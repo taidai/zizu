@@ -443,14 +443,15 @@ class DataPipeline:
                                 t.id AS tag_id,
                                 t.node_id,
                                 n.name AS node_name,
-                                fm.entries AS fault_map_entries
+                                COALESCE(fm_b.entries, fm_t.entries) AS fault_map_entries
                             FROM t_entity_alarm_bindings b
                             JOIN t_entities e ON e.id = b.entity_id
                             JOIN t_alarm_levels l ON l.id = b.alarm_level_id
                             JOIN t_entity_bindings eb ON eb.entity_id = e.id
                             JOIN t_tags t ON t.id = eb.tag_id
                             JOIN t_nodes n ON n.id = t.node_id
-                            LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
+                            LEFT JOIN t_fault_maps fm_b ON fm_b.id = b.fault_map_id
+                            LEFT JOIN t_fault_maps fm_t ON fm_t.id = t.fault_map_id
                             WHERE b.enabled = TRUE
                               AND l.enabled = TRUE
                               AND e.enabled = TRUE

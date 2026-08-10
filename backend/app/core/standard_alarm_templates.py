@@ -34,6 +34,17 @@ LEVELS = [
     },
 ]
 
+# 故障码映射表名（按实体类型）
+ENTITY_FAULT_MAPS: dict[str, str] = {
+    "ess.faultCode": "GB/T 36276 BMS故障码",
+    "pcs.faultCode": "GB/T 36276 BMS故障码",
+    "pv.faultCode": "GB/T 19963 光伏并网保护",
+    "charger.bmsFaultCode": "GB/T 36276 BMS故障码",
+    "protection.emergencyStop": "GB/T 51048 储能消防安全",
+    "protection.fireAlarm": "GB/T 51048 储能消防安全",
+    "protection.arcFault": "GB/T 51048 储能消防安全",
+}
+
 # 实体 -> 等级 -> 触发规则
 ENTITY_ALARM_BINDINGS: dict[str, dict[str, list[dict]]] = {
     # error1: 故障码/急停/消防类，active 即告警

@@ -44,6 +44,7 @@ class AlarmLevelUpdateRequest(BaseModel):
 class BatchEntityBindRequest(BaseModel):
     entity_ids: list[str] = Field(..., min_length=1)
     trigger_rules: list[TriggerRule] | None = None
+    fault_map_id: str | None = None
     enabled: bool = True
 
 
@@ -292,15 +293,16 @@ async def batch_bind_entities(level_id: UUID, req: BatchEntityBindRequest) -> di
                     cur.execute(
                         """
                         INSERT INTO t_entity_alarm_bindings
-                        (entity_id, alarm_level_id, trigger_rules, enabled)
-                        VALUES (%s, %s, %s, %s)
+                        (entity_id, alarm_level_id, trigger_rules, fault_map_id, enabled)
+                        VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (entity_id, alarm_level_id) DO UPDATE SET
                             trigger_rules = EXCLUDED.trigger_rules,
+                            fault_map_id = EXCLUDED.fault_map_id,
                             enabled = EXCLUDED.enabled,
                             updated_at = now()
                         RETURNING id
                         """,
-                        (eid, level_uuid, rules_json, req.enabled),
+                        (eid, level_uuid, rules_json, UUID(req.fault_map_id) if req.fault_map_id else None, req.enabled),
                     )
                     inserted += 1
                 conn.commit()
