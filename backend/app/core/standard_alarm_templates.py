@@ -102,9 +102,12 @@ def seed_standard_alarm_templates() -> dict:
                     """, (lvl["code"], lvl["name"], lvl["severity"], lvl["color"], Json([]), lvl["sort_order"]))
                     level_ids[lvl["code"]] = str(cur.fetchone()[0])
 
-            # 2) 查询实体 ID
+            # 2) 查询实体 ID 与故障码映射表 ID
             cur.execute("SELECT id, name FROM t_entities WHERE name = ANY(%s)", (list(ENTITY_ALARM_BINDINGS.keys()),))
             entity_map = {name: str(eid) for eid, name in cur.fetchall()}
+
+            cur.execute("SELECT id, name FROM t_fault_maps WHERE name = ANY(%s)", (list(set(ENTITY_FAULT_MAPS.values())),))
+            fault_map_map = {name: str(fmid) for fmid, name in cur.fetchall()}
 
             bound = 0
             skipped = 0
@@ -113,17 +116,19 @@ def seed_standard_alarm_templates() -> dict:
                 if not entity_id:
                     skipped += 1
                     continue
+                fault_map_id = fault_map_map.get(ENTITY_FAULT_MAPS.get(entity_name, ""))
                 for code, rules in level_rules.items():
                     level_id = level_ids[code]
                     cur.execute("""
-                        INSERT INTO t_entity_alarm_bindings (entity_id, alarm_level_id, trigger_rules, enabled)
-                        VALUES (%s, %s, %s::jsonb, TRUE)
+                        INSERT INTO t_entity_alarm_bindings (entity_id, alarm_level_id, trigger_rules, fault_map_id, enabled)
+                        VALUES (%s, %s, %s::jsonb, %s, TRUE)
                         ON CONFLICT (entity_id, alarm_level_id) DO UPDATE SET
                             trigger_rules = EXCLUDED.trigger_rules,
+                            fault_map_id = EXCLUDED.fault_map_id,
                             enabled = TRUE,
                             updated_at = now()
                         RETURNING id
-                    """, (entity_id, level_id, Json(rules)))
+                    """, (entity_id, level_id, Json(rules), fault_map_id))
                     if cur.fetchone():
                         bound += 1
 
