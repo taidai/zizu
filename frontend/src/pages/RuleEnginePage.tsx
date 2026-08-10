@@ -1,12 +1,11 @@
-// @ts-nocheck
 import { useEffect, useMemo, useState } from 'react'
 import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-editor'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
-  fetchRules, fetchNodes, fetchNodeDetail, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, fetchRuleTemplates,
-  type Rule, type RuleCreateRequest, type Node, type NodeTag, type RuleTemplate,
-} from '../api/client'
+  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, fetchRuleTemplates,
+  type Rule, type RuleCreateRequest, type Node, type Entity, type EntityBinding, type RuleTemplate,
+} from '../api/client'  
 
 type DecisionGraphType = {
   nodes: any[]
@@ -20,6 +19,8 @@ type NeuronWriteAction = {
   tag: string
   value: any
   cooldown?: number
+  entity_id?: string
+  entity_name?: string
 }
 
 type OutputBinding = {
@@ -29,6 +30,8 @@ type OutputBinding = {
   group: string
   tag: string
   cooldown: number
+  entity_id?: string
+  entity_name?: string
 }
 
 type RuleConfig = {
@@ -51,6 +54,8 @@ function extractConfig(content: any): RuleConfig {
         tag: a.tag || '',
         value: a.value ?? '',
         cooldown: a.cooldown ?? 60,
+        entity_id: a.entity_id || '',
+        entity_name: a.entity_name || '',
       })),
       inputMappings: cfg.inputMappings || {},
       outputBindings: (cfg.outputBindings || []).map((b: any) => ({
@@ -60,6 +65,8 @@ function extractConfig(content: any): RuleConfig {
         group: b.group || '',
         tag: b.tag || '',
         cooldown: b.cooldown ?? 60,
+        entity_id: b.entity_id || '',
+        entity_name: b.entity_name || '',
       })),
       template: cfg.template || 'custom',
     }
@@ -125,6 +132,8 @@ function bindingsToActions(bindings: OutputBinding[]): NeuronWriteAction[] {
       tag: b.tag,
       value: `{{${b.field}}}`,
       cooldown: b.cooldown,
+      entity_id: b.entity_id,
+      entity_name: b.entity_name,
     }))
 }
 
@@ -141,6 +150,8 @@ function actionsToBindings(actions: NeuronWriteAction[], outputs: { id: string; 
         group: a.group,
         tag: a.tag,
         cooldown: a.cooldown ?? 60,
+        entity_id: a.entity_id,
+        entity_name: a.entity_name,
       }
     })
 }
@@ -176,8 +187,9 @@ function RuleForm({
   const [graph, setGraph] = useState<DecisionGraphType>(initialGraph)
   const [config, setConfig] = useState<RuleConfig>(initialConfig)
   const [nodes, setNodes] = useState<Node[]>([])
-  const [nodeTags, setNodeTags] = useState<Record<string, NodeTag[]>>({})
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  const [entitySearch, setEntitySearch] = useState('')
+  const [entityOptions, setEntityOptions] = useState<Entity[]>([])
+  const [entityBindings, setEntityBindings] = useState<EntityBinding[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [simulate, setSimulate] = useState<any>()
@@ -187,34 +199,25 @@ function RuleForm({
   const [showRawActions, setShowRawActions] = useState(false)
 
   useEffect(() => {
-    fetchNodes().then((list) => {
-      setNodes(list)
-      const roots = list.filter((n) => !n.parent_id).map((n) => n.id)
-      if (roots.length) setExpandedIds(new Set(roots))
-    }).catch(() => {})
+    fetchNodes().then((list) => setNodes(list)).catch(() => {})
   }, [])
 
   useEffect(() => {
-    if (!config.sourceNodeIds.length) {
-      setNodeTags({})
-      return
-    }
     const load = async () => {
-      const map: Record<string, NodeTag[]> = {}
-      await Promise.all(
-        config.sourceNodeIds.map(async (nodeId) => {
-          try {
-            const detail = await fetchNodeDetail(nodeId)
-            map[nodeId] = detail.tags || []
-          } catch {
-            map[nodeId] = []
-          }
-        }),
-      )
-      setNodeTags(map)
+      try {
+        const [entities, bindings] = await Promise.all([
+          fetchEntities({ page: 1, page_size: 10000 }),
+          fetchEntityBindings({}),
+        ])
+        setEntityOptions(entities.items)
+        setEntityBindings(bindings.bindings)
+      } catch {
+        setEntityOptions([])
+        setEntityBindings([])
+      }
     }
     load()
-  }, [config.sourceNodeIds])
+  }, [])
 
   const graphFields = useMemo(() => extractGraphFields(graph), [graph])
 
@@ -239,14 +242,10 @@ function RuleForm({
     })
   }, [graphFields.inputs.length, graphFields.outputs.length])
 
-  const allTags = useMemo(() => {
-    const list: { nodeId: string; nodeName: string; tag: NodeTag }[] = []
-    Object.entries(nodeTags).forEach(([nodeId, tags]) => {
-      const nodeName = nodes.find((n) => n.id === nodeId)?.name || nodeId
-      tags.forEach((tag) => list.push({ nodeId, nodeName, tag }))
-    })
-    return list
-  }, [nodeTags, nodes])
+  const resolveEntityBinding = (entityId: string | undefined) => {
+    if (!entityId) return null
+    return entityBindings.find((b) => b.entity_id === entityId) || null
+  }
 
   const applyTemplate = (templateId: string) => {
     const tmpl = templates.find((t) => t.id === templateId)
@@ -646,13 +645,15 @@ function RuleForm({
                               <select
                                 value={binding.entity_id || ''}
                                 onChange={(e) => {
-                                  const entity = entityOptions.find((en) => en.id === e.target.value)
+                                  const entityId = e.target.value || undefined
+                                  const entity = entityOptions.find((en) => en.id === entityId)
+                                  const tagBinding = entityId ? resolveEntityBinding(entityId) : null
                                   updateOutputBinding(idx, {
-                                    entity_id: e.target.value || undefined,
+                                    entity_id: entityId,
                                     entity_name: entity?.name,
-                                    node: '',
-                                    group: '',
-                                    tag: '',
+                                    node: tagBinding?.node_name || '',
+                                    group: tagBinding?.tag_name?.includes('.') ? tagBinding.tag_name.split('.')[0] : '',
+                                    tag: tagBinding?.tag_name || '',
                                   })
                                 }}
                                 className="neu-input w-full px-2 py-1 text-xs bg-transparent"
@@ -677,7 +678,7 @@ function RuleForm({
                                 onClick={() => testWrite({
                                   type: 'neuron_write',
                                   entity_id: binding.entity_id,
-                                  entity: binding.entity_name,
+                                  entity_name: binding.entity_name,
                                   node: binding.node,
                                   group: binding.group,
                                   tag: binding.tag,
