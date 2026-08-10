@@ -169,13 +169,13 @@ class MqttClient:
         else:
             logger.error("[MQTT] Connect failed: rc={}", reason_code)
 
-    def _on_disconnect(self, client: mqtt.Client, userdata, reason_code, properties):
-        """断开连接回调。"""
+    def _on_disconnect(self, client: mqtt.Client, userdata, disconnect_flags, rc, properties):
+        """断开连接回调（paho-mqtt v2 签名：client, userdata, disconnect_flags, rc, properties）。"""
         self._connected.clear()
         if not self._stopped:
             logger.warning(
                 "[MQTT] Disconnected (rc={}). Reconnect in {:.1f}s ...",
-                reason_code,
+                rc,
                 settings.mqtt_reconnect_delay,
             )
 
