@@ -65,7 +65,7 @@ export default function AlarmLevelManagerPage() {
     try {
       const [lv, en] = await Promise.all([
         fetchAlarmLevels(),
-        fetchEntities(1, 10000, '', categoryFilter || undefined),
+        fetchEntities({ page: 1, page_size: 10000, search: search || undefined, category: categoryFilter || undefined }),
       ])
       setLevels(lv.items)
       setEntities(en.items)

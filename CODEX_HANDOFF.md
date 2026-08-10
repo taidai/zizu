@@ -1,7 +1,7 @@
 # ZiZu Handoff — v0.4.44
 
 ## 当前版本
-v0.4.44 (2026-08-10)
+v0.4.45 (2026-08-10)
 
 ## 最近完成
 ### v0.4.44 — 告警中心国标合规 (TDD)
@@ -19,6 +19,37 @@ v0.4.44 (2026-08-10)
 - **batch 更新后触发 pipeline 立即 reload**（不等 30s）
 - **3 个国标故障码映射表** — GB/T 36276 BMS(27条) / GB/T 19963 PV保护(16条) / GB/T 51048 消防(15条)
 - **前端** — NodeTagPanel 批量告警类型+阈值 UI，AlarmCenterPage 展示类型/来源/计数/阈值
+
+
+## v0.4.45 — 自定义告警等级 + 全局实体批量绑定
+
+**已完成：**
+- 新增 `t_alarm_levels` 自定义告警等级表（code/name/severity/color/trigger_rules）
+- 新增 `t_entity_alarm_bindings` 实体-等级绑定表，支持批量绑定与覆盖规则
+- migration_017 为 `t_alarms` 增加 `entity_id` 列
+- 新增 `backend/app/services/entity_alarm_engine.py`：
+  - 触发规则：active / eq / ne / gte / gt / lte / lt / fault
+  - `process_entity_alarms` 按 tag_id 索引批量评估并生成/恢复告警
+- 更新 `backend/app/services/pipeline.py`：
+  - 加载 `_entity_alarm_index`（tag_id → 绑定列表）
+  - 在 `process_tag_alarms` 之后调用 `process_entity_alarms`
+- 新增 `backend/app/api/alarm_levels.py`：
+  - `/alarm-levels` CRUD
+  - `/alarm-levels/{id}/entities` 批量绑定/解绑
+  - `/entities/{id}/alarm-levels` 查询实体已绑等级
+- 前端：
+  - `client.ts` 增加 AlarmLevel / EntityAlarmBinding 类型与 API
+  - 新增 `AlarmLevelManagerPage.tsx`：等级管理 + 批量勾选实体 + 规则覆盖
+  - 重写 `AlarmCenterPage.tsx`：按动态告警等级展示分组
+  - `App.tsx` 增加「告警等级」导航
+- 新增 `backend/tests/test_entity_alarm_engine.py`：23 个 TDD 测试全绿
+
+**部署状态：**
+- 1号机 (e606.hlszh.com:9000)：已部署 v0.4.45，health OK，migration 017 已应用
+- GitHub taidai/zizu main：已推送 (bd64efb)
+
+**已知问题（与本次改动无关）：**
+- `test_aggregator.py` 仍有 2 个 SQL 结构断言失败（pre-existing）
 
 ## 部署状态
 - 1号机 (e606.hlszh.com:13122, holo/holo123)：已部署 v0.4.44
