@@ -367,7 +367,7 @@ def run_rule_tick() -> dict[str, int]:
                 result["evaluated"] += 1
                 try:
                     content = jdm_content if isinstance(jdm_content, dict) else json.loads(jdm_content)
-                                        source_node_ids = set(
+                    source_node_ids = set(
                         str(nid) for nid in content.get("_config", {}).get("sourceNodeIds", []) if nid
                     )
                     source_entity_ids = set(
@@ -385,7 +385,7 @@ def run_rule_tick() -> dict[str, int]:
                             if str(v.get("entity_id")) in source_entity_ids
                         }
 
-input_mappings = content.get("_config", {}).get("inputMappings", {}) or {}
+                    input_mappings = content.get("_config", {}).get("inputMappings", {}) or {}
                     eval_context = _apply_input_mappings(context, input_mappings)
                     eval_result = evaluate_rule(content, eval_context)
 
