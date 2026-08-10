@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import ReactECharts from 'echarts-for-react'
 import {
   fetchEntities,
   fetchEntity,
@@ -8,6 +9,7 @@ import {
   bindTagToEntity,
   unbindTagFromEntity,
   fetchEntityRealtime,
+  fetchEntityHistory,
   fetchTags,
   fetchNodes,
   type Entity,
@@ -37,6 +39,10 @@ export default function EntityManagerPage() {
   const [tags, setTags] = useState<Tag[]>([])
   const [nodes, setNodes] = useState<Node[]>([])
   const [realtime, setRealtime] = useState<any>(null)
+  const [activeTab, setActiveTab] = useState<'bindings' | 'realtime' | 'history'>('bindings')
+  const [historyRange, setHistoryRange] = useState<'1h' | '24h' | '7d'>('1h')
+  const [historyPoints, setHistoryPoints] = useState<{ ts: string; value: number | string | boolean | null; quality: number }[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -56,11 +62,23 @@ export default function EntityManagerPage() {
     if (selected) {
       fetchEntity(selected.id).then(setDetail)
       fetchEntityRealtime(selected.id).then(setRealtime).catch(() => setRealtime(null))
+      setActiveTab('bindings')
     } else {
       setDetail(null)
       setRealtime(null)
+      setHistoryPoints([])
     }
   }, [selected])
+
+  useEffect(() => {
+    if (selected && activeTab === 'history') {
+      setHistoryLoading(true)
+      fetchEntityHistory(selected.id, historyRange)
+        .then((data) => setHistoryPoints(data.points || []))
+        .catch(() => setHistoryPoints([]))
+        .finally(() => setHistoryLoading(false))
+    }
+  }, [selected, activeTab, historyRange])
 
   useEffect(() => {
     Promise.all([fetchTags(undefined, 1, 200, undefined, undefined, undefined, undefined, true), fetchNodes()]).then(([t, n]) => {
@@ -142,85 +160,203 @@ export default function EntityManagerPage() {
           className="neu-inset w-full px-3 py-2 text-xs mb-3"
         />
         <div className="flex-1 overflow-y-auto space-y-2">
+          {loading && <div className="text-xs text-gray-400">加载中...</div>}
           {entities.map((e) => (
             <div
               key={e.id}
               onClick={() => setSelected(e)}
-              className={`p-3 rounded-xl cursor-pointer transition-colors ${selected?.id === e.id ? 'bg-[#52c41a] text-white' : 'bg-gray-50 hover:bg-gray-100'}`}
+              className={`p-3 rounded-xl cursor-pointer transition ${
+                selected?.id === e.id
+                  ? 'bg-[#52c41a] text-white shadow'
+                  : 'bg-white/40 hover:bg-white/60 text-gray-700'
+              }`}
             >
               <div className="flex items-center justify-between">
-                <span className="font-medium text-sm flex items-center gap-2">
-                  {e.display_name || e.name}
-                  {e.is_system && <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${selected?.id === e.id ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-700'}`}>系统</span>}
-                </span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${e.entity_type === 'R' ? 'bg-blue-100 text-blue-700' : e.entity_type === 'W' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>{e.entity_type}</span>
+                <span className="text-sm font-bold">{e.display_name || e.name}</span>
+                {!e.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-500/20">禁用</span>}
               </div>
-              <div className={`text-xs mt-1 ${selected?.id === e.id ? 'text-white/80' : 'text-gray-400'}`}>{e.name} · 绑定 {e.binding_count} 个点位</div>
+              <div className={`text-[10px] mt-0.5 ${selected?.id === e.id ? 'text-white/80' : 'text-gray-400'}`}>
+                {e.name} · {e.entity_type} · {e.category || '无分类'}
+              </div>
             </div>
           ))}
-          {entities.length === 0 && !loading && <div className="text-center text-gray-400 text-xs py-8">暂无实体</div>}
         </div>
       </div>
 
       {/* 右侧详情 */}
-      <div className="flex-1 neu-card p-4 overflow-y-auto">
-        {!selected ? (
-          <div className="h-full flex items-center justify-center text-gray-400 text-sm">请选择左侧实体</div>
-        ) : detail ? (
-          <div className="space-y-4">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-bold text-gray-800">{detail.display_name || detail.name}</h3>
-                  {detail.is_system && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700">系统</span>}
-                </div>
-                <div className="text-xs text-gray-500 mt-1">{detail.name} · {detail.data_type} · {detail.entity_type} · {detail.category || '未分类'}</div>
-                {detail.description && <div className="text-[11px] text-gray-400 mt-0.5">{detail.description}</div>}
-                {(detail.std_field || detail.std_ref) && (
-                  <div className="text-[11px] text-gray-400">标准字段: {detail.std_field || '—'} {detail.std_ref ? `· ${detail.std_ref}` : ''}</div>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => setEditing(detail)} className="neu-btn px-3 py-1.5 text-xs">编辑</button>
-                {!detail.is_system && <button onClick={() => handleDelete(detail.id)} className="neu-btn px-3 py-1.5 text-xs text-red-500">删除</button>}
-              </div>
-            </div>
-
-            {realtime && (
-              <div className="neu-inset p-3">
-                <div className="text-xs text-gray-400">实时值</div>
-                <div className="text-xl font-mono-value font-bold text-gray-800 mt-1">
-                  {realtime.value === null ? '—' : String(realtime.value)} {detail.unit || ''}
-                </div>
-                <div className="text-[10px] text-gray-400 mt-1">来源: {realtime.node_name} / {realtime.tag_name} · {realtime.ts ? new Date(realtime.ts).toLocaleString() : '—'}</div>
-              </div>
-            )}
-
+      {selected && detail && (
+        <div className="w-2/3 neu-card p-4 flex flex-col min-h-0">
+          <div className="flex items-start justify-between mb-3">
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-sm font-bold text-gray-700">绑定点位</h4>
-                <EntityBindForm tags={tags} nodes={nodes} onBind={handleBind} />
-              </div>
-              <div className="space-y-2">
-                {detail.bindings.map((b) => (
-                  <div key={b.id} className="flex items-center justify-between bg-gray-50 p-2 rounded-lg">
-                    <div>
-                      <div className="text-sm font-medium">{b.tag_display_name || b.tag_name}</div>
-                      <div className="text-xs text-gray-400">{b.node_name} · {b.binding_type} · 优先级 {b.priority}{b.brand ? ` · ${b.brand}` : ''}</div>
-                    </div>
-                    <button onClick={() => handleUnbind(b.id)} className="text-xs text-red-500 hover:underline">解绑</button>
-                  </div>
-                ))}
-                {detail.bindings.length === 0 && <div className="text-xs text-gray-400 py-4 text-center">暂无绑定</div>}
-              </div>
+              <h3 className="text-base font-bold text-gray-800">{detail.display_name || detail.name}</h3>
+              <p className="text-xs text-gray-500 font-mono">{detail.name}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setEditing(detail)} className="neu-btn px-3 py-1.5 text-xs text-gray-600">编辑</button>
+              {!detail.is_system && (
+                <button onClick={() => handleDelete(detail.id)} className="neu-btn px-3 py-1.5 text-xs text-red-500 hover:bg-red-50">删除</button>
+              )}
             </div>
           </div>
-        ) : (
-          <div className="h-full flex items-center justify-center text-gray-400 text-sm">加载中...</div>
-        )}
-      </div>
 
-      {(showForm || editing) && (
+          <div className="flex items-center gap-2 mb-3 border-b border-gray-200 pb-2">
+            {[
+              { key: 'bindings', label: '点位绑定' },
+              { key: 'realtime', label: '实时数据' },
+              { key: 'history', label: '历史数据' },
+            ].map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setActiveTab(t.key as any)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-t ${activeTab === t.key ? 'bg-[#52c41a] text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === 'realtime' && (
+            <div className="neu-card p-3">
+              <div className="text-[10px] text-gray-400 uppercase">实时值</div>
+              {realtime ? (
+                <div className="mt-1">
+                  <div className="text-2xl font-bold text-gray-800 font-mono-value">
+                    {realtime.value ?? '—'} {detail.unit || ''}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">
+                    绑定: {realtime.tag_name} @ {realtime.node_name} · {realtime.ts ? new Date(realtime.ts).toLocaleString() : '—'}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-gray-400">暂无实时数据</div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="flex-1 flex flex-col min-h-0">
+              <div className="flex items-center gap-2 mb-2">
+                {(['1h', '24h', '7d'] as const).map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => setHistoryRange(r)}
+                    className={`neu-btn px-3 py-1 text-xs ${historyRange === r ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}
+                  >
+                    {r === '1h' ? '1小时' : r === '24h' ? '24小时' : '7天'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 min-h-[250px]">
+                {historyLoading ? (
+                  <div className="h-full flex items-center justify-center text-gray-400 text-sm">加载中...</div>
+                ) : historyPoints.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-gray-400 text-sm">暂无历史数据</div>
+                ) : (
+                  <ReactECharts
+                    option={{
+                      backgroundColor: 'transparent',
+                      animation: false,
+                      grid: { left: 60, right: 20, top: 20, bottom: 30 },
+                      tooltip: {
+                        trigger: 'axis',
+                        backgroundColor: 'rgba(255,255,255,0.95)',
+                        borderColor: '#d1d9e6',
+                        textStyle: { color: '#333', fontSize: 12 },
+                        formatter: (params: any) => {
+                          const p = params[0]
+                          const d = new Date(p.axisValue)
+                          return `<div style="font-family:monospace">${d.toLocaleString()}</div>
+                            <div style="color:#389e0d;font-weight:bold">${detail.name}: ${p.data ?? '—'} ${detail.unit || ''}</div>`
+                        },
+                      },
+                      xAxis: {
+                        type: 'time',
+                        axisLine: { lineStyle: { color: '#d1d9e6' } },
+                        axisLabel: { color: '#666', fontSize: 11 },
+                        splitLine: { show: false },
+                      },
+                      yAxis: {
+                        type: 'value',
+                        name: detail.unit || '',
+                        nameTextStyle: { color: '#888', fontSize: 11 },
+                        axisLine: { show: false },
+                        axisLabel: { color: '#666', fontSize: 11 },
+                        splitLine: { lineStyle: { color: '#e8ecf1', type: 'dashed' } },
+                      },
+                      series: [{
+                        name: detail.name,
+                        type: 'line',
+                        showSymbol: false,
+                        smooth: true,
+                        lineStyle: { color: '#52c41a', width: 2 },
+                        areaStyle: {
+                          color: {
+                            type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                            colorStops: [
+                              { offset: 0, color: 'rgba(82,196,26,0.25)' },
+                              { offset: 1, color: 'rgba(82,196,26,0.02)' },
+                            ],
+                          },
+                        },
+                        data: historyPoints.map((p) => [p.ts, p.value]),
+                      }],
+                    }}
+                    style={{ height: '100%', width: '100%' }}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'bindings' && (
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-sm font-bold text-gray-700">点位绑定</h4>
+                <EntityBindForm tags={tags} nodes={nodes} onBind={handleBind} />
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {detail.bindings.length === 0 ? (
+                  <div className="text-xs text-gray-400">暂无绑定</div>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead className="text-[10px] text-gray-400 uppercase border-b border-gray-200">
+                      <tr>
+                        <th className="text-left py-1.5">点位</th>
+                        <th className="text-left py-1.5">节点</th>
+                        <th className="text-left py-1.5">类型</th>
+                        <th className="text-left py-1.5">品牌</th>
+                        <th className="text-left py-1.5">优先级</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.bindings.map((b) => (
+                        <tr key={b.id} className="border-b border-gray-100 last:border-0">
+                          <td className="py-1.5">{b.tag_display_name || b.tag_name}</td>
+                          <td className="py-1.5 text-gray-500">{b.node_name}</td>
+                          <td className="py-1.5"><span className={`px-1.5 py-0.5 rounded text-[10px] ${b.binding_type === 'PHYSICAL' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'}`}>{b.binding_type}</span></td>
+                          <td className="py-1.5 text-gray-500">{b.brand || '—'}</td>
+                          <td className="py-1.5">{b.priority}</td>
+                          <td className="py-1.5 text-right"><button onClick={() => handleUnbind(b.id)} className="text-red-500 hover:underline text-[10px]">解绑</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {showForm && (
+        <EntityForm
+          categories={categories}
+          onClose={() => { setShowForm(false); setEditing(null) }}
+          onSubmit={editing ? handleUpdate : handleCreate}
+        />
+      )}
+      {editing && (
         <EntityForm
           categories={categories}
           initial={editing}

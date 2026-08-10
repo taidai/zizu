@@ -545,38 +545,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                       />
                     </td>
                     <td className="px-3 py-2">
-                      <button
-                        onClick={() => setTrendTag(tag)}
-                        className="text-left hover:text-[#389e0d] transition-colors"
-                        title="点击查看趋势"
-                      >
-                        <div className="font-medium text-gray-800 whitespace-nowrap underline decoration-dotted underline-offset-2 decoration-gray-300 hover:decoration-[#52c41a]">
-                          {tag.display_name || tag.name}
-                          {tag.alarm_level && (
-                            <span className={`ml-2 text-[10px] px-1 py-0.5 rounded border ${
-                              tag.alarm_level === 'error1' ? 'bg-red-100 text-red-700 border-red-200' :
-                              tag.alarm_level === 'error2' ? 'bg-orange-100 text-orange-700 border-orange-200' :
-                              'bg-amber-100 text-amber-700 border-amber-200'
-                            }`}>{tag.alarm_level}</span>
-                          )}
-                          {tag.alarm_type && (
-                            <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-700 border border-indigo-200">
-                              {tag.alarm_type}
-                            </span>
-                          )}
-                          {tag.alarm_threshold != null && (
-                            <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-100">
-                              隈值:{tag.alarm_threshold}
-                            </span>
-                          )}
-                          {tag.fault_map_name && (
-                            <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
-                              {tag.fault_map_name}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-gray-400 text-[11px] whitespace-nowrap">{tag.name}</div>
-                      </button>
+                      
                     </td>
                     <td className="px-3 py-2">
                       <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${
@@ -660,14 +629,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
         </div>
       </div>
 
-      {trendTag && (
-        <TrendChart
-          tagId={trendTag.id}
-          tagName={trendTag.display_name || trendTag.name}
-          unit={trendTag.unit}
-          onClose={() => setTrendTag(null)}
-        />
-      )}
+      
 
       {(editingTag || showCreateModal) && (
         <TagFormModal
