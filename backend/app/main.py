@@ -27,6 +27,11 @@ logger.add(
 
 # Pipeline 实例引用 (供 Health API 使用)
 _pipeline = None
+
+def get_pipeline():
+    """Return the pipeline instance (or None if not started)."""
+    return _pipeline
+
 # F1/F2/F3 调度任务列表
 _scheduler_tasks = []
 # 聚合 tick 间隔 (秒)
@@ -83,6 +88,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[Main] Standard entities seeded: {}", _seed_res.get("seeded"))
         except Exception as _se:
             logger.warning("[Main] Standard entity seed (non-fatal): {}", _se)
+        try:
+            from app.core.standard_fault_maps import seed_standard_fault_maps
+            _fm_res = seed_standard_fault_maps()
+            logger.info("[Main] Standard fault maps: {}", _fm_res)
+        except Exception as _fe:
+            logger.warning("[Main] Standard fault map seed (non-fatal): {}", _fe)
         persisted_topic = load_mqtt_topics()
         if persisted_topic:
             settings.mqtt_telemetry_topic = persisted_topic

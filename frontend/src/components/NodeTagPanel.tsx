@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   fetchTags, updateTag, batchUpdateTags, deleteTag, createTag, fetchNodes, fetchAlarmCounts, connectTelemetryWS, fetchFaultMaps,
+  fetchAlarmTypes,
   type Tag, type TelemetryUpdate, type TagCreateInput, type FaultMap,
 } from '../api/client'
 import EditableCell from './EditableCell'
@@ -49,6 +50,9 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [faultMaps, setFaultMaps] = useState<FaultMap[]>([])
   const [batchAlarmLevel, setBatchAlarmLevel] = useState<'error1' | 'error2' | 'error3' | ''>('')
   const [batchFaultMapId, setBatchFaultMapId] = useState<string>('__keep__')
+  const [batchAlarmType, setBatchAlarmType] = useState<string>('')
+  const [batchAlarmThreshold, setBatchAlarmThreshold] = useState('')
+  const [alarmTypes, setAlarmTypes] = useState<string[]>([])
   const [batchSaving, setBatchSaving] = useState(false)
   const [trendTag, setTrendTag] = useState<Tag | null>(null)
   const [editingTag, setEditingTag] = useState<Tag | null>(null)
@@ -87,6 +91,9 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
     fetchFaultMaps().then((d) => setFaultMaps(d.items)).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    fetchAlarmTypes().then(setAlarmTypes).catch(() => {})
+  }, [])
   useEffect(() => {
     loadTags()
   }, [loadTags])
@@ -551,6 +558,16 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                               tag.alarm_level === 'error2' ? 'bg-orange-100 text-orange-700 border-orange-200' :
                               'bg-amber-100 text-amber-700 border-amber-200'
                             }`}>{tag.alarm_level}</span>
+                          )}
+                          {tag.alarm_type && (
+                            <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-indigo-100 text-indigo-700 border border-indigo-200">
+                              {tag.alarm_type}
+                            </span>
+                          )}
+                          {tag.alarm_threshold != null && (
+                            <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-100">
+                              隈值:{tag.alarm_threshold}
+                            </span>
                           )}
                           {tag.fault_map_name && (
                             <span className="ml-2 text-[10px] px-1 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">

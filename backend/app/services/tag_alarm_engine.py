@@ -1,11 +1,12 @@
 """
-Tag Alarm Engine — 基于点位 alarm_level 与 fault_map 生成告警。
+Tag Alarm Engine — 基于点位 alarm_level / alarm_type / alarm_threshold 与 fault_map 生成告警。
 
 逻辑：
-  - 当点位的 alarm_level 为 error1/error2/error3 且当前值为"激活"状态时，
-    向 t_alarms 写入一条未恢复告警；
-  - 当值变为"非激活"时，将同一点位同级别的最新未恢复告警标记为已恢复；
-  - 若点位绑定了 fault_map，则优先使用故障码映射生成 message。
+  - 当点位的 alarm_level 为 error1/error2/error3 且当前值为"激活"状态时：
+    - 若同一点位同级别已有未恢复告警 → alarm_count += 1 (不重复创建)
+    - 否则 → 插入新告警，携带 alarm_type / alarm_threshold / alarm_source
+  - 当值变为"非激活"时 → 恢复最新未恢复告警
+  - 若点位绑定了 fault_map → 优先使用故障码映射生成 message (支持 hex/wildcard 匹配)
 """
 from __future__ import annotations
 
@@ -15,6 +16,10 @@ from uuid import UUID
 
 from loguru import logger
 
+from app.services.alarm_logic import (
+    is_alarm_active,
+    build_alarm_message,
+)
 from app.services.telemetry_store import get_connection
 
 ERROR_GROUP_MAP = {
@@ -25,17 +30,18 @@ ERROR_GROUP_MAP = {
 
 ERROR_LEVELS = {"error1", "error2", "error3"}
 
-
-def _is_active(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip() != "" and value.strip().lower() not in {"0", "false", "off", "no"}
-    return bool(value)
+# node_type → alarm_source 映射 (对齐国标 9.1.4)
+NODE_TYPE_TO_SOURCE = {
+    "ESS": "ESS",
+    "PV": "PV",
+    "PCS": "PCS",
+    "EVSE": "EVSE",
+    "BMS": "BMS",
+    "Meter": "Grid",
+    "GRID": "Grid",
+    "site": "System",
+    "station": "System",
+}
 
 
 def _extract_value(record: dict) -> Any:
@@ -51,23 +57,11 @@ def _extract_value(record: dict) -> Any:
     return None
 
 
-def _code_str(value: Any) -> str:
-    """将点位值标准化为故障码字符串。"""
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    return str(value).strip()
-
-
-def _resolve_message(tag_name: str, alarm_level: str, value: Any, entries: list[dict] | None) -> str:
-    """生成告警消息：优先匹配故障码映射表，否则使用默认描述。"""
-    code = _code_str(value)
-    if entries:
-        for entry in entries:
-            if str(entry.get("code", "")).strip() == code:
-                return f"[{alarm_level}] {tag_name}: {entry.get('message', code)}"
-    return f"[{alarm_level}] {tag_name} 告警 (值: {code})"
+def _check_threshold_active(value: Any, threshold: float | None) -> bool:
+    """阈值模式: value >= threshold → active; 无阈值 → fallback to is_alarm_active."""
+    if threshold is not None and isinstance(value, (int, float)):
+        return value >= threshold
+    return is_alarm_active(value)
 
 
 def process_tag_alarms(records: list, tag_meta: dict[UUID, dict]) -> dict:
@@ -76,17 +70,20 @@ def process_tag_alarms(records: list, tag_meta: dict[UUID, dict]) -> dict:
 
     Args:
         records: TelemetryRecord 列表（或兼容 dict）
-        tag_meta: {tag_id: {"alarm_level": ..., "tag_name": ..., "fault_map_entries": [...]}}
+        tag_meta: {tag_id(str): {"alarm_level":..., "tag_name":..., "alarm_type":...,
+                                "alarm_threshold":..., "node_type":...,
+                                "fault_map_entries":[...]}}
 
     Returns:
-        {"created": int, "resolved": int}
+        {"created": int, "resolved": int, "incremented": int}
     """
     created = 0
     resolved = 0
+    incremented = 0
     now = datetime.now(timezone.utc)
 
     if not records or not tag_meta:
-        return {"created": 0, "resolved": 0}
+        return {"created": 0, "resolved": 0, "incremented": 0}
 
     try:
         with get_connection() as conn:
@@ -102,17 +99,22 @@ def process_tag_alarms(records: list, tag_meta: dict[UUID, dict]) -> dict:
                         continue
 
                     value = _extract_value(record)
-                    active = _is_active(value)
+                    threshold = meta.get("alarm_threshold")
+                    active = _check_threshold_active(value, threshold)
                     level = ERROR_GROUP_MAP[alarm_level]
                     source_key = alarm_level
                     tag_name = meta.get("tag_name") or "unknown"
+                    alarm_type = meta.get("alarm_type")
                     node_id = record.get("node_id")
+                    node_type = meta.get("node_type")
+                    alarm_source = NODE_TYPE_TO_SOURCE.get(node_type, node_type or "System")
+
                     trigger_value = None
                     if isinstance(value, (int, float)):
                         trigger_value = float(value)
 
                     cur.execute(
-                        "SELECT id, resolved_at FROM t_alarms "
+                        "SELECT id, resolved_at, alarm_count FROM t_alarms "
                         "WHERE tag_id = %s AND source_key = %s "
                         "ORDER BY created_at DESC LIMIT 1",
                         (tag_id, source_key),
@@ -121,26 +123,34 @@ def process_tag_alarms(records: list, tag_meta: dict[UUID, dict]) -> dict:
 
                     if active:
                         if row is None or row[1] is not None:
-                            message = _resolve_message(
-                                tag_name, alarm_level, value, meta.get("fault_map_entries")
+                            # 创建新告警
+                            message = build_alarm_message(
+                                tag_name=tag_name,
+                                alarm_level=alarm_level,
+                                alarm_type=alarm_type,
+                                threshold=threshold,
+                                value=value,
+                                entries=meta.get("fault_map_entries"),
                             )
                             cur.execute(
                                 "INSERT INTO t_alarms (tag_id, node_id, source_key, external_id, "
-                                "level, message, trigger_tag_name, trigger_value, created_at) "
-                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                "level, message, alarm_type, alarm_threshold, alarm_source, "
+                                "trigger_tag_name, trigger_value, created_at) "
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                                 (
-                                    tag_id,
-                                    node_id,
-                                    source_key,
-                                    tag_name,
-                                    level,
-                                    message,
-                                    tag_name,
-                                    trigger_value,
-                                    now,
+                                    tag_id, node_id, source_key, tag_name,
+                                    level, message, alarm_type, threshold, alarm_source,
+                                    tag_name, trigger_value, now,
                                 ),
                             )
                             created += 1
+                        else:
+                            # 已有未恢复告警 → 累计计数
+                            cur.execute(
+                                "UPDATE t_alarms SET alarm_count = alarm_count + 1 WHERE id = %s",
+                                (row[0],),
+                            )
+                            incremented += 1
                     else:
                         if row is not None and row[1] is None:
                             cur.execute(
@@ -152,7 +162,7 @@ def process_tag_alarms(records: list, tag_meta: dict[UUID, dict]) -> dict:
             conn.commit()
     except Exception as e:
         logger.error("[TagAlarmEngine] process failed: {}", e)
-        return {"created": 0, "resolved": 0}
+        return {"created": 0, "resolved": 0, "incremented": 0}
 
-    logger.debug("[TagAlarmEngine] created={} resolved={}", created, resolved)
-    return {"created": created, "resolved": resolved}
+    logger.debug("[TagAlarmEngine] created={} resolved={} incremented={}", created, resolved, incremented)
+    return {"created": created, "resolved": resolved, "incremented": incremented}

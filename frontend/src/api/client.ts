@@ -44,6 +44,8 @@ export interface Tag {
   formula_type: string | null
   sources: string[] | null
   alarm_level: string | null
+  alarm_type: string | null
+  alarm_threshold: number | null
   fault_map_id: string | null
   fault_map_name: string | null
 }
@@ -367,6 +369,8 @@ export async function batchUpdateTags(
     enabled?: boolean
     node_id?: string
     alarm_level?: string
+    alarm_type?: string
+    alarm_threshold?: number
     fault_map_id?: string
   },
 ): Promise<any> {
@@ -401,7 +405,7 @@ export function exportTagsCsv(nodeId?: string, search?: string): void {
   document.body.removeChild(a)
 }
 
-export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale_factor' | 'value_offset' | 'unit' | 'display_name' | 'alarm_level' | 'fault_map_id'>>): Promise<any> {
+export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale_factor' | 'value_offset' | 'unit' | 'display_name' | 'alarm_level' | 'alarm_type' | 'alarm_threshold' | 'fault_map_id'>>): Promise<any> {
   const res = await fetch(`${API_BASE}/tags/${tagId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -780,6 +784,11 @@ export interface Alarm {
   source_topic?: string | null
   source_key?: string | null
   external_id?: string | null
+  alarm_type?: string | null
+  alarm_threshold?: number | null
+  alarm_source?: string | null
+  alarm_count?: number | null
+  alarm_code?: string | null
 }
 
 export interface AlarmListResponse {
@@ -841,6 +850,35 @@ export async function resolveAlarm(alarmId: string): Promise<void> {
   })
   if (!res.ok) throw new Error(`Resolve alarm failed: ${res.status}`)
 }
+// ── Alarm Types & Config ──
+
+export async function fetchAlarmTypes(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/alarms/alarm-types`)
+  if (!res.ok) throw new Error(`Fetch alarm types failed: ${res.status}`)
+  const data = await res.json()
+  return data.types || []
+}
+
+export interface AlarmConfigTag {
+  id: string
+  name: string
+  display_name: string | null
+  node_id: string
+  node_name: string
+  node_type: string
+  alarm_level: string
+  alarm_type: string | null
+  alarm_threshold: number | null
+  fault_map_id: string | null
+  fault_map_name: string | null
+}
+
+export async function fetchAlarmConfig(): Promise<{ tags: AlarmConfigTag[]; total: number }> {
+  const res = await fetch(`${API_BASE}/tags/alarm-config`)
+  if (!res.ok) throw new Error(`Fetch alarm config failed: ${res.status}`)
+  return res.json()
+}
+
 // ── Global Entities ──
 
 export interface Entity {

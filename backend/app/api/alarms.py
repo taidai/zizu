@@ -73,6 +73,7 @@ async def list_alarms(
     SELECT a.id, a.rule_id, a.node_id, a.level, a.message,
            a.acknowledged, a.ack_user, a.ack_at, a.created_at, a.resolved_at,
            a.source_topic, a.source_key, a.external_id,
+           a.alarm_type, a.alarm_threshold, a.alarm_source, a.alarm_count, a.alarm_code,
            r.name AS rule_name, n.name AS node_name
     FROM t_alarms a
     LEFT JOIN t_rules r ON r.id = a.rule_id
@@ -107,6 +108,13 @@ async def list_alarms(
 
 
 @router.get("/alarms/counts")
+
+@router.get("/alarms/alarm-types")
+async def list_alarm_types() -> dict:
+    """返回标准告警类型列表 (GB/T 36276, GB/T 19963, GB/T 51048)。"""
+    from app.services.alarm_logic import STANDARD_ALARM_TYPES
+    return {"types": sorted(STANDARD_ALARM_TYPES)}
+
 async def alarm_counts(
     node_ids: list[str] | None = Query(None, description="节点 ID 列表，逗号分隔"),
 ) -> dict:

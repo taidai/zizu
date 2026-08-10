@@ -1,5 +1,8 @@
-"""M2.5 - MQTT 分级告警处理器"""
+"""M2.5 - MQTT 分级告警处理器
 
+从 MQTT payload 中提取 error1/error2/error3 分组，生成/恢复告警。
+若提供 tag_name_meta，则通过统一 fault_map 解析故障描述 + 携带 alarm_type/threshold。
+"""
 from __future__ import annotations
 
 import json
@@ -8,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.services.alarm_logic import is_alarm_active, build_alarm_message
 from app.services.telemetry_store import get_connection
 
 ERROR_GROUP_MAP = {
@@ -18,28 +22,7 @@ ERROR_GROUP_MAP = {
 
 ERROR_LEVELS = {"error1", "error2", "error3"}
 
-# 可能嵌套出现 error1/2/3 的容器字段（兼容标准 Neuron payload 与自定义 payload）
 _NESTED_CONTAINER_KEYS = {"values", "tags", "data", "metrics", "payload"}
-
-
-def _is_active(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip() != "" and value.strip().lower() not in {"0", "false", "off", "no"}
-    return bool(value)
-
-
-def _build_message(external_id: str, value: Any, source_key: str) -> str:
-    if isinstance(value, str) and value.strip():
-        return f"[{source_key}] {value}"
-    if external_id:
-        return f"[{source_key}] {external_id} 告警"
-    return f"[{source_key}] 告警触发"
 
 
 def _iter_error_groups(data: dict[str, Any], _depth: int = 0) -> dict[str, dict[str, Any]]:
@@ -62,7 +45,6 @@ def _iter_error_groups(data: dict[str, Any], _depth: int = 0) -> dict[str, dict[
                         continue
                     groups[key][str(item)] = 1
             else:
-                # 标量 0/1 或字符串：用空 external_id 作为稳定标识，保证同一信号可恢复
                 groups[key][""] = value
         elif key in _NESTED_CONTAINER_KEYS and isinstance(value, dict):
             nested = _iter_error_groups(value, _depth + 1)
@@ -88,7 +70,20 @@ def _alarms_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return alarms
 
 
-def process_alarm_message(topic: str, payload_bytes: bytes) -> dict:
+def process_alarm_message(
+    topic: str,
+    payload_bytes: bytes,
+    tag_name_meta: dict[str, dict] | None = None,
+) -> dict:
+    """
+    处理 MQTT 分级告警消息。
+
+    Args:
+        topic: MQTT 主题
+        payload_bytes: 原始 payload
+        tag_name_meta: 可选 {tag_name(str): {alarm_type, alarm_threshold, fault_map_entries, ...}}
+                       用于故障码转义和补充告警类型/阈值
+    """
     try:
         payload = json.loads(payload_bytes.decode("utf-8", errors="replace"))
     except Exception as e:
@@ -105,6 +100,7 @@ def process_alarm_message(topic: str, payload_bytes: bytes) -> dict:
 
     created = 0
     resolved = 0
+    incremented = 0
     now = datetime.now(timezone.utc)
 
     try:
@@ -114,25 +110,48 @@ def process_alarm_message(topic: str, payload_bytes: bytes) -> dict:
                     source_key = alarm["source_key"]
                     external_id = alarm["external_id"]
                     level = alarm["level"]
-                    active = _is_active(alarm["value"])
+                    value = alarm["value"]
+                    active = is_alarm_active(value)
 
+                    # 查找已有的同源告警
                     cur.execute(
-                        "SELECT id, resolved_at FROM t_alarms " +
-                        "WHERE source_topic = %s AND source_key = %s AND external_id = %s " +
+                        "SELECT id, resolved_at, alarm_count FROM t_alarms "
+                        "WHERE source_topic = %s AND source_key = %s AND external_id = %s "
                         "ORDER BY created_at DESC LIMIT 1",
                         (topic, source_key, external_id),
                     )
                     row = cur.fetchone()
 
+                    # 从 tag_name_meta 获取故障码映射和告警类型
+                    meta = (tag_name_meta or {}).get(external_id, {})
+                    alarm_type = meta.get("alarm_type")
+                    threshold = meta.get("alarm_threshold")
+                    entries = meta.get("fault_map_entries")
+
                     if active:
                         if row is None or row[1] is not None:
-                            message = _build_message(external_id, alarm["value"], source_key)
+                            message = build_alarm_message(
+                                tag_name=external_id,
+                                alarm_level=source_key,
+                                alarm_type=alarm_type,
+                                threshold=threshold,
+                                value=value,
+                                entries=entries,
+                            )
                             cur.execute(
-                                "INSERT INTO t_alarms (source_topic, source_key, external_id, level, message, created_at) " +
-                                "VALUES (%s, %s, %s, %s, %s, %s)",
-                                (topic, source_key, external_id, level, message, now),
+                                "INSERT INTO t_alarms (source_topic, source_key, external_id, "
+                                "level, message, alarm_type, alarm_threshold, alarm_source, created_at) "
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                (topic, source_key, external_id, level, message,
+                                 alarm_type, threshold, meta.get("alarm_source"), now),
                             )
                             created += 1
+                        else:
+                            cur.execute(
+                                "UPDATE t_alarms SET alarm_count = alarm_count + 1 WHERE id = %s",
+                                (row[0],),
+                            )
+                            incremented += 1
                     else:
                         if row is not None and row[1] is None:
                             cur.execute(
@@ -146,5 +165,5 @@ def process_alarm_message(topic: str, payload_bytes: bytes) -> dict:
         logger.error("[Alarm] DB processing failed: {}", e)
         return {"created": 0, "resolved": 0, "skipped": len(alarms)}
 
-    logger.debug("[Alarm] topic={} created={} resolved={}", topic, created, resolved)
-    return {"created": created, "resolved": resolved, "skipped": 0}
+    logger.debug("[Alarm] topic={} created={} resolved={} incr={}", topic, created, resolved, incremented)
+    return {"created": created, "resolved": resolved, "skipped": 0, "incremented": incremented}

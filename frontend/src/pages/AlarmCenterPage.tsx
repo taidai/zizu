@@ -240,6 +240,21 @@ export default function AlarmCenterPage() {
                               {alarm.source_key}
                             </span>
                           )}
+                          {alarm.alarm_type && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700 border border-purple-200">
+                              {alarm.alarm_type}
+                            </span>
+                          )}
+                          {alarm.alarm_source && (
+                            <span className="px-2 py-0.5 rounded text-[10px] text-gray-500 bg-gray-50 border border-gray-200">
+                              {alarm.alarm_source}
+                            </span>
+                          )}
+                          {alarm.alarm_count && alarm.alarm_count > 1 && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-orange-100 text-orange-700 border border-orange-200">
+                              ×{alarm.alarm_count}
+                            </span>
+                          )}
                           <span className="text-xs text-gray-400">{new Date(alarm.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
                           {alarm.rule_name && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#534AB7]/10 text-[#534AB8]">
@@ -250,6 +265,8 @@ export default function AlarmCenterPage() {
                         <h3 className="text-sm font-bold text-gray-800">{alarm.message}</h3>
                         <p className="text-xs text-gray-500 mt-0.5">
                           来源: {alarm.external_id || alarm.node_name || alarm.node_id || 'MQTT告警'}
+                          {alarm.alarm_threshold != null && <span className="ml-2 text-[10px] text-amber-600">阈值:{alarm.alarm_threshold}</span>}
+                          {alarm.alarm_code && <span className="ml-2 text-[10px] text-gray-400 font-mono">编码:{alarm.alarm_code}</span>}
                           {alarm.source_topic && <span className="ml-2 text-[10px] text-gray-400 font-mono">{alarm.source_topic}</span>}
                         </p>
                       </div>

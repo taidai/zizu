@@ -43,6 +43,8 @@ class TagUpdateRequest(BaseModel):
     formula_type: str | None = Field(None, description="expression/aggregate/condition")
     sources: list[str] | None = Field(None, description="来源点位 UUID 列表")
     alarm_level: str | None = Field(None, pattern="^(error1|error2|error3)?$", description="告警级别 error1/error2/error3")
+    alarm_type: str | None = None
+    alarm_threshold: float | None = None
     fault_map_id: str | None = Field(None, description="故障码映射表 UUID")
 
 
@@ -214,7 +216,7 @@ async def list_tags(
        t.read_write, t.enabled, t.description,
        t.aggregate_fn, t.formula, t.formula_type, t.sources,
        n.name AS node_name,
-        t.alarm_level, t.fault_map_id,
+        t.alarm_level, t.alarm_type, t.alarm_threshold, t.fault_map_id,
         fm.name AS fault_map_name,
         -- 最新值缓存表 (value_* 列由 Python 层按 data_type 转换)
         latest.ts AS latest_ts,
@@ -365,6 +367,36 @@ async def export_tags_csv(
     )
 
 
+@router.get("/tags/alarm-config")
+async def list_alarm_configured_tags() -> dict:
+    """列出所有已配置告警级别 (alarm_level) 的点位，按级别/类型分组。"""
+    from app.services.telemetry_store import get_connection
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT t.id, t.name, t.display_name, t.node_id, n.name AS node_name,
+                           n.node_type, t.alarm_level, t.alarm_type, t.alarm_threshold,
+                           t.fault_map_id, fm.name AS fault_map_name
+                    FROM t_tags t
+                    JOIN t_nodes n ON n.id = t.node_id
+                    LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
+                    WHERE t.alarm_level IS NOT NULL AND t.enabled = TRUE
+                    ORDER BY t.alarm_level, t.alarm_type, n.node_type
+                """);
+                columns = [desc[0] for desc in cur.description]
+                rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        for row in rows:
+            row["id"] = str(row["id"])
+            row["node_id"] = str(row["node_id"])
+            if row.get("fault_map_id"):
+                row["fault_map_id"] = str(row["fault_map_id"])
+        return {"tags": rows, "total": len(rows)}
+    except Exception as e:
+        logger.error("[API/tags/alarm-config] failed: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/tags/{tag_id}")
 async def get_tag(tag_id: UUID) -> dict:
     """获取单个点位详情 + 最新值。"""
@@ -378,7 +410,7 @@ async def get_tag(tag_id: UUID) -> dict:
                       t.unit, t.scale_factor, t.value_offset, t.source_path, t.source_type,
                       t.read_write, t.enabled, t.description,
                       t.aggregate_fn, t.formula, t.formula_type, t.sources,
-                       t.alarm_level, t.fault_map_id,
+                       t.alarm_level, t.alarm_type, t.alarm_threshold, t.fault_map_id,
                        fm.name AS fault_map_name,
                        n.name AS node_name,
                        latest.ts, latest.value_float, latest.value_int,
@@ -503,6 +535,7 @@ class BatchUpdateRequest(BaseModel):
     fault_map_id: str | None = Field(None, description="统一故障码映射表 UUID，空字符串表示清除")
 
 
+
 @router.put("/tags/batch")
 async def batch_update_tags(req: BatchUpdateRequest) -> dict:
     """
@@ -534,6 +567,12 @@ async def batch_update_tags(req: BatchUpdateRequest) -> dict:
     if req.alarm_level is not None:
         updates.append("alarm_level = %s")
         params.append(req.alarm_level if req.alarm_level else None)
+    if req.alarm_type is not None:
+        updates.append("alarm_type = %s")
+        params.append(req.alarm_type if req.alarm_type else None)
+    if req.alarm_threshold is not None:
+        updates.append("alarm_threshold = %s")
+        params.append(req.alarm_threshold)
     if req.fault_map_id is not None:
         updates.append("fault_map_id = %s")
         params.append(UUID(req.fault_map_id) if req.fault_map_id else None)
@@ -599,6 +638,16 @@ async def batch_update_tags(req: BatchUpdateRequest) -> dict:
                 cur.execute(query, params)
                 conn.commit()
                 updated = cur.rowcount
+
+        # Trigger immediate pipeline reload
+        try:
+            from app.main import get_pipeline
+            pipeline = get_pipeline()
+            if pipeline:
+                import asyncio as _aio
+                _aio.ensure_future(pipeline.reload_rules_now())
+        except Exception:
+            pass
 
         return {"status": "ok", "updated": updated}
     except Exception as e:
@@ -823,6 +872,8 @@ class TagCreateRequest(BaseModel):
     formula_type: str | None = Field("expression", description="expression/aggregate/condition")
     sources: list[str] = Field(default_factory=list, description="来源点位 UUID 列表")
     alarm_level: str | None = Field(None, pattern="^(error1|error2|error3)?$", description="告警级别 error1/error2/error3")
+    alarm_type: str | None = None
+    alarm_threshold: float | None = None
     fault_map_id: str | None = Field(None, description="故障码映射表 UUID")
 
 
@@ -844,6 +895,8 @@ async def create_tag(req: TagCreateRequest) -> dict:
         raise HTTPException(status_code=400, detail="Invalid node_id (not a UUID)")
 
     alarm_level = req.alarm_level.lower() if req.alarm_level else None
+    alarm_type_val = req.alarm_type if req.alarm_type else None
+    alarm_threshold_val = req.alarm_threshold
     fault_map_uuid = UUID(req.fault_map_id) if req.fault_map_id else None
 
     data_type = req.data_type.upper()
@@ -894,7 +947,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
                     INSERT INTO t_tags (node_id, name, display_name, data_type, tag_type,
                                         unit, description, read_write, source_type, source_path,
                                         aggregate_fn, formula, formula_type, sources,
-                                        alarm_level, fault_map_id, enabled)
+                                        alarm_level, alarm_type, alarm_threshold, fault_map_id, enabled)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                     RETURNING id
                     """,
@@ -903,7 +956,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
                         req.unit, req.description, req.read_write.upper(), source_type, req.source_path,
                         req.aggregate_fn, req.formula,
                         req.formula_type if req.tag_type == "LOGICAL" else None,
-                        source_uuids, alarm_level, fault_map_uuid,
+                        source_uuids, alarm_level, req.alarm_type, req.alarm_threshold, fault_map_uuid,
                     ),
                 )
                 new_id = cur.fetchone()[0]

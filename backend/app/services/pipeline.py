@@ -58,6 +58,7 @@ class DataPipeline:
         self._node_id_map: dict[str, UUID] = {}            # {node_name: node_id}
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
         self._alarm_tag_map: dict[str, dict] = {}          # {tag_id(str): alarm meta}
+        self._alarm_name_map: dict[str, dict] = {}         # {tag_name(str): alarm meta} for MQTT path
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
 
@@ -175,7 +176,7 @@ class DataPipeline:
         # 路由：告警 topic 直接走告警处理器
         if self._mqtt is not None and self._mqtt.is_alarm_topic(mqtt_msg.topic):
             try:
-                result = await asyncio.to_thread(process_alarm_message, mqtt_msg.topic, mqtt_msg.payload)
+                result = await asyncio.to_thread(process_alarm_message, mqtt_msg.topic, mqtt_msg.payload, self._alarm_name_map)
                 logger.debug("[Pipeline] Alarm message processed: {}", result)
             except Exception as e:
                 logger.error("[Pipeline] Alarm processing failed: {}", e)
@@ -203,7 +204,7 @@ class DataPipeline:
         if self._mqtt is not None and not self._mqtt.is_alarm_topic(raw.topic):
             if any(k in ERROR_LEVELS for k in parsed.tags):
                 try:
-                    result = await asyncio.to_thread(process_alarm_message, raw.topic, raw.payload)
+                    result = await asyncio.to_thread(process_alarm_message, raw.topic, raw.payload, self._alarm_name_map)
                     logger.debug('[Pipeline] Extracted alarms from telemetry topic {}: {}', raw.topic, result)
                 except Exception as e:
                     logger.error('[Pipeline] Alarm extraction failed: {}', e)
@@ -388,15 +389,17 @@ class DataPipeline:
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT t.id AS tag_id, t.name AS tag_name, t.alarm_level,
-                                   t.fault_map_id, fm.entries
+                                   t.alarm_type, t.alarm_threshold, t.fault_map_id, fm.entries,
+                                   n.node_type
                             FROM t_tags t
+                            JOIN t_nodes n ON t.node_id = n.id
                             LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
                             WHERE t.alarm_level IN ('error1', 'error2', 'error3')
                               AND t.enabled = TRUE
                         """)
                         meta: dict[str, dict] = {}
                         for row in cur.fetchall():
-                            tag_id, tag_name, alarm_level, fault_map_id, entries = row
+                            tag_id, tag_name, alarm_level, alarm_type, alarm_threshold, fault_map_id, entries, node_type = row
                             meta[str(tag_id)] = {
                                 "tag_name": tag_name,
                                 "alarm_level": alarm_level,
@@ -406,6 +409,7 @@ class DataPipeline:
                         return meta
 
             self._alarm_tag_map = _fetch_alarm_meta()
+            self._alarm_name_map = {m["tag_name"]: m for m in self._alarm_tag_map.values()}
 
             logger.info(
                 "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} alarm tags",
@@ -414,6 +418,14 @@ class DataPipeline:
 
         except Exception as e:
             logger.warning("[Pipeline] Failed to load tag rules: {}", e)
+
+    async def reload_rules_now(self) -> None:
+        """立即重载 tag 规则和告警配置 (供 API 调用)。"""
+        try:
+            await self._load_tag_rules()
+            logger.info("[Pipeline] Rules reloaded on demand")
+        except Exception as e:
+            logger.warning("[Pipeline] On-demand reload failed: {}", e)
 
     async def _periodic_reload_rules(self) -> None:
         """定时重载 tag 规则，让新导入点位无需重启即可生效。"""
