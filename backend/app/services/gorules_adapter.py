@@ -176,8 +176,14 @@ def _normalize_jdm_content(jdm_content: dict) -> dict:
 
 
 def _is_standard_jdm(content: dict) -> bool:
-    """判断是否为标准 GoRules JDM（含 nodes 字段）。"""
-    return isinstance(content, dict) and "nodes" in content and isinstance(content["nodes"], list)
+    """判断是否为标准 GoRules JDM（含 nodes 字段或 inputs/rules 决策表）。"""
+    if not isinstance(content, dict):
+        return False
+    if "nodes" in content and isinstance(content.get("nodes"), list):
+        return True
+    if "inputs" in content and "rules" in content and isinstance(content.get("inputs"), list):
+        return True
+    return False
 
 
 def _extract_triggered(outputs: Any) -> bool:
