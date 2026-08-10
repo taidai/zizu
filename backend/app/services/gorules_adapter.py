@@ -236,6 +236,23 @@ def _extract_actions(outputs: Any, jdm_content: dict) -> list[dict]:
                 "message": message or "rule triggered",
             })
 
+    # 4. 决策表按业务字段分组输出（result 内嵌 alarm/control）
+    if isinstance(outputs, dict):
+        result = outputs.get("result", outputs)
+        if isinstance(result, dict):
+            if isinstance(result.get("alarm"), dict):
+                alarm = result["alarm"]
+                actions.append({
+                    "type": "alarm",
+                    "level": alarm.get("level", "WARNING"),
+                    "message": alarm.get("message", "rule triggered"),
+                })
+            if isinstance(result.get("control"), dict):
+                control = result["control"]
+                action: dict[str, Any] = {"type": "control"}
+                action.update(control)
+                actions.append(action)
+
     # 3. _config 中配置的动作（前端控制动作面板）
     for a in jdm_content.get("_config", {}).get("actions", []):
         actions.append(dict(a))
