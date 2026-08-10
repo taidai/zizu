@@ -24,7 +24,7 @@ router = APIRouter()
 _DEFAULT_TEMPLATES = [
     {
         "name": "光储充调度",
-        "description": "PV + ESS + EVSE，根据 SOC / 光伏 / 负载 / 电价自动调度 PCS 与充电桩",
+        "description": "PV + ESS + EVSE，根据 SOC / 光伏 / 电网功率 / 电价自动调度 PCS 与充电桩",
         "rule_type": "control",
         "graph": {
             "nodes": [
@@ -39,7 +39,7 @@ _DEFAULT_TEMPLATES = [
                         "inputs": [
                             {"id": "soc", "name": "SOC %", "field": "soc"},
                             {"id": "pv_power", "name": "PV Power kW", "field": "pv_power"},
-                            {"id": "load_power", "name": "Load kW", "field": "load_power"},
+                            {"id": "grid_power", "name": "Grid Power kW", "field": "grid_power"},
                             {"id": "tou_price", "name": "TOU Price", "field": "tou_price"},
                         ],
                         "outputs": [
@@ -48,16 +48,12 @@ _DEFAULT_TEMPLATES = [
                             {"id": "strategy", "name": "Strategy", "field": "strategy"},
                         ],
                         "rules": [
-                            {"_id": "r1", "soc": "< 10", "pv_power": "*", "load_power": "*", "tou_price": "*", "pcs_setpoint": "0", "evse_current": "0", "strategy": '"电池亏电保护"'},
-                            {"_id": "r2", "soc": "> 95", "pv_power": "*", "load_power": "*", "tou_price": "*", "pcs_setpoint": "0", "evse_current": "16", "strategy": '"电池充满，光伏直供"'},
-                            {"_id": "r3", "soc": "*", "pv_power": "> load_power", "tou_price": "< 0.4", "load_power": "*", "pcs_setpoint": "-min(pv_power - load_power, 50)", "evse_current": "16", "strategy": '"光伏富余，低价储充"'},
-                            {"_id": "r4", "soc": "*", "pv_power": "< load_power", "tou_price": "> 0.8", "load_power": "*", "pcs_setpoint": "min(load_power - pv_power, 50)", "evse_current": "8", "strategy": '"高电价放电+限充"'},
-                            {"_id": "r5", "soc": "*", "pv_power": "*", "load_power": "*", "tou_price": "*", "pcs_setpoint": "pv_power - load_power", "evse_current": "16", "strategy": '"默认自发自用"'},
+                            {"_id": "r1", "soc": "< 10", "pv_power": "*", "grid_power": "*", "tou_price": "*", "pcs_setpoint": "0", "evse_current": "0", "strategy": '"电池亏电保护"'},
+                            {"_id": "r2", "soc": "> 95", "pv_power": "*", "grid_power": "*", "tou_price": "*", "pcs_setpoint": "0", "evse_current": "16", "strategy": '"电池充满，光伏直供"'},
+                            {"_id": "r3", "soc": "*", "pv_power": "> 80", "tou_price": "< 0.4", "grid_power": "*", "pcs_setpoint": "-min(pv_power - 80, 50)", "evse_current": "16", "strategy": '"光伏富余，低价储充"'},
+                            {"_id": "r4", "soc": "*", "pv_power": "< 80", "tou_price": "> 0.8", "grid_power": "*", "pcs_setpoint": "min(80 - pv_power, 50)", "evse_current": "8", "strategy": '"高电价放电+限充"'},
+                            {"_id": "r5", "soc": "*", "pv_power": "*", "grid_power": "*", "tou_price": "*", "pcs_setpoint": "pv_power - 80", "evse_current": "16", "strategy": '"默认自发自用"'},
                         ],
-                        "passThrough": False,
-                        "inputField": None,
-                        "outputPath": None,
-                        "executionMode": "single",
                     },
                 },
                 {"id": "output-1", "type": "outputNode", "name": "Dispatch Command", "position": {"x": 670, "y": 250}},
@@ -70,12 +66,162 @@ _DEFAULT_TEMPLATES = [
         "config": {
             "sourceNodeIds": [],
             "actions": [],
-            "inputMappings": {},
+            "inputMappings": {
+                "soc": "ess.soc",
+                "pv_power": "pv.activePower",
+                "grid_power": "grid.activePower",
+                "tou_price": "billing.tariffPeakPrice",
+            },
             "outputBindings": [
                 {"field": "pcs_setpoint", "name": "PCS Setpoint kW", "node": "", "group": "", "tag": "", "cooldown": 60},
                 {"field": "evse_current", "name": "EV Current A", "node": "", "group": "", "tag": "", "cooldown": 60},
             ],
             "template": "energy_dispatch",
+        },
+        "enabled": True,
+        "is_default": True,
+    },
+    {
+        "name": "防逆流保护",
+        "description": "当检测到向电网反向送电时，降低 PCS 放电功率或切换为充电",
+        "rule_type": "control",
+        "graph": {
+            "nodes": [
+                {"id": "input-1", "type": "inputNode", "name": "Grid Telemetry", "position": {"x": 70, "y": 250}},
+                {
+                    "id": "table-1",
+                    "type": "decisionTableNode",
+                    "name": "Anti Reflux",
+                    "position": {"x": 370, "y": 250},
+                    "content": {
+                        "hitPolicy": "first",
+                        "inputs": [
+                            {"id": "grid_power", "name": "Grid Power kW", "field": "grid_power"},
+                            {"id": "soc", "name": "SOC %", "field": "soc"},
+                        ],
+                        "outputs": [
+                            {"id": "pcs_setpoint", "name": "PCS Setpoint kW", "field": "pcs_setpoint"},
+                            {"id": "strategy", "name": "Strategy", "field": "strategy"},
+                        ],
+                        "rules": [
+                            {"_id": "r1", "grid_power": "< -5", "soc": "> 20", "pcs_setpoint": "max(grid_power + 5, -50)", "strategy": '"反向功率，减少放电"'},
+                            {"_id": "r2", "grid_power": "< -10", "soc": "<= 20", "pcs_setpoint": "0", "strategy": '"SOC低，停机保护"'},
+                            {"_id": "r3", "grid_power": ">= -5", "soc": "*", "pcs_setpoint": "grid_power", "strategy": '"正常范围"'},
+                        ],
+                    },
+                },
+                {"id": "output-1", "type": "outputNode", "name": "Command", "position": {"x": 670, "y": 250}},
+            ],
+            "edges": [
+                {"id": "e1", "sourceId": "input-1", "targetId": "table-1", "type": "edge"},
+                {"id": "e2", "sourceId": "table-1", "targetId": "output-1", "type": "edge"},
+            ],
+        },
+        "config": {
+            "sourceNodeIds": [],
+            "actions": [],
+            "inputMappings": {"grid_power": "grid.activePower", "soc": "ess.soc"},
+            "outputBindings": [
+                {"field": "pcs_setpoint", "name": "PCS Setpoint kW", "node": "", "group": "", "tag": "", "cooldown": 10},
+            ],
+            "template": "anti_reflux",
+        },
+        "enabled": True,
+        "is_default": True,
+    },
+    {
+        "name": "峰谷套利",
+        "description": "根据分时电价：低谷充电、高峰放电",
+        "rule_type": "control",
+        "graph": {
+            "nodes": [
+                {"id": "input-1", "type": "inputNode", "name": "Price & SOC", "position": {"x": 70, "y": 250}},
+                {
+                    "id": "table-1",
+                    "type": "decisionTableNode",
+                    "name": "Peak Valley Arbitrage",
+                    "position": {"x": 370, "y": 250},
+                    "content": {
+                        "hitPolicy": "first",
+                        "inputs": [
+                            {"id": "tou_price", "name": "Current Price 元/kWh", "field": "tou_price"},
+                            {"id": "soc", "name": "SOC %", "field": "soc"},
+                        ],
+                        "outputs": [
+                            {"id": "pcs_setpoint", "name": "PCS Setpoint kW", "field": "pcs_setpoint"},
+                            {"id": "strategy", "name": "Strategy", "field": "strategy"},
+                        ],
+                        "rules": [
+                            {"_id": "r1", "tou_price": "< 0.3", "soc": "< 90", "pcs_setpoint": "-50", "strategy": '"低谷充电"'},
+                            {"_id": "r2", "tou_price": "> 0.8", "soc": "> 30", "pcs_setpoint": "50", "strategy": '"高峰放电"'},
+                            {"_id": "r3", "tou_price": "*", "soc": "*", "pcs_setpoint": "0", "strategy": '"保持"'},
+                        ],
+                    },
+                },
+                {"id": "output-1", "type": "outputNode", "name": "Command", "position": {"x": 670, "y": 250}},
+            ],
+            "edges": [
+                {"id": "e1", "sourceId": "input-1", "targetId": "table-1", "type": "edge"},
+                {"id": "e2", "sourceId": "table-1", "targetId": "output-1", "type": "edge"},
+            ],
+        },
+        "config": {
+            "sourceNodeIds": [],
+            "actions": [],
+            "inputMappings": {"tou_price": "billing.tariffPeakPrice", "soc": "ess.soc"},
+            "outputBindings": [
+                {"field": "pcs_setpoint", "name": "PCS Setpoint kW", "node": "", "group": "", "tag": "", "cooldown": 60},
+            ],
+            "template": "peak_valley",
+        },
+        "enabled": True,
+        "is_default": True,
+    },
+    {
+        "name": "需量控制",
+        "description": "当关口功率超过需量阈值时，调用储能放电削峰",
+        "rule_type": "control",
+        "graph": {
+            "nodes": [
+                {"id": "input-1", "type": "inputNode", "name": "Demand", "position": {"x": 70, "y": 250}},
+                {
+                    "id": "table-1",
+                    "type": "decisionTableNode",
+                    "name": "Demand Control",
+                    "position": {"x": 370, "y": 250},
+                    "content": {
+                        "hitPolicy": "first",
+                        "inputs": [
+                            {"id": "grid_power", "name": "Grid Power kW", "field": "grid_power"},
+                            {"id": "demand_limit", "name": "Demand Limit kW", "field": "demand_limit"},
+                            {"id": "soc", "name": "SOC %", "field": "soc"},
+                        ],
+                        "outputs": [
+                            {"id": "pcs_setpoint", "name": "PCS Setpoint kW", "field": "pcs_setpoint"},
+                            {"id": "strategy", "name": "Strategy", "field": "strategy"},
+                        ],
+                        "rules": [
+                            {"_id": "r1", "grid_power": "> demand_limit", "soc": "> 30", "demand_limit": "*", "pcs_setpoint": "min(grid_power - demand_limit, 100)", "strategy": '"削峰放电"'},
+                            {"_id": "r2", "grid_power": "> demand_limit", "soc": "<= 30", "demand_limit": "*", "pcs_setpoint": "0", "strategy": '"SOC不足，无法削峰"'},
+                            {"_id": "r3", "grid_power": "<= demand_limit", "soc": "*", "demand_limit": "*", "pcs_setpoint": "0", "strategy": '"未超需量"'},
+                        ],
+                    },
+                },
+                {"id": "output-1", "type": "outputNode", "name": "Command", "position": {"x": 670, "y": 250}},
+            ],
+            "edges": [
+                {"id": "e1", "sourceId": "input-1", "targetId": "table-1", "type": "edge"},
+                {"id": "e2", "sourceId": "table-1", "targetId": "output-1", "type": "edge"},
+            ],
+        },
+        "config": {
+            "sourceNodeIds": [],
+            "actions": [],
+            "inputMappings": {"grid_power": "grid.activePower", "soc": "ess.soc", "demand_limit": "ems.strategyPowerLimit"},
+            "outputBindings": [
+                {"field": "pcs_setpoint", "name": "PCS Setpoint kW", "node": "", "group": "", "tag": "", "cooldown": 30},
+            ],
+            "template": "demand_control",
         },
         "enabled": True,
         "is_default": True,
@@ -97,10 +243,6 @@ _DEFAULT_TEMPLATES = [
                         "inputs": [{"id": "trigger", "name": "Trigger", "field": "trigger"}],
                         "outputs": [{"id": "value", "name": "Value", "field": "value"}],
                         "rules": [{"_id": "r1", "trigger": "*", "value": "1"}],
-                        "passThrough": False,
-                        "inputField": None,
-                        "outputPath": None,
-                        "executionMode": "single",
                     },
                 },
                 {"id": "output-1", "type": "outputNode", "name": "Command", "position": {"x": 670, "y": 250}},
