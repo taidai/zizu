@@ -94,6 +94,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[Main] Standard fault maps: {}", _fm_res)
         except Exception as _fe:
             logger.warning("[Main] Standard fault map seed (non-fatal): {}", _fe)
+        try:
+            from app.core.standard_device_templates import seed_standard_device_templates
+            _dt_res = seed_standard_device_templates()
+            logger.info("[Main] Standard device templates: {}", _dt_res)
+        except Exception as _de:
+            logger.warning("[Main] Standard device template seed (non-fatal): {}", _de)
         persisted_topic = load_mqtt_topics()
         if persisted_topic:
             settings.mqtt_telemetry_topic = persisted_topic
