@@ -343,3 +343,39 @@ async def delete_template(template_id: UUID) -> dict:
                 raise HTTPException(status_code=404, detail="Template not found")
             conn.commit()
     return {"status": "deleted", "id": str(template_id)}
+
+class RuleTemplateApplyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200, description="基于模板创建的新规则名称")
+    enabled: bool = True
+
+
+@router.post("/rule-templates/{template_id}/apply")
+async def apply_template(template_id: UUID, req: RuleTemplateApplyRequest) -> dict:
+    """基于规则模板快速创建一条可编辑的规则。"""
+    from app.services.telemetry_store import get_connection
+
+    tpl = await get_template(template_id)
+    graph = tpl.get("graph") or {}
+    config = tpl.get("config") or {}
+    jdm_content = {**graph, "_config": config}
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO t_rules (name, rule_type, jdm_content, enabled, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, name, rule_type, jdm_content, version, enabled, created_at, updated_at
+                    """,
+                    (req.name, tpl.get("rule_type"), json.dumps(jdm_content), req.enabled,
+                     datetime.now(timezone.utc), datetime.now(timezone.utc)),
+                )
+                columns = [desc[0] for desc in cur.description]
+                row = dict(zip(columns, cur.fetchone()))
+                conn.commit()
+        from app.api.rules import _serialize_rule
+        return {"rule": _serialize_rule(row), "status": "created"}
+    except Exception as e:
+        logger.error("[API/rule-templates] apply failed: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
