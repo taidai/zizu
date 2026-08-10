@@ -1,5 +1,37 @@
 ---
 
+## Session 2026-08-10 — 节点管理减负：虚拟点位入口折叠 (v0.4.47)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 节点管理简化
+
+### Session Summary
+继续推进「删繁就简」。将节点管理中创建/编辑点位时的 LOGICAL（虚拟/公式）点位入口折叠到「高级模式」，默认只展示 PHYSICAL 物理点位，降低普通用户的配置复杂度。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| frontend/src/components/NodeTagPanel.tsx | 新增点位创建「高级模式」开关；非高级模式下锁定为 PHYSICAL 并隐藏虚拟/公式配置；编辑已有的 LOGICAL 点位时自动展开高级模式 |
+| frontend/src/App.tsx | 底部说明文字由「融合：节点快照 + 点位管理」改为「设备与点位采集管理」 |
+| VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json | patch bump to v0.4.47 |
+
+### 构建与验证
+- [x] 前端 npm run build 通过
+- [x] GitHub push 成功：c4eee53 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.47 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.47、status ok、pipeline RUNNING
+
+### Next Steps
+1. 用户在前端验证「节点管理 → 新建点位」是否只显示物理点位，高级模式可展开虚拟点位。
+2. 继续按「实体即应用入口」清理其他直接消费 tag/node 的页面（如规则引擎、告警中心已实体化）。
+3. 考虑为设备新增「设备模板」，通过模板一键生成标准实体与点位，进一步降低新品牌接入成本。
+
+---
+
 ## Session 2026-08-10 — 告警中心按全局实体筛选 (v0.4.46)
 
 **Date:** 2026-08-10
