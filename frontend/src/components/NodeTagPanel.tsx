@@ -664,6 +664,7 @@ function TagFormModal({
   const [description, setDescription] = useState(tag?.description || '')
   const [sourcePath, setSourcePath] = useState(tag?.source_path || '')
   const [saving, setSaving] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(!!(tag?.tag_type === 'LOGICAL'))
 
   // -- Virtual point (LOGICAL) formula config --
   const [formulaType, setFormulaType] = useState(tag?.formula_type || 'expression')
@@ -673,6 +674,10 @@ function TagFormModal({
   const [availableTags, setAvailableTags] = useState<Tag[]>([])
   const [sourceNodeFilter, setSourceNodeFilter] = useState(nodeId)
   const [allNodes, setAllNodes] = useState<Node[]>([])
+
+  useEffect(() => {
+    if (!showAdvanced) setTagType('PHYSICAL')
+  }, [showAdvanced])
 
   useEffect(() => {
     fetchTags(sourceNodeFilter, 1, 200, undefined, undefined, undefined, undefined, undefined).then((data) => {
@@ -785,14 +790,18 @@ function TagFormModal({
             </div>
             <div>
               <label className="block text-xs text-gray-600 mb-1">点位类型</label>
-              <select
-                value={tagType}
-                onChange={(e) => setTagType(e.target.value)}
-                className="neu-input w-full px-3 py-1.5 text-xs bg-transparent"
-              >
-                <option value="PHYSICAL">PHYSICAL（物理点位）</option>
-                <option value="LOGICAL">LOGICAL（虚拟点位）</option>
-              </select>
+              {showAdvanced ? (
+                <select
+                  value={tagType}
+                  onChange={(e) => setTagType(e.target.value)}
+                  className="neu-input w-full px-3 py-1.5 text-xs bg-transparent"
+                >
+                  <option value="PHYSICAL">PHYSICAL（物理点位）</option>
+                  <option value="LOGICAL">LOGICAL（虚拟点位）</option>
+                </select>
+              ) : (
+                <div className="neu-input w-full px-3 py-1.5 text-xs text-gray-500 bg-gray-50">PHYSICAL（物理点位）</div>
+              )}
             </div>
             <div>
               <label className="block text-xs text-gray-600 mb-1">读写</label>
@@ -807,6 +816,19 @@ function TagFormModal({
               </select>
             </div>
           </div>
+
+          {!showAdvanced && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(true)}
+                className="text-[10px] text-indigo-600 hover:text-indigo-800 underline"
+              >
+                高级：创建虚拟/公式点位
+              </button>
+              <span className="text-[10px] text-gray-400">默认仅创建物理点位</span>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <div>

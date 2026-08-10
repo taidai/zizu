@@ -111,7 +111,7 @@ export default function App() {
           ))}
         </nav>
         <div className={`mt-auto text-[10px] text-gray-400 ${collapsed ? 'text-center' : 'px-2 pb-1'}`}>
-          {!collapsed && <div>融合：节点快照 + 点位管理</div>}
+          {!collapsed && <div>设备与点位采集管理</div>}
           <div className={collapsed ? '' : 'mt-1'}>FE {__APP_VERSION__}</div>
         </div>
       </aside>
