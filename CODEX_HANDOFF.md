@@ -51,6 +51,13 @@ v0.4.45 (2026-08-10)
 **已知问题（与本次改动无关）：**
 - `test_aggregator.py` 仍有 2 个 SQL 结构断言失败（pre-existing）
 
+
+### v0.4.45-fix — 删繁就简（实体层统一入口）
+- **EntityManagerPage**：详情面板拆分为「点位绑定 / 实时数据 / 历史数据」三个 tab；历史数据支持 1h/24h/7d 趋势图。
+- **NodeTagPanel**：移除点位行的「历史趋势」按钮，回归原始实时值展示；历史数据入口迁移到全局实体。
+- **rule_engine.py**：后端增加 `sourceEntityIds` 配置读取，按 entity_id 过滤上下文；保留 `sourceNodeIds` 兼容旧规则。
+- 已部署到 1 号机，GitHub 已推送 (27fe135)。
+
 ## 部署状态
 - 1号机 (e606.hlszh.com:13122, holo/holo123)：已部署 v0.4.44
   - health v0.4.44, pipeline RUNNING, MQTT+Neuron connected

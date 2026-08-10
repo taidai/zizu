@@ -31,7 +31,7 @@ type OutputBinding = {
 }
 
 type RuleConfig = {
-  sourceNodeIds: string[]
+  sourceEntityIds: string[]
   actions: NeuronWriteAction[]
   inputMappings?: Record<string, string>
   outputBindings?: OutputBinding[]
@@ -42,7 +42,7 @@ function extractConfig(content: any): RuleConfig {
   if (content && typeof content === 'object' && content._config) {
     const cfg = content._config
     return {
-      sourceNodeIds: cfg.sourceNodeIds || [],
+      sourceEntityIds: cfg.sourceEntityIds || [],
       actions: (cfg.actions || []).map((a: any) => ({
         type: 'neuron_write',
         node: a.node || '',
@@ -63,7 +63,7 @@ function extractConfig(content: any): RuleConfig {
       template: cfg.template || 'custom',
     }
   }
-  return { sourceNodeIds: [], actions: [], inputMappings: {}, outputBindings: [], template: 'custom' }
+  return { sourceEntityIds: [], actions: [], inputMappings: {}, outputBindings: [], template: 'custom' }
 }
 
 function emptyGraph(): DecisionGraphType {
@@ -153,112 +153,6 @@ const TYPE_LABELS: Record<RuleCreateRequest['rule_type'], string> = {
   linkage: '联动 linkage',
 }
 
-
-interface TreeNode extends Node {
-  children: TreeNode[]
-}
-
-function buildTree(nodes: Node[], parentId: string | null = null): TreeNode[] {
-  return nodes
-    .filter((n) => n.parent_id === parentId)
-    .sort((a, b) => a.sort_order - b.sort_order)
-    .map((n) => ({ ...n, children: buildTree(nodes, n.id) }))
-}
-
-function NodeTreeSelect({
-  nodes,
-  selectedIds,
-  expandedIds,
-  onToggleNode,
-  onToggleExpand,
-}: {
-  nodes: Node[]
-  selectedIds: string[]
-  expandedIds: Set<string>
-  onToggleNode: (id: string) => void
-  onToggleExpand: (id: string) => void
-}) {
-  const tree = useMemo(() => buildTree(nodes), [nodes])
-  if (!nodes.length) return null
-
-  return (
-    <div className="text-xs">
-      {tree.map((node) => (
-        <NodeTreeItem
-          key={node.id}
-          node={node}
-          depth={0}
-          selectedIds={selectedIds}
-          expandedIds={expandedIds}
-          onToggleNode={onToggleNode}
-          onToggleExpand={onToggleExpand}
-        />
-      ))}
-    </div>
-  )
-}
-
-function NodeTreeItem({
-  node,
-  depth,
-  selectedIds,
-  expandedIds,
-  onToggleNode,
-  onToggleExpand,
-}: {
-  node: TreeNode
-  depth: number
-  selectedIds: string[]
-  expandedIds: Set<string>
-  onToggleNode: (id: string) => void
-  onToggleExpand: (id: string) => void
-}) {
-  const checked = selectedIds.includes(node.id)
-  const expanded = expandedIds.has(node.id)
-  const hasChildren = node.children.length > 0
-  return (
-    <div>
-      <div
-        className="flex items-center gap-1 py-1 hover:bg-white/40 rounded pr-2"
-        style={{ paddingLeft: `${depth * 16}px` }}
-      >
-        {hasChildren ? (
-          <button
-            onClick={() => onToggleExpand(node.id)}
-            className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-600"
-            type="button"
-          >
-            {expanded ? '▼' : '▶'}
-          </button>
-        ) : (
-          <span className="w-5 h-5" />
-        )}
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={() => onToggleNode(node.id)}
-          className="w-4 h-4 accent-[#52c41a]"
-        />
-        <span className="truncate whitespace-nowrap text-gray-700" title={node.name}>{node.name}</span>
-      </div>
-      {expanded && hasChildren && (
-        <div>
-          {node.children.map((child) => (
-            <NodeTreeItem
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              selectedIds={selectedIds}
-              expandedIds={expandedIds}
-              onToggleNode={onToggleNode}
-              onToggleExpand={onToggleExpand}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 
 function RuleForm({
   initial,
@@ -564,33 +458,44 @@ function RuleForm({
           {activeTab === 'input' && (
             <div className="flex flex-col gap-4 h-full">
               <div className="neu-card p-4 bg-white">
-                <h4 className="text-sm font-bold text-gray-800 mb-2">数据源节点</h4>
-                <p className="text-xs text-gray-500 mb-3">在节点树中选择规则读取数据的节点（可多选）。不选则读取全库最新值。</p>
+                <h4 className="text-sm font-bold text-gray-800 mb-2">数据源实体</h4>
+                <p className="text-xs text-gray-500 mb-3">选择规则读取数据的全局实体（可多选）。不选则读取全库最新值。</p>
+                <input
+                  value={entitySearch}
+                  onChange={(e) => setEntitySearch(e.target.value)}
+                  placeholder="搜索实体..."
+                  className="neu-inset w-full px-3 py-1.5 text-xs mb-2"
+                />
                 <div className="neu-inset p-3 max-h-[240px] overflow-y-auto">
-                  {nodes.length === 0 && <p className="text-xs text-gray-400">暂无节点</p>}
-                  <NodeTreeSelect
-                    nodes={nodes}
-                    selectedIds={config.sourceNodeIds}
-                    expandedIds={expandedIds}
-                    onToggleNode={(nodeId) => {
-                      const next = new Set(config.sourceNodeIds)
-                      if (next.has(nodeId)) next.delete(nodeId)
-                      else next.add(nodeId)
-                      setConfig({ ...config, sourceNodeIds: Array.from(next) })
-                    }}
-                    onToggleExpand={(nodeId) => {
-                      const next = new Set(expandedIds)
-                      if (next.has(nodeId)) next.delete(nodeId)
-                      else next.add(nodeId)
-                      setExpandedIds(next)
-                    }}
-                  />
+                  {entityOptions.length === 0 && <p className="text-xs text-gray-400">暂无实体</p>}
+                  <div className="space-y-1">
+                    {entityOptions.map((e) => {
+                      const checked = config.sourceEntityIds.includes(e.id)
+                      return (
+                        <label key={e.id} className="flex items-center gap-2 py-1 hover:bg-white/40 rounded pr-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const next = new Set(config.sourceEntityIds)
+                              if (next.has(e.id)) next.delete(e.id)
+                              else next.add(e.id)
+                              setConfig({ ...config, sourceEntityIds: Array.from(next) })
+                            }}
+                            className="w-4 h-4 accent-[#52c41a]"
+                          />
+                          <span className="truncate whitespace-nowrap text-gray-700 text-xs" title={e.name}>{e.display_name || e.name}</span>
+                          <span className="text-[10px] text-gray-400 font-mono ml-auto">{e.name}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
 
               <div className="neu-card p-4 bg-white flex-1 overflow-hidden flex flex-col">
                 <h4 className="text-sm font-bold text-gray-800 mb-2">字段映射</h4>
-                <p className="text-xs text-gray-500 mb-3">把决策表字段名映射到真实 tag 名；不映射则按字段名直接匹配。</p>
+                <p className="text-xs text-gray-500 mb-3">把决策表字段名映射到全局实体名；不映射则按字段名直接匹配。</p>
                 <div className="neu-inset flex-1 overflow-auto p-3 text-xs">
                   {graphFields.inputs.length === 0 ? (
                     <div className="text-gray-400">当前决策表没有输入字段</div>
@@ -599,14 +504,12 @@ function RuleForm({
                       <thead className="text-[10px] text-gray-500 border-b border-gray-200">
                         <tr>
                           <th className="text-left py-2 font-medium">决策表字段</th>
-                          <th className="text-left py-2 font-medium">绑定 tag</th>
-                          <th className="text-left py-2 font-medium">所在节点</th>
+                          <th className="text-left py-2 font-medium">绑定实体</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {graphFields.inputs.map((field: any) => {
-                          const selectedTagName = config.inputMappings?.[field.id] || ''
-                          const selectedTag = allTags.find((t) => t.tag.name === selectedTagName)
+                          const selectedEntityName = config.inputMappings?.[field.id] || ''
                           return (
                             <tr key={field.id}>
                               <td className="py-2">
@@ -615,20 +518,17 @@ function RuleForm({
                               </td>
                               <td className="py-2">
                                 <select
-                                  value={selectedTagName}
+                                  value={selectedEntityName}
                                   onChange={(e) => updateInputMapping(field.id, e.target.value)}
                                   className="neu-input w-full px-2 py-1 text-xs bg-transparent"
                                 >
-                                  <option value="">-- 选择 tag --</option>
-                                  {allTags.map((t) => (
-                                    <option key={`${t.nodeId}-${t.tag.name}`} value={t.tag.name}>
-                                      {t.tag.name} ({t.nodeName})
+                                  <option value="">-- 选择实体 --</option>
+                                  {entityOptions.map((e) => (
+                                    <option key={e.id} value={e.name}>
+                                      {e.display_name || e.name}
                                     </option>
                                   ))}
                                 </select>
-                              </td>
-                              <td className="py-2 text-gray-500">
-                                {selectedTag ? selectedTag.nodeName : '-'}
                               </td>
                             </tr>
                           )
@@ -636,15 +536,15 @@ function RuleForm({
                       </tbody>
                     </table>
                   )}
-                  {allTags.length === 0 && config.sourceNodeIds.length > 0 && (
-                    <div className="mt-3 text-[10px] text-gray-400">正在加载选中节点下的 tags…</div>
+                  {entityOptions.length === 0 && config.sourceEntityIds.length > 0 && (
+                    <div className="mt-3 text-[10px] text-gray-400">正在加载实体列表…</div>
                   )}
                 </div>
               </div>
             </div>
           )}
 
-          {activeTab === 'process' && (
+{activeTab === 'process' && (
             <div className="flex flex-col gap-4 h-full">
               <div className="neu-card p-4 bg-white">
                 <div className="flex items-start justify-between">
