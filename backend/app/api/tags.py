@@ -948,7 +948,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
                                         unit, description, read_write, source_type, source_path,
                                         aggregate_fn, formula, formula_type, sources,
                                         alarm_level, alarm_type, alarm_threshold, fault_map_id, enabled)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                     RETURNING id
                     """,
                     (
@@ -956,7 +956,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
                         req.unit, req.description, req.read_write.upper(), source_type, req.source_path,
                         req.aggregate_fn, req.formula,
                         req.formula_type if req.tag_type == "LOGICAL" else None,
-                        source_uuids, alarm_level, req.alarm_type, req.alarm_threshold, fault_map_uuid,
+                        source_uuids, alarm_level, alarm_type_val, alarm_threshold_val, fault_map_uuid, True,
                     ),
                 )
                 new_id = cur.fetchone()[0]
