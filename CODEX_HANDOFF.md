@@ -1,5 +1,43 @@
 ---
 
+## Session 2026-08-10 — 设备模板：一键下发节点/点位/实体绑定 (v0.4.48)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 设备模板化接入
+
+### Session Summary
+新增「设备模板」功能，把同型号设备的节点、点位、实体绑定预置为模板，应用时一键生成实例，显著降低新品牌/新型号接入成本。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| init-db/migration_018_device_templates.sql | 新增 t_device_templates 表 |
+| backend/app/api/device_templates.py | 模板 CRUD + apply 接口；递归创建节点、点位；自动按 entity_name 绑定全局实体 |
+| backend/app/main.py | 注册 device_templates 路由 |
+| frontend/src/api/client.ts | 新增 DeviceTemplate 类型与 API 函数 |
+| frontend/src/pages/DeviceTemplatePage.tsx | 模板列表、新建/编辑（JSON）、应用到父节点 |
+| frontend/src/App.tsx | 左侧导航新增「设备模板」入口 |
+| VERSION 等 | patch bump to v0.4.48 |
+
+### 构建与验证
+- [x] 前端 npm run build 通过
+- [x] 后端 python -m py_compile 通过
+- [x] GitHub push 成功：11b56d3 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.48 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.48、status ok、pipeline RUNNING
+- [x] 数据库迁移 applied 018，t_device_templates 表已创建
+
+### Next Steps
+1. 用户在前端验证「设备模板」页面：创建模板 -> 应用到某个节点 -> 检查节点树、点位、实体绑定是否生成。
+2. 根据验证反馈，补充模板占位符（{node}、{group}）和批量导入/导出。
+3. 继续完善规则模板、告警模板，形成完整光储充交付模板库。
+
+---
+
 ## Session 2026-08-10 — 节点管理减负：虚拟点位入口折叠 (v0.4.47)
 
 **Date:** 2026-08-10
