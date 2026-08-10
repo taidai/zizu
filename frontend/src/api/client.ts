@@ -1126,6 +1126,67 @@ export interface FaultMap {
   updated_at: string
 }
 
+
+
+export async function fetchAlarmLevels(enabledOnly = false): Promise<{ items: AlarmLevel[] }> {
+  const res = await fetch(`${API_BASE}/alarm-levels?enabled_only=${enabledOnly}`)
+  if (!res.ok) throw new Error(`Fetch alarm levels failed: ${res.status}`)
+  return res.json()
+}
+
+export async function createAlarmLevel(data: Omit<AlarmLevel, 'id' | 'created_at' | 'updated_at'>): Promise<{ id: string; created_at: string }> {
+  const res = await fetch(`${API_BASE}/alarm-levels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(`Create alarm level failed: ${res.status}`)
+  return res.json()
+}
+
+export async function updateAlarmLevel(levelId: string, data: Partial<Omit<AlarmLevel, 'id' | 'created_at' | 'updated_at'>>): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(`Update alarm level failed: ${res.status}`)
+  return res.json()
+}
+
+export async function deleteAlarmLevel(levelId: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Delete alarm level failed: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchAlarmLevelEntities(levelId: string): Promise<{ items: EntityAlarmBinding[] }> {
+  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities`)
+  if (!res.ok) throw new Error(`Fetch alarm level entities failed: ${res.status}`)
+  return res.json()
+}
+
+export async function batchBindEntitiesToAlarmLevel(
+  levelId: string,
+  entityIds: string[],
+  triggerRules?: TriggerRule[],
+  enabled = true,
+): Promise<{ bound: number }> {
+  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entity_ids: entityIds, trigger_rules: triggerRules, enabled }),
+  })
+  if (!res.ok) throw new Error(`Batch bind failed: ${res.status}`)
+  return res.json()
+}
+
+export async function unbindEntityFromAlarmLevel(levelId: string, bindingId: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities/${bindingId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Unbind failed: ${res.status}`)
+  return res.json()
+}
+
 export async function fetchFaultMaps(): Promise<{ items: FaultMap[]; total: number }> {
   const res = await fetch(`${API_BASE}/fault-maps`)
   return res.json()
