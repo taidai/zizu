@@ -1,6 +1,44 @@
 ---
 ---
 
+## Session 2026-08-10 — 新增点位告警配置页面 (v0.4.60)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 告警中心可配置化
+
+### Session Summary
+新增 `frontend/src/pages/AlarmConfigPage.tsx`，并在侧边栏加入「告警配置」菜单。该页面支持按节点/关键词筛选 tag、多选批量设置 error1/error2/error3 告警等级、告警类型、阈值、故障码映射表，以及一键清空告警配置。解决此前 DB 中 0 个 tag 配置 alarm_level 导致告警中心无法产生告警的问题。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| frontend/src/pages/AlarmConfigPage.tsx | 新增点位告警配置页面 |
+| frontend/src/App.tsx | 加入「告警配置」导航项与路由 |
+| VERSION 等 | patch bump to v0.4.60 |
+
+### 构建与验证
+- [x] 前端 `npm run build`（tsc + vite）通过
+- [x] GitHub push 成功：c8ccc2f main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.60 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.60、status ok、pipeline RUNNING
+- [x] 侧边栏新增「告警配置」入口
+
+### 已知遗留问题
+1. DB 中 `t_entity_bindings` 仍为 0 条，全局实体层面的告警/规则输出仍需在「实体管理」中绑定。
+2. 点位告警配置页面目前按 tag 名逐条配置；后续可扩展为按规则模板批量应用（如把所有温度类 tag 批量设为 error2）。
+3. 告警产生后的 UI 展示、确认/恢复流程需在浏览器中实际验证。
+
+### Next Steps
+1. 用户在「告警配置」页面为关键点位（如温度、频率、故障码相关 tag）设置 error1/error2/error3 等级，观察告警中心是否生成告警。
+2. 验证故障码映射表：为 faultCode 类 tag 设置 fault_map_id 后，告警消息是否显示中文故障内容。
+3. 继续完善全局实体自动/批量绑定机制，使规则引擎输出与实体告警也能开箱即用。
+
+---
+
 ## Session 2026-08-10 — 修复 RuleEnginePage 类型与运行时问题 (v0.4.59)
 
 **Date:** 2026-08-10
