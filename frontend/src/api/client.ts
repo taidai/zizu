@@ -1329,3 +1329,91 @@ export async function restartNanoMQ(): Promise<{ restarted: boolean; message: st
   if (!res.ok) throw new Error(`Restart failed: ${res.status}`)
   return res.json()
 }
+// ── Device Templates ──
+
+export interface DeviceTemplate {
+  id: string
+  name: string
+  category: string | null
+  description: string | null
+  content: { nodes?: DeviceTemplateNode[] }
+  is_system?: boolean
+  enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface DeviceTemplateNode {
+  name: string
+  node_type?: string
+  config?: Record<string, any>
+  sort_order?: number
+  tags?: DeviceTemplateTag[]
+  children?: DeviceTemplateNode[]
+}
+
+export interface DeviceTemplateTag {
+  name: string
+  display_name?: string
+  data_type?: string
+  tag_type?: 'PHYSICAL' | 'LOGICAL'
+  unit?: string
+  read_write?: string
+  source_path?: string
+  scale_factor?: number
+  value_offset?: number
+  description?: string
+  entity_name?: string
+  binding_type?: 'PHYSICAL' | 'VIRTUAL'
+}
+
+export async function fetchDeviceTemplates(): Promise<{ items: DeviceTemplate[] }> {
+  const res = await fetch(`${API_BASE}/device-templates`)
+  if (!res.ok) throw new Error(`Fetch templates failed: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchDeviceTemplate(id: string): Promise<DeviceTemplate> {
+  const res = await fetch(`${API_BASE}/device-templates/${id}`)
+  if (!res.ok) throw new Error(`Fetch template failed: ${res.status}`)
+  return res.json()
+}
+
+export async function createDeviceTemplate(data: Omit<DeviceTemplate, 'id' | 'created_at' | 'updated_at'>): Promise<DeviceTemplate> {
+  const res = await fetch(`${API_BASE}/device-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(`Create template failed: ${res.status}`)
+  return res.json()
+}
+
+export async function updateDeviceTemplate(id: string, data: Partial<Omit<DeviceTemplate, 'id' | 'created_at' | 'updated_at'>>): Promise<{ updated: boolean }> {
+  const res = await fetch(`${API_BASE}/device-templates/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(`Update template failed: ${res.status}`)
+  return res.json()
+}
+
+export async function deleteDeviceTemplate(id: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${API_BASE}/device-templates/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Delete template failed: ${res.status}`)
+  return res.json()
+}
+
+export async function applyDeviceTemplate(
+  id: string,
+  input: { parent_node_id: string; instance_name?: string; source_prefix?: string; brand?: string }
+): Promise<{ status: string; summary: { nodes_created: number; tags_created: number; bindings_created: number; entity_missing: string[]; warnings: string[] } }> {
+  const res = await fetch(`${API_BASE}/device-templates/${id}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) throw new Error(`Apply template failed: ${res.status}`)
+  return res.json()
+}

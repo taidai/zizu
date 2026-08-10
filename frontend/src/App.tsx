@@ -1,12 +1,13 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { fetchHealth, type HealthStatus } from './api/client'
 import AdminPanel from './components/AdminPanel'
-import { Network, Scale, Bell, Settings, Box } from 'lucide-react'
+import { Network, Scale, Bell, Settings, Box, Layers } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
 const EntityManagerPage = lazy(() => import('./pages/EntityManagerPage'))
+const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
 const AlarmLevelManagerPage = lazy(() => import('./pages/AlarmLevelManagerPage'))
 
 function PageLoader() {
@@ -45,7 +46,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'admin'
+type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'templates' | 'admin'
 
 const NAV_ITEMS: { key: PageKey; label: string; icon: React.ReactNode }[] = [
   { key: 'tree', label: '节点管理', icon: <Network size={18} strokeWidth={1.8} /> },
@@ -126,6 +127,7 @@ export default function App() {
             {activePage === 'alarms' && <AlarmCenterPage />}
             {activePage === 'alarm-levels' && <AlarmLevelManagerPage />}
             {activePage === 'entities' && <EntityManagerPage />}
+            {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>
           {activePage === 'admin' && <AdminPanel />}
         </div>

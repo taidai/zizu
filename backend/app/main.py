@@ -241,6 +241,10 @@ def create_app() -> FastAPI:
 
     from app.api.alarm_levels import router as alarm_levels_router
     app.include_router(alarm_levels_router, prefix="/api/v1", tags=["Alarm Levels"])
+
+    from app.api.device_templates import router as device_templates_router
+    app.include_router(device_templates_router, prefix="/api/v1", tags=["Device Templates"])
+
     from app.api.nanomq import router as nanomq_router
     app.include_router(nanomq_router, prefix="/api/v1", tags=["nanoMQ"])
 
