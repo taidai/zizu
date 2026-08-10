@@ -58,6 +58,12 @@ v0.4.45 (2026-08-10)
 - **rule_engine.py**：后端增加 `sourceEntityIds` 配置读取，按 entity_id 过滤上下文；保留 `sourceNodeIds` 兼容旧规则。
 - 已部署到 1 号机，GitHub 已推送 (27fe135)。
 
+
+### v0.4.45-fix2 — 规则引擎数据源切到全局实体
+- **RuleEnginePage**：「数据源节点」改为「数据源实体」，多选全局实体；字段映射从 tag 名改为全局实体名。
+- **后端 rule_engine**：已支持 `sourceEntityIds` 按 entity_id 过滤上下文，旧 `sourceNodeIds` 规则仍兼容。
+- 已部署到 1 号机，GitHub 已推送 (c1db5db)。
+
 ## 部署状态
 - 1号机 (e606.hlszh.com:13122, holo/holo123)：已部署 v0.4.44
   - health v0.4.44, pipeline RUNNING, MQTT+Neuron connected

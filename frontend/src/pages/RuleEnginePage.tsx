@@ -629,9 +629,7 @@ function RuleForm({
                       <thead className="text-[10px] text-gray-500 border-b border-gray-200">
                         <tr>
                           <th className="text-left py-2 font-medium">决策输出</th>
-                          <th className="text-left py-2 font-medium">NE 节点</th>
-                          <th className="text-left py-2 font-medium">组</th>
-                          <th className="text-left py-2 font-medium">点位名</th>
+                          <th className="text-left py-2 font-medium">全局实体</th>
                           <th className="text-left py-2 font-medium">冷却(s)</th>
                           <th className="text-left py-2 font-medium">操作</th>
                         </tr>
@@ -644,28 +642,25 @@ function RuleForm({
                               <span className="text-[10px] text-gray-400 ml-2">({binding.field})</span>
                             </td>
                             <td className="py-2">
-                              <input
-                                value={binding.node}
-                                onChange={(e) => updateOutputBinding(idx, { node: e.target.value })}
-                                placeholder="tk_db"
-                                className="neu-input w-full px-2 py-1"
-                              />
-                            </td>
-                            <td className="py-2">
-                              <input
-                                value={binding.group}
-                                onChange={(e) => updateOutputBinding(idx, { group: e.target.value })}
-                                placeholder="meters"
-                                className="neu-input w-full px-2 py-1"
-                              />
-                            </td>
-                            <td className="py-2">
-                              <input
-                                value={binding.tag}
-                                onChange={(e) => updateOutputBinding(idx, { tag: e.target.value })}
-                                placeholder="PCS功率设定"
-                                className="neu-input w-full px-2 py-1"
-                              />
+                              <select
+                                value={binding.entity_id || ''}
+                                onChange={(e) => {
+                                  const entity = entityOptions.find((en) => en.id === e.target.value)
+                                  updateOutputBinding(idx, {
+                                    entity_id: e.target.value || undefined,
+                                    entity_name: entity?.name,
+                                    node: '',
+                                    group: '',
+                                    tag: '',
+                                  })
+                                }}
+                                className="neu-input w-full px-2 py-1 text-xs bg-transparent"
+                              >
+                                <option value="">-- 选择实体 --</option>
+                                {entityOptions.map((e) => (
+                                  <option key={e.id} value={e.id}>{e.display_name || e.name}</option>
+                                ))}
+                              </select>
                             </td>
                             <td className="py-2">
                               <input
@@ -680,13 +675,15 @@ function RuleForm({
                                 type="button"
                                 onClick={() => testWrite({
                                   type: 'neuron_write',
+                                  entity_id: binding.entity_id,
+                                  entity: binding.entity_name,
                                   node: binding.node,
                                   group: binding.group,
                                   tag: binding.tag,
                                   value: `{{${binding.field}}}`,
                                   cooldown: binding.cooldown,
                                 })}
-                                disabled={!binding.node || !binding.group || !binding.tag}
+                                disabled={!binding.entity_id}
                                 className="neu-btn px-2 py-1 text-[10px] text-[#389e0d] disabled:opacity-40"
                               >
                                 测试下发
