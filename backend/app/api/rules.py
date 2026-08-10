@@ -347,3 +347,16 @@ async def simulate_rule(rule_id: UUID, req: SimulateRequest) -> dict:
     except Exception as e:
         logger.error("[API/rules] simulate failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/rules/{rule_id}/dry-run")
+async def dry_run_rule_endpoint(rule_id: UUID) -> dict:
+    """用当前真实数据试运行单条规则，不执行告警/控制动作。"""
+    from app.services.rule_engine import dry_run_rule
+    try:
+        return dry_run_rule(str(rule_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("[API/rules] dry-run failed: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+

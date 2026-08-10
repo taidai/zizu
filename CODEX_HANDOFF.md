@@ -2763,3 +2763,35 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 2. 如需要，后续把 health.py 的 neuron 状态改为真实检测。
 3. 确认未提交的 vite.config.ts 与 entity-tab.png 是否保留。
 
+
+---
+
+## Session 2026-08-10 — 节点管理删繁就简 (v0.4.63)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 节点管理 UX 简化
+
+### Session Summary
+响应“删繁就简”的优化方向：节点详情页的“实时数据”“历史数据”两个标签与“点位管理”高度重叠，且全局实体已有独立标签。本次将节点详情精简为 **概览 / 点位 / 全局实体** 三个标签，并把多点位历史分析入口收进“点位管理”工具栏，以弹窗形式保留原有趋势图与入库记录表。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| frontend/src/pages/NodeTreePage.tsx | 移除 `realtime`/`history` TabKey 与标签页渲染，精简为 3 个标签 |
+| frontend/src/components/NodeTagPanel.tsx | 新增“历史分析”按钮；引入 `NodeHistoryPanel` 作为弹窗，保留多点位趋势与入库记录 |
+| VERSION 等 | patch bump to v0.4.63 |
+
+### 构建与验证
+- [x] 前端 `npm run build` 通过
+- [x] 后端 `python -m py_compile` 通过
+- [x] GitHub push 受当前网络限制失败，待网络恢复后重试
+
+### 1 号机部署
+- [x] 部署 v0.4.63 到 e606.hlszh.com:9000 成功；/api/v1/health 返回 version 0.4.63、status ok、pipeline RUNNING
+
+### 下一步
+1. 网络恢复后重新 `git push origin main`。
+2. 运行 `python scripts/deploy_1号机.py` 部署到 e606.hlszh.com:9000。
+3. 在浏览器验证节点管理只剩 3 个标签，且“点位管理”中“历史分析”弹窗可正常打开。

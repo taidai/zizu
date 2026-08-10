@@ -385,8 +385,7 @@ def run_rule_tick() -> dict[str, int]:
                             if str(v.get("entity_id")) in source_entity_ids
                         }
 
-                    input_mappings = content.get("_config", {}).get("inputMappings", {}) or {}
-                    eval_context = _apply_input_mappings(context, input_mappings)
+                    eval_context = _build_eval_context(context, content)
                     eval_result = evaluate_rule(content, eval_context)
 
                     if eval_result.get("error"):
@@ -443,3 +442,50 @@ def run_rule_tick() -> dict[str, int]:
     if any(v for k, v in result.items() if k != "evaluated"):
         logger.debug("[RuleEngine] tick result: {}", result)
     return result
+
+def dry_run_rule(rule_id: str) -> dict:
+    """对单条规则使用当前真实 telemetry 做试运行，不执行任何动作。"""
+    from app.services.telemetry_store import get_connection
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, rule_type, jdm_content, enabled FROM t_rules WHERE id = %s""",
+                (UUID(rule_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"Rule not found: {rule_id}")
+            rid, rule_type, jdm_content, enabled = row
+            content = jdm_content if isinstance(jdm_content, dict) else json.loads(jdm_content)
+
+            full_context = _build_context(cur)
+            source_node_ids = set(
+                str(nid) for nid in content.get("_config", {}).get("sourceNodeIds", []) if nid
+            )
+            source_entity_ids = set(
+                str(eid) for eid in content.get("_config", {}).get("sourceEntityIds", []) if eid
+            )
+            context = full_context
+            if source_node_ids:
+                context = {k: v for k, v in context.items() if str(v.get("node_id")) in source_node_ids}
+            if source_entity_ids:
+                context = {k: v for k, v in context.items() if str(v.get("entity_id")) in source_entity_ids}
+
+            eval_context = _build_eval_context(context, content)
+            eval_result = evaluate_rule(content, eval_context)
+
+            return {
+                "rule_id": str(rid),
+                "rule_type": rule_type,
+                "enabled": enabled,
+                "triggered": bool(eval_result.get("triggered")),
+                "actions": eval_result.get("actions", []),
+                "outputs": eval_result.get("outputs", {}),
+                "error": eval_result.get("error"),
+                "engine": eval_result.get("engine"),
+                "context_keys": list(context.keys()),
+                "eval_context_keys": list(eval_context.keys()),
+                "eval_context_values": {k: v.get("value") if isinstance(v, dict) and "value" in v else v for k, v in eval_context.items()},
+            }
+
