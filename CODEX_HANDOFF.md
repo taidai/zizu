@@ -1,5 +1,52 @@
 ---
 
+## Session 2026-08-10 — 控制规则 IPO 端到端验证 (v0.4.75)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 规则引擎控制下发
+
+### Session Summary
+在 v0.4.75 部署基础上，创建控制规则并验证完整的「输入 → 处理 → 输出」链路：
+- 输入：实时遥测 IGBT温度 = 41.6（来自 MQTT / Neuron）
+- 处理：规则引擎 F2 tick 每 60s 求值 IGBT温度 > 30
+- 输出：触发 
+euron_write 动作，通过全局实体 pcs.heartbeat 绑定写回点位 心跳信号
+- 结果：Neuron REST API 返回 {"error":0}，设备侧心跳寄存器从 16 变为 112
+
+### 关键测试数据
+| 对象 | ID/路径 |
+|---|---|
+| 节点（变流器） | 2192c1b1-fe1a-4dea-9a34-bc2785a0ca95 |
+| 点位（心跳信号） | 4638e9a-09e9-4740-9ec2-a1fcfe0b5a37 |
+| 全局实体 | pcs.heartbeat / 8ae14977-8826-4b23-94c9-060fee641cc7 |
+| Neuron 路径 | n9_pcs/cmd/心跳信号 → 地址 1!420622 |
+| 控制规则 | _e2e_heartbeat_control / 6796123c-0a0f-4fcd-846e-c7679857cac6 |
+
+### 验证结果
+- [x] POST /rules/{id}/dry-run 返回 	riggered=true, actions 包含 
+euron_write 到 pcs.heartbeat
+- [x] 启用规则后，F2 tick 日志显示：[EntityResolver] write entity=pcs.heartbeat tag=en9_pcs/心跳信号 value=1 result={'error': 0}
+- [x] 点位「心跳信号」实时值从 16 变为 112，证明设备侧收到写指令
+- [x] 验证后已禁用测试规则，避免持续写设备
+
+### 发现的问题
+1. 规则引擎 tick 日志中有大量 ms_current 未知变量警告，源自若干引用 BMS 电流的旧规则；当前设备侧无此 tag，不影响核心功能但日志嘈杂。
+2. ntity_resolver.resolve_entity_binding 把 pcs.heartbeat 当 UUID 解析时产生一次 WARNING，随后 fallback 到按名称解析成功；建议后续优化为优先按名称/ID 同时尝试，减少噪音。
+3. GitHub 推送仍受当前网络限制，本地 commit 已存在但 push 失败。
+
+### Next Steps
+1. 网络恢复后补推 GitHub。
+2. 优化规则引擎/实体解析的 warning 噪音。
+3. 前端规则引擎 UI：支持可视化配置控制动作（选择全局实体 + 写入值），避免用户手写 JSON。
+4. 告警中心：继续完善 faultCode 中文转义、分级告警批量配置。
+5. 设备模板/节点模板：进一步降低新品牌设备接入的配置成本。
+
+---
+
+---
+
 ## Session 2026-08-10 — 修复创建点位 500 并打通控制下发 IPO (v0.4.75)
 
 **Date:** 2026-08-10
