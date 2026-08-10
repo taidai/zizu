@@ -105,15 +105,15 @@ export default function DeviceTemplatePage() {
       if (editing) {
         await updateDeviceTemplate(editing.id, {
           name: form.name,
-          category: form.category || undefined,
-          description: form.description || undefined,
+          category: form.category || null,
+          description: form.description || null,
           content,
         })
       } else {
         await createDeviceTemplate({
           name: form.name,
-          category: form.category || undefined,
-          description: form.description || undefined,
+          category: form.category || null,
+          description: form.description || null,
           content,
           enabled: true,
         })
@@ -225,7 +225,7 @@ export default function DeviceTemplatePage() {
                   rows={16}
                   spellCheck={false}
                 />
-                <p className="text-[10px] text-gray-400 mt-1">支持占位符：source_path 中使用 {prefix} 会被替换为应用时填写的来源前缀。</p>
+                <p className="text-[10px] text-gray-400 mt-1">支持占位符：source_path 中使用 {'{prefix}'} 会被替换为应用时填写的来源前缀。</p>
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setModalOpen(false)} className="neu-btn px-4 py-1.5 text-xs text-gray-600">取消</button>

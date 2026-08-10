@@ -72,6 +72,8 @@ def _serialize_binding(row: dict) -> dict:
         "entity_display_name": row.get("entity_display_name"),
         "alarm_level_id": str(row["alarm_level_id"]),
         "trigger_rules": row.get("trigger_rules") or [],
+        "fault_map_id": str(row["fault_map_id"]) if row.get("fault_map_id") else None,
+        "fault_map_name": row.get("fault_map_name"),
         "enabled": row["enabled"],
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
     }
@@ -250,9 +252,12 @@ async def list_level_entities(level_id: UUID) -> dict:
             cur.execute(
                 """
                 SELECT b.id, b.entity_id, b.alarm_level_id, b.trigger_rules, b.enabled, b.created_at,
-                       e.name AS entity_name, e.display_name AS entity_display_name
+                       b.fault_map_id,
+                       e.name AS entity_name, e.display_name AS entity_display_name,
+                       fm.name AS fault_map_name
                 FROM t_entity_alarm_bindings b
                 JOIN t_entities e ON e.id = b.entity_id
+                LEFT JOIN t_fault_maps fm ON fm.id = b.fault_map_id
                 WHERE b.alarm_level_id = %s
                 ORDER BY e.name
                 """,

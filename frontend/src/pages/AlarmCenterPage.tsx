@@ -1,19 +1,11 @@
 import { useEffect, useState } from 'react'
-import { fetchAlarms, fetchAlarmGroupCounts, acknowledgeAlarm, resolveAlarm, fetchAlarmLevels, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
+import { fetchAlarms, fetchAlarmGroupCounts, acknowledgeAlarm, resolveAlarm, fetchAlarmLevels, fetchAlarmEntities, type Alarm, type AlarmLevel, type AlarmLevelEntity } from '../api/client'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
   MAJOR: 'bg-orange-100 text-orange-700 border-orange-200',
   WARNING: 'bg-amber-100 text-amber-700 border-amber-200',
   INFO: 'bg-blue-100 text-blue-700 border-blue-200',
-}
-
-interface DynamicLevel {
-  id: string
-  code: string
-  name: string
-  severity: AlarmLevel
-  color: string | null
 }
 
 interface Stats {
@@ -32,7 +24,7 @@ export default function AlarmCenterPage() {
   const [groupCounts, setGroupCounts] = useState<Record<string, number>>({})
   const [entityFilter, setEntityFilter] = useState<string>('')
   const [alarmEntities, setAlarmEntities] = useState<{ id: string; name: string; display_name: string | null }[]>([])
-  const [alarmLevels, setAlarmLevels] = useState<DynamicLevel[]>([])
+  const [alarmLevels, setAlarmLevels] = useState<AlarmLevelEntity[]>([])
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [stats, setStats] = useState<Stats>({ total: 0, unack: 0, byLevel: { CRITICAL: 0, MAJOR: 0, WARNING: 0, INFO: 0 } })
@@ -50,7 +42,7 @@ export default function AlarmCenterPage() {
         fetchAlarms(targetPage, pageSize, level, sourceKey, acknowledged, resolved, undefined, entityId),
         fetchAlarmGroupCounts(),
       ])
-      setGroupCounts(counts.counts || {})
+      setGroupCounts(counts || {})
       setAlarms(data.alarms)
       setTotalPages(data.total_pages || 1)
       setStats({
@@ -106,7 +98,7 @@ export default function AlarmCenterPage() {
     }
   }
 
-  const levelBadgeStyle = (level: DynamicLevel) => {
+  const levelBadgeStyle = (level: AlarmLevelEntity) => {
     return LEVEL_STYLES[level.severity]
   }
 

@@ -8,10 +8,12 @@ import {
   fetchAlarmLevelEntities,
   batchBindEntitiesToAlarmLevel,
   unbindEntityFromAlarmLevel,
-  type AlarmLevel,
+  fetchFaultMaps,
+  type AlarmLevelEntity,
   type Entity,
   type EntityAlarmBinding,
   type TriggerRule,
+  type FaultMap,
 } from '../api/client'
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -38,16 +40,17 @@ function ruleLabel(rule: TriggerRule): string {
 }
 
 export default function AlarmLevelManagerPage() {
-  const [levels, setLevels] = useState<AlarmLevel[]>([])
+  const [levels, setLevels] = useState<AlarmLevelEntity[]>([])
   const [entities, setEntities] = useState<Entity[]>([])
   const [bindingsByLevel, setBindingsByLevel] = useState<Record<string, EntityAlarmBinding[]>>({})
+  const [faultMaps, setFaultMaps] = useState<FaultMap[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedLevelId, setSelectedLevelId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
 
   // Create/edit modal
-  const [editingLevel, setEditingLevel] = useState<AlarmLevel | null>(null)
+  const [editingLevel, setEditingLevel] = useState<AlarmLevelEntity | null>(null)
   const [showModal, setShowModal] = useState(false)
   const [formCode, setFormCode] = useState('')
   const [formName, setFormName] = useState('')
@@ -59,16 +62,19 @@ export default function AlarmLevelManagerPage() {
   const [showBindModal, setShowBindModal] = useState(false)
   const [selectedEntityIds, setSelectedEntityIds] = useState<Set<string>>(new Set())
   const [bindRules, setBindRules] = useState<TriggerRule[]>([])
+  const [bindFaultMapId, setBindFaultMapId] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
     try {
-      const [lv, en] = await Promise.all([
+      const [lv, en, fm] = await Promise.all([
         fetchAlarmLevels(),
         fetchEntities({ page: 1, page_size: 10000, search: search || undefined, category: categoryFilter || undefined }),
+        fetchFaultMaps(),
       ])
       setLevels(lv.items)
       setEntities(en.items)
+      setFaultMaps(fm.items)
       const bindings: Record<string, EntityAlarmBinding[]> = {}
       await Promise.all(
         lv.items.map(async (l) => {
@@ -110,7 +116,7 @@ export default function AlarmLevelManagerPage() {
     setShowModal(true)
   }
 
-  const openEdit = (level: AlarmLevel) => {
+  const openEdit = (level: AlarmLevelEntity) => {
     setEditingLevel(level)
     setFormCode(level.code)
     setFormName(level.name)
@@ -143,7 +149,7 @@ export default function AlarmLevelManagerPage() {
     }
   }
 
-  const handleDeleteLevel = async (level: AlarmLevel) => {
+  const handleDeleteLevel = async (level: AlarmLevelEntity) => {
     if (!confirm(`确定删除告警等级「${level.name}」？绑定关系将一并删除。`)) return
     try {
       await deleteAlarmLevel(level.id)
@@ -157,6 +163,7 @@ export default function AlarmLevelManagerPage() {
     setSelectedLevelId(levelId)
     setSelectedEntityIds(new Set())
     setBindRules([])
+    setBindFaultMapId(null)
     setShowBindModal(true)
   }
 
@@ -176,6 +183,8 @@ export default function AlarmLevelManagerPage() {
         selectedLevelId,
         Array.from(selectedEntityIds),
         bindRules.length ? bindRules : undefined,
+        true,
+        bindFaultMapId,
       )
       setShowBindModal(false)
       load()
@@ -274,8 +283,14 @@ export default function AlarmLevelManagerPage() {
                     <span
                       key={b.id}
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-gray-100 text-gray-700 border border-gray-200"
+                      title={b.trigger_rules.map(ruleLabel).join(' / ') || '激活即告警'}
                     >
                       {b.entity_display_name || b.entity_name}
+                      {b.fault_map_name && (
+                        <span className="ml-1 px-1 py-0 rounded bg-blue-50 text-blue-600 border border-blue-100">
+                          {b.fault_map_name}
+                        </span>
+                      )}
                       <button
                         onClick={() => handleUnbind(level.id, b.id)}
                         className="text-gray-400 hover:text-red-500"
@@ -469,6 +484,22 @@ export default function AlarmLevelManagerPage() {
                   </label>
                 )
               })}
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-xs text-gray-600 mb-1">故障码映射表（可选，用于 faultCode 类实体显示中文故障内容）</label>
+              <select
+                value={bindFaultMapId ?? ''}
+                onChange={(e) => setBindFaultMapId(e.target.value || null)}
+                className="neu-input w-full px-3 py-1.5 text-xs"
+              >
+                <option value="">不指定</option>
+                {faultMaps.map((fm) => (
+                  <option key={fm.id} value={fm.id}>
+                    {fm.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="mb-4">

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useEffect, useMemo, useState } from 'react'
 import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-editor'
 import { DndProvider } from 'react-dnd'

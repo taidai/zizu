@@ -775,7 +775,28 @@ export async function applyRuleTemplate(templateId: string, name: string, enable
 
 // ── Alarms ──
 
-export type AlarmLevel = 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL'
+export interface TriggerRule {
+  op: 'active' | 'eq' | 'ne' | 'gte' | 'gt' | 'lte' | 'lt' | 'fault'
+  value?: string | number | null
+  threshold?: number | null
+  fault_map_id?: string | null
+}
+
+export interface AlarmLevelEntity {
+  id: string
+  code: string
+  name: string
+  severity: 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL'
+  color: string | null
+  trigger_rules: TriggerRule[]
+  enabled: boolean
+  sort_order: number
+  is_system: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type AlarmLevel = 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL' 
 
 export interface Alarm {
   id: string
@@ -916,6 +937,19 @@ export interface Entity {
   is_system?: boolean
   std_field?: string | null
   std_ref?: string | null
+}
+
+export interface EntityAlarmBinding {
+  id: string
+  entity_id: string
+  entity_name: string
+  entity_display_name: string | null
+  alarm_level_id: string
+  trigger_rules: TriggerRule[]
+  fault_map_id: string | null
+  fault_map_name: string | null
+  enabled: boolean
+  created_at: string
 }
 
 export interface EntityBinding {
@@ -1149,13 +1183,13 @@ export interface FaultMap {
 
 
 
-export async function fetchAlarmLevels(enabledOnly = false): Promise<{ items: AlarmLevel[] }> {
+export async function fetchAlarmLevels(enabledOnly = false): Promise<{ items: AlarmLevelEntity[] }> {
   const res = await fetch(`${API_BASE}/alarm-levels?enabled_only=${enabledOnly}`)
   if (!res.ok) throw new Error(`Fetch alarm levels failed: ${res.status}`)
   return res.json()
 }
 
-export async function createAlarmLevel(data: Omit<AlarmLevel, 'id' | 'created_at' | 'updated_at'>): Promise<{ id: string; created_at: string }> {
+export async function createAlarmLevel(data: Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>): Promise<{ id: string; created_at: string }> {
   const res = await fetch(`${API_BASE}/alarm-levels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1165,7 +1199,7 @@ export async function createAlarmLevel(data: Omit<AlarmLevel, 'id' | 'created_at
   return res.json()
 }
 
-export async function updateAlarmLevel(levelId: string, data: Partial<Omit<AlarmLevel, 'id' | 'created_at' | 'updated_at'>>): Promise<{ status: string }> {
+export async function updateAlarmLevel(levelId: string, data: Partial<Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>>): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/alarm-levels/${levelId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -1192,11 +1226,12 @@ export async function batchBindEntitiesToAlarmLevel(
   entityIds: string[],
   triggerRules?: TriggerRule[],
   enabled = true,
+  faultMapId?: string | null,
 ): Promise<{ bound: number }> {
   const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ entity_ids: entityIds, trigger_rules: triggerRules, enabled }),
+    body: JSON.stringify({ entity_ids: entityIds, trigger_rules: triggerRules, enabled, fault_map_id: faultMapId }),
   })
   if (!res.ok) throw new Error(`Batch bind failed: ${res.status}`)
   return res.json()
