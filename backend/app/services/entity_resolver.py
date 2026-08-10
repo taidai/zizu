@@ -275,13 +275,22 @@ def write_entity_value(entity_id_or_name: str | UUID, value: float | int | bool 
     node_name = binding["node_name"]
     tag_name = binding["tag_name"]
     source_path = binding.get("source_path") or tag_name
+    source_type = binding.get("source_type") or "neuron"
 
     # MVP 通过 Neuron REST API 写 tag。
-    # source_path 形如 "group/tag" 时拆分；否则默认 group="group0"。
-    if "/" in source_path:
-        group_name, tag_name = source_path.split("/", 1)
-    else:
-        group_name = "group0"
+    # Neuron source_path 标准格式: neuron_node/group/tag (如 en9_pcs/cmd/心跳信号)
+    group_name = "group0"
+    neuron_tag_name = tag_name
+    if source_type.lower() == "neuron" and "/" in source_path:
+        parts = source_path.split("/")
+        if len(parts) >= 3:
+            node_name = parts[0]          # Neuron 节点名
+            group_name = parts[1]
+            neuron_tag_name = "/".join(parts[2:])
+        elif len(parts) == 2:
+            group_name, neuron_tag_name = parts
+    elif "/" in source_path:
+        group_name, neuron_tag_name = source_path.split("/", 1)
 
     config = NeuronConfig(
         url=settings.neuron_api_url,
@@ -290,7 +299,7 @@ def write_entity_value(entity_id_or_name: str | UUID, value: float | int | bool 
     )
     client = NeuronClient(config)
     try:
-        result = client.write_tag(node_name, group_name, tag_name, value)
+        result = client.write_tag(node_name, group_name, neuron_tag_name, value)
         logger.info("[EntityResolver] write entity={} tag={}/{} value={} result={}",
                     binding["entity_name"], node_name, tag_name, value, result)
         return {

@@ -948,7 +948,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
                                         unit, description, read_write, source_type, source_path,
                                         aggregate_fn, formula, formula_type, sources,
                                         alarm_level, alarm_type, alarm_threshold, fault_map_id, enabled)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
