@@ -16,6 +16,7 @@ GoRules zen-engine 适配器 (F2 规则引擎)
 from __future__ import annotations
 
 import ast
+import copy
 import operator
 from typing import Any
 
@@ -123,6 +124,56 @@ def _eval_condition_ast(condition: str, context: dict[str, Any]) -> bool:
 # ================================================================
 # GoRules 适配器
 # ================================================================
+
+
+
+# 决策表 cell 常见简写操作符（如 "> 30"）需要补全为 "inputId > 30"
+_COMPARISON_SHORTHAND_PREFIXES = (">=", "<=", "==", "!=", ">", "<")
+
+
+def _is_shorthand_expression_cell(cell: str, input_id: str) -> bool:
+    if not isinstance(cell, str):
+        return False
+    s = cell.strip()
+    if not s or s == "1 == 1":
+        return False
+    # 已经是完整表达式（包含 input_id）则不处理
+    if input_id in s:
+        return False
+    return any(s.startswith(prefix) for prefix in _COMPARISON_SHORTHAND_PREFIXES)
+
+
+def _normalize_jdm_content(jdm_content: dict) -> dict:
+    """
+    把 jdm-editor 生成的简写决策表 cell 补齐为 zen-engine 可求值的完整表达式。
+    例如 expression 类型输入 id=pcs_temp 的 cell "> 30" -> "pcs_temp > 30"。
+    """
+    content = copy.deepcopy(jdm_content)
+
+    def _normalize_inputs_rules(inputs: list, rules: list) -> None:
+        expr_inputs = [
+            inp for inp in inputs
+            if inp.get("type") == "expression" and inp.get("id")
+        ]
+        for rule in rules:
+            for inp in expr_inputs:
+                inp_id = inp["id"]
+                cell = rule.get(inp_id)
+                if _is_shorthand_expression_cell(cell, inp_id):
+                    rule[inp_id] = f"{inp_id} {cell.strip()}"
+
+    if isinstance(content.get("inputs"), list):
+        _normalize_inputs_rules(content.get("inputs", []), content.get("rules", []))
+    elif "nodes" in content:
+        for node in content.get("nodes", []):
+            if node.get("type") in ("decisionTableNode", "decisionNode"):
+                node_content = node.get("content", {})
+                _normalize_inputs_rules(
+                    node_content.get("inputs", []),
+                    node_content.get("rules", []),
+                )
+    return content
+
 
 def _is_standard_jdm(content: dict) -> bool:
     """判断是否为标准 GoRules JDM（含 nodes 字段）。"""
@@ -243,7 +294,8 @@ def evaluate_rule(jdm_content: dict, context: dict[str, Any]) -> dict:
                 jdm_ctx = {k: v["value"] for k, v in context.items() if isinstance(v, dict) and "value" in v}
             else:
                 jdm_ctx = context
-            outputs = _evaluate_jdm_zen(jdm_content, jdm_ctx)
+            normalized_content = _normalize_jdm_content(jdm_content)
+            outputs = _evaluate_jdm_zen(normalized_content, jdm_ctx)
             triggered = _extract_triggered(outputs)
             if triggered:
                 actions = _extract_actions(outputs, jdm_content)
@@ -292,15 +344,20 @@ def evaluate_rule(jdm_content: dict, context: dict[str, Any]) -> dict:
             triggered = _evaluate_expression_zen(when, ctx_values)
         else:
             triggered = _eval_condition_ast(when, ctx_values)
-    except Exception as e:
-        logger.warning("[GoRules] expression evaluation failed ({}): {}", engine_used, e)
-        return {
-            "triggered": False,
-            "actions": [],
-            "outputs": {},
-            "error": str(e),
-            "engine": engine_used,
-        }
+    except Exception as e_zen:
+        # zen 对中文变量名 / 带点实体名可能解析失败，fallback 到 AST 求值器
+        try:
+            triggered = _eval_condition_ast(when, ctx_values)
+            engine_used = "ast"
+        except Exception as e_ast:
+            logger.warning("[GoRules] expression evaluation failed (zen: {}; ast: {})", e_zen, e_ast)
+            return {
+                "triggered": False,
+                "actions": [],
+                "outputs": {},
+                "error": f"zen: {e_zen}; ast: {e_ast}",
+                "engine": "error",
+            }
 
     return {
         "triggered": bool(triggered),

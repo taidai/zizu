@@ -12,6 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
+from app.services.gorules_adapter import _normalize_jdm_content
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -309,7 +310,8 @@ def _evaluate_with_zen(jdm_content: dict, context: dict) -> dict:
     if not ZEN_AVAILABLE or ZenEngine is None:
         raise RuntimeError("zen 未安装，无法评估规则")
 
-    graph = _table_to_graph(jdm_content)
+    normalized = _normalize_jdm_content(jdm_content)
+    graph = _table_to_graph(normalized)
     engine = ZenEngine()
     decision = engine.create_decision(json.dumps(graph))
     response = decision.evaluate(context, {"trace": True})
