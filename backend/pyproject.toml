@@ -5,7 +5,7 @@
 
 [project]
 name = "zizu-backend"
-version = "0.4.64"
+version = "0.4.65"
 description = "ZiZu IoT Platform - 替代 ThingsBoard 的工业 IoT 开发平台"
 readme = "README.md"
 requires-python = ">=3.12"

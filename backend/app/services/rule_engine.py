@@ -336,6 +336,51 @@ def _apply_input_mappings(context: dict, input_mappings: dict[str, str] | None) 
     return mapped
 
 
+
+
+def _extract_jdm_inputs(content: dict) -> list[dict]:
+    """从简化决策表或决策图节点中提取 inputs 定义。"""
+    inputs = []
+    if isinstance(content.get("inputs"), list):
+        inputs = content["inputs"]
+    elif "nodes" in content:
+        for node in content.get("nodes", []):
+            if node.get("type") in ("decisionTableNode", "decisionNode"):
+                inputs = node.get("content", {}).get("inputs", [])
+                break
+    return inputs
+
+
+def _build_eval_context(context: dict, content: dict) -> dict:
+    """
+    构造规则求值上下文。
+
+    先应用 _config.inputMappings；再按 JDM inputs 定义自动补齐：
+      - input.id 直接匹配
+      - input.field 匹配（支持 tag.xxx / entity.xxx 前缀回退到 xxx）
+    这样前端用 tag.temp / entity.pcs.activePower 作为字段时，
+    能与真实 telemetry 上下文（键为 tag 名或实体名）自动对上。
+    """
+    input_mappings = content.get("_config", {}).get("inputMappings", {}) or {}
+    eval_ctx = _apply_input_mappings(context, input_mappings)
+
+    for inp in _extract_jdm_inputs(content):
+        inp_id = inp.get("id")
+        if not inp_id or inp_id in eval_ctx:
+            continue
+        field = inp.get("field") or inp_id
+        candidates = [field]
+        if field.startswith("tag."):
+            candidates.append(field[4:])
+        elif field.startswith("entity."):
+            candidates.append(field[7:])
+        for c in candidates:
+            if c in context:
+                eval_ctx[inp_id] = context[c]
+                break
+    return eval_ctx
+
+
 def run_rule_tick() -> dict[str, int]:
     """
     执行一次 F2 规则 tick。
