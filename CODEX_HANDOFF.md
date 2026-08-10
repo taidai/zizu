@@ -2795,3 +2795,47 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 1. 网络恢复后重新 `git push origin main`。
 2. 运行 `python scripts/deploy_1号机.py` 部署到 e606.hlszh.com:9000。
 3. 在浏览器验证节点管理只剩 3 个标签，且“点位管理”中“历史分析”弹窗可正常打开。
+
+---
+
+## Session 2026-08-10 — 规则引擎 IPO 链路跑通 (v0.4.71)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu F2 规则引擎可交付验证
+
+### Session Summary
+经过多轮修复，规则引擎已完成「输入 → 求值 → 输出动作」的完整 IPO 验证：
+- 支持中文 tag 名、带点的全局实体名作为输入
+- JDM 决策表简写 cell（如 "> 30"）自动补全为 "pcs_temp > 30"
+- 从 JDM 输出的 alarm/control 分组自动提取动作
+- 新增单条规则试运行接口 `POST /rules/{id}/dry-run`
+- 真实 tick 已产生告警并写入告警中心
+
+### 关键修复
+| 文件 | 改动 |
+|---|---|
+| backend/app/services/rule_engine.py | 新增 `_build_eval_context`，自动把 `entity.pcs.temp` / `tag.IGBT温度` 等字段映射到真实 telemetry 上下文 |
+| backend/app/services/gorules_adapter.py | 标准 JDM 检测支持 `inputs/rules` 格式；节点类型兼容 `startNode/endNode/decisionNode`；cell 简写补全；结果 `result.alarm` / `result.control` 提取动作；简单表达式 zen 失败时 fallback AST |
+| backend/app/api/rules.py | 新增 `POST /rules/{rule_id}/dry-run`；`/rules/evaluate` 复用 `_normalize_jdm_content` |
+
+### 构建与验证
+- [x] 前端 `npm run build` 通过（v0.4.71）
+- [x] 后端 `python -m py_compile` 通过
+- [x] 部署到 1 号机 e606.hlszh.com:9000，health ok
+- [x] dry-run 验证：
+  - 中文 tag：`IGBT温度 > 30` → triggered=true, engine=ast, action=alarm
+  - 全局实体 JDM：`entity.pcs.temp > 30` → triggered=true, engine=zen, action=alarm
+- [x] 真实 tick 验证：启用规则 `_e2e_igbt_alarm` 后约 60 秒，告警中心出现对应告警记录
+
+### 已知待完善
+1. 规则删除接口对测试规则返回 500（不影响核心功能，待查）。
+2. 控制下发（control/neuron_write）动作的真实设备回写待用实际工况验证。
+3. 告警中心 faultCode 中文转义需等设备侧有 faultCode 类 tag 后验证。
+4. GitHub push 受当前网络限制，待恢复后重试。
+
+### Next Steps
+1. 修复规则删除 500（可选，非阻塞）。
+2. 验证控制下发链路：创建 W/RW 实体 + 控制规则 + 观察 Neuron 写 tag。
+3. 继续简化前端：合并告警等级/告警配置菜单、节点管理 inline 实体绑定。
