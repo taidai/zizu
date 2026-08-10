@@ -1,6 +1,44 @@
 ---
 ---
 
+## Session 2026-08-10 — 修复 RuleEnginePage 类型与运行时问题 (v0.4.59)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 规则引擎前端
+
+### Session Summary
+彻底修复 `frontend/src/pages/RuleEnginePage.tsx`：移除 `// @ts-nocheck`，补齐缺失的实体搜索/选项/绑定状态，修正 `OutputBinding`/`NeuronWriteAction` 类型，使输出控制绑定支持通过全局实体选择并自动解析到 node/group/tag。规则引擎配置页面现在可以通过 TypeScript 构建并运行。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| frontend/src/pages/RuleEnginePage.tsx | 移除 `// @ts-nocheck`；导入 `fetchEntities`/`fetchEntityBindings`/`Entity`/`EntityBinding`；删除废弃的 `sourceNodeIds`/`nodeTags`/`allTags` 逻辑；新增 `entitySearch`/`entityOptions`/`entityBindings` 状态；`OutputBinding`/`NeuronWriteAction` 增加 `entity_id`/`entity_name`；实体选择时自动解析到 tag 绑定 |
+| VERSION 等 | patch bump to v0.4.59 |
+
+### 构建与验证
+- [x] 前端 `npm run build`（tsc + vite）通过，无 TypeScript 错误
+- [x] GitHub push 成功：ad306b5 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.59 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.59、status ok、pipeline RUNNING
+- [x] F1/F2/F3 schedulers 正常启动
+- [x] 启动日志无 MQTT disconnect TypeError
+
+### 已知遗留问题
+1. DB 中 `t_entity_bindings` 为 0 条，因此 pipeline 显示 `0 entity alarm bindings`。faultCode 类告警要生效，需在「实体管理」中把标准实体绑定到具体点位，并确保 tag/node 启用。
+2. 规则引擎输出绑定目前按实体首个 tag 绑定解析 node/group/tag；若一个实体绑定多个 tag，可能需要更精细的选择器。
+3. 页面实际交互效果需用户在浏览器中验证。
+
+### Next Steps
+1. 用户在浏览器验证「规则引擎」→新建/编辑规则→输入/处理/输出三个 tab 是否正常。
+2. 在「实体管理」中把 ess.faultCode/pcs.faultCode 等故障码实体绑定到对应 tag，验证告警中心能否按 error1 分组并显示中文故障内容。
+3. 验证规则启用后，F2 rule tick 是否按 60s 执行并产生控制/告警动作。
+
+---
+
 ## Session 2026-08-10 — 修复 MQTT 断开回调签名，适配 paho-mqtt v2 (v0.4.58)
 
 **Date:** 2026-08-10
