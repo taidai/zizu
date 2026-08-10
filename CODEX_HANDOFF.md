@@ -1,5 +1,41 @@
 ---
 
+## Session 2026-08-10 — 规则模板库：防逆流/峰谷套利/需量控制 (v0.4.52)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 规则引擎模板化
+
+### Session Summary
+扩展规则模板库，新增防逆流保护、峰谷套利、需量控制三套光储充常用策略模板；所有默认模板预置 inputMappings 到国标实体（ess.soc / pv.activePower / grid.activePower / billing.tariffPeakPrice 等），并优化了规则模板启动同步逻辑，确保代码中的默认模板变更能自动更新到数据库。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/api/rule_templates.py | 重写 _DEFAULT_TEMPLATES；新增防逆流/峰谷套利/需量控制；光储充调度改为使用 grid_power；_ensure_table 改为 upsert，默认模板启动时自动同步 |
+| frontend/src/pages/RuleEnginePage.tsx | extractConfig / OutputBinding / bindingsToActions 支持 entity_id/entity_name，使模板输出绑定可直接选择全局实体 |
+| frontend/src/api/client.ts | 新增 applyRuleTemplate 辅助函数 |
+| backend/app/api/rule_templates.py | 新增 POST /rule-templates/{id}/apply 接口 |
+| VERSION 等 | patch bump to v0.4.52 |
+
+### 构建与验证
+- [x] 前端 npm run build 通过
+- [x] 后端 python -m py_compile 通过
+- [x] GitHub push 成功：352c5f4 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.52 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.52、status ok、pipeline RUNNING
+- [x] GET /api/v1/rule-templates 返回 6 套模板：光储充调度、峰谷套利、心跳测试、自定义、防逆流保护、需量控制
+
+### Next Steps
+1. 用户在规则引擎页面验证：新建规则 -> 选择模板 -> 输入/输出映射已预填国标实体，保存后即可运行。
+2. 继续完善告警模板：为 PCS/BMS/PV/EVSE 预置 error1/error2/error3 告警等级与触发规则。
+3. 规则模板支持从设备模板联动生成（如应用 PCS 设备模板后，自动推荐防逆流规则模板）。
+
+---
+
 ## Session 2026-08-10 — 预置光储充国标设备模板 (v0.4.49)
 
 **Date:** 2026-08-10
