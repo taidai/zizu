@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchAlarms, fetchAlarmGroupCounts, acknowledgeAlarm, resolveAlarm, fetchAlarmLevels, type Alarm, type AlarmLevel } from '../api/client'
+import { fetchAlarms, fetchAlarmGroupCounts, acknowledgeAlarm, resolveAlarm, fetchAlarmLevels, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -30,6 +30,8 @@ export default function AlarmCenterPage() {
   const [levelFilter, setLevelFilter] = useState<AlarmLevel | ''>('')
   const [groupFilter, setGroupFilter] = useState<string>('')
   const [groupCounts, setGroupCounts] = useState<Record<string, number>>({})
+  const [entityFilter, setEntityFilter] = useState<string>('')
+  const [alarmEntities, setAlarmEntities] = useState<{ id: string; name: string; display_name: string | null }[]>([])
   const [alarmLevels, setAlarmLevels] = useState<DynamicLevel[]>([])
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -41,10 +43,11 @@ export default function AlarmCenterPage() {
     try {
       const level = levelFilter || undefined
       const sourceKey = groupFilter || undefined
+      const entityId = entityFilter || undefined
       const acknowledged = statusFilter === 'acknowledged' ? true : statusFilter === 'active' ? false : undefined
       const resolved = statusFilter === 'resolved' ? true : statusFilter === 'active' ? false : undefined
       const [data, counts] = await Promise.all([
-        fetchAlarms(targetPage, pageSize, level, sourceKey, acknowledged, resolved),
+        fetchAlarms(targetPage, pageSize, level, sourceKey, acknowledged, resolved, undefined, entityId),
         fetchAlarmGroupCounts(),
       ])
       setGroupCounts(counts.counts || {})
@@ -67,12 +70,13 @@ export default function AlarmCenterPage() {
 
   useEffect(() => {
     fetchAlarmLevels(true).then((d) => setAlarmLevels(d.items)).catch(() => {})
+    fetchAlarmEntities().then((d) => setAlarmEntities(d.items)).catch(() => {})
   }, [])
 
   useEffect(() => {
     setPage(1)
     load(1)
-  }, [levelFilter, statusFilter, groupFilter])
+  }, [levelFilter, statusFilter, groupFilter, entityFilter])
 
   useEffect(() => {
     load(page)
@@ -82,7 +86,7 @@ export default function AlarmCenterPage() {
     if (!autoRefresh) return
     const id = setInterval(() => load(page), 5000)
     return () => clearInterval(id)
-  }, [autoRefresh, page, levelFilter, statusFilter, groupFilter])
+  }, [autoRefresh, page, levelFilter, statusFilter, groupFilter, entityFilter])
 
   const handleAck = async (alarm: Alarm) => {
     try {
@@ -184,6 +188,27 @@ export default function AlarmCenterPage() {
             </button>
           ))}
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500">实体:</span>
+          <select
+            value={entityFilter}
+            onChange={(e) => setEntityFilter(e.target.value)}
+            className="neu-input text-xs px-2 py-1 bg-white border border-gray-200 rounded"
+          >
+            <option value="">全部实体</option>
+            {alarmEntities.map((ent) => (
+              <option key={ent.id} value={ent.id}>{ent.display_name || ent.name}</option>
+            ))}
+          </select>
+          {entityFilter && (
+            <button
+              onClick={() => setEntityFilter('')}
+              className="text-[10px] text-gray-400 hover:text-gray-600"
+            >
+              清除
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 告警列表 */}
@@ -224,6 +249,11 @@ export default function AlarmCenterPage() {
                     {alarm.alarm_source && (
                       <span className="px-2 py-0.5 rounded text-[10px] text-gray-500 bg-gray-50 border border-gray-200">
                         {alarm.alarm_source}
+                      </span>
+                    )}
+                    {alarm.entity_name && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+                        {alarm.entity_name}
                       </span>
                     )}
                     {alarm.alarm_count && alarm.alarm_count > 1 && (

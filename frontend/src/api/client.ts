@@ -773,6 +773,8 @@ export interface Alarm {
   rule_name?: string
   node_id: string | null
   node_name?: string
+  entity_id?: string | null
+  entity_name?: string
   entity_is_system?: boolean
   level: AlarmLevel
   message: string
@@ -807,6 +809,7 @@ export async function fetchAlarms(
   acknowledged?: boolean,
   resolved?: boolean,
   nodeId?: string,
+  entityId?: string,
 ): Promise<AlarmListResponse> {
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
   if (level) params.set('level', level)
@@ -814,11 +817,19 @@ export async function fetchAlarms(
   if (acknowledged !== undefined) params.set('acknowledged', String(acknowledged))
   if (resolved !== undefined) params.set('resolved', String(resolved))
   if (nodeId) params.set('node_id', nodeId)
+  if (entityId) params.set('entity_id', entityId)
   const res = await fetch(`${API_BASE}/alarms?${params}`)
   if (!res.ok) throw new Error(`Fetch alarms failed: ${res.status}`)
   return res.json()
 }
 
+
+
+export async function fetchAlarmEntities(): Promise<{ items: { id: string; name: string; display_name: string | null }[] }> {
+  const res = await fetch(`${API_BASE}/alarms/entities`)
+  if (!res.ok) throw new Error(`Fetch alarm entities failed: ${res.status}`)
+  return res.json()
+}
 export async function fetchAlarmGroupCounts(): Promise<Record<string, number>> {
   const res = await fetch(`${API_BASE}/alarms/group-counts`)
   if (!res.ok) throw new Error(`Fetch alarm group counts failed: ${res.status}`)

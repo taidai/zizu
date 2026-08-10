@@ -64,6 +64,14 @@ v0.4.45 (2026-08-10)
 - **后端 rule_engine**：已支持 `sourceEntityIds` 按 entity_id 过滤上下文，旧 `sourceNodeIds` 规则仍兼容。
 - 已部署到 1 号机，GitHub 已推送 (c1db5db)。
 
+
+### v0.4.45-fix3 — 规则引擎输出动作支持全局实体写入
+- **RuleEnginePage 输出绑定**：从「NE 节点/组/点位」三栏改为「全局实体」单栏下拉选择。
+- **bindingsToActions/actionsToBindings**：支持 `entity_id` / `entity_name`。
+- **testWrite**：优先调用 `writeEntityValue`，保留 Neuron tag 回退。
+- 后端 `_execute_neuron_write` 已原生支持 `entity_id` / `entity` 写入。
+- 已部署到 1 号机，GitHub 已推送 (8936165)。
+
 ## 部署状态
 - 1号机 (e606.hlszh.com:13122, holo/holo123)：已部署 v0.4.44
   - health v0.4.44, pipeline RUNNING, MQTT+Neuron connected

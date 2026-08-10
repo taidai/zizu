@@ -27,7 +27,7 @@ class AlarmCreateRequest(BaseModel):
 def _serialize_alarm(row: dict) -> dict:
     row = dict(row)
     row["id"] = str(row["id"])
-    for key in ["rule_id", "node_id"]:
+    for key in ["rule_id", "node_id", "entity_id"]:
         if row.get(key):
             row[key] = str(row[key])
     for key in ["created_at", "ack_at", "resolved_at"]:
@@ -43,6 +43,7 @@ async def list_alarms(
     acknowledged: bool | None = Query(None),
     resolved: bool | None = Query(None),
     node_id: UUID | None = Query(None),
+    entity_id: UUID | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> dict:
@@ -65,6 +66,9 @@ async def list_alarms(
     if node_id:
         conditions.append("a.node_id = %s")
         params.append(node_id)
+    if entity_id:
+        conditions.append("a.entity_id = %s")
+        params.append(entity_id)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = (page - 1) * page_size
@@ -74,10 +78,12 @@ async def list_alarms(
            a.acknowledged, a.ack_user, a.ack_at, a.created_at, a.resolved_at,
            a.source_topic, a.source_key, a.external_id,
            a.alarm_type, a.alarm_threshold, a.alarm_source, a.alarm_count, a.alarm_code,
+           a.entity_id, e.name AS entity_name,
            r.name AS rule_name, n.name AS node_name
     FROM t_alarms a
     LEFT JOIN t_rules r ON r.id = a.rule_id
     LEFT JOIN t_nodes n ON n.id = a.node_id
+    LEFT JOIN t_entities e ON e.id = a.entity_id
     {where}
     ORDER BY
         CASE a.level WHEN 'CRITICAL' THEN 0 WHEN 'MAJOR' THEN 1 WHEN 'WARNING' THEN 2 ELSE 3 END,
@@ -151,6 +157,26 @@ async def alarm_counts(
 
     return {"counts": counts}
 
+
+
+
+@router.get("/alarms/entities")
+async def list_alarm_entities() -> dict:
+    """返回当前有未恢复告警的实体列表。"""
+    from app.services.telemetry_store import get_connection
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT e.id, e.name, e.display_name
+                FROM t_alarms a
+                JOIN t_entities e ON e.id = a.entity_id
+                WHERE a.resolved_at IS NULL
+                ORDER BY e.name
+            """)
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    return {"items": [{"id": str(r["id"]), "name": r["name"], "display_name": r.get("display_name")} for r in rows]}
 
 @router.get("/alarms/group-counts")
 async def alarm_group_counts() -> dict:
