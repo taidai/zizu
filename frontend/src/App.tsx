@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { fetchHealth, type HealthStatus } from './api/client'
 import AdminPanel from './components/AdminPanel'
-import { Network, Scale, Bell, Settings, Box, Layers } from 'lucide-react'
+import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
@@ -9,6 +9,7 @@ const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
 const EntityManagerPage = lazy(() => import('./pages/EntityManagerPage'))
 const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
 const AlarmLevelManagerPage = lazy(() => import('./pages/AlarmLevelManagerPage'))
+const AlarmConfigPage = lazy(() => import('./pages/AlarmConfigPage'))
 
 function PageLoader() {
   return (
@@ -46,7 +47,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'templates' | 'admin'
+type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
 
 const NAV_ITEMS: { key: PageKey; label: string; icon: React.ReactNode }[] = [
   { key: 'tree', label: '节点管理', icon: <Network size={18} strokeWidth={1.8} /> },
@@ -54,6 +55,7 @@ const NAV_ITEMS: { key: PageKey; label: string; icon: React.ReactNode }[] = [
   { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} /> },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} /> },
   { key: 'alarm-levels', label: '告警等级', icon: <Bell size={18} strokeWidth={1.8} /> },
+  { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} /> },
   { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} /> },
 ]
 
@@ -126,6 +128,7 @@ export default function App() {
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
             {activePage === 'alarm-levels' && <AlarmLevelManagerPage />}
+            {activePage === 'alarm-config' && <AlarmConfigPage />}
             {activePage === 'entities' && <EntityManagerPage />}
             {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>
