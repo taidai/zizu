@@ -1,5 +1,40 @@
 ---
 
+## Session 2026-08-10 — 告警模板：三级告警与国标实体绑定 (v0.4.53)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 告警中心模板化
+
+### Session Summary
+预置 error1/error2/error3 三级告警等级，并自动绑定到光储充国标实体，实现开箱即用的分级告警。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/core/standard_alarm_templates.py | 新增系统告警模板模块：定义 error1/error2/error3 等级，并绑定 ess.faultCode、pcs.faultCode、ess.maxCellTemp、grid.voltageThd 等 18 个实体触发规则 |
+| backend/app/main.py | 启动时调用 seed_standard_alarm_templates |
+| VERSION 等 | patch bump to v0.4.53 |
+
+### 构建与验证
+- [x] 前端 npm run build 通过
+- [x] 后端 python -m py_compile 通过
+- [x] GitHub push 成功：d4721fa main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.53 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.53、status ok、pipeline RUNNING
+- [x] 启动日志：StandardAlarmTemplates levels=3, bound=18
+- [x] /api/v1/alarm-levels 返回 error1/error2/error3 系统等级
+
+### Next Steps
+1. 用户验证告警中心：当 faultCode、温度、SOC 等实体点位有新值时，是否按 error1/error2/error3 分组生成告警。
+2. 告警中心增加按设备/实体分组的统计视图。
+3. 继续完善故障码映射（fault_map）与告警内容的转义显示。
+
+---
+
 ## Session 2026-08-10 — 规则模板库：防逆流/峰谷套利/需量控制 (v0.4.52)
 
 **Date:** 2026-08-10
