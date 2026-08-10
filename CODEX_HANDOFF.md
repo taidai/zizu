@@ -1,5 +1,39 @@
 ---
 
+## Session 2026-08-10 — 预置光储充国标设备模板 (v0.4.49)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 设备模板库
+
+### Session Summary
+为光储充场景预置 5 套系统级国标设备模板（PCS、BMS、光伏逆变器、充电桩、关口电表），启动时自动播种到 t_device_templates，用户开箱即可一键创建设备节点、点位并绑定标准实体。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/core/standard_device_templates.py | 新增系统模板定义（PCS/BMS/PV/EVSE/Meter）及幂等播种函数 |
+| backend/app/main.py | 启动生命周期中调用 seed_standard_device_templates |
+| VERSION 等 | patch bump to v0.4.49 |
+
+### 构建与验证
+- [x] 前端 npm run build 通过
+- [x] 后端 python -m py_compile 通过
+- [x] GitHub push 成功：a07dad1 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.49 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.49、status ok、pipeline RUNNING
+- [x] GET /api/v1/device-templates 返回 5 条系统模板
+
+### Next Steps
+1. 用户在「设备模板」页面验证系统模板可见，并可应用到节点树下。
+2. 应用后检查节点管理、实体管理是否生成正确节点、点位、实体绑定。
+3. 下一轮可继续做规则模板/告警模板，或设备模板导入导出。
+
+---
+
 ## Session 2026-08-10 — 设备模板：一键下发节点/点位/实体绑定 (v0.4.48)
 
 **Date:** 2026-08-10
