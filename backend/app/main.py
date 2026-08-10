@@ -100,6 +100,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[Main] Standard device templates: {}", _dt_res)
         except Exception as _de:
             logger.warning("[Main] Standard device template seed (non-fatal): {}", _de)
+        try:
+            from app.core.standard_alarm_templates import seed_standard_alarm_templates
+            _al_res = seed_standard_alarm_templates()
+            logger.info("[Main] Standard alarm templates: {}", _al_res)
+        except Exception as _ae:
+            logger.warning("[Main] Standard alarm template seed (non-fatal): {}", _ae)
         persisted_topic = load_mqtt_topics()
         if persisted_topic:
             settings.mqtt_telemetry_topic = persisted_topic
