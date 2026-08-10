@@ -178,9 +178,23 @@ def _ensure_table() -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(create_sql)
-            cur.execute("SELECT COUNT(*) FROM t_rule_templates")
-            if cur.fetchone()[0] == 0:
-                for tmpl in _DEFAULT_TEMPLATES:
+            for tmpl in _DEFAULT_TEMPLATES:
+                cur.execute("SELECT id FROM t_rule_templates WHERE name = %s", (tmpl["name"],))
+                if cur.fetchone():
+                    cur.execute(
+                        """
+                        UPDATE t_rule_templates
+                        SET description = %s, rule_type = %s, graph = %s, config = %s, enabled = %s, is_default = %s, updated_at = now()
+                        WHERE name = %s
+                        """,
+                        (
+                            tmpl.get("description"), tmpl["rule_type"],
+                            json.dumps(tmpl["graph"]), json.dumps(tmpl["config"]),
+                            tmpl.get("enabled", True), tmpl.get("is_default", False),
+                            tmpl["name"],
+                        ),
+                    )
+                else:
                     cur.execute(
                         """
                         INSERT INTO t_rule_templates
