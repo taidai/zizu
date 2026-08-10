@@ -1,4 +1,56 @@
 ---
+
+## Session 2026-08-10 — 修复创建点位 500 并打通控制下发 IPO (v0.4.75)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 控制链路交付
+
+### Session Summary
+接上 v0.4.73 遗留问题：创建点位报 500 
+ot all arguments converted during string formatting。原因是 ackend/app/api/tags.py 的 INSERT 语句有 18 个 %s 占位符 + TRUE 字面量，但参数元组却传了 19 个值（包含末尾的 True）。将 TRUE 改为 %s 后修复。
+
+同时发现实体控制写回存在 source_path 解析错误：ntity_resolver.write_entity_value 把 n9_pcs/cmd/心跳信号 按第一个 / 拆成 group= en9_pcs, tag=cmd/心跳信号，导致 Neuron 写失败。已改为按 Neuron 标准三段式解析：neuron_node / group / tag。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/api/tags.py | INSERT VALUES(..., TRUE) → VALUES(..., %s)，匹配 19 个参数 |
+| backend/app/services/entity_resolver.py | write_entity_value 按 source_type=neuron 三段式解析 source_path，正确提取 Neuron 节点/组/标签名 |
+| VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json | patch bump 0.4.73 → 0.4.75 |
+
+### 构建与验证
+- [x] 后端 python -m py_compile 通过
+- [x] 部署到 1 号机 e606.hlszh.com:9000，health 返回 version 0.4.75、pipeline RUNNING
+- [x] POST /api/v1/tags 成功创建 心跳信号 点位（id=b4638e9a-09e9-4740-9ec2-a1fcfe0b5a37）
+- [x] POST /api/v1/entities 创建可写全局实体 pcs.heartbeat
+- [x] POST /api/v1/entities/bindings/batch 绑定实体到点位
+- [x] POST /api/v1/entities/{id}/write 下发 value=1，Neuron 返回 {"error":0}，控制 IPO 打通
+
+### 关键测试数据
+- 节点：变流器 2192c1b1-fe1a-4dea-9a34-bc2785a0ca95
+- 点位：心跳信号 4638e9a-09e9-4740-9ec2-a1fcfe0b5a37
+- 实体：pcs.heartbeat 8ae14977-8826-4b23-94c9-060fee641cc7
+- source_path：n9_pcs/cmd/心跳信号
+- Neuron 实际地址：1!420622
+
+### 已知遗留问题
+1. 前端 UI 中「创建点位」弹窗若未传 sources 仍可能显示空数组；当前后端已兼容 sources=[]。
+2. 控制规则（JDM 输出 
+esult.control → 
+euron_write 或 ntity）的真实工况联动待用户在规则引擎页面配置后验证。
+3. 告警 faultCode 中文转义需等设备侧有 faultCode 类 tag 后验证。
+
+### Next Steps
+1. 在「规则引擎」创建控制规则：当某个条件满足时，输出 
+esult.control = {"entity": "pcs.heartbeat", "value": 1}，验证规则触发后自动下发心跳。
+2. 继续简化前端：合并告警等级/告警配置菜单、节点管理 inline 实体绑定。
+3. 观察设备侧 1!420622 寄存器是否真实变化，确认 Neuron 南向已把写指令送到设备。
+
+---
+
+---
 ---
 
 ## Session 2026-08-10 — 启动时自动执行实体绑定 (v0.4.62)
