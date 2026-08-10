@@ -1,6 +1,43 @@
 ---
 ---
 
+## Session 2026-08-10 — 修复 rule_engine.py 缩进错误，恢复 F1/F2/F3 调度器 (v0.4.57)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 规则引擎可靠性
+
+### Session Summary
+修复 `backend/app/services/rule_engine.py` 中 `run_rule_tick()` 函数的缩进错误（`input_mappings` 与前面 `source_node_ids` 行未对齐），使 F1/F2/F3 调度器能够正常启动，规则 tick 恢复执行。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/services/rule_engine.py | 修正 L367 与 L388 附近的缩进，使 `source_node_ids`/`source_entity_ids`/`input_mappings`/`eval_context` 处于同一 try 块内 |
+| VERSION 等 | patch bump to v0.4.57 |
+
+### 构建与验证
+- [x] 后端 `python -m py_compile` 通过
+- [x] 全量 `python -m compileall backend/app` 无语法错误
+- [x] GitHub push 成功：319ddc5 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.57 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.57、status ok、pipeline RUNNING
+- [x] 启动日志：`[Main] F1/F2/F3 schedulers started (formula=30s, rules=60s, agg=60s) ✅`
+
+### 已知遗留问题
+1. **RuleEnginePage.tsx** 仍标记 `// @ts-nocheck`，存在运行时未定义变量风险，需后续修复。
+2. 启动/运行日志偶现 `TypeError: MqttClient._on_disconnect() takes 5 positional arguments but 6 were given`，MQTT 长连接稳定性需排查（与用户此前反馈“MQTT 数据管道长时间后会卡”相关）。
+
+### Next Steps
+1. 用户验证规则引擎：创建/启用规则后，观察 F2 rule tick 是否按 60s 间隔执行并产生控制/告警动作。
+2. 修复 RuleEnginePage 前端运行时错误与类型问题。
+3. 排查 MQTT 断开回调参数不匹配问题。
+
+---
+
 ## Session 2026-08-10 — 告警等级绑定支持故障码映射 (v0.4.56)
 
 **Date:** 2026-08-10
