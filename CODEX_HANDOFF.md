@@ -1,6 +1,51 @@
 ---
 ---
 
+## Session 2026-08-10 — 新增实体-点位自动绑定 (v0.4.61)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 全局实体落地
+
+### Session Summary
+解决长期存在的 `0 entity bindings` 问题：新增国标中文点位名到全局实体的映射表，后端提供 `POST /entities/bindings/auto-bind`（支持 dry_run 预览），前端「实体管理」页面增加「自动绑定」按钮。在 1 号机实测一次自动绑定即创建 32 条实体-点位绑定，使规则引擎输出、实体告警链路真正可用。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/core/tag_entity_mappings.py | 新增常用中文点位名 → 国标实体映射表（Meter/PCS/BMS/通用） |
+| backend/app/services/entity_binder.py | 新增 `auto_bind_standard_entities()`，幂等创建实体-点位绑定 |
+| backend/app/api/entities.py | 新增 `POST /entities/bindings/auto-bind?dry_run=true` |
+| frontend/src/api/client.ts | 新增 `autoBindEntities()` |
+| frontend/src/pages/EntityManagerPage.tsx | 顶部增加「自动绑定」按钮与预览/确认弹窗 |
+| VERSION 等 | patch bump to v0.4.61 |
+
+### 构建与验证
+- [x] 前端 `npm run build` 通过
+- [x] 后端 `python -m py_compile` 通过
+- [x] GitHub push 成功：3ae7402 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.61 到 e606.hlszh.com:9000
+- [x] dry_run 预览匹配 32 条绑定
+- [x] 实际执行自动绑定：created=32，skipped=64
+- [x] DB 中 `t_entity_bindings` 从 0 变为 32 条
+- [x] Pipeline 日志显示 `2 entity alarm bindings`（已绑定的实体中命中告警模板的数量）
+
+### 已知遗留问题
+1. 当前 1 号机 tag 中暂无 `ess.faultCode`/`pcs.faultCode` 类故障码点位，因此 faultCode 中文告警内容尚未能验证；当设备侧增加故障码 tag 后，自动绑定会将其关联到国标故障码映射表。
+2. 映射表目前覆盖最常见的 PCS/电表/BMS 中文点位名；新品牌设备若有不同命名，需扩展 `tag_entity_mappings.py` 或走手动绑定。
+3. 自动绑定目前需用户点击按钮；后续可考虑在启动时若 `t_entity_bindings` 为空则自动执行一次。
+
+### Next Steps
+1. 用户在「实体管理」点击「自动绑定」，确认预览后应用。
+2. 验证规则引擎：选择全局实体作为输入/输出，保存规则后观察 F2 tick 是否产生控制动作。
+3. 验证实体告警：为温度、电压等已绑定实体对应的 tag 配置 alarm_level，观察告警中心是否按 error1/error2/error3 分组。
+4. 当设备侧有 faultCode 数据流入时，验证告警消息是否显示中文故障内容。
+
+---
+
 ## Session 2026-08-10 — 新增点位告警配置页面 (v0.4.60)
 
 **Date:** 2026-08-10
