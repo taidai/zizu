@@ -251,14 +251,70 @@ def _evaluate_expression_zen(expression: str, context: dict[str, Any]) -> bool:
     return bool(result)
 
 
+
+
+def _normalize_zen_table_cell(value: str | None, is_input: bool) -> str:
+    """将决策表空单元格转换为 zen-engine 可识别的表达式。"""
+    if value is None or value == "":
+        return "1 == 1" if is_input else "null"
+    return str(value)
+
+
+def _build_zen_table_content(inputs: list, outputs: list, rules: list, hit_policy: str) -> dict:
+    normalized_rules = []
+    for rule in rules:
+        new_rule: dict = {"_id": rule.get("_id", str(id(rule)))}
+        for col in inputs:
+            new_rule[col["id"]] = _normalize_zen_table_cell(rule.get(col["id"]), is_input=True)
+        for col in outputs:
+            new_rule[col["id"]] = _normalize_zen_table_cell(rule.get(col["id"]), is_input=False)
+        if rule.get("_description"):
+            new_rule["_description"] = rule["_description"]
+        normalized_rules.append(new_rule)
+    return {
+        "hitPolicy": hit_policy,
+        "inputs": inputs,
+        "outputs": outputs,
+        "rules": normalized_rules,
+    }
+
+
+def _build_zen_graph(inputs: list, outputs: list, rules: list, hit_policy: str) -> dict:
+    return {
+        "nodes": [
+            {"id": "input", "type": "inputNode", "name": "Input"},
+            {
+                "id": "table",
+                "type": "decisionTableNode",
+                "name": "决策表",
+                "content": _build_zen_table_content(inputs, outputs, rules, hit_policy),
+            },
+            {"id": "output", "type": "outputNode", "name": "Output"},
+        ],
+        "edges": [
+            {"id": "e1", "sourceId": "input", "targetId": "table", "type": "edge"},
+            {"id": "e2", "sourceId": "table", "targetId": "output", "type": "edge"},
+        ],
+    }
+
+
 def _evaluate_jdm_zen(jdm_content: dict, context: dict[str, Any]) -> dict:
     """使用 zen-engine 评估标准 JDM 决策图/决策表。"""
     if _zen is None:
         raise RuntimeError("zen-engine not available")
     engine = _zen.ZenEngine()
     clean_content = _normalize_jdm_content(jdm_content)
-    # 移除前端私有配置，并兼容旧版 jdm-editor 节点类型命名
+    # 移除前端私有配置
     clean_content = {k: v for k, v in clean_content.items() if k not in ("_config", "actions")}
+    # 纯决策表对象包装成标准决策图
+    if "nodes" not in clean_content:
+        clean_content = _build_zen_graph(
+            clean_content.get("inputs", []),
+            clean_content.get("outputs", []),
+            clean_content.get("rules", []),
+            clean_content.get("hitPolicy", "first"),
+        )
+    # 兼容旧版 jdm-editor 节点类型命名
     if isinstance(clean_content.get("nodes"), list):
         for node in clean_content["nodes"]:
             node_type = node.get("type")
