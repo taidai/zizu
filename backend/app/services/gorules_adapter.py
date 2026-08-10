@@ -256,7 +256,18 @@ def _evaluate_jdm_zen(jdm_content: dict, context: dict[str, Any]) -> dict:
     if _zen is None:
         raise RuntimeError("zen-engine not available")
     engine = _zen.ZenEngine()
-    clean_content = {k: v for k, v in jdm_content.items() if k not in ("_config", "actions")}
+    clean_content = _normalize_jdm_content(jdm_content)
+    # 移除前端私有配置，并兼容旧版 jdm-editor 节点类型命名
+    clean_content = {k: v for k, v in clean_content.items() if k not in ("_config", "actions")}
+    if isinstance(clean_content.get("nodes"), list):
+        for node in clean_content["nodes"]:
+            node_type = node.get("type")
+            if node_type == "startNode":
+                node["type"] = "inputNode"
+            elif node_type == "endNode":
+                node["type"] = "outputNode"
+            elif node_type == "decisionNode":
+                node["type"] = "decisionTableNode"
     decision = engine.create_decision(clean_content)
     outputs = decision.evaluate(context)
     return outputs if isinstance(outputs, dict) else {"result": outputs}
