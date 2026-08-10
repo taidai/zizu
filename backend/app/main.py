@@ -106,6 +106,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[Main] Standard alarm templates: {}", _al_res)
         except Exception as _ae:
             logger.warning("[Main] Standard alarm template seed (non-fatal): {}", _ae)
+        # 若当前没有任何实体绑定，自动执行一次国标映射绑定，提升开箱即用性
+        try:
+            from app.services.entity_binder import auto_bind_standard_entities
+            from app.services.telemetry_store import get_connection
+            _binding_count = 0
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM t_entity_bindings")
+                    _binding_count = cur.fetchone()[0]
+            if _binding_count == 0:
+                _ab_res = auto_bind_standard_entities(dry_run=False)
+                logger.info("[Main] Auto-bind on startup: created={}, skipped={}", _ab_res.get("created"), _ab_res.get("skipped"))
+            else:
+                logger.info("[Main] Auto-bind skipped: {} existing bindings", _binding_count)
+        except Exception as _abe:
+            logger.warning("[Main] Auto-bind on startup (non-fatal): {}", _abe)
         persisted_topic = load_mqtt_topics()
         if persisted_topic:
             settings.mqtt_telemetry_topic = persisted_topic
