@@ -1,6 +1,43 @@
 ---
 ---
 
+## Session 2026-08-10 — 启动时自动执行实体绑定 (v0.4.62)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 开箱即用
+
+### Session Summary
+在 `backend/app/main.py` 启动生命周期中增加自动绑定逻辑：启动时若 `t_entity_bindings` 为空，则自动调用 `auto_bind_standard_entities()` 执行一次国标映射绑定。新部署的环境无需手动点击即可拥有实体-点位绑定，显著提升「简单配置即可交付」的能力。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/main.py | 在 seeds 之后、pipeline 启动之前，检查 bindings 数量；为 0 时自动执行绑定并记录日志 |
+| VERSION 等 | patch bump to v0.4.62 |
+
+### 构建与验证
+- [x] 后端 `python -m py_compile` 通过
+- [x] GitHub push 成功：b38edc6 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.62 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.62、status ok、pipeline RUNNING
+- [x] 启动日志：`[Main] Auto-bind skipped: 32 existing bindings`（说明空库时会自动执行）
+
+### 已知遗留问题
+1. 当前 1 号机设备 tag 中仍无 faultCode 类点位，faultCode 中文告警内容待验证。
+2. 映射表覆盖常见中文点位名；新品牌设备 naming 不同时仍需扩展映射或手动绑定。
+3. 规则引擎实际产生控制/告警动作、实体告警触发，需在浏览器中结合真实数据验证。
+
+### Next Steps
+1. 用户重新部署（清空 DB 或新环境）验证启动时是否自动创建实体绑定。
+2. 在「规则引擎」创建一条简单规则（如 PCS 有功功率 > 阈值时下发控制），验证 IPO 链路。
+3. 当设备有 faultCode 数据时，验证告警中心的中文故障内容展示。
+
+---
+
 ## Session 2026-08-10 — 新增实体-点位自动绑定 (v0.4.61)
 
 **Date:** 2026-08-10
