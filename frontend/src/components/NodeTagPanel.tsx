@@ -6,6 +6,7 @@ import {
 } from '../api/client'
 import EditableCell from './EditableCell'
 import TrendChart from './TrendChart'
+import NodeHistoryPanel from './NodeHistoryPanel'
 import type { Node } from '../api/client'
 
 const SORTABLE_COLUMNS = [
@@ -55,6 +56,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [alarmTypes, setAlarmTypes] = useState<string[]>([])
   const [batchSaving, setBatchSaving] = useState(false)
   const [trendTag, setTrendTag] = useState<Tag | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
   const [editingTag, setEditingTag] = useState<Tag | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const pageSize = 50
@@ -281,6 +283,14 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
           className="neu-btn px-4 py-1.5 text-xs font-medium text-[#389e0d] disabled:opacity-50"
         >
           {loading ? '加载中...' : '刷新'}
+        </button>
+
+        <button
+          onClick={() => setShowHistory(true)}
+          className="neu-btn px-4 py-1.5 text-xs font-medium text-[#1890ff]"
+          title="多点位历史趋势分析"
+        >
+          历史分析
         </button>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
@@ -639,6 +649,19 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
           onSave={handleSaveTag}
         />
       )}
+      {showHistory && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowHistory(false)}>
+          <div className="neu-card w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+              <h3 className="text-sm font-bold text-gray-800">历史数据分析</h3>
+              <button onClick={() => setShowHistory(false)} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600">×</button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              <NodeHistoryPanel nodeId={nodeId} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -993,6 +1016,7 @@ function TagFormModal({
           </div>
         </form>
       </div>
+
     </div>
   )
 }
