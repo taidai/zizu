@@ -3,7 +3,7 @@ import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-e
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
-  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, fetchRuleTemplates,
+  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, writeEntityValue, fetchRuleTemplates,
   type Rule, type RuleCreateRequest, type Node, type Entity, type EntityBinding, type RuleTemplate,
 } from '../api/client'  
 
@@ -20,6 +20,7 @@ type NeuronWriteAction = {
   value: any
   cooldown?: number
   entity_id?: string
+  entity?: string
   entity_name?: string
 }
 
@@ -31,6 +32,7 @@ type OutputBinding = {
   tag: string
   cooldown: number
   entity_id?: string
+  entity?: string
   entity_name?: string
 }
 
@@ -55,6 +57,7 @@ function extractConfig(content: any): RuleConfig {
         value: a.value ?? '',
         cooldown: a.cooldown ?? 60,
         entity_id: a.entity_id || '',
+        entity: a.entity || a.entity_name || '',
         entity_name: a.entity_name || '',
       })),
       inputMappings: cfg.inputMappings || {},
@@ -66,6 +69,7 @@ function extractConfig(content: any): RuleConfig {
         tag: b.tag || '',
         cooldown: b.cooldown ?? 60,
         entity_id: b.entity_id || '',
+        entity: b.entity || b.entity_name || '',
         entity_name: b.entity_name || '',
       })),
       template: cfg.template || 'custom',
@@ -133,6 +137,7 @@ function bindingsToActions(bindings: OutputBinding[]): NeuronWriteAction[] {
       value: `{{${b.field}}}`,
       cooldown: b.cooldown,
       entity_id: b.entity_id,
+      entity: b.entity,
       entity_name: b.entity_name,
     }))
 }
@@ -151,6 +156,7 @@ function actionsToBindings(actions: NeuronWriteAction[], outputs: { id: string; 
         tag: a.tag,
         cooldown: a.cooldown ?? 60,
         entity_id: a.entity_id,
+        entity: a.entity,
         entity_name: a.entity_name,
       }
     })
@@ -343,7 +349,11 @@ function RuleForm({
       if (typeof v === 'string' && v.includes('{{')) {
         if (!confirm('当前值为模板，测试下发会写入字面量，确定继续？')) return
       }
-      await writeNeuronTag(action.node, action.group, action.tag, action.value)
+      if (action.entity_id) {
+        await writeEntityValue(action.entity_id, action.value)
+      } else {
+        await writeNeuronTag(action.node, action.group, action.tag, action.value)
+      }
       alert('下发成功')
     } catch (e: any) {
       alert(`下发失败: ${e.message || e}`)
@@ -650,6 +660,7 @@ function RuleForm({
                                   const tagBinding = entityId ? resolveEntityBinding(entityId) : null
                                   updateOutputBinding(idx, {
                                     entity_id: entityId,
+                                    entity: entity?.name,
                                     entity_name: entity?.name,
                                     node: tagBinding?.node_name || '',
                                     group: tagBinding?.tag_name?.includes('.') ? tagBinding.tag_name.split('.')[0] : '',
@@ -701,6 +712,31 @@ function RuleForm({
                 <div className="neu-inset flex-1 overflow-y-auto p-3 text-xs space-y-2">
                   {config.actions.map((action, idx) => (
                     <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                      <select
+                        value={action.entity_id || ''}
+                        onChange={(e) => {
+                          const entityId = e.target.value || undefined
+                          const entity = entityOptions.find((en) => en.id === entityId)
+                          const binding = entityId ? resolveEntityBinding(entityId) : null
+                          const actions = [...config.actions]
+                          actions[idx] = {
+                            ...action,
+                            entity_id: entityId,
+                            entity: entity?.name,
+                            entity_name: entity?.name,
+                            node: binding?.node_name || '',
+                            group: '',
+                            tag: binding?.tag_name || '',
+                          }
+                          setConfig({ ...config, actions })
+                        }}
+                        className="neu-input col-span-3 px-2 py-1 bg-transparent"
+                      >
+                        <option value="">-- 选择全局实体 --</option>
+                        {entityOptions.map((e) => (
+                          <option key={e.id} value={e.id}>{e.display_name || e.name}</option>
+                        ))}
+                      </select>
                       <input
                         value={action.node}
                         onChange={(e) => {
@@ -709,7 +745,8 @@ function RuleForm({
                           setConfig({ ...config, actions })
                         }}
                         placeholder="NE节点"
-                        className="neu-input col-span-3 px-2 py-1"
+                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
+                        disabled={!!action.entity_id}
                       />
                       <input
                         value={action.group}
@@ -719,7 +756,8 @@ function RuleForm({
                           setConfig({ ...config, actions })
                         }}
                         placeholder="组"
-                        className="neu-input col-span-2 px-2 py-1"
+                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
+                        disabled={!!action.entity_id}
                       />
                       <input
                         value={action.tag}
@@ -729,7 +767,8 @@ function RuleForm({
                           setConfig({ ...config, actions })
                         }}
                         placeholder="点位名"
-                        className="neu-input col-span-3 px-2 py-1"
+                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
+                        disabled={!!action.entity_id}
                       />
                       <input
                         value={String(action.value ?? '')}
@@ -744,9 +783,10 @@ function RuleForm({
                       <button
                         type="button"
                         onClick={() => testWrite(action)}
-                        className="neu-btn col-span-2 px-1 py-1 text-[10px] text-[#389e0d]"
+                        disabled={!action.entity_id && (!action.node || !action.group || !action.tag)}
+                        className="neu-btn col-span-1 px-1 py-1 text-[10px] text-[#389e0d] disabled:opacity-40"
                       >
-                        测试下发
+                        测试
                       </button>
                     </div>
                   ))}

@@ -449,9 +449,10 @@ def evaluate_rule(jdm_content: dict, context: dict[str, Any]) -> dict:
                 "engine": "error",
             }
 
+    config_actions = list(jdm_content.get("_config", {}).get("actions", []))
     return {
         "triggered": bool(triggered),
-        "actions": actions if triggered else [],
+        "actions": (actions + config_actions) if triggered else [],
         "outputs": {"triggered": triggered},
         "error": None,
         "engine": engine_used,
