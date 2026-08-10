@@ -1,6 +1,44 @@
 ---
 ---
 
+## Session 2026-08-10 — 修复 MQTT 断开回调签名，适配 paho-mqtt v2 (v0.4.58)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu MQTT 连接稳定性
+
+### Session Summary
+修复 `backend/app/services/mqtt_client.py` 中 `_on_disconnect` 回调签名与 paho-mqtt v2 不匹配的问题（缺少 `disconnect_flags` 参数），消除启动/断线时的 `TypeError`，提升 MQTT 长连接稳定性。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| backend/app/services/mqtt_client.py | `_on_disconnect` 签名改为 `(self, client, userdata, disconnect_flags, rc, properties)`，日志中使用 `rc` |
+| VERSION 等 | patch bump to v0.4.58 |
+
+### 构建与验证
+- [x] 后端 `python -m py_compile` 通过
+- [x] GitHub push 成功：1514805 main -> origin
+
+### 1 号机部署验证
+- [x] 部署 v0.4.58 到 e606.hlszh.com:9000
+- [x] /api/v1/health 返回 version 0.4.58、status ok、pipeline RUNNING
+- [x] 启动日志无 `TypeError: MqttClient._on_disconnect() takes 5 positional arguments but 6 were given`
+- [x] F1/F2/F3 schedulers 正常启动
+
+### 已知遗留问题
+1. **RuleEnginePage.tsx** 仍标记 `// @ts-nocheck`，存在运行时未定义变量风险，需后续修复。
+2. 启动日志显示 `0 entity alarm bindings`，说明当前没有全局实体被绑定到启用的 tag 上。若需 faultCode 类告警生效，需在「实体管理」中将故障码实体绑定到具体点位，并确保 tag/node 启用。
+
+### Next Steps
+1. 用户验证 MQTT 长时间运行后是否仍稳定，数据管道是否还会卡顿。
+2. 验证规则引擎：创建/启用规则后，F2 rule tick 是否按 60s 间隔执行并产生控制/告警动作。
+3. 修复 RuleEnginePage 前端运行时错误与类型问题。
+4. 验证全局实体→tag 绑定后，faultCode 告警能否按 error1/error2/error3 分组生成并显示中文故障内容。
+
+---
+
 ## Session 2026-08-10 — 修复 rule_engine.py 缩进错误，恢复 F1/F2/F3 调度器 (v0.4.57)
 
 **Date:** 2026-08-10
