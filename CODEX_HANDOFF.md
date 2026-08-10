@@ -1,5 +1,52 @@
 ---
 
+## Session 2026-08-10 — 规则引擎控制动作支持全局实体选择 (v0.4.77)
+
+**Date:** 2026-08-10
+**Agent:** Codex（桌面版）
+**User:** chent
+**Project:** zizu 前端规则配置简化
+
+### Session Summary
+在前端「规则引擎」的原始动作（Raw Actions）面板中增加全局实体下拉选择。用户现在可以：
+- 在控制规则的动作行先选择全局实体（如 pcs.heartbeat）
+- 填写要写入的值后点击「测试」直接通过实体写回 API 下发
+- 保存后规则在 F2 tick 触发时自动走实体 → 点位 → Neuron 的完整控制链路
+
+同时修复了 dry-run 对 _config.actions 格式动作未返回的问题，使前端保存的规则在试运行时也能看到控制动作。
+
+### 改动清单
+| 文件 | 改动 |
+|---|---|
+| frontend/src/pages/RuleEnginePage.tsx | Raw Actions 面板增加实体下拉；选择实体后填充 ntity/ntity_id/ntity_name；测试下发优先走实体写回 API |
+| frontend/src/api/client.ts | 复用已有的 writeEntityValue，无需新增 |
+| backend/app/services/gorules_adapter.py | 简化格式 {when, _config.actions} 求值时，把 _config.actions 并入返回的 actions，dry-run 与真实执行一致 |
+| VERSION 等 | patch bump 0.4.75 → 0.4.77 |
+
+### 构建与验证
+- [x] 前端 
+pm run build 通过
+- [x] 后端 python -m py_compile 通过
+- [x] 部署到 1 号机，health 返回 version 0.4.77
+- [x] POST /rules/{id}/dry-run 对 _config.actions 格式的控制规则返回 	riggered=true 与 
+euron_write 动作
+- [x] GitHub push 成功：4ce161a main -> origin
+
+### 已知遗留问题
+1. 前端输出绑定（Output Bindings）模式仍按旧逻辑用 	ag_name.split('.')[0] 猜测 group，对 Neuron 三段式路径不准确；但因实体写回优先，实际保存的规则走实体 ID，不影响控制下发。
+2. 规则引擎 tick 中仍有 ms_current 未知变量警告，来自旧规则引用不存在的 BMS 电流 tag。
+3. 告警中心 faultCode 中文转义待设备侧有故障码 tag 后验证。
+
+### Next Steps
+1. 在浏览器中打开规则引擎，验证「原始动作」面板的全局实体下拉、测试下发按钮可正常使用。
+2. 优化 Output Bindings 的 source_path 解析，或移除对 node/group/tag 的显示依赖。
+3. 清理引用 ms_current 等无效变量的旧规则，减少日志噪音。
+4. 继续完善告警中心分级告警与 faultCode 中文转义。
+
+---
+
+---
+
 ## Session 2026-08-10 — 控制规则 IPO 端到端验证 (v0.4.75)
 
 **Date:** 2026-08-10
