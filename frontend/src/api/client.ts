@@ -1162,6 +1162,12 @@ export async function importEntitiesFile(file: File, mode: 'upsert' | 'create' =
 
 
 
+export async function autoBindEntities(dryRun = false): Promise<{ created: number; skipped: number; preview: { entity_name: string; tag_name: string; node_name: string; node_type: string }[] }> {
+  const res = await fetch(`${API_BASE}/entities/bindings/auto-bind?dry_run=${dryRun}`, { method: 'POST' })
+  if (!res.ok) throw new Error(`Auto bind failed: ${res.status}`)
+  return res.json()
+}
+
 
 
 

@@ -24,6 +24,7 @@ from app.services.entity_resolver import (
     write_entity_value,
 )
 from app.core.standard_entities import STANDARD_ENTITIES, seed_standard_entities
+from app.services.entity_binder import auto_bind_standard_entities
 from app.api.health import _VERSION as APP_VERSION
 
 router = APIRouter()
@@ -132,6 +133,17 @@ def _standard_entities_rows() -> list[tuple]:
 async def seed_entities() -> dict:
     """重新初始化系统内置标准实体（幂等，单一数据源）。"""
     return seed_standard_entities()
+
+
+@router.post("/entities/bindings/auto-bind")
+async def auto_bind_entities(dry_run: bool = False) -> dict:
+    """根据内置映射表自动把国标实体绑定到 enabled tag（幂等）。"""
+    try:
+        result = auto_bind_standard_entities(dry_run=dry_run)
+        return result
+    except Exception as e:
+        logger.error("[API/entities] auto-bind failed: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/entities/export")

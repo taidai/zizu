@@ -19,6 +19,7 @@ import {
   exportEntitiesCsv,
   exportEntitiesJson,
   importEntitiesFile,
+  autoBindEntities,
 } from '../api/client'
 
 const DATA_TYPES = ['FLOAT', 'INT', 'BOOL', 'STRING', 'ENUM']
@@ -44,6 +45,9 @@ export default function EntityManagerPage() {
   const [historyPoints, setHistoryPoints] = useState<{ ts: string; value: number | string | boolean | null; quality: number }[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [autoBinding, setAutoBinding] = useState(false)
+  const [autoBindPreview, setAutoBindPreview] = useState<{ entity_name: string; tag_name: string; node_name: string; node_type: string }[]>([])
+  const [showAutoBindModal, setShowAutoBindModal] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const load = async () => {
@@ -139,6 +143,35 @@ export default function EntityManagerPage() {
     }
   }
 
+  const handleAutoBindPreview = async () => {
+    setAutoBinding(true)
+    try {
+      const r = await autoBindEntities(true)
+      setAutoBindPreview(r.preview || [])
+      setShowAutoBindModal(true)
+    } catch (e: any) {
+      alert('预览自动绑定失败：' + (e?.message || e))
+    } finally {
+      setAutoBinding(false)
+    }
+  }
+
+  const handleAutoBindConfirm = async () => {
+    setAutoBinding(true)
+    try {
+      const r = await autoBindEntities(false)
+      alert(`自动绑定完成：新建 ${r.created} 条，跳过 ${r.skipped} 条`)
+      setShowAutoBindModal(false)
+      setAutoBindPreview([])
+      load()
+      if (selected) fetchEntity(selected.id).then(setDetail)
+    } catch (e: any) {
+      alert('自动绑定失败：' + (e?.message || e))
+    } finally {
+      setAutoBinding(false)
+    }
+  }
+
   return (
     <div className="min-h-0 flex gap-4">
       {/* 左侧列表 */}
@@ -149,6 +182,7 @@ export default function EntityManagerPage() {
             <button onClick={() => exportEntitiesCsv()} className="neu-btn px-2.5 py-1.5 text-xs">导出CSV</button>
             <button onClick={() => exportEntitiesJson()} className="neu-btn px-2.5 py-1.5 text-xs">导出JSON</button>
             <button onClick={() => fileInputRef.current?.click()} disabled={importing} className="neu-btn px-2.5 py-1.5 text-xs">{importing ? '导入中...' : '导入'}</button>
+            <button onClick={handleAutoBindPreview} disabled={autoBinding} className="neu-btn px-2.5 py-1.5 text-xs text-[#389e0d]">{autoBinding ? '匹配中...' : '自动绑定'}</button>
             <button onClick={() => setShowForm(true)} className="neu-btn px-3 py-1.5 text-xs bg-[#52c41a] text-white">新建</button>
             <input ref={fileInputRef} type="file" accept=".csv,.json,application/json,text/csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImport(f); e.target.value = '' }} />
           </div>
@@ -363,6 +397,49 @@ export default function EntityManagerPage() {
           onClose={() => { setShowForm(false); setEditing(null) }}
           onSubmit={editing ? handleUpdate : handleCreate}
         />
+      )}
+      {showAutoBindModal && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+          <div className="neu-card bg-white w-full max-w-2xl max-h-[80vh] flex flex-col p-5">
+            <h3 className="text-base font-bold text-gray-800 mb-2">自动绑定预览</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              将根据内置国标映射表把实体绑定到对应点位。共匹配 {autoBindPreview.length} 条。
+            </p>
+            <div className="flex-1 overflow-y-auto border border-gray-100 rounded mb-4">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 text-gray-600 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2 text-left">节点</th>
+                    <th className="px-3 py-2 text-left">点位名</th>
+                    <th className="px-3 py-2 text-left">绑定实体</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {autoBindPreview.map((item, idx) => (
+                    <tr key={idx}>
+                      <td className="px-3 py-1.5 text-gray-600">{item.node_name}</td>
+                      <td className="px-3 py-1.5 text-gray-700">{item.tag_name}</td>
+                      <td className="px-3 py-1.5 text-gray-700 font-medium">{item.entity_name}</td>
+                    </tr>
+                  ))}
+                  {autoBindPreview.length === 0 && (
+                    <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">没有可自动匹配的点位</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowAutoBindModal(false)} className="neu-btn px-4 py-1.5 text-xs text-gray-600">取消</button>
+              <button
+                onClick={handleAutoBindConfirm}
+                disabled={autoBinding || autoBindPreview.length === 0}
+                className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
+              >
+                {autoBinding ? '绑定中...' : '确认绑定'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
