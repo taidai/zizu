@@ -17,12 +17,12 @@ import paramiko
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION = (REPO_ROOT / "VERSION").read_text().strip()
 
-HOST = "e606.hlszh.com"
-PORT = 13122
+HOST = "e606.xxxx.com"
+PORT = 22
 USER = "holo"
-PASSWD = "holo123"
+PASSWD = "****"
 REMOTE_DIR = "/home/omnithings"
-SUDO_PROMPT = "holo123"
+SUDO_PROMPT = "****"
 CONTAINER = os.environ.get("ZIZU_CONTAINER", "zizu")
 
 # 同步路径：含 init-db 以确保新迁移文件到达远端
