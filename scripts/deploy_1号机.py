@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ZiZu 部署到 1 号机 (e606.hlszh.com:13122 / holo)
+ZiZu 部署到 1 号机 (e606.xxxx.com:22 / holo)
 - 打包 backend/app + frontend/dist + init-db + VERSION
 - 上传 -> 解压到 /home/omnithings -> 重启 zizu 容器 -> health 校验
 用法: python scripts/deploy_1号机.py
