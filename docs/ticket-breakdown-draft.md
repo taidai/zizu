@@ -14,6 +14,12 @@
 - [ ] 校验失败零写入；相同包重复安装结果一致。
 - [ ] liveness 成功/失败均产生稳定状态、机器码和证据。
 
+**Interface / test seam:** 按
+[`ADR-0006`](adr/0006-minimal-solution-delivery-tracer.md) 实现
+`SolutionDelivery.import_package/plan_install/apply_install/run_acceptance`。主测试使用
+真实 ZIP 和公开 HTTP，从导入走到不可变报告；辅助测试只断言模块接口的摘要、计划、
+幂等和机器码。维护者确认 ADR 测试缝后才开始 TDD。
+
 ## 02 — 身份模块扩展到交付主缝
 
 **Blocked by:** 01
