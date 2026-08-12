@@ -5,16 +5,21 @@ V4 端到端验证: 发布模拟 Neuron 消息 → 验证管道消费 → 验证
 前置: backend uvicorn 已在 :9000 运行 + mosquitto @1883 + TSDB @5432
 """
 import json
+import os
 import sys
 import time
 import urllib.request
 
 import paho.mqtt.client as mqtt
 import psycopg2
+from app.core.secret_policy import validate_secret
 
 MQTT_HOST, MQTT_PORT = "127.0.0.1", 1883
 API = "http://127.0.0.1:9000/api/v1/health"
-DB_DSN = "host=127.0.0.1 port=5432 dbname=zizu_iot user=zizu password=omnidev_2026"
+DB_DSN = os.environ.get("ZIZU_DSN")
+if not DB_DSN or not DB_DSN.strip():
+    raise RuntimeError("ZIZU_DSN is required; no database credential default is provided")
+validate_secret("database", psycopg2.extensions.parse_dsn(DB_DSN).get("password", ""))
 
 PASS = FAIL = 0
 

@@ -111,12 +111,23 @@ Site (场站)
 ```bash
 git clone https://github.com/taidai/zizu.git
 cd zizu
-python scripts/bootstrap_runtime_secrets.py  # 生成未纳入 Git 的运行时 Secret
+python scripts/bootstrap_runtime_secrets.py  # 隐式输入已轮换的 Neuron 密码；生成其余 Secret
 ```
 
-已有部署若仍使用 NanoMQ 公开默认口令，引导脚本会拒绝静默覆盖。安排 broker
-与 backend 同步重启的维护窗口后，显式执行
-`python scripts/bootstrap_runtime_secrets.py --rotate`，再启动服务。
+已有部署若仍使用公开默认值，引导脚本会拒绝静默覆盖。先在数据库、Neuron
+或会话系统侧协调轮换并更新 `.env`；NanoMQ 安排 broker 与 backend 同步重启
+的维护窗口后执行 `python scripts/bootstrap_runtime_secrets.py --rotate`。
+Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入新值。
+
+生产模式是默认值，缺失、空白或公开示例 Secret 都会阻止后端启动。只有完全
+隔离的本机开发环境才可显式同时设置 `DEPLOYMENT_MODE=development` 和
+`ALLOW_INSECURE_DEV_SECRETS=true`；进程启动时会在标准错误输出显示
+`INSECURE DEVELOPMENT MODE` 警示。此模式不得用于任何可被其他主机访问的部署。
+
+独立验收/同步脚本也不再携带数据库或 Neuron 默认口令：运行
+`backend/acceptance_f0_f3.py` 与 `backend/test_f0_e2e.py` 前必须设置
+`ZIZU_DSN`；运行 `backend/scripts/sync_neuron_tags.py` 前必须设置
+`ZIZU_DSN` 与 `NEURON_PASSWORD`。
 
 ### 2. 一键启动（推荐）
 

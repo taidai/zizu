@@ -9,8 +9,10 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.secret_policy import insecure_development_enabled, validate_secret
 
 
 class Settings(BaseSettings):
@@ -26,13 +28,22 @@ class Settings(BaseSettings):
     app_name: str = "ZiZu"
     debug: bool = False
     log_level: str = "INFO"
+    deployment_mode: Literal["production", "development"] = "production"
+    allow_insecure_dev_secrets: bool = False
+
+    @property
+    def insecure_development_mode(self) -> bool:
+        return insecure_development_enabled(
+            self.deployment_mode,
+            self.allow_insecure_dev_secrets,
+        )
 
     # ---- 数据库 (TimescaleDB / PostgreSQL) ----
     db_host: str = "timescaledb"
     db_port: int = 5432
     db_name: str = "zizu"
     db_user: str = "zizu"
-    db_password: str = "zizu_dev"
+    db_password: str = Field(min_length=1)
     db_pool_min: int = 2
     db_pool_max: int = 15
 
@@ -83,12 +94,12 @@ class Settings(BaseSettings):
     neuron_api_url: str = "http://neuron:7000"
     neuron_api_version: str = "/api/v2"
     neuron_username: str = "admin"
-    neuron_password: str = "0000"
+    neuron_password: str = Field(min_length=1)
 
     # ---- nanoMQ REST API ----
     nanomq_api_url: str = "http://nanomq:8081"
     nanomq_api_username: str = "admin"
-    nanomq_api_password: str = "public"
+    nanomq_api_password: str = Field(min_length=1)
     nanomq_conf_path: str = "/app/config/nanomq.conf"
 
 
@@ -96,9 +107,42 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # ---- JWT (M7 RPC 控制) ----
-    jwt_secret: str = "zizu-dev-secret-change-in-production"
+    jwt_secret: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440  # 24h
+
+    @field_validator(
+        "db_password",
+        "neuron_password",
+        "nanomq_api_password",
+        "jwt_secret",
+    )
+    @classmethod
+    def validate_runtime_secret(cls, value: str, info: ValidationInfo) -> str:
+        kinds = {
+            "db_password": "database",
+            "neuron_password": "neuron",
+            "nanomq_api_password": "nanomq",
+            "jwt_secret": "jwt",
+        }
+        allow_insecure = insecure_development_enabled(
+            info.data.get("deployment_mode", "production"),
+            info.data.get("allow_insecure_dev_secrets", False),
+        )
+        return validate_secret(
+            kinds[info.field_name],
+            value,
+            allow_insecure=allow_insecure,
+            warn=allow_insecure,
+        )
+
+    @model_validator(mode="after")
+    def validate_development_mode(self) -> "Settings":
+        insecure_development_enabled(
+            self.deployment_mode,
+            self.allow_insecure_dev_secrets,
+        )
+        return self
 
     # ---- 管道性能参数 ----
     # 批量写入 TSDB 的条数阈值 (攒够 N 条或 T 秒就 flush)

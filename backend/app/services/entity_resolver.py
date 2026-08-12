@@ -296,6 +296,8 @@ def write_entity_value(entity_id_or_name: str | UUID, value: float | int | bool 
         url=settings.neuron_api_url,
         username=settings.neuron_username,
         password=settings.neuron_password,
+        deployment_mode=settings.deployment_mode,
+        allow_insecure_dev_secrets=settings.allow_insecure_dev_secrets,
     )
     client = NeuronClient(config)
     try:

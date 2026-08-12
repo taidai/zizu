@@ -20,16 +20,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
+from pathlib import Path
 
 import psycopg2
 
-NEURON = "http://127.0.0.1:7000/api/v2"
-NEURON_USER = "admin"
-NEURON_PASS = "0000"
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
-DB_DSN = "host=127.0.0.1 port=5432 dbname=zizu user=zizu password=omnidev_2026"
+from app.core.secret_policy import validate_secret
+
+NEURON = os.environ.get("NEURON_API_URL", "http://127.0.0.1:7000").rstrip("/") + "/api/v2"
+NEURON_USER = os.environ.get("NEURON_USERNAME", "admin")
+NEURON_PASS = os.environ.get("NEURON_PASSWORD", "").strip()
+DB_DSN = os.environ.get("ZIZU_DSN", "").strip()
 
 # Neuron type code → ZiZu data_type
 TYPE_MAP = {
@@ -78,6 +85,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只打印不写入 DB")
     args = ap.parse_args()
+
+    try:
+        validate_secret("neuron", NEURON_PASS)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not DB_DSN:
+        raise RuntimeError("ZIZU_DSN is required")
+    try:
+        validate_secret("database", psycopg2.extensions.parse_dsn(DB_DSN).get("password", ""))
+    except (ValueError, psycopg2.ProgrammingError) as exc:
+        raise RuntimeError(f"ZIZU_DSN is not secure: {exc}") from exc
 
     print("=" * 60)
     print("Neuron → ZiZu tag 同步")
