@@ -111,8 +111,12 @@ Site (场站)
 ```bash
 git clone https://github.com/taidai/zizu.git
 cd zizu
-cp .env.example .env   # 按需修改数据库密码
+python scripts/bootstrap_runtime_secrets.py  # 生成未纳入 Git 的运行时 Secret
 ```
+
+已有部署若仍使用 NanoMQ 公开默认口令，引导脚本会拒绝静默覆盖。安排 broker
+与 backend 同步重启的维护窗口后，显式执行
+`python scripts/bootstrap_runtime_secrets.py --rotate`，再启动服务。
 
 ### 2. 一键启动（推荐）
 

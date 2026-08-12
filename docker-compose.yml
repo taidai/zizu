@@ -4,7 +4,7 @@
 # 三服务: TimescaleDB + FastAPI(Backend+Frontend SPA) + NanoMQ
 #
 # 快速启动:
-#   cp .env.example .env
+#   python scripts/bootstrap_runtime_secrets.py
 #   docker compose up -d --build
 #
 # 访问:
@@ -63,6 +63,9 @@ services:
     volumes:
       - ./config/nanomq.conf:/usr/local/nanomq/nanomq.conf:ro
       - nanomq_data:/usr/local/nanomq/data
+    secrets:
+      - source: nanomq_http_config
+        target: nanomq-http.conf
     healthcheck:
       test: ["CMD-SHELL", "nanomq_cli dscv | grep -q . || exit 0"]
       interval: 15s
@@ -127,3 +130,7 @@ volumes:
   tsdb_data:
   nanomq_data:
   zizu-data:
+
+secrets:
+  nanomq_http_config:
+    file: ./config/runtime/nanomq-http.conf
