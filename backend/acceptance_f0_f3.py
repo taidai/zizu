@@ -1,7 +1,11 @@
 import json, os, time, urllib.request, urllib.error, paho.mqtt.client as mqtt, psycopg2
+from app.core.secret_policy import validate_secret
 
 API = os.environ.get('ZIZU_API', 'http://127.0.0.1:9000/api/v1')
-DB_DSN = os.environ.get('ZIZU_DSN', 'host=127.0.0.1 port=5432 dbname=zizu user=zizu password=omnidev_2026')
+DB_DSN = os.environ.get('ZIZU_DSN')
+if not DB_DSN or not DB_DSN.strip():
+    raise RuntimeError('ZIZU_DSN is required; no database credential default is provided')
+validate_secret('database', psycopg2.extensions.parse_dsn(DB_DSN).get('password', ''))
 MQTT_HOST = os.environ.get('ZIZU_MQTT', '127.0.0.1')
 MQTT_PORT = int(os.environ.get('ZIZU_MQTT_PORT', '1883'))
 AGG_POLL_INTERVAL = 2

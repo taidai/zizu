@@ -10,24 +10,37 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
+
+from app.core.secret_policy import insecure_development_enabled, validate_secret
 
 
 @dataclass
 class NeuronConfig:
     url: str = "http://127.0.0.1:7000"
     username: str = "admin"
-    password: str = "0000"
+    password: str = ""
     timeout: float = 10.0
+    deployment_mode: Literal["production", "development"] = "production"
+    allow_insecure_dev_secrets: bool = False
+
+    def __post_init__(self) -> None:
+        allow_insecure = insecure_development_enabled(
+            self.deployment_mode,
+            self.allow_insecure_dev_secrets,
+        )
+        self.password = validate_secret(
+            "neuron", self.password, allow_insecure=allow_insecure, warn=allow_insecure
+        )
 
 
 class NeuronClient:
     """Neuron API 客户端。"""
 
-    def __init__(self, config: NeuronConfig | None = None):
-        self.config = config or NeuronConfig()
+    def __init__(self, config: NeuronConfig):
+        self.config = config
         self._token: str | None = None
         self._timeout = self.config.timeout
 
@@ -254,6 +267,8 @@ def get_neuron_client() -> NeuronClient:
             url=settings.neuron_api_url,
             username=settings.neuron_username,
             password=settings.neuron_password,
+            deployment_mode=settings.deployment_mode,
+            allow_insecure_dev_secrets=settings.allow_insecure_dev_secrets,
         )
         _neuron_client = NeuronClient(config)
     return _neuron_client

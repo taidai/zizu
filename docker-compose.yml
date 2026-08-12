@@ -30,7 +30,7 @@ services:
       - "5432:5432"
     environment:
       POSTGRES_USER: ${DB_USER:-zizu}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-omnidev_2026}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?run python scripts/bootstrap_runtime_secrets.py first}
       POSTGRES_DB: ${DB_NAME:-zizu}
       TIMESCALEDB_TELEMETRY: 'off'
     volumes:
@@ -54,6 +54,8 @@ services:
     image: emqx/nanomq:latest
     container_name: zizu-nanomq
     restart: unless-stopped
+    environment:
+      NANOMQ_CONF_PATH: /run/secrets/nanomq.conf
     ports:
       - "1883:1883"
       - "8883:8883"
@@ -65,7 +67,7 @@ services:
       - nanomq_data:/usr/local/nanomq/data
     secrets:
       - source: nanomq_http_config
-        target: nanomq-http.conf
+        target: nanomq.conf
     healthcheck:
       test: ["CMD-SHELL", "nanomq_cli dscv | grep -q . || exit 0"]
       interval: 15s
@@ -133,4 +135,4 @@ volumes:
 
 secrets:
   nanomq_http_config:
-    file: ./config/runtime/nanomq-http.conf
+    file: ./config/runtime/nanomq.conf

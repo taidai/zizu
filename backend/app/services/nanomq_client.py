@@ -12,25 +12,38 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
+
+from app.core.secret_policy import insecure_development_enabled, validate_secret
 
 
 @dataclass
 class NanoMQConfig:
     url: str = "http://nanomq:8081"
     username: str = "admin"
-    password: str = "public"
+    password: str = ""
     timeout: float = 10.0
     conf_path: str = "/app/config/nanomq.conf"
+    deployment_mode: Literal["production", "development"] = "production"
+    allow_insecure_dev_secrets: bool = False
+
+    def __post_init__(self) -> None:
+        allow_insecure = insecure_development_enabled(
+            self.deployment_mode,
+            self.allow_insecure_dev_secrets,
+        )
+        self.password = validate_secret(
+            "nanomq", self.password, allow_insecure=allow_insecure, warn=allow_insecure
+        )
 
 
 class NanoMQClient:
     """nanoMQ REST API 客户端。"""
 
-    def __init__(self, config: NanoMQConfig | None = None):
-        self.config = config or NanoMQConfig()
+    def __init__(self, config: NanoMQConfig):
+        self.config = config
         self._timeout = self.config.timeout
 
     def _auth_header(self) -> str:
@@ -184,6 +197,8 @@ def get_nanomq_client() -> NanoMQClient:
                 username=settings.nanomq_api_username,
                 password=settings.nanomq_api_password,
                 conf_path=settings.nanomq_conf_path,
+                deployment_mode=settings.deployment_mode,
+                allow_insecure_dev_secrets=settings.allow_insecure_dev_secrets,
             )
         )
     return _nanomq_client
