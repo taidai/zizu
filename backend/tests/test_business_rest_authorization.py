@@ -34,6 +34,7 @@ from app.api.rule_templates import router as rule_templates_router
 from app.api.rules import router as rules_router
 from app.api.security import get_identity
 from app.api.solution_delivery import router as solution_delivery_router
+from app.api.entity_instances import router as entity_instances_router
 from app.api.tags import router as tags_router
 from app.api.telemetry import router as telemetry_router
 from app.services.identity import (
@@ -246,6 +247,7 @@ DELIVERY_OPERATIONS = {
         "/api/v1/solution-installations/{installation_id}/acceptance-runs",
     ),
     ("GET", "/api/v1/delivery-reports/{report_id}"),
+    ("GET", "/api/v1/entity-instances/{entity_instance_id}/realtime"),
 }
 
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
@@ -269,6 +271,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     device_templates_router,
     nanomq_router,
     solution_delivery_router,
+    entity_instances_router,
 )
 
 
@@ -345,6 +348,7 @@ class FakeCursor:
                     "sort_order",
                     "enabled",
                     "config",
+                    "source_catalog_key",
                     "created_at",
                     "tag_count",
                 )
@@ -360,6 +364,7 @@ class FakeCursor:
                         0,
                         True,
                         self.state.node_config,
+                        "stable-device-key-should-not-leak",
                         datetime(2026, 8, 13, tzinfo=timezone.utc),
                         3,
                     )
@@ -857,6 +862,7 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("node-password-should-not-leak", response.text)
         self.assertNotIn("token-should-not-leak", response.text)
+        self.assertNotIn("stable-device-key-should-not-leak", response.text)
 
     async def test_operator_runtime_tag_representation_omits_configuration_fields(
         self,
@@ -1049,7 +1055,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 128)
+        self.assertEqual(len(registered), 129)
 
         for (method, path), capability in sorted(TICKET_03_CAPABILITIES.items()):
             with self.subTest(method=method, path=path):

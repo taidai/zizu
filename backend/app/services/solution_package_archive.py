@@ -171,7 +171,11 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     for asset in assets:
         if not isinstance(asset, dict):
             raise DeliveryError("MANIFEST_INVALID", "Asset must be a mapping")
-        if asset.get("kind") != "acceptance" or any(
+        if asset.get("kind") not in {
+            "acceptance",
+            "entity_definition",
+            "entity_instance_slot",
+        } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
         ):
@@ -188,10 +192,181 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     validate_parameter_contracts(manifest.get("parameters"))
 
 
+def _validate_entity_assets(
+    manifest: dict[str, Any],
+    assets: dict[str, bytes],
+) -> tuple[dict[str, Any], ...]:
+    """校验定义/槽位/实体验收并返回 Registry 使用的规范槽位。"""
+    declarations = {item["id"]: item for item in manifest["assets"]}
+    definitions: dict[str, dict[str, Any]] = {}
+    slots: list[dict[str, Any]] = []
+    parameter_contracts = {
+        item["id"]: item for item in validate_parameter_contracts(manifest.get("parameters"))
+    }
+    for declaration in declarations.values():
+        if declaration["kind"] != "entity_definition":
+            continue
+        definition = _load_mapping(
+            assets[declaration["path"]],
+            "ASSET_REFERENCE_INVALID",
+        )
+        fields = {
+            "schemaVersion",
+            "id",
+            "kind",
+            "displayName",
+            "deviceCategory",
+            "dataType",
+            "unit",
+            "direction",
+        }
+        if (
+            set(definition) - fields
+            or definition.get("schemaVersion") != "zizu.entity-definition/v1alpha1"
+            or definition.get("id") != declaration["id"]
+            or definition.get("kind") != "entity_definition"
+            or any(
+                not isinstance(definition.get(field), str) or not definition[field]
+                for field in ("displayName", "deviceCategory", "dataType", "direction")
+            )
+            or definition["dataType"] not in {"FLOAT", "INT", "BOOL", "STRING", "ENUM"}
+            or definition["direction"] not in {"R", "W", "RW"}
+            or not isinstance(definition.get("unit"), (str, type(None)))
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Entity definition is invalid",
+            )
+        definitions[definition["id"]] = definition
+
+    slot_ids: set[str] = set()
+    slot_definition_ids: dict[str, set[str]] = {}
+    for declaration in declarations.values():
+        if declaration["kind"] != "entity_instance_slot":
+            continue
+        raw = _load_mapping(assets[declaration["path"]], "ASSET_REFERENCE_INVALID")
+        allowed = {
+            "schemaVersion",
+            "id",
+            "kind",
+            "deviceCategory",
+            "count",
+            "instanceKeyParameter",
+            "displayName",
+            "freshness",
+            "requiredEntities",
+        }
+        parameter_id = raw.get("instanceKeyParameter")
+        parameter = parameter_contracts.get(parameter_id)
+        required_entities = raw.get("requiredEntities")
+        if (
+            set(raw) != allowed
+            or raw.get("schemaVersion") != "zizu.entity-instance-slot/v1alpha1"
+            or raw.get("id") != declaration["id"]
+            or raw.get("kind") != "entity_instance_slot"
+            or raw.get("count") != 1
+            or any(
+                not isinstance(raw.get(field), str) or not raw[field]
+                for field in ("deviceCategory", "displayName", "freshness")
+            )
+            or parameter is None
+            or parameter["type"] != "string"
+            or not isinstance(required_entities, list)
+            or not required_entities
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot is invalid")
+        freshness = _duration_seconds(raw["freshness"])
+        normalized_definitions: list[dict[str, Any]] = []
+        required_definition_ids: set[str] = set()
+        matcher_ids: set[str] = set()
+        for required in required_entities:
+            if not isinstance(required, dict) or set(required) != {"definition", "matcher"}:
+                raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot reference is invalid")
+            definition = definitions.get(required["definition"])
+            matcher = required.get("matcher")
+            if (
+                definition is None
+                or definition["id"] in required_definition_ids
+                or not isinstance(matcher, dict)
+                or set(matcher) != {"id", "deviceKeyParameter", "tagName"}
+                or any(
+                    not isinstance(matcher.get(field), str) or not matcher[field]
+                    for field in ("id", "deviceKeyParameter", "tagName")
+                )
+                or matcher["id"] in matcher_ids
+                or matcher["deviceKeyParameter"] not in parameter_contracts
+                or parameter_contracts[matcher["deviceKeyParameter"]]["type"] != "string"
+                or definition["deviceCategory"] != raw["deviceCategory"]
+            ):
+                raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot reference is invalid")
+            required_definition_ids.add(definition["id"])
+            matcher_ids.add(matcher["id"])
+            normalized_definitions.append(
+                {
+                    "id": definition["id"],
+                    "display_name": definition["displayName"],
+                    "data_type": definition["dataType"],
+                    "unit": definition.get("unit"),
+                    "direction": definition["direction"],
+                    "matcher": {
+                        "id": matcher["id"],
+                        "device_key_parameter": matcher["deviceKeyParameter"],
+                        "tag_name": matcher["tagName"],
+                    },
+                }
+            )
+        slot_ids.add(raw["id"])
+        slot_definition_ids[raw["id"]] = required_definition_ids
+        slots.append(
+            {
+                "id": raw["id"],
+                "device_category": raw["deviceCategory"],
+                "instance_key_parameter": parameter_id,
+                "display_name": raw["displayName"],
+                "freshness_seconds": freshness,
+                "definitions": normalized_definitions,
+            }
+        )
+
+    for acceptance_id in manifest["acceptance"]:
+        declaration = declarations[acceptance_id]
+        definition = _load_mapping(assets[declaration["path"]], "ASSET_REFERENCE_INVALID")
+        if definition.get("kind") != "entity_readiness":
+            continue
+        allowed = {
+            "schemaVersion", "id", "kind", "required", "slot",
+            "definition", "freshness", "timeout",
+        }
+        if (
+            set(definition) != allowed
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+            or definition.get("slot") not in slot_ids
+            or definition.get("definition")
+            not in slot_definition_ids.get(definition.get("slot"), set())
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity acceptance is invalid")
+        _duration_seconds(definition.get("freshness"))
+        _validate_timeout(definition.get("timeout"))
+    return tuple(slots)
+
+
+def _duration_seconds(value: Any) -> float:
+    if not isinstance(value, str):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Duration is invalid")
+    match = re.fullmatch(r"([1-9]\d*)s", value)
+    if match is None:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Duration is invalid")
+    return float(match.group(1))
+
+
 def _validate_acceptance_definition(
     definition: dict[str, Any],
     acceptance_id: str,
 ) -> None:
+    if definition.get("kind") == "entity_readiness":
+        return
     allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
     if set(definition) != allowed_fields:
         raise DeliveryError(

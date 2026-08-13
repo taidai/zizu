@@ -7,7 +7,7 @@ import json
 import re
 import time
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 
@@ -31,6 +31,7 @@ from app.services.solution_package_archive import (
     _package_digest,
     _read_archive,
     _validate_acceptance_definition,
+    _validate_entity_assets,
     _validate_manifest,
     _validate_platform_range,
     _version_tuple,
@@ -39,6 +40,13 @@ from app.services.solution_parameters import (
     resolve_site_parameters,
     validate_parameter_contracts,
 )
+from app.services.entity_instance_registry import (
+    ApplyEntityInstancePlan,
+    EntityInstanceError,
+    EntityInstanceRegistry,
+    PlanEntityInstances,
+)
+from app.services.entity_instance_runtime import EntityInstanceRuntime
 
 __all__ = [
     "DeliveryError",
@@ -83,10 +91,14 @@ class SolutionDelivery:
         repository: DeliveryRepository,
         platform_version: str,
         public_api_probe: PublicApiProbe | None = None,
+        entity_instance_registry: EntityInstanceRegistry | None = None,
+        entity_instance_runtime: EntityInstanceRuntime | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
         self._public_api_probe = public_api_probe
+        self._entity_instance_registry = entity_instance_registry
+        self._entity_instance_runtime = entity_instance_runtime
 
     def import_package(self, archive: bytes) -> PackageImport:
         files = _read_archive(archive)
@@ -136,6 +148,9 @@ class SolutionDelivery:
                 _load_mapping(declared_assets[asset["path"]], "ASSET_REFERENCE_INVALID"),
                 acceptance_id,
             )
+        normalized_slots = _validate_entity_assets(manifest, declared_assets)
+        if normalized_slots:
+            manifest["_entity_slots"] = list(normalized_slots)
 
         package = PackageImport(
             id=uuid4(),
@@ -159,6 +174,8 @@ class SolutionDelivery:
         *,
         parameters: dict[str, Any] | None = None,
         secret_references: dict[str, str] | None = None,
+        binding_selections: dict[str, UUID] | None = None,
+        actor: str = "system:delivery-plan",
     ) -> InstallationPlan:
         package = self._repository.get_package(package_record_id)
         if package is None:
@@ -190,7 +207,7 @@ class SolutionDelivery:
                 else None
             ),
         )
-        configuration_content = {
+        parameter_configuration_content = {
             "package_digest": package.digest,
             "parameters": parameter_values,
             "secret_references": secret_values,
@@ -198,9 +215,95 @@ class SolutionDelivery:
         # Before typed parameters existed, package digest was the complete site
         # configuration identity. Preserve that identity for empty contracts so
         # migration_023 can backfill existing installations without guessing.
-        configuration_digest = (
+        parameter_configuration_digest = (
             package.digest
             if not parameter_values and not secret_values
+            else hashlib.sha256(
+                json.dumps(
+                    parameter_configuration_content,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        parameter_items = _parameter_plan_items(
+            parameter_contracts,
+            parameter_values,
+            secret_values,
+            parameter_sources,
+            blockers,
+            current_configuration,
+        )
+        prospective_entity_identity = uuid5(
+            NAMESPACE_URL,
+            (
+                f"zizu/entity-installation-identity/{package.id}/{base_version}/"
+                f"{parameter_configuration_digest}"
+            ),
+        )
+        entity_identity_installation_id = (
+            current_configuration.entity_identity_installation_id
+            if current_configuration is not None
+            else prospective_entity_identity
+        )
+        entity_plan = None
+        entity_items: tuple[dict[str, Any], ...] = ()
+        entity_blockers: tuple[dict[str, str], ...] = ()
+        if package.manifest.get("_entity_slots"):
+            if self._entity_instance_registry is None:
+                raise DeliveryError(
+                    "ENTITY_REGISTRY_UNAVAILABLE",
+                    "Entity instance registry is not configured",
+                )
+            entity_slots = _resolve_entity_slots(
+                tuple(package.manifest["_entity_slots"]),
+                parameter_values,
+            )
+            # Each installation plan owns one deterministic prospective
+            # installation identity. Saved-plan deduplication preserves it.
+            try:
+                entity_plan = self._entity_instance_registry.plan(
+                    PlanEntityInstances(
+                        package_digest=package.digest,
+                        site_configuration_version=base_version,
+                        installation_id=entity_identity_installation_id,
+                        slots=entity_slots,
+                        selections=binding_selections or {},
+                        actor=actor,
+                    )
+                )
+            except EntityInstanceError as exc:
+                raise DeliveryError(exc.code, str(exc)) from exc
+            entity_items = tuple(
+                {
+                    "asset_id": (
+                        f"{item['slot_id']}/{item['instance_key']}/"
+                        f"{item['definition_id']}"
+                    ),
+                    "kind": "entity_binding",
+                    "action": item["action"],
+                    **item,
+                    "entity_plan_id": str(entity_plan.id),
+                    "entity_plan_digest": entity_plan.digest,
+                }
+                for item in entity_plan.items
+            )
+            entity_blockers = entity_plan.blockers
+            blockers = (*blockers, *entity_blockers)
+        configuration_content = {
+            **parameter_configuration_content,
+            "entity_bindings": [
+                {
+                    "entity_instance_id": item["entity_instance_id"],
+                    "selected_tag_id": item["selected_tag_id"],
+                }
+                for item in entity_items
+            ],
+        }
+        configuration_digest = (
+            package.digest
+            if not parameter_values and not secret_values and not entity_items
             else hashlib.sha256(
                 json.dumps(
                     configuration_content,
@@ -209,6 +312,13 @@ class SolutionDelivery:
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
+        )
+        target_installation_id = uuid5(
+            NAMESPACE_URL,
+            (
+                f"zizu/solution-installation/{package.id}/{base_version}/"
+                f"{configuration_digest}"
+            ),
         )
         action = (
             "preserve"
@@ -219,14 +329,6 @@ class SolutionDelivery:
             else "update"
             if base_version > 0
             else "add"
-        )
-        parameter_items = _parameter_plan_items(
-            parameter_contracts,
-            parameter_values,
-            secret_values,
-            parameter_sources,
-            blockers,
-            current_configuration,
         )
         items = (
             {
@@ -243,6 +345,7 @@ class SolutionDelivery:
                 for acceptance_id in package.acceptance_ids
             ),
             *parameter_items,
+            *entity_items,
         )
         plan_content = {
             "package_record_id": str(package.id),
@@ -260,6 +363,11 @@ class SolutionDelivery:
                 else {}
             ),
             "configuration_digest": configuration_digest,
+            "target_installation_id": str(target_installation_id),
+            "entity_identity_installation_id": str(
+                entity_identity_installation_id
+            ),
+            "entity_plan": entity_plan.public_dict() if entity_plan else None,
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -288,6 +396,9 @@ class SolutionDelivery:
                     else {}
                 ),
                 configuration_digest=configuration_digest,
+                target_installation_id=target_installation_id,
+                entity_identity_installation_id=entity_identity_installation_id,
+                entity_plan=entity_plan.public_dict() if entity_plan else None,
                 digest=digest,
             )
         )
@@ -344,11 +455,35 @@ class SolutionDelivery:
                 "INSTALL_PLAN_STALE",
                 "Package digest changed after the plan was created",
             )
+        entity_plan = plan.entity_plan
+
+        def apply_entities(transaction: Any | None) -> tuple[UUID, ...]:
+            if entity_plan is None:
+                return ()
+            if self._entity_instance_registry is None:
+                raise DeliveryError(
+                    "ENTITY_REGISTRY_UNAVAILABLE",
+                    "Entity instance registry is not configured",
+                )
+            try:
+                entity_outcome = self._entity_instance_registry.apply(
+                    ApplyEntityInstancePlan(
+                        UUID(entity_plan["id"]),
+                        entity_plan["digest"],
+                        actor,
+                    ),
+                    transaction=transaction,
+                )
+            except EntityInstanceError as exc:
+                raise DeliveryError(exc.code, str(exc)) from exc
+            return entity_outcome.entity_instance_ids
+
         return self._repository.install(
             plan,
             actor,
             idempotency_key,
             request_digest,
+            apply_entities if entity_plan is not None else None,
         )
 
     def list_installations(self) -> list[InstallationOutcome]:
@@ -423,7 +558,10 @@ class SolutionDelivery:
             if (
                 definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
                 or definition.get("id") != acceptance_id
-                or definition.get("kind") != "platform_liveness"
+                or definition.get("kind") not in {
+                    "platform_liveness",
+                    "entity_readiness",
+                }
             ):
                 raise DeliveryError(
                     "ASSET_REFERENCE_INVALID",
@@ -431,6 +569,15 @@ class SolutionDelivery:
                 )
             timeout_seconds = _parse_timeout(definition.get("timeout"))
             item_started = time.monotonic()
+            if definition["kind"] == "entity_readiness":
+                item = self._run_entity_readiness(
+                    installation,
+                    acceptance_id,
+                    definition,
+                    item_started,
+                )
+                items.append(item)
+                continue
             try:
                 response_status, evidence = await self._public_api_probe.get(
                     "/api/v1/health/live",
@@ -529,6 +676,99 @@ class SolutionDelivery:
             request_digest,
         )
 
+    def _run_entity_readiness(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+    ) -> dict[str, Any]:
+        if self._entity_instance_runtime is None:
+            return {
+                "acceptance_id": acceptance_id,
+                "status": "failed",
+                "code": "ENTITY_RUNTIME_UNAVAILABLE",
+                "required": bool(definition.get("required", True)),
+                "duration_ms": max(
+                    0,
+                    round((time.monotonic() - item_started) * 1000),
+                ),
+                "evidence": {"binding": "unavailable"},
+            }
+        plan = self._repository.get_plan(installation.plan_id)
+        entity_item = next(
+            (
+                item
+                for item in plan.items
+                if item.get("kind") == "entity_binding"
+                and item.get("slot_id") == definition.get("slot")
+                and item.get("definition_id") == definition.get("definition")
+            ),
+            None,
+        ) if plan is not None else None
+        if entity_item is None:
+            code = "ENTITY_BINDING_MISSING"
+            status_text = "failed"
+            evidence: dict[str, Any] = {
+                "binding": "missing",
+                "primary_source_count": 0,
+            }
+        else:
+            entity_instance_id = UUID(entity_item["entity_instance_id"])
+            try:
+                observation = self._entity_instance_runtime.read(entity_instance_id)
+            except EntityInstanceError as exc:
+                code = exc.code
+                status_text = "failed"
+                binding_confirmed = exc.code in {
+                    "ENTITY_DATA_MISSING",
+                    "ENTITY_DATA_STALE",
+                    "ENTITY_DATA_QUALITY_BAD",
+                }
+                evidence = {
+                    "entity_instance_id": str(entity_instance_id),
+                    "binding": "confirmed" if binding_confirmed else "unavailable",
+                    "primary_source_count": 1 if binding_confirmed else 0,
+                }
+            else:
+                freshness_seconds = _parse_timeout(definition.get("freshness"))
+                within_acceptance_freshness = (
+                    observation.age_ms <= freshness_seconds * 1000
+                )
+                status_text = (
+                    "passed"
+                    if within_acceptance_freshness and observation.quality_good
+                    else "failed"
+                )
+                code = (
+                    "ENTITY_DATA_STALE"
+                    if not within_acceptance_freshness
+                    else "ENTITY_DATA_QUALITY_BAD"
+                    if not observation.quality_good
+                    else "ENTITY_BINDING_FRESH"
+                )
+                evidence = {
+                    "entity_instance_id": str(entity_instance_id),
+                    "definition_id": observation.definition_id,
+                    "binding": "confirmed",
+                    "primary_source_count": 1,
+                    "observed_at": observation.observed_at.isoformat(),
+                    "age_ms": observation.age_ms,
+                    "quality": observation.quality,
+                    "quality_good": observation.quality_good,
+                }
+        return {
+            "acceptance_id": acceptance_id,
+            "status": status_text,
+            "code": code,
+            "required": bool(definition.get("required", True)),
+            "duration_ms": max(
+                0,
+                round((time.monotonic() - item_started) * 1000),
+            ),
+            "evidence": evidence,
+        }
+
     def get_report(self, report_id: UUID) -> DeliveryReport:
         report = self._repository.get_report(report_id)
         if report is None:
@@ -596,6 +836,51 @@ def _parameter_plan_items(
             }
         )
     return tuple(items)
+
+
+def _resolve_entity_slots(
+    slots: tuple[dict[str, Any], ...],
+    parameters: dict[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    resolved: list[dict[str, Any]] = []
+    for slot in slots:
+        instance_key = parameters.get(slot["instance_key_parameter"])
+        if not isinstance(instance_key, str) or not instance_key:
+            raise DeliveryError(
+                "ENTITY_SLOT_PARAMETER_INVALID",
+                "Entity slot instance key parameter is missing",
+            )
+        definitions: list[dict[str, Any]] = []
+        for definition in slot["definitions"]:
+            device_key = parameters.get(
+                definition["matcher"]["device_key_parameter"]
+            )
+            if not isinstance(device_key, str) or not device_key:
+                raise DeliveryError(
+                    "ENTITY_SLOT_PARAMETER_INVALID",
+                    "Entity matcher device key parameter is missing",
+                )
+            definitions.append(
+                {
+                    **definition,
+                    "matcher": {
+                        "id": definition["matcher"]["id"],
+                        "device_key": device_key,
+                        "tag_name": definition["matcher"]["tag_name"],
+                    },
+                }
+            )
+        resolved.append(
+            {
+                "id": slot["id"],
+                "device_category": slot["device_category"],
+                "instance_key": instance_key,
+                "display_name": slot["display_name"],
+                "freshness_seconds": slot["freshness_seconds"],
+                "definitions": definitions,
+            }
+        )
+    return tuple(resolved)
 
 
 def _parse_timeout(value: Any) -> float:

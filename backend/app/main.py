@@ -311,6 +311,13 @@ def create_app() -> FastAPI:
         tags=["Solution Delivery"],
     )
 
+    from app.api.entity_instances import router as entity_instances_router
+    app.include_router(
+        entity_instances_router,
+        prefix="/api/v1",
+        tags=["Entity Instances"],
+    )
+
      # ---- Static Frontend (F0 可视化 V1) ----
     # 后端直接托管前端 dist，无需独立 nginx 容器
     import os

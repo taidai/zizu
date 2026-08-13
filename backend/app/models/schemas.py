@@ -250,6 +250,12 @@ class NodeCreate(BaseModel):
     parent_id: UUID | None = Field(None, description="父节点 ID (根节点为 None)")
     layer: int = Field(..., ge=1, le=5, description="层级 1~5")
     node_type: str | None = Field(None, description="节点子类型, 如 ESS/PV/GRID/EVSE")
+    source_catalog_key: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="解决方案匹配使用的站点内稳定设备键",
+    )
     config: dict = Field(default_factory=dict, description="扩展配置 JSONB")
     sort_order: int = Field(0, description="同级排序")
     enabled: bool = True

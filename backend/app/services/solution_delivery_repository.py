@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -81,7 +82,8 @@ class InMemoryDeliveryRepository:
     def get_package(self, package_record_id: UUID) -> PackageImport | None:
         return self._packages_by_id.get(package_record_id)
 
-    def site_configuration_version(self) -> int:
+    def site_configuration_version(self, transaction: Any | None = None) -> int:
+        del transaction
         return self._site_configuration_version
 
     def save_plan(self, plan: InstallationPlan) -> InstallationPlan:
@@ -124,6 +126,7 @@ class InMemoryDeliveryRepository:
         actor: str,
         key: str,
         request_digest: str,
+        apply_entities: Callable[[Any | None], tuple[UUID, ...]] | None = None,
     ) -> InstallationOutcome:
         current_configuration = self._site_configurations.get(
             self._site_configuration_version
@@ -147,14 +150,16 @@ class InMemoryDeliveryRepository:
                 "INSTALL_PLAN_STALE",
                 "Site configuration changed after the plan was created",
             )
+        entity_instance_ids = apply_entities(None) if apply_entities else ()
         self._site_configuration_version += 1
         outcome = InstallationOutcome(
-            id=uuid4(),
+            id=plan.target_installation_id,
             plan_id=plan.id,
             package_record_id=plan.package_record_id,
             package_digest=plan.package_digest,
             site_configuration_version=self._site_configuration_version,
             status="installed",
+            entity_instance_ids=entity_instance_ids,
         )
         self._installations[outcome.id] = outcome
         self._site_configurations[outcome.site_configuration_version] = (
@@ -169,6 +174,9 @@ class InMemoryDeliveryRepository:
                 parameter_metadata=_parameter_metadata(plan),
                 digest=plan.configuration_digest,
                 actor=actor,
+                entity_identity_installation_id=(
+                    plan.entity_identity_installation_id
+                ),
             )
         )
         self._idempotency[("apply_install", actor, key)] = (
@@ -237,7 +245,10 @@ class PostgresDeliveryRepository:
 
     @staticmethod
     @contextmanager
-    def _connection():
+    def _connection(transaction: Any | None = None):
+        if transaction is not None:
+            yield transaction
+            return
         from app.services.telemetry_store import get_connection
 
         with get_connection() as connection:
@@ -279,7 +290,10 @@ class PostgresDeliveryRepository:
             parameter_sources=row[10],
             parameter_metadata=row[11],
             configuration_digest=row[12],
-            digest=row[13],
+            target_installation_id=row[13],
+            entity_identity_installation_id=row[14],
+            entity_plan=row[15],
+            digest=row[16],
         )
 
     @staticmethod
@@ -297,6 +311,7 @@ class PostgresDeliveryRepository:
             parameter_metadata=row[7],
             digest=row[8],
             actor=row[9],
+            entity_identity_installation_id=row[10],
         )
 
     @staticmethod
@@ -308,6 +323,7 @@ class PostgresDeliveryRepository:
             package_digest=row[3],
             site_configuration_version=row[4],
             status=row[5],
+            entity_instance_ids=tuple(row[6]),
         )
 
     @staticmethod
@@ -433,8 +449,8 @@ class PostgresDeliveryRepository:
                 conn.commit()
                 return package
 
-    def site_configuration_version(self) -> int:
-        with self._connection() as conn:
+    def site_configuration_version(self, transaction: Any | None = None) -> int:
+        with self._connection(transaction) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT current_version FROM t_site_configuration_state "
@@ -453,14 +469,17 @@ class PostgresDeliveryRepository:
                        base_site_configuration_version, status, items, blockers,
                        parameter_contracts, parameters, secret_references,
                        parameter_sources, parameter_metadata,
-                       configuration_digest, digest)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       configuration_digest, target_installation_id,
+                       entity_identity_installation_id, entity_plan, digest)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING id, package_record_id, package_digest,
                               base_site_configuration_version, status,
                               items, blockers, parameter_contracts, parameters,
                               secret_references, parameter_sources,
-                              parameter_metadata, configuration_digest, digest
+                              parameter_metadata, configuration_digest,
+                              target_installation_id,
+                              entity_identity_installation_id, entity_plan, digest
                     """,
                     (
                         plan.id,
@@ -476,6 +495,9 @@ class PostgresDeliveryRepository:
                         Json(plan.parameter_sources),
                         Json(plan.parameter_metadata),
                         plan.configuration_digest,
+                        plan.target_installation_id,
+                        plan.entity_identity_installation_id,
+                        Json(plan.entity_plan) if plan.entity_plan is not None else None,
                         plan.digest,
                     ),
                 )
@@ -487,7 +509,9 @@ class PostgresDeliveryRepository:
                                base_site_configuration_version, status,
                                items, blockers, parameter_contracts, parameters,
                                secret_references, parameter_sources,
-                               parameter_metadata, configuration_digest, digest
+                               parameter_metadata, configuration_digest,
+                               target_installation_id,
+                               entity_identity_installation_id, entity_plan, digest
                         FROM t_solution_install_plans WHERE digest = %s
                         """,
                         (plan.digest,),
@@ -506,7 +530,8 @@ class PostgresDeliveryRepository:
                            base_site_configuration_version, status, items, blockers,
                            parameter_contracts, parameters, secret_references,
                            parameter_sources, parameter_metadata,
-                           configuration_digest, digest
+                           configuration_digest, target_installation_id,
+                           entity_identity_installation_id, entity_plan, digest
                     FROM t_solution_install_plans WHERE id = %s
                     """,
                     (plan_id,),
@@ -550,7 +575,8 @@ class PostgresDeliveryRepository:
                 cur.execute(
                     """
                     SELECT id, plan_id, package_record_id, package_digest,
-                           site_configuration_version, status
+                           site_configuration_version, status,
+                           entity_instance_ids
                     FROM t_solution_installations WHERE id = %s
                     """,
                     (existing[1],),
@@ -564,6 +590,7 @@ class PostgresDeliveryRepository:
         actor: str,
         key: str,
         request_digest: str,
+        apply_entities: Callable[[Any | None], tuple[UUID, ...]] | None = None,
     ) -> InstallationOutcome:
         with self._connection() as conn:
             with conn.cursor() as cur:
@@ -582,7 +609,8 @@ class PostgresDeliveryRepository:
                     cur.execute(
                         """
                         SELECT id, plan_id, package_record_id, package_digest,
-                               site_configuration_version, status
+                               site_configuration_version, status,
+                               entity_instance_ids
                         FROM t_solution_installations WHERE id = %s
                         """,
                         (existing[1],),
@@ -595,7 +623,8 @@ class PostgresDeliveryRepository:
                 cur.execute(
                     """
                     SELECT i.id, i.plan_id, i.package_record_id, i.package_digest,
-                           i.site_configuration_version, i.status
+                           i.site_configuration_version, i.status,
+                           i.entity_instance_ids
                     FROM t_solution_installations i
                     JOIN t_site_configuration_versions v
                       ON v.installation_id = i.id
@@ -630,20 +659,22 @@ class PostgresDeliveryRepository:
                         "INSTALL_PLAN_STALE",
                         "Site configuration changed after the plan was created",
                     )
+                entity_instance_ids = apply_entities(conn) if apply_entities else ()
                 outcome = InstallationOutcome(
-                    id=uuid4(),
+                    id=plan.target_installation_id,
                     plan_id=plan.id,
                     package_record_id=plan.package_record_id,
                     package_digest=plan.package_digest,
                     site_configuration_version=current_version + 1,
                     status="installed",
+                    entity_instance_ids=entity_instance_ids,
                 )
                 cur.execute(
                     """
                     INSERT INTO t_solution_installations
                       (id, plan_id, package_record_id, package_digest,
-                       site_configuration_version, status)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                       site_configuration_version, status, entity_instance_ids)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         outcome.id,
@@ -652,6 +683,7 @@ class PostgresDeliveryRepository:
                         outcome.package_digest,
                         outcome.site_configuration_version,
                         outcome.status,
+                        list(outcome.entity_instance_ids),
                     ),
                 )
                 cur.execute(
@@ -660,8 +692,9 @@ class PostgresDeliveryRepository:
                       (version, previous_version, installation_id,
                        package_record_id, package_digest, parameters,
                        secret_references, parameter_metadata,
-                       configuration_digest, actor)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        configuration_digest, actor,
+                        entity_identity_installation_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         outcome.site_configuration_version,
@@ -674,6 +707,7 @@ class PostgresDeliveryRepository:
                         Json(_parameter_metadata(plan)),
                         plan.configuration_digest,
                         actor,
+                        plan.entity_identity_installation_id,
                     ),
                 )
                 cur.execute(
@@ -745,7 +779,8 @@ class PostgresDeliveryRepository:
                 cur.execute(
                     """
                     SELECT id, plan_id, package_record_id, package_digest,
-                           site_configuration_version, status
+                           site_configuration_version, status,
+                           entity_instance_ids
                     FROM t_solution_installations ORDER BY site_configuration_version
                     """
                 )
@@ -757,7 +792,8 @@ class PostgresDeliveryRepository:
                 cur.execute(
                     """
                     SELECT id, plan_id, package_record_id, package_digest,
-                           site_configuration_version, status
+                           site_configuration_version, status,
+                           entity_instance_ids
                     FROM t_solution_installations WHERE id = %s
                     """,
                     (installation_id,),
@@ -776,7 +812,8 @@ class PostgresDeliveryRepository:
                     SELECT version, previous_version, installation_id,
                            package_record_id, package_digest, parameters,
                            secret_references, parameter_metadata,
-                           configuration_digest, actor
+                           configuration_digest, actor,
+                           entity_identity_installation_id
                     FROM t_site_configuration_versions
                     WHERE version = %s AND installation_id IS NOT NULL
                     """,
