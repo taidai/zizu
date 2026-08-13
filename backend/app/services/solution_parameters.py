@@ -26,6 +26,7 @@ _PARAMETER_TYPES = {
     "port",
     "duration",
     "secret",
+    "device_instances",
 }
 _COMMON_FIELDS = {"id", "type", "required", "description", "default"}
 _TYPE_FIELDS = {
@@ -38,6 +39,7 @@ _TYPE_FIELDS = {
     "port": {"minimum", "maximum"},
     "duration": set(),
     "secret": set(),
+    "device_instances": {"minimumItems", "maximumItems"},
 }
 
 
@@ -76,6 +78,17 @@ def validate_parameter_contracts(value: Any) -> tuple[dict[str, Any], ...]:
             raise DeliveryError("MANIFEST_INVALID", "Parameter contract is invalid")
         if parameter_type == "secret" and "default" in raw:
             raise DeliveryError("MANIFEST_INVALID", "Secret parameters cannot have defaults")
+        if parameter_type == "device_instances":
+            minimum_items = raw.get("minimumItems", 1)
+            maximum_items = raw.get("maximumItems", 64)
+            if (
+                isinstance(minimum_items, bool)
+                or isinstance(maximum_items, bool)
+                or not isinstance(minimum_items, int)
+                or not isinstance(maximum_items, int)
+                or not 1 <= minimum_items <= maximum_items <= 64
+            ):
+                raise DeliveryError("MANIFEST_INVALID", "Device instance limits are invalid")
         if "unit" in raw and (
             not isinstance(raw["unit"], str) or not raw["unit"].strip()
         ):
@@ -272,6 +285,71 @@ def _normalize_value(contract: dict[str, Any], value: Any) -> Any:
         if not isinstance(value, str) or _DURATION.fullmatch(value) is None:
             raise _ParameterValueError("PARAMETER_DURATION_INVALID", "Duration must use ms, s, m, or h")
         return value
+    if parameter_type == "device_instances":
+        if not isinstance(value, list):
+            raise _ParameterValueError(
+                "PARAMETER_TYPE_INVALID",
+                "Expected a device instance list",
+            )
+        minimum_items = contract.get("minimumItems", 1)
+        maximum_items = contract.get("maximumItems", 64)
+        if not minimum_items <= len(value) <= maximum_items:
+            raise _ParameterValueError(
+                "PARAMETER_RANGE_INVALID",
+                "Device instance count is outside the allowed range",
+            )
+        normalized: list[dict[str, str]] = []
+        instance_keys: set[str] = set()
+        device_keys: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict) or not {"instance_key", "device_key"} <= set(item) \
+                    or set(item) - {
+                        "instance_key", "device_key", "standby_device_key", "display_name"
+                    }:
+                raise _ParameterValueError(
+                    "PARAMETER_DEVICE_INSTANCE_INVALID",
+                    "Device instance fields are invalid",
+                )
+            instance_key = item.get("instance_key")
+            device_key = item.get("device_key")
+            display_name = item.get("display_name")
+            standby_device_key = item.get("standby_device_key")
+            if (
+                not _valid_instance_text(instance_key)
+                or not _valid_instance_text(device_key)
+                or (display_name is not None and not _valid_instance_text(display_name))
+                or (
+                    standby_device_key is not None
+                    and (
+                        not _valid_instance_text(standby_device_key)
+                        or standby_device_key == device_key
+                    )
+                )
+                or instance_key in instance_keys
+                or device_key in device_keys
+                or standby_device_key in device_keys
+            ):
+                raise _ParameterValueError(
+                    "PARAMETER_DEVICE_INSTANCE_INVALID",
+                    "Device instance keys must be unique, non-empty strings",
+                )
+            normalized.append(
+                {
+                    "instance_key": instance_key,
+                    "device_key": device_key,
+                    **({"display_name": display_name} if display_name is not None else {}),
+                    **(
+                        {"standby_device_key": standby_device_key}
+                        if standby_device_key is not None
+                        else {}
+                    ),
+                }
+            )
+            instance_keys.add(instance_key)
+            device_keys.add(device_key)
+            if standby_device_key is not None:
+                device_keys.add(standby_device_key)
+        return sorted(normalized, key=lambda item: item["instance_key"])
     raise _ParameterValueError("PARAMETER_TYPE_INVALID", "Unsupported parameter type")
 
 
@@ -288,6 +366,16 @@ def _valid_address(value: str) -> bool:
         return True
     except ValueError:
         return _HOSTNAME.fullmatch(value) is not None
+
+
+def _valid_instance_text(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and value == value.strip()
+        and len(value) <= 128
+        and all(character.isprintable() for character in value)
+    )
 
 
 def _is_safe_pattern(pattern: str) -> bool:

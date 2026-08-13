@@ -250,6 +250,13 @@ DELIVERY_OPERATIONS = {
     ("GET", "/api/v1/entity-instances/{entity_instance_id}/realtime"),
 }
 
+TICKET_07_CAPABILITIES = {
+    ("GET", "/api/v1/entity-instances"): "runtime.read",
+    ("GET", "/api/v1/entity-instances/legacy-migration-preview"): "configuration.read",
+    ("GET", "/api/v1/entity-instances/{entity_instance_id}/source-failover"): "configuration.read",
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/source-failover"): "configuration.write",
+}
+
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
 
 
@@ -1033,6 +1040,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             ISSUE_04_REST,
             AUTH_OPERATIONS,
             DELIVERY_OPERATIONS,
+            set(TICKET_07_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1055,7 +1063,12 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 129)
+        self.assertEqual(len(registered), 133)
+
+        for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
         for (method, path), capability in sorted(TICKET_03_CAPABILITIES.items()):
             with self.subTest(method=method, path=path):

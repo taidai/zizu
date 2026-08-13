@@ -1019,6 +1019,44 @@ export async function fetchAlarmConfig(): Promise<{ tags: AlarmConfigTag[]; tota
 
 // ── Global Entities ──
 
+export interface EntityInstance {
+  id: string
+  device_instance_id: string
+  slot_id: string
+  instance_key: string
+  device_category: string
+  device_display_name: string
+  definition_id: string
+  display_name: string
+  data_type: string
+  unit: string | null
+  direction: 'R' | 'W' | 'RW'
+  freshness_seconds: number
+}
+
+export interface LegacyEntityMigrationItem {
+  legacy_entity_id: string
+  legacy_entity_name: string
+  classification: 'unique' | 'missing' | 'ambiguous'
+  candidate_entity_instance_ids: string[]
+}
+
+export async function fetchEntityInstances(): Promise<{ items: EntityInstance[]; total: number }> {
+  const res = await apiFetch(`${API_BASE}/entity-instances`)
+  if (!res.ok) throw new Error(`Fetch entity instances failed: ${res.status}`)
+  return res.json()
+}
+
+export async function previewLegacyEntityMigration(): Promise<{
+  items: LegacyEntityMigrationItem[]
+  counts: Record<'unique' | 'missing' | 'ambiguous', number>
+  writes_applied: 0
+}> {
+  const res = await apiFetch(`${API_BASE}/entity-instances/legacy-migration-preview`)
+  if (!res.ok) throw new Error(`Preview legacy entity migration failed: ${res.status}`)
+  return res.json()
+}
+
 export interface Entity {
   id: string
   name: string

@@ -18,6 +18,8 @@ from app.services.entity_instance_postgres import (
 )
 from app.services.entity_instance_registry import EntityInstanceRegistry
 from app.services.entity_instance_runtime import EntityInstanceRuntime
+from app.services.entity_instance_catalog import EntityInstanceCatalog
+from app.services.entity_instance_failover import EntityFailoverPolicy
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -29,8 +31,9 @@ from app.services.solution_delivery import (
 
 router = APIRouter()
 _repository = PostgresDeliveryRepository()
+_entity_instance_repository = PostgresEntityInstanceRepository()
 _entity_instance_registry = EntityInstanceRegistry(
-    PostgresEntityInstanceRepository(),
+    _entity_instance_repository,
     PostgresSourceCatalog(),
     _repository.site_configuration_version,
 )
@@ -38,6 +41,8 @@ _entity_instance_runtime = EntityInstanceRuntime(
     _entity_instance_registry,
     PostgresObservationCatalog(),
 )
+_entity_instance_catalog = EntityInstanceCatalog(_entity_instance_repository)
+_entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
 _delivery = SolutionDelivery(
     _repository,
     platform_version=_VERSION,
@@ -53,6 +58,18 @@ def get_solution_delivery() -> SolutionDelivery:
 
 def get_default_entity_instance_runtime() -> EntityInstanceRuntime:
     return _entity_instance_runtime
+
+
+def get_default_entity_instance_catalog() -> EntityInstanceCatalog:
+    return _entity_instance_catalog
+
+
+def get_default_entity_instance_registry() -> EntityInstanceRegistry:
+    return _entity_instance_registry
+
+
+def get_default_entity_instance_failover() -> EntityFailoverPolicy:
+    return _entity_instance_failover
 
 
 class ApplyInstallationRequest(BaseModel):

@@ -1,5 +1,27 @@
 ---
 
+## Session 2026-08-14 — Ticket #7 多设备实例消费者与显式主备（双轴通过）
+
+### 目标与结果
+- `device_instances` 强类型参数一次声明多台同类 PCS/BMS；同一实体定义按 `instance_key` 生成互不混淆的稳定实体实例，显示名升级不改变引用。
+- 新增消费者实例目录与只读旧实体迁移预览；预览以主、备来源预留判定 unique/missing/ambiguous，不随当前活动角色漂移，也不自动写入。
+- 新规则输入只接受 `sourceEntityInstanceIds` 和实例 UUID `inputMappings`；旧 `sourceEntityIds` 只读兼容并带迁移警告。规则 tick/dry-run 复用 Registry.resolve + Runtime.read 的同一确认来源、新鲜度和 GOOD 质量边界。
+- 显式 `manual` 主备策略独立为 `EntityFailoverPolicy`；不存在自动切换。切换要求预期角色、目标角色和原因，原子更新并追加不可变审计；standby 状态禁止静默更换/移除策略，切回 primary 后才允许清理。
+- migration_025 持久化规则实例引用、主备策略、来源预留和切换审计，并阻止新写旧规则实体引用。
+
+### 验证证据
+- Ticket #7 + 交付/认证/权限/控制公开回归 78/78 通过。
+- 隔离真实 PostgreSQL 公开主缝 1/1 通过，覆盖 migration_020~025 重放、多设备安装、显式切换、规则引用、持久化与进程重启。
+- 前端 `npm run build` 通过（8176 modules；仅既有大 chunk warning）；Python 编译与 `git diff --check` 通过。
+- Standards / Spec 复审最终均 PASS，阻断 0；未新增依赖、未连接或部署 1号机。
+
+### 当前边界 / Next
+- 本票迁移规则输入；告警状态机、统一控制命令与 EMS 工作台在后续票据继续使用实体实例 ID。旧规则输出/控制旁路仍是兼容边界。
+- 1号机仍是旧 v0.4.77；TLS、固定 ARM64 digest 制品、现场凭据轮换和发布锁未闭合，当前分支禁止直接上线。
+- 下一步按依赖合并 PR 后进入 Ticket #8：定义统一控制命令契约，并以实例 ID 实现限值、联锁、幂等、回读和审计。
+
+---
+
 ## Session 2026-08-14 — Ticket #6 设备/实体实例与确定性绑定（双轴通过）
 
 ### 目标与结果

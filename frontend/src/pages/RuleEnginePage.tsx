@@ -3,8 +3,8 @@ import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-e
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
-  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, writeEntityValue, fetchRuleTemplates,
-  type Rule, type RuleCreateRequest, type Node, type Entity, type EntityBinding, type RuleTemplate,
+  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, fetchEntityInstances, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, writeEntityValue, fetchRuleTemplates,
+  type Rule, type RuleCreateRequest, type Node, type Entity, type EntityBinding, type EntityInstance, type RuleTemplate,
 } from '../api/client'  
 
 type DecisionGraphType = {
@@ -37,7 +37,8 @@ type OutputBinding = {
 }
 
 type RuleConfig = {
-  sourceEntityIds: string[]
+  sourceEntityInstanceIds: string[]
+  legacySourceEntityIds: string[]
   actions: NeuronWriteAction[]
   inputMappings?: Record<string, string>
   outputBindings?: OutputBinding[]
@@ -48,7 +49,8 @@ function extractConfig(content: any): RuleConfig {
   if (content && typeof content === 'object' && content._config) {
     const cfg = content._config
     return {
-      sourceEntityIds: cfg.sourceEntityIds || [],
+      sourceEntityInstanceIds: cfg.sourceEntityInstanceIds || [],
+      legacySourceEntityIds: cfg.sourceEntityIds || [],
       actions: (cfg.actions || []).map((a: any) => ({
         type: 'neuron_write',
         node: a.node || '',
@@ -75,7 +77,7 @@ function extractConfig(content: any): RuleConfig {
       template: cfg.template || 'custom',
     }
   }
-  return { sourceEntityIds: [], actions: [], inputMappings: {}, outputBindings: [], template: 'custom' }
+  return { sourceEntityInstanceIds: [], legacySourceEntityIds: [], actions: [], inputMappings: {}, outputBindings: [], template: 'custom' }
 }
 
 function emptyGraph(): DecisionGraphType {
@@ -195,6 +197,7 @@ function RuleForm({
   const [nodes, setNodes] = useState<Node[]>([])
   const [entitySearch, setEntitySearch] = useState('')
   const [entityOptions, setEntityOptions] = useState<Entity[]>([])
+  const [entityInstanceOptions, setEntityInstanceOptions] = useState<EntityInstance[]>([])
   const [entityBindings, setEntityBindings] = useState<EntityBinding[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -211,21 +214,32 @@ function RuleForm({
   useEffect(() => {
     const load = async () => {
       try {
-        const [entities, bindings] = await Promise.all([
+        const [entities, bindings, instances] = await Promise.all([
           fetchEntities({ page: 1, page_size: 10000 }),
           fetchEntityBindings({}),
+          fetchEntityInstances(),
         ])
         setEntityOptions(entities.items)
         setEntityBindings(bindings.bindings)
+        setEntityInstanceOptions(instances.items)
       } catch {
         setEntityOptions([])
         setEntityBindings([])
+        setEntityInstanceOptions([])
       }
     }
     load()
   }, [])
 
   const graphFields = useMemo(() => extractGraphFields(graph), [graph])
+  const visibleEntityInstances = useMemo(() => {
+    const needle = entitySearch.trim().toLocaleLowerCase()
+    if (!needle) return entityInstanceOptions
+    return entityInstanceOptions.filter((item) =>
+      [item.device_display_name, item.instance_key, item.display_name, item.definition_id]
+        .some((value) => value.toLocaleLowerCase().includes(needle)),
+    )
+  }, [entityInstanceOptions, entitySearch])
 
   useEffect(() => {
     setConfig((prev) => {
@@ -315,10 +329,23 @@ function RuleForm({
       setError('规则图至少包含一个节点')
       return
     }
+    if (config.legacySourceEntityIds.length > 0) {
+      setError('该规则仍引用旧全局实体，请按迁移预览改选明确的设备实体实例后再保存')
+      return
+    }
     setSaving(true)
     try {
       const derivedActions = showRawActions ? config.actions : bindingsToActions(config.outputBindings || [])
-      const jdm_content = { ...graph, _config: { ...config, actions: derivedActions } }
+      const jdm_content = {
+        ...graph,
+        _config: {
+          sourceEntityInstanceIds: config.sourceEntityInstanceIds,
+          actions: derivedActions,
+          inputMappings: config.inputMappings,
+          outputBindings: config.outputBindings,
+          template: config.template,
+        },
+      }
       await onSave({ name, rule_type: ruleType, enabled, jdm_content: jdm_content as Record<string, any> })
       onCancel()
     } catch (e: any) {
@@ -468,8 +495,13 @@ function RuleForm({
           {activeTab === 'input' && (
             <div className="flex flex-col gap-4 h-full">
               <div className="neu-card p-4 bg-white">
-                <h4 className="text-sm font-bold text-gray-800 mb-2">数据源实体</h4>
-                <p className="text-xs text-gray-500 mb-3">选择规则读取数据的全局实体（可多选）。不选则读取全库最新值。</p>
+                <h4 className="text-sm font-bold text-gray-800 mb-2">数据源实体实例</h4>
+                <p className="text-xs text-gray-500 mb-3">按设备选择稳定实体实例；同类多设备不会混用数据。</p>
+                {config.legacySourceEntityIds.length > 0 && (
+                  <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    该规则仍有 {config.legacySourceEntityIds.length} 个旧全局实体引用，当前只读兼容；请重新选择实体实例后保存。
+                  </div>
+                )}
                 <input
                   value={entitySearch}
                   onChange={(e) => setEntitySearch(e.target.value)}
@@ -477,25 +509,25 @@ function RuleForm({
                   className="neu-inset w-full px-3 py-1.5 text-xs mb-2"
                 />
                 <div className="neu-inset p-3 max-h-[240px] overflow-y-auto">
-                  {entityOptions.length === 0 && <p className="text-xs text-gray-400">暂无实体</p>}
+                  {visibleEntityInstances.length === 0 && <p className="text-xs text-gray-400">暂无匹配的已确认实体实例</p>}
                   <div className="space-y-1">
-                    {entityOptions.map((e) => {
-                      const checked = config.sourceEntityIds.includes(e.id)
+                    {visibleEntityInstances.map((e) => {
+                      const checked = config.sourceEntityInstanceIds.includes(e.id)
                       return (
                         <label key={e.id} className="flex items-center gap-2 py-1 hover:bg-white/40 rounded pr-2 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={checked}
                             onChange={() => {
-                              const next = new Set(config.sourceEntityIds)
+                              const next = new Set(config.sourceEntityInstanceIds)
                               if (next.has(e.id)) next.delete(e.id)
                               else next.add(e.id)
-                              setConfig({ ...config, sourceEntityIds: Array.from(next) })
+                              setConfig({ ...config, sourceEntityInstanceIds: Array.from(next), legacySourceEntityIds: [] })
                             }}
                             className="w-4 h-4 accent-[#52c41a]"
                           />
-                          <span className="truncate whitespace-nowrap text-gray-700 text-xs" title={e.name}>{e.display_name || e.name}</span>
-                          <span className="text-[10px] text-gray-400 font-mono ml-auto">{e.name}</span>
+                          <span className="truncate whitespace-nowrap text-gray-700 text-xs" title={e.definition_id}>{e.device_display_name} / {e.display_name}</span>
+                          <span className="text-[10px] text-gray-400 font-mono ml-auto">{e.instance_key}</span>
                         </label>
                       )
                     })}
@@ -505,7 +537,7 @@ function RuleForm({
 
               <div className="neu-card p-4 bg-white flex-1 overflow-hidden flex flex-col">
                 <h4 className="text-sm font-bold text-gray-800 mb-2">字段映射</h4>
-                <p className="text-xs text-gray-500 mb-3">把决策表字段名映射到全局实体名；不映射则按字段名直接匹配。</p>
+                <p className="text-xs text-gray-500 mb-3">把决策表字段名映射到设备实体实例；不映射则按字段名直接匹配。</p>
                 <div className="neu-inset flex-1 overflow-auto p-3 text-xs">
                   {graphFields.inputs.length === 0 ? (
                     <div className="text-gray-400">当前决策表没有输入字段</div>
@@ -533,9 +565,9 @@ function RuleForm({
                                   className="neu-input w-full px-2 py-1 text-xs bg-transparent"
                                 >
                                   <option value="">-- 选择实体 --</option>
-                                  {entityOptions.map((e) => (
-                                    <option key={e.id} value={e.name}>
-                                      {e.display_name || e.name}
+                                  {entityInstanceOptions.map((e) => (
+                                    <option key={e.id} value={e.id}>
+                                      {e.device_display_name} / {e.display_name}
                                     </option>
                                   ))}
                                 </select>
@@ -546,7 +578,7 @@ function RuleForm({
                       </tbody>
                     </table>
                   )}
-                  {entityOptions.length === 0 && config.sourceEntityIds.length > 0 && (
+                  {entityInstanceOptions.length === 0 && config.sourceEntityInstanceIds.length > 0 && (
                     <div className="mt-3 text-[10px] text-gray-400">正在加载实体列表…</div>
                   )}
                 </div>
@@ -639,7 +671,7 @@ function RuleForm({
                       <thead className="text-[10px] text-gray-500 border-b border-gray-200">
                         <tr>
                           <th className="text-left py-2 font-medium">决策输出</th>
-                          <th className="text-left py-2 font-medium">全局实体</th>
+                          <th className="text-left py-2 font-medium">设备实体实例</th>
                           <th className="text-left py-2 font-medium">冷却(s)</th>
                           <th className="text-left py-2 font-medium">操作</th>
                         </tr>
@@ -732,7 +764,7 @@ function RuleForm({
                         }}
                         className="neu-input col-span-3 px-2 py-1 bg-transparent"
                       >
-                        <option value="">-- 选择全局实体 --</option>
+                        <option value="">-- 选择实体实例 --</option>
                         {entityOptions.map((e) => (
                           <option key={e.id} value={e.id}>{e.display_name || e.name}</option>
                         ))}

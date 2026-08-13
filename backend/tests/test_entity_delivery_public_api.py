@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -18,9 +19,15 @@ from tests.test_delivery_public_api import (
 
 TAG_ID = UUID("20000000-0000-0000-0000-000000000001")
 OTHER_TAG_ID = UUID("20000000-0000-0000-0000-000000000002")
+BACKUP_TAG_ID = UUID("20000000-0000-0000-0000-000000000003")
 
 
-def build_entity_package(*, package_version: str = "1.0.0") -> bytes:
+def build_entity_package(
+    *,
+    package_version: str = "1.0.0",
+    multiple_devices: bool = False,
+    manual_failover: bool = False,
+) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
         "id: acceptance.platform-liveness\n"
@@ -39,20 +46,38 @@ def build_entity_package(*, package_version: str = "1.0.0") -> bytes:
         "direction: R\n"
     ).encode()
     entity_slot = (
-        "schemaVersion: zizu.entity-instance-slot/v1alpha1\n"
-        "id: slot.pcs-primary\n"
-        "kind: entity_instance_slot\n"
-        "deviceCategory: pcs\n"
-        "count: 1\n"
-        "instanceKeyParameter: pcs.instance_key\n"
-        "displayName: Primary PCS\n"
-        "freshness: 30s\n"
-        "requiredEntities:\n"
-        "  - definition: pcs.activePower\n"
-        "    matcher:\n"
-        "      id: matcher.pcs-active-power\n"
-        "      deviceKeyParameter: pcs.device_key\n"
-        "      tagName: ActivePower\n"
+        (
+            "schemaVersion: zizu.entity-instance-slot/v1alpha1\n"
+            "id: slot.pcs-primary\n"
+            "kind: entity_instance_slot\n"
+            "deviceCategory: pcs\n"
+            "instancesParameter: pcs.instances\n"
+            "displayName: PCS\n"
+            "freshness: 30s\n"
+            "requiredEntities:\n"
+            "  - definition: pcs.activePower\n"
+            "    matcher:\n"
+            "      id: matcher.pcs-active-power\n"
+            "      tagName: ActivePower\n"
+            + ("      failoverPolicy: manual\n" if manual_failover else "")
+        )
+        if multiple_devices
+        else (
+            "schemaVersion: zizu.entity-instance-slot/v1alpha1\n"
+            "id: slot.pcs-primary\n"
+            "kind: entity_instance_slot\n"
+            "deviceCategory: pcs\n"
+            "count: 1\n"
+            "instanceKeyParameter: pcs.instance_key\n"
+            "displayName: Primary PCS\n"
+            "freshness: 30s\n"
+            "requiredEntities:\n"
+            "  - definition: pcs.activePower\n"
+            "    matcher:\n"
+            "      id: matcher.pcs-active-power\n"
+            "      deviceKeyParameter: pcs.device_key\n"
+            "      tagName: ActivePower\n"
+        )
     ).encode()
     entity_acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -76,14 +101,26 @@ def build_entity_package(*, package_version: str = "1.0.0") -> bytes:
         "platform:\n"
         "  version: \">=0.4.77,<0.5.0\"\n"
         "parameters:\n"
-        "  - id: pcs.instance_key\n"
-        "    type: string\n"
-        "    required: true\n"
-        "    description: Stable site-local PCS key\n"
-        "  - id: pcs.device_key\n"
-        "    type: string\n"
-        "    required: true\n"
-        "    description: Source catalog device key\n"
+        + (
+            "  - id: pcs.instances\n"
+            "    type: device_instances\n"
+            "    required: true\n"
+            "    description: Stable PCS instance and source keys\n"
+            "    minimumItems: 1\n"
+            "    maximumItems: 16\n"
+            if multiple_devices
+            else (
+                "  - id: pcs.instance_key\n"
+                "    type: string\n"
+                "    required: true\n"
+                "    description: Stable site-local PCS key\n"
+                "  - id: pcs.device_key\n"
+                "    type: string\n"
+                "    required: true\n"
+                "    description: Source catalog device key\n"
+            )
+        )
+        +
         "assets:\n"
         "  - id: acceptance.platform-liveness\n"
         "    kind: acceptance\n"
@@ -117,8 +154,10 @@ def build_entity_package(*, package_version: str = "1.0.0") -> bytes:
 
 class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def build_app(*, sources: tuple) -> FastAPI:
+    def build_app(*, sources: tuple, legacy_entities: tuple = ()) -> FastAPI:
         from app.api.entity_instances import (
+            get_entity_instance_catalog,
+            get_entity_instance_failover,
             get_entity_instance_runtime,
             router as entity_instance_router,
         )
@@ -127,6 +166,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             router as delivery_router,
         )
         from app.api.health import router as health_router
+        from app.api.rules import router as rules_router
         from app.services.entity_instance_registry import (
             EntityInstanceRegistry,
             InMemoryEntityInstanceRepository,
@@ -138,6 +178,8 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             InMemoryObservationCatalog,
             InMemoryNeuronProtocolSimulator,
         )
+        from app.services.entity_instance_catalog import EntityInstanceCatalog
+        from app.services.entity_instance_failover import EntityFailoverPolicy
         from app.services.solution_delivery import (
             InMemoryDeliveryRepository,
             SolutionDelivery,
@@ -145,14 +187,17 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
 
         delivery_repository = InMemoryDeliveryRepository()
         source_catalog = InMemorySourceCatalog(sources)
+        entity_repository = InMemoryEntityInstanceRepository(legacy_entities=legacy_entities)
         registry = EntityInstanceRegistry(
-            InMemoryEntityInstanceRepository(),
+            entity_repository,
             source_catalog,
             delivery_repository.site_configuration_version,
         )
         observations = InMemoryObservationCatalog()
         simulator = InMemoryNeuronProtocolSimulator(source_catalog, observations)
         runtime = EntityInstanceRuntime(registry, observations)
+        catalog = EntityInstanceCatalog(entity_repository)
+        failover = EntityFailoverPolicy(entity_repository)
         app = FastAPI()
 
         @app.post("/protocol-simulator/neuron")
@@ -168,6 +213,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(health_router, prefix="/api/v1")
         app.include_router(delivery_router, prefix="/api/v1")
         app.include_router(entity_instance_router, prefix="/api/v1")
+        app.include_router(rules_router, prefix="/api/v1")
         delivery = SolutionDelivery(
             delivery_repository,
             platform_version="0.4.77",
@@ -177,16 +223,18 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
         app.dependency_overrides[get_entity_instance_runtime] = lambda: runtime
+        app.dependency_overrides[get_entity_instance_catalog] = lambda: catalog
+        app.dependency_overrides[get_entity_instance_failover] = lambda: failover
         return app
 
     @staticmethod
-    def source(tag_id: UUID = TAG_ID):
+    def source(tag_id: UUID = TAG_ID, *, device_key: str = "PCS-01"):
         from app.services.entity_instance_registry import SourceDescriptor
 
         return SourceDescriptor(
             tag_id=tag_id,
-            device_key="PCS-01",
-            device_name="PCS-01",
+            device_key=device_key,
+            device_name=device_key,
             tag_name="ActivePower",
             data_type="FLOAT",
             unit="kW",
@@ -308,6 +356,474 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 plan["entity_identity_installation_id"],
                 upgraded_plan.json()["entity_identity_installation_id"],
             )
+
+    async def test_two_same_definition_devices_have_stable_non_crossed_instances(self) -> None:
+        legacy_unique_id = UUID("30000000-0000-0000-0000-000000000001")
+        legacy_ambiguous_id = UUID("30000000-0000-0000-0000-000000000002")
+        legacy_missing_id = UUID("30000000-0000-0000-0000-000000000003")
+        app = self.build_app(
+            sources=(
+                self.source(TAG_ID, device_key="PCS-01"),
+                self.source(OTHER_TAG_ID, device_key="PCS-02"),
+            ),
+            legacy_entities=(
+                (legacy_unique_id, "legacy.pcs-a-power", (TAG_ID,)),
+                (
+                    legacy_ambiguous_id,
+                    "legacy.global-pcs-power",
+                    (TAG_ID, OTHER_TAG_ID),
+                ),
+                (
+                    legacy_missing_id,
+                    "legacy.retired-meter-power",
+                    (UUID("20000000-0000-0000-0000-000000000099"),),
+                ),
+            ),
+        )
+        parameters = {
+            "pcs.instances": [
+                {
+                    "instance_key": "PCS-01",
+                    "device_key": "PCS-01",
+                    "display_name": "PCS A",
+                },
+                {
+                    "instance_key": "PCS-02",
+                    "device_key": "PCS-02",
+                    "display_name": "PCS B",
+                },
+            ]
+        }
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "multi-pcs.zizu.zip",
+                        build_entity_package(multiple_devices=True),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": parameters},
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            entity_items = [
+                item for item in planned.json()["items"] if item["kind"] == "entity_binding"
+            ]
+            self.assertEqual(2, len(entity_items))
+            self.assertEqual(
+                {"PCS-01": str(TAG_ID), "PCS-02": str(OTHER_TAG_ID)},
+                {item["instance_key"]: item["selected_tag_id"] for item in entity_items},
+            )
+
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-multi-pcs"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            ids_by_key = {
+                item["instance_key"]: item["entity_instance_id"] for item in entity_items
+            }
+            self.assertEqual(2, len(set(ids_by_key.values())))
+            catalog = await client.get("/api/v1/entity-instances")
+            self.assertEqual(200, catalog.status_code, catalog.text)
+            self.assertEqual(2, catalog.json()["total"])
+            self.assertEqual(
+                {"PCS-01", "PCS-02"},
+                {item["instance_key"] for item in catalog.json()["items"]},
+            )
+            migration = await client.get(
+                "/api/v1/entity-instances/legacy-migration-preview"
+            )
+            self.assertEqual(200, migration.status_code, migration.text)
+            self.assertEqual(
+                {"unique": 1, "missing": 1, "ambiguous": 1},
+                migration.json()["counts"],
+            )
+            preview_by_id = {
+                item["legacy_entity_id"]: item for item in migration.json()["items"]
+            }
+            self.assertEqual(
+                [ids_by_key["PCS-01"]],
+                preview_by_id[str(legacy_unique_id)]["candidate_entity_instance_ids"],
+            )
+            self.assertEqual(
+                {ids_by_key["PCS-01"], ids_by_key["PCS-02"]},
+                set(
+                    preview_by_id[str(legacy_ambiguous_id)][
+                        "candidate_entity_instance_ids"
+                    ]
+                ),
+            )
+            self.assertEqual(
+                [],
+                preview_by_id[str(legacy_missing_id)]["candidate_entity_instance_ids"],
+            )
+
+            legacy_rule = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "legacy ambiguous input",
+                    "rule_type": "alarm",
+                    "jdm_content": {
+                        "_config": {"sourceEntityIds": [str(legacy_ambiguous_id)]}
+                    },
+                },
+            )
+            self.assertEqual(409, legacy_rule.status_code, legacy_rule.text)
+            self.assertEqual(
+                "ENTITY_REFERENCE_LEGACY_FORBIDDEN",
+                legacy_rule.json()["detail"]["code"],
+            )
+
+            rule_id = UUID("40000000-0000-0000-0000-000000000001")
+
+            class RuleCursor:
+                description = [
+                    (name,) for name in (
+                        "id", "name", "rule_type", "jdm_content", "version",
+                        "enabled", "created_at", "updated_at",
+                    )
+                ]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def execute(self, query, params):
+                    self.params = params
+
+                def fetchone(self):
+                    now = datetime.now(timezone.utc)
+                    return (
+                        rule_id,
+                        "PCS A input",
+                        "alarm",
+                        json.dumps({
+                            "_config": {
+                                "sourceEntityInstanceIds": [ids_by_key["PCS-01"]],
+                                "inputMappings": {"power": ids_by_key["PCS-01"]},
+                            }
+                        }),
+                        1,
+                        True,
+                        now,
+                        now,
+                    )
+
+            class RuleConnection:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def cursor(self):
+                    return RuleCursor()
+
+                def commit(self):
+                    return None
+
+            @contextmanager
+            def rule_connection():
+                yield RuleConnection()
+
+            from unittest.mock import patch
+            with patch(
+                "app.services.telemetry_store.get_connection",
+                rule_connection,
+            ):
+                stable_rule = await client.post(
+                    "/api/v1/rules",
+                    json={
+                        "name": "PCS A input",
+                        "rule_type": "alarm",
+                        "jdm_content": {
+                            "_config": {
+                                "sourceEntityInstanceIds": [ids_by_key["PCS-01"]],
+                                "inputMappings": {"power": ids_by_key["PCS-01"]},
+                            }
+                        },
+                    },
+                )
+            self.assertEqual(200, stable_rule.status_code, stable_rule.text)
+            self.assertEqual(str(rule_id), stable_rule.json()["id"])
+
+            for device_key, value in (("PCS-01", 101.5), ("PCS-02", 202.5)):
+                published = await client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "message": {
+                            "node": device_key,
+                            "timestamp": round(datetime.now(timezone.utc).timestamp() * 1000),
+                            "values": {"ActivePower": value},
+                        }
+                    },
+                )
+                self.assertEqual(1, published.json()["published"])
+                realtime = await client.get(
+                    f"/api/v1/entity-instances/{ids_by_key[device_key]}/realtime"
+                )
+                self.assertEqual(value, realtime.json()["value"])
+
+            renamed_parameters = {
+                "pcs.instances": [
+                    {**parameters["pcs.instances"][0], "display_name": "East PCS"},
+                    {**parameters["pcs.instances"][1], "display_name": "West PCS"},
+                ]
+            }
+            renamed_plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": renamed_parameters},
+            )
+            renamed = await client.post(
+                f"/api/v1/install-plans/{renamed_plan.json()['id']}/apply",
+                json={"plan_digest": renamed_plan.json()["digest"]},
+                headers={"Idempotency-Key": "rename-multi-pcs"},
+            )
+            self.assertEqual(201, renamed.status_code, renamed.text)
+            self.assertEqual(
+                set(ids_by_key.values()),
+                set(renamed.json()["entity_instance_ids"]),
+            )
+
+    async def test_manual_source_failover_is_explicit_and_audited(self) -> None:
+        legacy_standby_id = UUID("30000000-0000-0000-0000-000000000004")
+        app = self.build_app(
+            sources=(
+                self.source(TAG_ID, device_key="PCS-01"),
+                self.source(BACKUP_TAG_ID, device_key="PCS-01-BACKUP"),
+            ),
+            legacy_entities=((legacy_standby_id, "legacy.standby", (BACKUP_TAG_ID,)),),
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "pcs-failover.zizu.zip",
+                        build_entity_package(
+                            multiple_devices=True,
+                            manual_failover=True,
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instances": [
+                            {
+                                "instance_key": "PCS-01",
+                                "device_key": "PCS-01",
+                                "standby_device_key": "PCS-01-BACKUP",
+                            }
+                        ]
+                    }
+                },
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            binding = next(
+                item for item in planned.json()["items"]
+                if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("manual", binding["failover_policy"])
+            self.assertEqual(str(BACKUP_TAG_ID), binding["standby_tag_id"])
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-manual-failover"},
+            )
+            entity_instance_id = installed.json()["entity_instance_ids"][0]
+
+            published_backup = await client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "message": {
+                        "node": "PCS-01-BACKUP",
+                        "timestamp": round(datetime.now(timezone.utc).timestamp() * 1000),
+                        "values": {"ActivePower": 77.5},
+                    }
+                },
+            )
+            self.assertEqual(1, published_backup.json()["published"])
+            before_switch = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime"
+            )
+            self.assertEqual(404, before_switch.status_code, before_switch.text)
+            self.assertEqual("ENTITY_DATA_MISSING", before_switch.json()["detail"]["code"])
+
+            switched = await client.post(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                json={
+                    "expected_current_role": "primary",
+                    "target_role": "standby",
+                    "reason": "Primary gateway maintenance",
+                },
+            )
+            self.assertEqual(200, switched.status_code, switched.text)
+            self.assertEqual("standby", switched.json()["current_role"])
+            self.assertEqual(1, switched.json()["switch_count"])
+            self.assertEqual("user:00000000-0000-0000-0000-000000000002", switched.json()["actor"])
+            self.assertEqual("Primary gateway maintenance", switched.json()["reason"])
+            after_switch = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime"
+            )
+            self.assertEqual(200, after_switch.status_code, after_switch.text)
+            self.assertEqual(77.5, after_switch.json()["value"])
+            preview = await client.get(
+                "/api/v1/entity-instances/legacy-migration-preview"
+            )
+            standby_preview = next(
+                item for item in preview.json()["items"]
+                if item["legacy_entity_id"] == str(legacy_standby_id)
+            )
+            self.assertEqual("unique", standby_preview["classification"])
+            self.assertEqual(
+                [entity_instance_id],
+                standby_preview["candidate_entity_instance_ids"],
+            )
+
+            renamed_plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instances": [
+                            {
+                                "instance_key": "PCS-01",
+                                "device_key": "PCS-01",
+                                "standby_device_key": "PCS-01-BACKUP",
+                                "display_name": "Renamed PCS",
+                            }
+                        ]
+                    }
+                },
+            )
+            upgraded = await client.post(
+                f"/api/v1/install-plans/{renamed_plan.json()['id']}/apply",
+                json={"plan_digest": renamed_plan.json()["digest"]},
+                headers={"Idempotency-Key": "upgrade-manual-failover"},
+            )
+            self.assertEqual(201, upgraded.status_code, upgraded.text)
+            self.assertEqual([entity_instance_id], upgraded.json()["entity_instance_ids"])
+            after_upgrade = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime"
+            )
+            self.assertEqual(77.5, after_upgrade.json()["value"])
+
+            stale_retry = await client.post(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                json={
+                    "expected_current_role": "primary",
+                    "target_role": "standby",
+                    "reason": "Unsafe duplicate retry",
+                },
+            )
+            self.assertEqual(409, stale_retry.status_code, stale_retry.text)
+            self.assertEqual(
+                "ENTITY_FAILOVER_STATE_CHANGED",
+                stale_retry.json()["detail"]["code"],
+            )
+
+            status_response = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover"
+            )
+            self.assertEqual("standby", status_response.json()["current_role"])
+            self.assertEqual(1, len(status_response.json()["audit"]), status_response.text)
+
+            without_policy = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "pcs-no-failover-v2.zizu.zip",
+                        build_entity_package(
+                            package_version="2.0.0",
+                            multiple_devices=True,
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            removal_plan = await client.post(
+                f"/api/v1/solution-packages/{without_policy.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instances": [
+                            {"instance_key": "PCS-01", "device_key": "PCS-01"}
+                        ]
+                    }
+                },
+            )
+            blocked_removal = await client.post(
+                f"/api/v1/install-plans/{removal_plan.json()['id']}/apply",
+                json={"plan_digest": removal_plan.json()["digest"]},
+                headers={"Idempotency-Key": "remove-active-standby-policy"},
+            )
+            self.assertEqual(409, blocked_removal.status_code, blocked_removal.text)
+            self.assertEqual(
+                "ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY",
+                blocked_removal.json()["detail"]["code"],
+            )
+            returned_primary = await client.post(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                json={
+                    "expected_current_role": "standby",
+                    "target_role": "primary",
+                    "reason": "Remove retired standby policy",
+                },
+            )
+            self.assertEqual(200, returned_primary.status_code, returned_primary.text)
+            removed = await client.post(
+                f"/api/v1/install-plans/{removal_plan.json()['id']}/apply",
+                json={"plan_digest": removal_plan.json()["digest"]},
+                headers={"Idempotency-Key": "remove-primary-policy"},
+            )
+            self.assertEqual(201, removed.status_code, removed.text)
+            missing_policy = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover"
+            )
+            self.assertEqual(404, missing_policy.status_code, missing_policy.text)
+            self.assertEqual(
+                "ENTITY_FAILOVER_NOT_CONFIGURED",
+                missing_policy.json()["detail"]["code"],
+            )
+
+    def test_rule_instance_context_reuses_registry_resolution_and_runtime_read(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from app.services.rule_engine import _entity_instance_context
+
+        entity_id = UUID("50000000-0000-0000-0000-000000000001")
+        registry = Mock()
+        registry.resolve.return_value = SimpleNamespace(
+            tag_id=TAG_ID,
+            device_instance_id=UUID("50000000-0000-0000-0000-000000000002"),
+            entity_instance_id=entity_id,
+        )
+        runtime = Mock()
+        runtime.read.return_value = SimpleNamespace(value=125.5)
+        with patch(
+            "app.api.solution_delivery.get_default_entity_instance_registry",
+            return_value=registry,
+        ), patch(
+            "app.api.solution_delivery.get_default_entity_instance_runtime",
+            return_value=runtime,
+        ):
+            context = _entity_instance_context({str(entity_id)})
+
+        registry.resolve.assert_called_once_with(entity_id)
+        runtime.read.assert_called_once_with(entity_id)
+        self.assertEqual(125.5, context[str(entity_id)]["value"])
 
     async def test_ambiguous_sources_require_explicit_selection_and_stale_plan_is_zero_write(
         self,

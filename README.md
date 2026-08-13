@@ -380,6 +380,10 @@ zizu/
 | GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
 | GET | `/api/v1/site-configuration-versions/{version}` | 查询不可变站点配置版本 |
 | GET | `/api/v1/entity-instances/{id}/realtime` | 从实体实例唯一确认主来源读取实时工程值 |
+| GET | `/api/v1/entity-instances` | 查询规则/工作台可引用的稳定实体实例目录 |
+| GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
+| GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
+| POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
 
@@ -390,7 +394,8 @@ zizu/
 
 解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。创建安装计划的请求体为
 `{"parameters":{"site.code":"EMS-01","pcs.count":2},"secret_references":{"neuron.credentials":"secret://site/neuron/credentials"}}`。
-参数契约支持 string、integer、number、boolean、enum、address、port、duration 和 secret；
+参数契约支持 string、integer、number、boolean、enum、address、port、duration、secret 和
+`device_instances`；
 可声明单位、必填、默认值、数值范围、枚举和正则模式。Secret 参数禁止提交明文值，只
 接受 `secret://` 引用；缺失或非法输入产生稳定 blocker，阻止安装且不改变站点版本。
 包导入结果和安装计划都会返回 `parameter_contracts`，实施端可据此生成配置表单；计划
@@ -405,6 +410,9 @@ zizu/
 `required` 和非空 `description`；非 Secret 项可声明与类型一致的 `default`。类型专属字段
 仅允许：string/address 的 `pattern`，integer/number 的 `unit`、`minimum`、`maximum`，
 port 的 `minimum`、`maximum`，enum 的非空唯一字符串 `values`。Secret 不允许默认值。
+`device_instances` 使用 `minimumItems`、`maximumItems`（1..64），值是由
+`instance_key`、`device_key`、可选 `standby_device_key` 与可选 `display_name` 组成的列表；
+实例键和主来源键必须分别唯一。
 以下片段可直接作为解决方案包的参数入口：
 
 ```yaml
@@ -436,9 +444,16 @@ parameters:
     type: secret
     required: true
     description: Runtime Neuron credential reference
+  - id: pcs.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 16
+    description: Site PCS instances and source catalog keys
 ```
 
-设备实例与实体实例也由解决方案包声明，不另建一套现场 CRUD。首版支持单设备槽位；
+设备实例与实体实例也由解决方案包声明，不另建一套现场 CRUD。槽位既兼容单设备参数，
+也可通过一个 `device_instances` 站点参数生成多台同类设备；
 安装计划根据稳定设备键与规范点位名列出候选，唯一兼容候选可预选，多候选必须由
 engineer 在 `binding_selections` 中明确确认。来源目录或站点配置在批准后变化时，执行
 返回过期错误并保持零写入；运行期只读已确认的唯一主来源，不按优先级或创建顺序猜测。
@@ -496,6 +511,39 @@ requiredEntities:
       tagName: ActivePower
 ```
 
+同一实体定义需要多台 PCS 实例时，槽位改为 `instancesParameter`，matcher 的设备键直接
+来自列表中的 `device_key`，无需复制定义或槽位：
+
+```yaml
+# solution.yaml parameters
+parameters:
+  - id: pcs.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 16
+    description: Site PCS instances and source catalog keys
+---
+# entities/pcs-fleet.yaml
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.pcs
+kind: entity_instance_slot
+deviceCategory: pcs
+instancesParameter: pcs.instances
+displayName: PCS
+freshness: 30s
+requiredEntities:
+  - definition: pcs.activePower
+    matcher:
+      id: matcher.pcs-active-power
+      tagName: ActivePower
+```
+
+创建计划时提交例如
+`{"parameters":{"pcs.instances":[{"instance_key":"PCS-01","device_key":"edge-pcs-a","display_name":"东侧 PCS"},{"instance_key":"PCS-02","device_key":"edge-pcs-b","display_name":"西侧 PCS"}]}}`。
+列表顺序和 `display_name` 变化不改变设备/实体实例 ID；`instance_key` 是站点稳定身份，
+不能用展示名称代替。
+
 ```yaml
 # acceptance/pcs-active-power.yaml
 schemaVersion: zizu.acceptance/v1alpha1
@@ -514,6 +562,25 @@ timeout: 5s
 `ENTITY_BINDING_TYPE_MISMATCH`、`ENTITY_BINDING_UNIT_MISMATCH`、
 `ENTITY_BINDING_DIRECTION_MISMATCH` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
 绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
+
+规则输入的公开配置只接受 `_config.sourceEntityInstanceIds` 和将决策字段映射到实例 UUID
+的 `_config.inputMappings`。新建/更新规则出现旧 `_config.sourceEntityIds` 时返回
+`ENTITY_REFERENCE_LEGACY_FORBIDDEN`；已保存旧规则仅只读兼容并返回迁移提示。
+`GET /api/v1/entity-instances/legacy-migration-preview` 根据已确认的物理来源将旧实体分类为
+`unique`、`missing` 或 `ambiguous`，始终返回 `writes_applied: 0`，不自动猜测或改写规则。
+实际规则引用同时持久化到带实体实例外键的 `t_rule_entity_instance_refs`。告警、控制和
+EMS 工作台将在各自状态机/命令/工作台票据中复用同一实例目录；旧控制输出路径仍是兼容
+边界，不代表统一控制命令已完成。
+
+确需主备来源时，包在 matcher 上显式声明 `failoverPolicy: manual`，对应实例参数必须提供
+与主来源不同的 `standby_device_key`。安装计划分别展示主、备候选并要求两者都唯一兼容；
+安装后默认只读 primary，不会因缺失、陈旧或坏质量自动跳到 standby。engineer/admin 通过
+`POST /api/v1/entity-instances/{id}/source-failover` 提交
+`{"expected_current_role":"primary","target_role":"standby","reason":"..."}`；服务端以
+乐观状态检查执行原子切换并追加不可变审计，重复旧状态请求返回
+`ENTITY_FAILOVER_STATE_CHANGED`。升级若要删除策略或更换主备来源，必须先显式切回
+primary；standby 状态下变更会返回 `ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY`，
+避免包升级在没有切换审计的情况下静默改源。
 
 安装执行请求体为
 `{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带

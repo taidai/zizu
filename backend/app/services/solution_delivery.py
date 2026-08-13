@@ -297,6 +297,8 @@ class SolutionDelivery:
                 {
                     "entity_instance_id": item["entity_instance_id"],
                     "selected_tag_id": item["selected_tag_id"],
+                    "failover_policy": item.get("failover_policy"),
+                    "standby_tag_id": item.get("standby_tag_id"),
                 }
                 for item in entity_items
             ],
@@ -844,6 +846,47 @@ def _resolve_entity_slots(
 ) -> tuple[dict[str, Any], ...]:
     resolved: list[dict[str, Any]] = []
     for slot in slots:
+        instances_parameter = slot.get("instances_parameter")
+        if instances_parameter is not None:
+            instances = parameters.get(instances_parameter)
+            if not isinstance(instances, list) or not instances:
+                raise DeliveryError(
+                    "ENTITY_SLOT_PARAMETER_INVALID",
+                    "Entity slot device instance parameter is missing",
+                )
+            for instance in instances:
+                definitions = []
+                for definition in slot["definitions"]:
+                    matcher = {
+                        "id": definition["matcher"]["id"],
+                        "device_key": instance["device_key"],
+                        "tag_name": definition["matcher"]["tag_name"],
+                    }
+                    if definition["matcher"].get("failover_policy") == "manual":
+                        standby_device_key = instance.get("standby_device_key")
+                        if not isinstance(standby_device_key, str) or not standby_device_key:
+                            raise DeliveryError(
+                                "ENTITY_SLOT_PARAMETER_INVALID",
+                                "Manual failover requires a standby device key",
+                            )
+                        matcher.update(
+                            failover_policy="manual",
+                            standby_device_key=standby_device_key,
+                        )
+                    definitions.append({**definition, "matcher": matcher})
+                resolved.append(
+                    {
+                        "id": slot["id"],
+                        "device_category": slot["device_category"],
+                        "instance_key": instance["instance_key"],
+                        "display_name": instance.get("display_name") or (
+                            f"{slot['display_name']} {instance['instance_key']}"
+                        ),
+                        "freshness_seconds": slot["freshness_seconds"],
+                        "definitions": definitions,
+                    }
+                )
+            continue
         instance_key = parameters.get(slot["instance_key_parameter"])
         if not isinstance(instance_key, str) or not instance_key:
             raise DeliveryError(

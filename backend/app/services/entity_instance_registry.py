@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any, Callable, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
+
+from app.services.entity_instance_catalog import (
+    EntityInstanceDescriptor,
+    LegacyEntityMigrationItem,
+)
 
 
 class EntityInstanceError(ValueError):
@@ -147,7 +153,6 @@ class EntityInstanceRepository(Protocol):
 
     def resolve(self, entity_instance_id: UUID) -> ResolvedEntitySource | None: ...
 
-
 class InMemorySourceCatalog:
     """固定来源目录 Adapter；版本由规范内容决定，与查询顺序无关。"""
 
@@ -177,13 +182,19 @@ class InMemorySourceCatalog:
 class InMemoryEntityInstanceRepository:
     """辅助测试 Adapter；应用计划原子、幂等且不读旧绑定。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        legacy_entities: tuple[tuple[UUID, str, tuple[UUID, ...]], ...] = (),
+    ) -> None:
         self._plans: dict[UUID, EntityInstancePlan] = {}
         self._plans_by_digest: dict[str, EntityInstancePlan] = {}
         self._outcomes: dict[UUID, ApplyOutcome] = {}
         self._devices: dict[UUID, dict[str, Any]] = {}
         self._entities: dict[UUID, dict[str, Any]] = {}
         self._bindings: dict[UUID, ResolvedEntitySource] = {}
+        self._legacy_entities = legacy_entities
+        self._failovers: dict[UUID, dict[str, Any]] = {}
 
     @property
     def device_instance_count(self) -> int:
@@ -231,32 +242,49 @@ class InMemoryEntityInstanceRepository:
         pending_devices: dict[UUID, dict[str, Any]] = {}
         pending_entities: dict[UUID, dict[str, Any]] = {}
         pending_bindings: dict[UUID, ResolvedEntitySource] = {}
-        used_tags = {source.tag_id for source in self._bindings.values()}
+        pending_failovers: dict[UUID, dict[str, Any]] = {}
+        removed_failovers: set[UUID] = set()
+        reserved_tags = {
+            source.tag_id: entity_id for entity_id, source in self._bindings.items()
+        }
+        for entity_id, failover in self._failovers.items():
+            reserved_tags[failover["primary_tag_id"]] = entity_id
+            reserved_tags[failover["standby_tag_id"]] = entity_id
         for item in plan.items:
             tag_id = UUID(item["selected_tag_id"])
-            if tag_id in used_tags and not any(
-                source.entity_instance_id == UUID(item["entity_instance_id"])
-                and source.tag_id == tag_id
-                for source in self._bindings.values()
-            ):
-                raise EntityInstanceError(
-                    "ENTITY_BINDING_SOURCE_IN_USE",
-                    "Physical source already has an active primary binding",
-                )
             device_id = UUID(item["device_instance_id"])
             entity_id = UUID(item["entity_instance_id"])
+            standby_tag_id = (
+                UUID(item["standby_tag_id"]) if item.get("standby_tag_id") else None
+            )
+            for reserved_tag_id in (tag_id, standby_tag_id):
+                if reserved_tag_id is None:
+                    continue
+                owner = reserved_tags.get(reserved_tag_id)
+                if owner is not None and owner != entity_id:
+                    raise EntityInstanceError(
+                        "ENTITY_BINDING_SOURCE_IN_USE",
+                        "Physical source is reserved by another entity instance",
+                    )
+                reserved_tags[reserved_tag_id] = entity_id
             binding_id = UUID(item["binding_id"])
             audit_id = UUID(item["confirmation_audit_id"])
             pending_devices[device_id] = {
                 "slot_id": item["slot_id"],
                 "instance_key": item["instance_key"],
                 "display_name": item["device_display_name"],
+                "device_category": item["device_category"],
             }
             pending_entities[entity_id] = {
                 "definition_id": item["definition_id"],
                 "device_instance_id": device_id,
+                "display_name": item["definition_display_name"],
+                "data_type": item["data_type"],
+                "unit": item["unit"],
+                "direction": item["direction"],
+                "freshness_seconds": float(item["freshness_seconds"]),
             }
-            pending_bindings[entity_id] = ResolvedEntitySource(
+            resolved_binding = ResolvedEntitySource(
                 entity_instance_id=entity_id,
                 definition_id=item["definition_id"],
                 instance_key=item["instance_key"],
@@ -270,14 +298,51 @@ class InMemoryEntityInstanceRepository:
                 direction=item["direction"],
                 freshness_seconds=float(item["freshness_seconds"]),
             )
+            if item.get("failover_policy") == "manual" and standby_tag_id:
+                previous = self._failovers.get(entity_id)
+                if previous and previous["current_role"] == "standby" and (
+                    previous["primary_tag_id"] != tag_id
+                    or previous["standby_tag_id"] != standby_tag_id
+                ):
+                    raise EntityInstanceError(
+                        "ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY",
+                        "Switch the entity instance back to primary before changing its failover policy",
+                    )
+                failover = {
+                    "primary_tag_id": tag_id,
+                    "standby_tag_id": standby_tag_id,
+                    "current_role": previous["current_role"] if previous else "primary",
+                    "switch_count": previous["switch_count"] if previous else 0,
+                    "audit": list(previous["audit"]) if previous else [],
+                }
+                resolved_binding = ResolvedEntitySource(
+                    **{
+                        **asdict(resolved_binding),
+                        "tag_id": failover[f"{failover['current_role']}_tag_id"],
+                    }
+                )
+                pending_failovers[entity_id] = failover
+            elif (
+                entity_id in self._failovers
+                and self._failovers[entity_id]["current_role"] == "standby"
+            ):
+                raise EntityInstanceError(
+                    "ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY",
+                    "Switch the entity instance back to primary before removing its failover policy",
+                )
+            else:
+                removed_failovers.add(entity_id)
+            pending_bindings[entity_id] = resolved_binding
             device_ids.append(device_id)
             entity_ids.append(entity_id)
             binding_ids.append(binding_id)
-            used_tags.add(tag_id)
 
         self._devices.update(pending_devices)
         self._entities.update(pending_entities)
         self._bindings.update(pending_bindings)
+        for entity_id in removed_failovers:
+            self._failovers.pop(entity_id, None)
+        self._failovers.update(pending_failovers)
         outcome = ApplyOutcome(
             plan.id,
             tuple(dict.fromkeys(device_ids)),
@@ -289,6 +354,119 @@ class InMemoryEntityInstanceRepository:
 
     def resolve(self, entity_instance_id: UUID) -> ResolvedEntitySource | None:
         return self._bindings.get(entity_instance_id)
+
+    def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
+        descriptors = []
+        for entity_id, entity in self._entities.items():
+            device = self._devices[entity["device_instance_id"]]
+            descriptors.append(
+                EntityInstanceDescriptor(
+                    id=entity_id,
+                    device_instance_id=entity["device_instance_id"],
+                    slot_id=device["slot_id"],
+                    instance_key=device["instance_key"],
+                    device_category=device["device_category"],
+                    device_display_name=device["display_name"],
+                    definition_id=entity["definition_id"],
+                    display_name=entity["display_name"],
+                    data_type=entity["data_type"],
+                    unit=entity["unit"],
+                    direction=entity["direction"],
+                    freshness_seconds=entity["freshness_seconds"],
+                )
+            )
+        return tuple(sorted(descriptors, key=lambda item: (item.instance_key, item.definition_id)))
+
+    def failover_state(self, entity_instance_id: UUID) -> EntityFailoverState | None:
+        from app.services.entity_instance_failover import EntityFailoverState
+
+        state = self._failovers.get(entity_instance_id)
+        if state is None:
+            return None
+        latest = state["audit"][-1] if state["audit"] else {}
+        return EntityFailoverState(
+            entity_instance_id,
+            state["current_role"],
+            state["switch_count"],
+            latest.get("actor"),
+            latest.get("reason"),
+            latest.get("changed_at"),
+            tuple(
+                {**item, "changed_at": item["changed_at"].isoformat()}
+                for item in state["audit"]
+            ),
+        )
+
+    def switch_failover(
+        self,
+        entity_instance_id: UUID,
+        expected_current_role: str,
+        target_role: str,
+        actor: str,
+        reason: str,
+    ) -> EntityFailoverState:
+        state = self._failovers.get(entity_instance_id)
+        if state is None:
+            raise EntityInstanceError(
+                "ENTITY_FAILOVER_NOT_CONFIGURED",
+                "Entity instance has no manual failover policy",
+            )
+        if state["current_role"] != expected_current_role:
+            raise EntityInstanceError(
+                "ENTITY_FAILOVER_STATE_CHANGED",
+                "Entity source role changed after it was read",
+            )
+        if target_role == expected_current_role or target_role not in {"primary", "standby"}:
+            raise EntityInstanceError(
+                "ENTITY_FAILOVER_TARGET_INVALID",
+                "Failover target must be the other configured role",
+            )
+        current = self._bindings[entity_instance_id]
+        target_tag_id = state[f"{target_role}_tag_id"]
+        changed_at = datetime.now(timezone.utc)
+        audit = {
+            "from_role": expected_current_role,
+            "to_role": target_role,
+            "actor": actor,
+            "reason": reason,
+            "changed_at": changed_at,
+        }
+        self._bindings[entity_instance_id] = ResolvedEntitySource(
+            **{**asdict(current), "tag_id": target_tag_id}
+        )
+        state["current_role"] = target_role
+        state["switch_count"] += 1
+        state["audit"].append(audit)
+        return self.failover_state(entity_instance_id)  # type: ignore[return-value]
+
+    def preview_legacy(self) -> tuple[LegacyEntityMigrationItem, ...]:
+        candidates_by_tag = {
+            source.tag_id: source.entity_instance_id for source in self._bindings.values()
+        }
+        for entity_id, failover in self._failovers.items():
+            candidates_by_tag[failover["primary_tag_id"]] = entity_id
+            candidates_by_tag[failover["standby_tag_id"]] = entity_id
+        items = []
+        for legacy_id, name, tag_ids in self._legacy_entities:
+            candidates = tuple(
+                sorted(
+                    {
+                        candidates_by_tag[tag_id]
+                        for tag_id in tag_ids
+                        if tag_id in candidates_by_tag
+                    },
+                    key=str,
+                )
+            )
+            classification = (
+                "unique" if len(candidates) == 1
+                else "ambiguous" if len(candidates) > 1
+                else "missing"
+            )
+            items.append(
+                LegacyEntityMigrationItem(legacy_id, name, classification, candidates)
+            )
+        return tuple(items)
 
 
 class EntityInstanceRegistry:
@@ -309,15 +487,16 @@ class EntityInstanceRegistry:
         catalog_version = self._source_catalog.version()
         items: list[dict[str, Any]] = []
         blockers: list[dict[str, str]] = []
-        seen_slot_ids: set[str] = set()
+        seen_slot_instances: set[tuple[str, str]] = set()
         for raw_slot in request.slots:
             slot = _validated_slot(raw_slot)
-            if slot["id"] in seen_slot_ids:
+            slot_instance = (slot["id"], slot["instance_key"])
+            if slot_instance in seen_slot_instances:
                 raise EntityInstanceError(
                     "ENTITY_SLOT_INVALID",
-                    "Entity slot ids must be unique",
+                    "Entity slot instance keys must be unique",
                 )
-            seen_slot_ids.add(slot["id"])
+            seen_slot_instances.add(slot_instance)
             for definition in slot["definitions"]:
                 item, blocker = _plan_definition(
                     request.installation_id,
@@ -430,7 +609,6 @@ class EntityInstanceRegistry:
             )
         return source
 
-
 def _plan_definition(
     installation_id: UUID,
     site_configuration_version: int,
@@ -462,6 +640,17 @@ def _plan_definition(
         and source.device_key == matcher["device_key"]
         and source.tag_name.casefold() == matcher["tag_name"].casefold()
     ]
+    standby_matches = (
+        [
+            source
+            for source in sources
+            if source.enabled
+            and source.device_key == matcher.get("standby_device_key")
+            and source.tag_name.casefold() == matcher["tag_name"].casefold()
+        ]
+        if matcher.get("failover_policy") == "manual"
+        else []
+    )
     reason = (
         f"{matcher['id']}: device_key={matcher['device_key']}, "
         f"tag_name={matcher['tag_name']}"
@@ -469,6 +658,16 @@ def _plan_definition(
     candidates = tuple(
         source.public_dict(matcher_id=matcher["id"], reason=reason)
         for source in sorted(matches, key=lambda item: str(item.tag_id))
+    )
+    standby_candidates = tuple(
+        source.public_dict(
+            matcher_id=matcher["id"],
+            reason=(
+                f"{matcher['id']}: standby_device_key={matcher.get('standby_device_key')}, "
+                f"tag_name={matcher['tag_name']}"
+            ),
+        )
+        for source in sorted(standby_matches, key=lambda item: str(item.tag_id))
     )
     selected_id = selections.get(key)
     selected = next((item for item in matches if item.tag_id == selected_id), None)
@@ -483,6 +682,18 @@ def _plan_definition(
     else:
         selected = selected or matches[0]
         code = _compatibility_code(definition, selected)
+    standby = standby_matches[0] if len(standby_matches) == 1 else None
+    if code == "ENTITY_BINDING_READY" and matcher.get("failover_policy") == "manual":
+        if standby is None:
+            code = (
+                "ENTITY_FAILOVER_STANDBY_MISSING"
+                if not standby_matches
+                else "ENTITY_FAILOVER_STANDBY_AMBIGUOUS"
+            )
+        else:
+            standby_code = _compatibility_code(definition, standby)
+            if standby_code != "ENTITY_BINDING_READY":
+                code = standby_code
 
     ready = code == "ENTITY_BINDING_READY"
     existing = resolve_existing(entity_id)
@@ -510,7 +721,10 @@ def _plan_definition(
         "entity_instance_id": str(entity_id),
         "matcher_id": matcher["id"],
         "candidates": candidates,
+        "standby_candidates": standby_candidates,
         "selected_tag_id": str(selected.tag_id) if ready else None,
+        "failover_policy": matcher.get("failover_policy"),
+        "standby_tag_id": str(standby.tag_id) if ready and standby is not None else None,
         "selection_source": selection_source if ready else None,
         "binding_id": str(binding_id) if binding_id else None,
         "confirmation_audit_id": str(audit_id) if audit_id else None,

@@ -245,32 +245,36 @@ def _validate_entity_assets(
         if declaration["kind"] != "entity_instance_slot":
             continue
         raw = _load_mapping(assets[declaration["path"]], "ASSET_REFERENCE_INVALID")
-        allowed = {
+        common_fields = {
             "schemaVersion",
             "id",
             "kind",
             "deviceCategory",
-            "count",
-            "instanceKeyParameter",
             "displayName",
             "freshness",
             "requiredEntities",
         }
+        legacy_fields = common_fields | {"count", "instanceKeyParameter"}
+        multi_fields = common_fields | {"instancesParameter"}
+        multi_device = set(raw) == multi_fields
         parameter_id = raw.get("instanceKeyParameter")
-        parameter = parameter_contracts.get(parameter_id)
+        instances_parameter_id = raw.get("instancesParameter")
+        parameter = parameter_contracts.get(
+            instances_parameter_id if multi_device else parameter_id
+        )
         required_entities = raw.get("requiredEntities")
         if (
-            set(raw) != allowed
+            set(raw) not in (legacy_fields, multi_fields)
             or raw.get("schemaVersion") != "zizu.entity-instance-slot/v1alpha1"
             or raw.get("id") != declaration["id"]
             or raw.get("kind") != "entity_instance_slot"
-            or raw.get("count") != 1
+            or (not multi_device and raw.get("count") != 1)
             or any(
                 not isinstance(raw.get(field), str) or not raw[field]
                 for field in ("deviceCategory", "displayName", "freshness")
             )
             or parameter is None
-            or parameter["type"] != "string"
+            or parameter["type"] != ("device_instances" if multi_device else "string")
             or not isinstance(required_entities, list)
             or not required_entities
         ):
@@ -288,14 +292,29 @@ def _validate_entity_assets(
                 definition is None
                 or definition["id"] in required_definition_ids
                 or not isinstance(matcher, dict)
-                or set(matcher) != {"id", "deviceKeyParameter", "tagName"}
+                or set(matcher) not in (
+                    ({"id", "tagName"}, {"id", "tagName", "failoverPolicy"})
+                    if multi_device
+                    else ({"id", "deviceKeyParameter", "tagName"},)
+                )
                 or any(
                     not isinstance(matcher.get(field), str) or not matcher[field]
-                    for field in ("id", "deviceKeyParameter", "tagName")
+                    for field in (
+                        ("id", "tagName")
+                        if multi_device
+                        else ("id", "deviceKeyParameter", "tagName")
+                    )
                 )
                 or matcher["id"] in matcher_ids
-                or matcher["deviceKeyParameter"] not in parameter_contracts
-                or parameter_contracts[matcher["deviceKeyParameter"]]["type"] != "string"
+                or matcher.get("failoverPolicy") not in (None, "manual")
+                or (
+                    not multi_device
+                    and (
+                        matcher["deviceKeyParameter"] not in parameter_contracts
+                        or parameter_contracts[matcher["deviceKeyParameter"]]["type"]
+                        != "string"
+                    )
+                )
                 or definition["deviceCategory"] != raw["deviceCategory"]
             ):
                 raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot reference is invalid")
@@ -310,8 +329,17 @@ def _validate_entity_assets(
                     "direction": definition["direction"],
                     "matcher": {
                         "id": matcher["id"],
-                        "device_key_parameter": matcher["deviceKeyParameter"],
                         "tag_name": matcher["tagName"],
+                        **(
+                            {}
+                            if multi_device
+                            else {"device_key_parameter": matcher["deviceKeyParameter"]}
+                        ),
+                        **(
+                            {"failover_policy": "manual"}
+                            if matcher.get("failoverPolicy") == "manual"
+                            else {}
+                        ),
                     },
                 }
             )
@@ -321,7 +349,11 @@ def _validate_entity_assets(
             {
                 "id": raw["id"],
                 "device_category": raw["deviceCategory"],
-                "instance_key_parameter": parameter_id,
+                **(
+                    {"instances_parameter": instances_parameter_id}
+                    if multi_device
+                    else {"instance_key_parameter": parameter_id}
+                ),
                 "display_name": raw["displayName"],
                 "freshness_seconds": freshness,
                 "definitions": normalized_definitions,

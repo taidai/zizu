@@ -27,6 +27,37 @@ from loguru import logger
 from app.services.gorules_adapter import evaluate_rule
 
 
+def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]]:
+    """通过 Registry.resolve 读取已确认来源，再从该来源取新鲜 GOOD 观测。"""
+    if not instance_ids:
+        return {}
+    from app.api.solution_delivery import (
+        get_default_entity_instance_registry,
+        get_default_entity_instance_runtime,
+    )
+    from app.services.entity_instance_registry import EntityInstanceError
+
+    registry = get_default_entity_instance_registry()
+    runtime = get_default_entity_instance_runtime()
+    context: dict[str, dict[str, any]] = {}
+    for raw_id in sorted(instance_ids):
+        try:
+            entity_instance_id = UUID(raw_id)
+            resolved = registry.resolve(entity_instance_id)
+            observation = runtime.read(entity_instance_id)
+        except (ValueError, EntityInstanceError) as exc:
+            logger.warning("[RuleEngine] entity instance {} is unavailable: {}", raw_id, exc)
+            continue
+        context[raw_id] = {
+            "value": observation.value,
+            "tag_id": resolved.tag_id,
+            "device_instance_id": resolved.device_instance_id,
+            "entity_instance_id": resolved.entity_instance_id,
+            "is_entity_instance": True,
+        }
+    return context
+
+
 def _build_context(cur, source_node_ids: set[str] | None = None) -> dict[str, dict[str, any]]:
     """从 t_telemetry_latest 构建 tag_name + entity_name -> {value, tag_id, node_id} 上下文。
 
@@ -112,6 +143,51 @@ def _build_context(cur, source_node_ids: set[str] | None = None) -> dict[str, di
         logger.warning("[RuleEngine] failed to load entity context (non-fatal): {}", e)
 
     return ctx
+
+
+def _rule_context(cur, content: dict) -> dict[str, dict[str, any]]:
+    source_node_ids = {
+        str(item)
+        for item in content.get("_config", {}).get("sourceNodeIds", [])
+        if item
+    }
+    source_entity_instance_ids = {
+        str(item)
+        for item in content.get("_config", {}).get("sourceEntityInstanceIds", [])
+        if item
+    }
+    raw_input_ids = {
+        str(item)
+        for item in content.get("_config", {}).get("inputMappings", {}).values()
+        if item
+    }
+    input_entity_instance_ids = set()
+    for raw_id in raw_input_ids:
+        try:
+            UUID(raw_id)
+        except ValueError:
+            continue
+        input_entity_instance_ids.add(raw_id)
+    legacy_entity_ids = {
+        str(item)
+        for item in content.get("_config", {}).get("sourceEntityIds", [])
+        if item
+    }
+    requested_instances = source_entity_instance_ids | input_entity_instance_ids
+    if requested_instances:
+        return _entity_instance_context(requested_instances)
+    context = _build_context(cur, source_node_ids or None)
+    if source_node_ids:
+        context = {
+            key: value for key, value in context.items()
+            if str(value.get("node_id")) in source_node_ids
+        }
+    if legacy_entity_ids:
+        return {
+            key: value for key, value in context.items()
+            if str(value.get("entity_id")) in legacy_entity_ids
+        }
+    return context
 
 
 def _has_active_alarm(cur, rule_id: UUID) -> bool:
@@ -406,29 +482,11 @@ def run_rule_tick() -> dict[str, int]:
             if not rules:
                 return result
 
-            full_context = _build_context(cur)
-
             for rule_id, rule_type, jdm_content, enabled in rules:
                 result["evaluated"] += 1
                 try:
                     content = jdm_content if isinstance(jdm_content, dict) else json.loads(jdm_content)
-                    source_node_ids = set(
-                        str(nid) for nid in content.get("_config", {}).get("sourceNodeIds", []) if nid
-                    )
-                    source_entity_ids = set(
-                        str(eid) for eid in content.get("_config", {}).get("sourceEntityIds", []) if eid
-                    )
-                    context = full_context
-                    if source_node_ids:
-                        context = {
-                            k: v for k, v in context.items()
-                            if str(v.get("node_id")) in source_node_ids
-                        }
-                    if source_entity_ids:
-                        context = {
-                            k: v for k, v in context.items()
-                            if str(v.get("entity_id")) in source_entity_ids
-                        }
+                    context = _rule_context(cur, content)
 
                     eval_context = _build_eval_context(context, content)
                     eval_result = evaluate_rule(content, eval_context)
@@ -504,18 +562,7 @@ def dry_run_rule(rule_id: str) -> dict:
             rid, rule_type, jdm_content, enabled = row
             content = jdm_content if isinstance(jdm_content, dict) else json.loads(jdm_content)
 
-            full_context = _build_context(cur)
-            source_node_ids = set(
-                str(nid) for nid in content.get("_config", {}).get("sourceNodeIds", []) if nid
-            )
-            source_entity_ids = set(
-                str(eid) for eid in content.get("_config", {}).get("sourceEntityIds", []) if eid
-            )
-            context = full_context
-            if source_node_ids:
-                context = {k: v for k, v in context.items() if str(v.get("node_id")) in source_node_ids}
-            if source_entity_ids:
-                context = {k: v for k, v in context.items() if str(v.get("entity_id")) in source_entity_ids}
+            context = _rule_context(cur, content)
 
             eval_context = _build_eval_context(context, content)
             eval_result = evaluate_rule(content, eval_context)

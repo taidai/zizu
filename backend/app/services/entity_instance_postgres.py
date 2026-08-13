@@ -16,6 +16,11 @@ from app.services.entity_instance_registry import (
     SourceDescriptor,
     entity_instance_plan_from_dict,
 )
+from app.services.entity_instance_failover import EntityFailoverState
+from app.services.entity_instance_catalog import (
+    EntityInstanceDescriptor,
+    LegacyEntityMigrationItem,
+)
 from app.services.entity_instance_runtime import SourceObservation
 
 
@@ -145,6 +150,39 @@ class PostgresEntityInstanceRepository:
                     binding_id = UUID(item["binding_id"])
                     audit_id = UUID(item["confirmation_audit_id"])
                     tag_id = UUID(item["selected_tag_id"])
+                    standby_tag_id = (
+                        UUID(item["standby_tag_id"])
+                        if item.get("standby_tag_id")
+                        else None
+                    )
+                    proposed_failover = (
+                        item.get("failover_policy") == "manual"
+                        and standby_tag_id is not None
+                    )
+                    cur.execute(
+                        """
+                        SELECT active_source_role, primary_tag_id, standby_tag_id
+                        FROM t_entity_failover_policies
+                        WHERE entity_instance_id = %s
+                        FOR UPDATE
+                        """,
+                        (entity_id,),
+                    )
+                    previous_failover = cur.fetchone()
+                    policy_changes_source = previous_failover is not None and (
+                        not proposed_failover
+                        or previous_failover[1] != tag_id
+                        or previous_failover[2] != standby_tag_id
+                    )
+                    if (
+                        previous_failover is not None
+                        and previous_failover[0] == "standby"
+                        and policy_changes_source
+                    ):
+                        raise EntityInstanceError(
+                            "ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY",
+                            "Switch the entity instance back to primary before changing or removing its failover policy",
+                        )
                     cur.execute(
                         """
                         INSERT INTO t_device_instances
@@ -239,6 +277,67 @@ class PostgresEntityInstanceRepository:
                     device_ids.append(device_id)
                     entity_ids.append(entity_id)
                     binding_ids.append(binding_id)
+                    try:
+                        cur.execute(
+                            "DELETE FROM t_entity_source_reservations "
+                            "WHERE entity_instance_id = %s",
+                            (entity_id,),
+                        )
+                        cur.execute(
+                            """
+                            INSERT INTO t_entity_source_reservations
+                              (tag_id, entity_instance_id, source_role)
+                            VALUES (%s, %s, 'primary')
+                            """,
+                            (tag_id, entity_id),
+                        )
+                        if proposed_failover:
+                            cur.execute(
+                                """
+                                INSERT INTO t_entity_source_reservations
+                                  (tag_id, entity_instance_id, source_role)
+                                VALUES (%s, %s, 'standby')
+                                """,
+                                (standby_tag_id, entity_id),
+                            )
+                    except psycopg2.errors.UniqueViolation as exc:
+                        raise EntityInstanceError(
+                            "ENTITY_BINDING_SOURCE_IN_USE",
+                            "Physical source is reserved by another entity instance",
+                        ) from exc
+                    if proposed_failover:
+                        cur.execute(
+                            """
+                            INSERT INTO t_entity_failover_policies
+                              (entity_instance_id, primary_tag_id, standby_tag_id)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (entity_instance_id) DO UPDATE
+                            SET primary_tag_id = EXCLUDED.primary_tag_id,
+                                standby_tag_id = EXCLUDED.standby_tag_id,
+                                updated_at = now()
+                            """,
+                            (entity_id, tag_id, standby_tag_id),
+                        )
+                        cur.execute(
+                            """
+                            UPDATE t_entity_instance_bindings binding
+                            SET tag_id = CASE policy.active_source_role
+                              WHEN 'primary' THEN policy.primary_tag_id
+                              ELSE policy.standby_tag_id
+                            END
+                            FROM t_entity_failover_policies policy
+                            WHERE binding.entity_instance_id = policy.entity_instance_id
+                              AND binding.entity_instance_id = %s
+                              AND binding.active = TRUE
+                            """,
+                            (entity_id,),
+                        )
+                    else:
+                        cur.execute(
+                            "DELETE FROM t_entity_failover_policies "
+                            "WHERE entity_instance_id = %s",
+                            (entity_id,),
+                        )
         return ApplyOutcome(
             plan.id,
             tuple(dict.fromkeys(device_ids)),
@@ -264,6 +363,179 @@ class PostgresEntityInstanceRepository:
                 )
                 row = cur.fetchone()
         return ResolvedEntitySource(*row) if row else None
+
+    def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ei.id, di.id, di.slot_id, di.instance_key,
+                           di.device_category, di.display_name, ei.definition_id,
+                           ei.display_name, ei.data_type, ei.unit, ei.direction,
+                           ei.freshness_seconds
+                    FROM t_entity_instances ei
+                    JOIN t_device_instances di ON di.id = ei.device_instance_id
+                    WHERE ei.active = TRUE AND di.active = TRUE
+                      AND EXISTS (
+                        SELECT 1 FROM t_entity_instance_bindings binding
+                        WHERE binding.entity_instance_id = ei.id
+                          AND binding.active = TRUE
+                      )
+                    ORDER BY di.instance_key, ei.definition_id
+                    """
+                )
+                rows = cur.fetchall()
+        return tuple(EntityInstanceDescriptor(*row) for row in rows)
+
+    def preview_legacy(self) -> tuple[LegacyEntityMigrationItem, ...]:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT legacy.id, legacy.name,
+                           COALESCE(
+                             array_agg(DISTINCT reservation.entity_instance_id)
+                               FILTER (WHERE reservation.entity_instance_id IS NOT NULL),
+                             '{}'::uuid[]
+                           )
+                    FROM t_entities legacy
+                    LEFT JOIN t_entity_bindings old_binding
+                      ON old_binding.entity_id = legacy.id
+                     AND old_binding.enabled = TRUE
+                    LEFT JOIN t_entity_source_reservations reservation
+                      ON reservation.tag_id = old_binding.tag_id
+                    WHERE legacy.enabled = TRUE
+                    GROUP BY legacy.id, legacy.name
+                    ORDER BY legacy.name, legacy.id
+                    """
+                )
+                rows = cur.fetchall()
+        return tuple(
+            LegacyEntityMigrationItem(
+                row[0],
+                row[1],
+                "unique" if len(row[2]) == 1 else "ambiguous" if len(row[2]) > 1 else "missing",
+                tuple(sorted(row[2], key=str)),
+            )
+            for row in rows
+        )
+
+    def failover_state(self, entity_instance_id: UUID) -> EntityFailoverState | None:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT active_source_role, switch_count, updated_at
+                    FROM t_entity_failover_policies
+                    WHERE entity_instance_id = %s
+                    """,
+                    (entity_instance_id,),
+                )
+                state = cur.fetchone()
+                if state is None:
+                    return None
+                cur.execute(
+                    """
+                    SELECT from_role, to_role, actor, reason, changed_at
+                    FROM t_entity_failover_audit
+                    WHERE entity_instance_id = %s
+                    ORDER BY changed_at, id
+                    """,
+                    (entity_instance_id,),
+                )
+                audit = tuple(
+                    {
+                        "from_role": row[0],
+                        "to_role": row[1],
+                        "actor": row[2],
+                        "reason": row[3],
+                        "changed_at": row[4].isoformat(),
+                    }
+                    for row in cur.fetchall()
+                )
+        latest = audit[-1] if audit else {}
+        return EntityFailoverState(
+            entity_instance_id,
+            state[0],
+            state[1],
+            latest.get("actor"),
+            latest.get("reason"),
+            state[2] if state[1] else None,
+            audit,
+        )
+
+    def switch_failover(
+        self,
+        entity_instance_id: UUID,
+        expected_current_role: str,
+        target_role: str,
+        actor: str,
+        reason: str,
+    ) -> EntityFailoverState:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT active_source_role, primary_tag_id, standby_tag_id
+                    FROM t_entity_failover_policies
+                    WHERE entity_instance_id = %s
+                    FOR UPDATE
+                    """,
+                    (entity_instance_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise EntityInstanceError(
+                        "ENTITY_FAILOVER_NOT_CONFIGURED",
+                        "Entity instance has no manual failover policy",
+                    )
+                if row[0] != expected_current_role:
+                    raise EntityInstanceError(
+                        "ENTITY_FAILOVER_STATE_CHANGED",
+                        "Entity source role changed after it was read",
+                    )
+                if target_role == expected_current_role or target_role not in {"primary", "standby"}:
+                    raise EntityInstanceError(
+                        "ENTITY_FAILOVER_TARGET_INVALID",
+                        "Failover target must be the other configured role",
+                    )
+                target_tag_id = row[1] if target_role == "primary" else row[2]
+                try:
+                    cur.execute(
+                        """
+                        UPDATE t_entity_instance_bindings
+                        SET tag_id = %s
+                        WHERE entity_instance_id = %s AND active = TRUE
+                        """,
+                        (target_tag_id, entity_instance_id),
+                    )
+                except psycopg2.errors.UniqueViolation as exc:
+                    if getattr(exc.diag, "constraint_name", None) != (
+                        "uq_entity_tag_active_primary"
+                    ):
+                        raise
+                    raise EntityInstanceError(
+                        "ENTITY_FAILOVER_SOURCE_IN_USE",
+                        "Failover target is active for another entity instance",
+                    ) from exc
+                cur.execute(
+                    """
+                    UPDATE t_entity_failover_policies
+                    SET active_source_role = %s, switch_count = switch_count + 1,
+                        updated_at = now()
+                    WHERE entity_instance_id = %s
+                    """,
+                    (target_role, entity_instance_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO t_entity_failover_audit
+                      (entity_instance_id, from_role, to_role, actor, reason)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (entity_instance_id, expected_current_role, target_role, actor, reason),
+                )
+        return self.failover_state(entity_instance_id)  # type: ignore[return-value]
 
 
 class PostgresObservationCatalog:

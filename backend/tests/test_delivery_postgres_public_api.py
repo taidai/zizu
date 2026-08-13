@@ -19,12 +19,19 @@ import psycopg2
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+MIGRATION_020 = BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql"
+MIGRATION_021 = BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql"
+MIGRATION_022 = BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_tickets.sql"
+MIGRATION_023 = BACKEND_ROOT.parent / "init-db" / "migration_023_site_configuration_parameters.sql"
+MIGRATION_024 = BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instances.sql"
+MIGRATION_025 = BACKEND_ROOT.parent / "init-db" / "migration_025_rule_entity_instance_refs.sql"
 MIGRATIONS = (
-    BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql",
-    BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql",
-    BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_tickets.sql",
-    BACKEND_ROOT.parent / "init-db" / "migration_023_site_configuration_parameters.sql",
-    BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instances.sql",
+    MIGRATION_020,
+    MIGRATION_021,
+    MIGRATION_022,
+    MIGRATION_023,
+    MIGRATION_024,
+    MIGRATION_025,
 )
 def build_minimal_package(
     *,
@@ -61,10 +68,10 @@ def build_minimal_package(
     return archive.getvalue()
 
 
-def build_entity_package() -> bytes:
+def build_entity_package(**kwargs) -> bytes:
     from tests.test_entity_delivery_public_api import build_entity_package as build
 
-    return build()
+    return build(**kwargs)
 
 
 @unittest.skipUnless(
@@ -130,6 +137,28 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 updated_at TIMESTAMPTZ DEFAULT now(),
                 PRIMARY KEY (node_id, tag_id)
             );
+            CREATE TABLE IF NOT EXISTS t_entities (
+                id UUID PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE
+            );
+            CREATE TABLE IF NOT EXISTS t_entity_bindings (
+                id UUID PRIMARY KEY,
+                entity_id UUID NOT NULL REFERENCES t_entities(id),
+                tag_id UUID NOT NULL REFERENCES t_tags(id),
+                node_id UUID NOT NULL REFERENCES t_nodes(id),
+                enabled BOOLEAN NOT NULL DEFAULT TRUE
+            );
+            CREATE TABLE IF NOT EXISTS t_rules (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name TEXT NOT NULL,
+                rule_type TEXT NOT NULL,
+                jdm_content JSONB NOT NULL DEFAULT '{}'::jsonb,
+                version INTEGER NOT NULL DEFAULT 1,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             """
         )
 
@@ -157,7 +186,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
-                for migration in MIGRATIONS[:-2]:
+                for migration in (MIGRATION_020, MIGRATION_021, MIGRATION_022):
                     cursor.execute(migration.read_text(encoding="utf-8"))
                 legacy_package_id = "00000000-0000-0000-0000-000000000501"
                 legacy_plan_id = "00000000-0000-0000-0000-000000000502"
@@ -210,10 +239,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "UPDATE t_site_configuration_state SET current_version = 1 "
                     "WHERE singleton = TRUE"
                 )
-                migration_023 = MIGRATIONS[-2].read_text(encoding="utf-8")
+                migration_023 = MIGRATION_023.read_text(encoding="utf-8")
                 cursor.execute(migration_023)
                 cls._create_source_catalog_tables(cursor)
-                migration_024 = MIGRATIONS[-1].read_text(encoding="utf-8")
+                migration_024 = MIGRATION_024.read_text(encoding="utf-8")
                 cursor.execute(migration_024)
                 cursor.execute(
                     "SELECT target_installation_id, entity_identity_installation_id "
@@ -241,11 +270,14 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 if cursor.fetchone()[0].strip() != legacy_digest:
                     raise AssertionError("legacy site configuration was not backfilled")
                 cursor.execute(migration_023)
+                migration_025 = MIGRATION_025.read_text(encoding="utf-8")
+                cursor.execute(migration_025)
+                cursor.execute(migration_025)
 
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
                 for migration in MIGRATIONS:
-                    if migration == MIGRATIONS[-1]:
+                    if migration == MIGRATION_024:
                         cls._create_source_catalog_tables(cursor)
                     cursor.execute(migration.read_text(encoding="utf-8"))
                 cursor.execute(
@@ -254,7 +286,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     VALUES ('40000000-0000-0000-0000-000000000001',
                             'PCS-01', 'PCS-01', TRUE),
                            ('40000000-0000-0000-0000-000000000003',
-                            'PCS-01', NULL, TRUE);
+                            'PCS-01', NULL, TRUE),
+                           ('40000000-0000-0000-0000-000000000005',
+                            'PCS standby', 'PCS-01-BACKUP', TRUE);
                     INSERT INTO t_tags
                       (id, node_id, name, data_type, unit, read_write, enabled,
                        source_type, source_path)
@@ -267,6 +301,13 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     VALUES ('40000000-0000-0000-0000-000000000004',
                             '40000000-0000-0000-0000-000000000003',
                             'ActivePower', 'FLOAT', 'kW', 'R', TRUE);
+                    INSERT INTO t_tags
+                      (id, node_id, name, data_type, unit, read_write, enabled,
+                       source_type, source_path)
+                    VALUES ('40000000-0000-0000-0000-000000000006',
+                            '40000000-0000-0000-0000-000000000005',
+                            'ActivePower', 'FLOAT', 'kW', 'R', TRUE,
+                            'neuron', 'PCS-01-BACKUP/default/ActivePower');
                     """
                 )
                 # Exercise the controlled legacy-viewer migration path instead
@@ -576,7 +617,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 files={
                     "archive": (
                         "single-pcs.zizu.zip",
-                        build_entity_package(),
+                        build_entity_package(
+                            multiple_devices=True,
+                            manual_failover=True,
+                        ),
                         "application/zip",
                     )
                 },
@@ -587,8 +631,13 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 headers=engineer_auth,
                 json={
                     "parameters": {
-                        "pcs.instance_key": "PCS-01",
-                        "pcs.device_key": "PCS-01",
+                        "pcs.instances": [
+                            {
+                                "instance_key": "PCS-01",
+                                "device_key": "PCS-01",
+                                "standby_device_key": "PCS-01-BACKUP",
+                            }
+                        ],
                     }
                 },
             )
@@ -624,6 +673,77 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             )
             self.assertEqual(entity_read.status_code, 200, entity_read.text)
             self.assertEqual(entity_read.json()["value"], 88.5)
+            backup_publish = client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "node": "PCS-01-BACKUP",
+                    "group": "default",
+                    "timestamp": round(time.time() * 1000),
+                    "values": {"ActivePower": 77.5},
+                },
+            )
+            self.assertEqual(backup_publish.status_code, 200, backup_publish.text)
+            failover = client.post(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                headers=engineer_auth,
+                json={
+                    "expected_current_role": "primary",
+                    "target_role": "standby",
+                    "reason": "Postgres public seam maintenance",
+                },
+            )
+            self.assertEqual(failover.status_code, 200, failover.text)
+            self.assertEqual("standby", failover.json()["current_role"])
+            standby_read = client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime",
+                headers=operator_auth,
+            )
+            self.assertEqual(standby_read.status_code, 200, standby_read.text)
+            self.assertEqual(77.5, standby_read.json()["value"])
+            entity_catalog = client.get(
+                "/api/v1/entity-instances",
+                headers=operator_auth,
+            )
+            self.assertEqual(entity_catalog.status_code, 200, entity_catalog.text)
+            self.assertEqual(
+                [entity_instance_id],
+                [item["id"] for item in entity_catalog.json()["items"]],
+            )
+            stable_rule = client.post(
+                "/api/v1/rules",
+                headers=engineer_auth,
+                json={
+                    "name": "PCS instance input",
+                    "rule_type": "alarm",
+                    "jdm_content": {
+                        "_config": {
+                            "sourceEntityInstanceIds": [entity_instance_id],
+                            "inputMappings": {"power": entity_instance_id},
+                        }
+                    },
+                },
+            )
+            self.assertEqual(stable_rule.status_code, 200, stable_rule.text)
+            with psycopg2.connect(
+                host=os.environ["DB_HOST"],
+                port=int(os.environ["DB_PORT"]),
+                dbname=self.db_name,
+                user=os.environ["DB_USER"],
+                password=os.environ["DB_PASSWORD"],
+            ) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT reference_kind, reference_key, entity_instance_id "
+                        "FROM t_rule_entity_instance_refs WHERE rule_id = %s "
+                        "ORDER BY reference_kind, reference_key",
+                        (stable_rule.json()["id"],),
+                    )
+                    persisted_refs = cursor.fetchall()
+            self.assertEqual(
+                [("input", "power", entity_instance_id),
+                 ("source", "0", entity_instance_id)],
+                persisted_refs,
+            )
             entity_acceptance = client.post(
                 f"/api/v1/solution-installations/{entity_installation['id']}/acceptance-runs",
                 headers={
@@ -747,6 +867,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 f"/api/v1/entity-instances/{entity_instance_id}/realtime",
                 headers=operator_auth,
             )
+            persisted_failover = client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                headers=engineer_auth,
+            )
             repeated_entity_install = client.post(
                 f"/api/v1/install-plans/{entity_plan['id']}/apply",
                 headers={
@@ -789,7 +913,11 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(persisted_plan.status_code, 200, persisted_plan.text)
         self.assertEqual(persisted_plan.json(), plan)
         self.assertEqual(persisted_entity.status_code, 200, persisted_entity.text)
-        self.assertEqual(persisted_entity.json()["value"], 88.5)
+        self.assertEqual(persisted_entity.json()["value"], 77.5)
+        self.assertEqual(persisted_failover.status_code, 200, persisted_failover.text)
+        self.assertEqual("standby", persisted_failover.json()["current_role"])
+        self.assertEqual(1, persisted_failover.json()["switch_count"])
+        self.assertEqual(1, len(persisted_failover.json()["audit"]))
         self.assertEqual(repeated_entity_install.json(), entity_installation)
         persisted_packages = packages.json()
         self.assertEqual(persisted_packages["total"], 3)

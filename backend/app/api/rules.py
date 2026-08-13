@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from app.services.gorules_adapter import _normalize_jdm_content
 from pydantic import BaseModel, Field
@@ -19,6 +19,12 @@ from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
     protected,
+)
+from app.api.entity_instances import get_entity_instance_catalog
+from app.services.entity_instance_catalog import (
+    EntityInstanceCatalog,
+    EntityInstanceReferenceError,
+    validate_rule_entity_references,
 )
 
 router = APIRouter()
@@ -71,7 +77,37 @@ def _serialize_rule(row: dict) -> dict:
         row["created_at"] = row["created_at"].isoformat()
     if row.get("updated_at"):
         row["updated_at"] = row["updated_at"].isoformat()
+    config = row.get("jdm_content", {}).get("_config", {}) \
+        if isinstance(row.get("jdm_content"), dict) else {}
+    if isinstance(config, dict) and config.get("sourceEntityIds"):
+        row["entity_reference_migration"] = {
+            "code": "ENTITY_REFERENCE_LEGACY_DEPRECATED",
+            "status": "read_only_compatibility",
+            "replacement": "sourceEntityInstanceIds",
+            "preview_path": "/api/v1/entity-instances/legacy-migration-preview",
+            "removal_ticket": 10,
+        }
     return row
+
+
+def _replace_rule_entity_instance_references(
+    cur,
+    rule_id: UUID,
+    references: tuple[tuple[str, str, UUID], ...],
+) -> None:
+    cur.execute(
+        "DELETE FROM t_rule_entity_instance_refs WHERE rule_id = %s",
+        (rule_id,),
+    )
+    for reference_kind, reference_key, entity_instance_id in references:
+        cur.execute(
+            """
+            INSERT INTO t_rule_entity_instance_refs
+              (rule_id, reference_kind, reference_key, entity_instance_id)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (rule_id, reference_kind, reference_key, entity_instance_id),
+        )
 
 
 @router.get("/rules", **protected(CONFIGURATION_READ))
@@ -105,10 +141,20 @@ async def list_rules(enabled: bool | None = Query(None)) -> dict:
 
 
 @router.post("/rules", **protected(CONFIGURATION_WRITE))
-async def create_rule(req: RuleCreateRequest) -> dict:
+async def create_rule(
+    req: RuleCreateRequest,
+    catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
+) -> dict:
     """创建规则。"""
     from app.services.telemetry_store import get_connection
 
+    try:
+        references = validate_rule_entity_references(req.jdm_content, catalog)
+    except EntityInstanceReferenceError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -122,6 +168,7 @@ async def create_rule(req: RuleCreateRequest) -> dict:
                      datetime.now(timezone.utc), datetime.now(timezone.utc)),
                 )
                 row = dict(zip([desc[0] for desc in cur.description], cur.fetchone()))
+                _replace_rule_entity_instance_references(cur, row["id"], references)
                 conn.commit()
         return _serialize_rule(row)
     except Exception as e:
@@ -148,13 +195,25 @@ async def get_rule(rule_id: UUID) -> dict:
 
 
 @router.put("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
-async def update_rule(rule_id: UUID, req: RuleUpdateRequest) -> dict:
+async def update_rule(
+    rule_id: UUID,
+    req: RuleUpdateRequest,
+    catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
+) -> dict:
     """更新规则，版本号 +1。"""
     from app.services.telemetry_store import get_connection
 
     updates = []
     params: list = []
     data = req.model_dump(exclude_none=True)
+    if req.jdm_content is not None:
+        try:
+            references = validate_rule_entity_references(req.jdm_content, catalog)
+        except EntityInstanceReferenceError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
     for field, value in data.items():
         if field == "jdm_content":
             updates.append("jdm_content = %s")
@@ -179,6 +238,8 @@ async def update_rule(rule_id: UUID, req: RuleUpdateRequest) -> dict:
                 row = cur.fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Rule not found")
+                if req.jdm_content is not None:
+                    _replace_rule_entity_instance_references(cur, rule_id, references)
                 conn.commit()
                 columns = [desc[0] for desc in cur.description]
                 return _serialize_rule(dict(zip(columns, row)))
