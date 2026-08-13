@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -13,12 +14,33 @@ from app.services.solution_delivery_contracts import (
     InstallationOutcome,
     InstallationPlan,
     PackageImport,
+    SiteConfigurationVersion,
 )
 
 __all__ = [
     "InMemoryDeliveryRepository",
     "PostgresDeliveryRepository",
 ]
+
+
+def _parameter_metadata(plan: InstallationPlan) -> dict[str, dict[str, str]]:
+    modified_at = datetime.now(timezone.utc).isoformat()
+    metadata: dict[str, dict[str, str]] = {}
+    actions = {
+        item["asset_id"]: item["action"]
+        for item in plan.items
+        if item["kind"] in {"site_parameter", "secret_reference"}
+    }
+    for parameter_id, source in plan.parameter_sources.items():
+        previous = plan.parameter_metadata.get(parameter_id)
+        if actions.get(parameter_id) == "preserve" and previous is not None:
+            metadata[parameter_id] = dict(previous)
+        else:
+            metadata[parameter_id] = {
+                "source": source,
+                "modified_at": modified_at,
+            }
+    return metadata
 
 
 class InMemoryDeliveryRepository:
@@ -34,6 +56,7 @@ class InMemoryDeliveryRepository:
         ] = {}
         self._reports: dict[UUID, DeliveryReport] = {}
         self._site_configuration_version = 0
+        self._site_configurations: dict[int, SiteConfigurationVersion] = {}
 
     def save_package(self, package: PackageImport) -> PackageImport:
         key = (package.package_id, package.version)
@@ -102,9 +125,16 @@ class InMemoryDeliveryRepository:
         key: str,
         request_digest: str,
     ) -> InstallationOutcome:
-        existing_installation = self.find_installation(
-            plan.package_record_id,
-            plan.package_digest,
+        current_configuration = self._site_configurations.get(
+            self._site_configuration_version
+        )
+        existing_installation = (
+            self._installations.get(current_configuration.installation_id)
+            if current_configuration is not None
+            and current_configuration.package_record_id == plan.package_record_id
+            and current_configuration.package_digest == plan.package_digest
+            and current_configuration.digest == plan.configuration_digest
+            else None
         )
         if existing_installation is not None:
             self._idempotency[("apply_install", actor, key)] = (
@@ -127,6 +157,20 @@ class InMemoryDeliveryRepository:
             status="installed",
         )
         self._installations[outcome.id] = outcome
+        self._site_configurations[outcome.site_configuration_version] = (
+            SiteConfigurationVersion(
+                version=outcome.site_configuration_version,
+                previous_version=outcome.site_configuration_version - 1,
+                installation_id=outcome.id,
+                package_record_id=outcome.package_record_id,
+                package_digest=outcome.package_digest,
+                parameters=dict(plan.parameters),
+                secret_references=dict(plan.secret_references),
+                parameter_metadata=_parameter_metadata(plan),
+                digest=plan.configuration_digest,
+                actor=actor,
+            )
+        )
         self._idempotency[("apply_install", actor, key)] = (
             request_digest,
             outcome,
@@ -139,20 +183,11 @@ class InMemoryDeliveryRepository:
     def get_installation(self, installation_id: UUID) -> InstallationOutcome | None:
         return self._installations.get(installation_id)
 
-    def find_installation(
+    def get_site_configuration_version(
         self,
-        package_record_id: UUID,
-        package_digest: str,
-    ) -> InstallationOutcome | None:
-        return next(
-            (
-                installation
-                for installation in self._installations.values()
-                if installation.package_record_id == package_record_id
-                and installation.package_digest == package_digest
-            ),
-            None,
-        )
+        version: int,
+    ) -> SiteConfigurationVersion | None:
+        return self._site_configurations.get(version)
 
     def package_for_installation(
         self,
@@ -238,7 +273,30 @@ class PostgresDeliveryRepository:
             status=row[4],
             items=tuple(row[5]),
             blockers=tuple(row[6]),
-            digest=row[7],
+            parameter_contracts=tuple(row[7]),
+            parameters=row[8],
+            secret_references=row[9],
+            parameter_sources=row[10],
+            parameter_metadata=row[11],
+            configuration_digest=row[12],
+            digest=row[13],
+        )
+
+    @staticmethod
+    def _site_configuration_from_row(
+        row: tuple[Any, ...],
+    ) -> SiteConfigurationVersion:
+        return SiteConfigurationVersion(
+            version=row[0],
+            previous_version=row[1],
+            installation_id=row[2],
+            package_record_id=row[3],
+            package_digest=row[4],
+            parameters=row[5],
+            secret_references=row[6],
+            parameter_metadata=row[7],
+            digest=row[8],
+            actor=row[9],
         )
 
     @staticmethod
@@ -392,12 +450,17 @@ class PostgresDeliveryRepository:
                     """
                     INSERT INTO t_solution_install_plans
                       (id, package_record_id, package_digest,
-                       base_site_configuration_version, status, items, blockers, digest)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       base_site_configuration_version, status, items, blockers,
+                       parameter_contracts, parameters, secret_references,
+                       parameter_sources, parameter_metadata,
+                       configuration_digest, digest)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING id, package_record_id, package_digest,
                               base_site_configuration_version, status,
-                              items, blockers, digest
+                              items, blockers, parameter_contracts, parameters,
+                              secret_references, parameter_sources,
+                              parameter_metadata, configuration_digest, digest
                     """,
                     (
                         plan.id,
@@ -407,6 +470,12 @@ class PostgresDeliveryRepository:
                         plan.status,
                         Json(list(plan.items)),
                         Json(list(plan.blockers)),
+                        Json(list(plan.parameter_contracts)),
+                        Json(plan.parameters),
+                        Json(plan.secret_references),
+                        Json(plan.parameter_sources),
+                        Json(plan.parameter_metadata),
+                        plan.configuration_digest,
                         plan.digest,
                     ),
                 )
@@ -416,7 +485,9 @@ class PostgresDeliveryRepository:
                         """
                         SELECT id, package_record_id, package_digest,
                                base_site_configuration_version, status,
-                               items, blockers, digest
+                               items, blockers, parameter_contracts, parameters,
+                               secret_references, parameter_sources,
+                               parameter_metadata, configuration_digest, digest
                         FROM t_solution_install_plans WHERE digest = %s
                         """,
                         (plan.digest,),
@@ -432,7 +503,10 @@ class PostgresDeliveryRepository:
                 cur.execute(
                     """
                     SELECT id, package_record_id, package_digest,
-                           base_site_configuration_version, status, items, blockers, digest
+                           base_site_configuration_version, status, items, blockers,
+                           parameter_contracts, parameters, secret_references,
+                           parameter_sources, parameter_metadata,
+                           configuration_digest, digest
                     FROM t_solution_install_plans WHERE id = %s
                     """,
                     (plan_id,),
@@ -520,13 +594,22 @@ class PostgresDeliveryRepository:
 
                 cur.execute(
                     """
-                    SELECT id, plan_id, package_record_id, package_digest,
-                           site_configuration_version, status
-                    FROM t_solution_installations
-                    WHERE package_record_id = %s AND package_digest = %s
-                    ORDER BY site_configuration_version LIMIT 1
+                    SELECT i.id, i.plan_id, i.package_record_id, i.package_digest,
+                           i.site_configuration_version, i.status
+                    FROM t_solution_installations i
+                    JOIN t_site_configuration_versions v
+                      ON v.installation_id = i.id
+                    WHERE i.site_configuration_version = %s
+                      AND i.package_record_id = %s
+                      AND i.package_digest = %s
+                      AND v.configuration_digest = %s
                     """,
-                    (plan.package_record_id, plan.package_digest),
+                    (
+                        current_version,
+                        plan.package_record_id,
+                        plan.package_digest,
+                        plan.configuration_digest,
+                    ),
                 )
                 existing_installation = cur.fetchone()
                 if existing_installation is not None:
@@ -575,8 +658,10 @@ class PostgresDeliveryRepository:
                     """
                     INSERT INTO t_site_configuration_versions
                       (version, previous_version, installation_id,
-                       package_record_id, package_digest, actor)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                       package_record_id, package_digest, parameters,
+                       secret_references, parameter_metadata,
+                       configuration_digest, actor)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         outcome.site_configuration_version,
@@ -584,6 +669,10 @@ class PostgresDeliveryRepository:
                         outcome.id,
                         outcome.package_record_id,
                         outcome.package_digest,
+                        Json(plan.parameters),
+                        Json(plan.secret_references),
+                        Json(_parameter_metadata(plan)),
+                        plan.configuration_digest,
                         actor,
                     ),
                 )
@@ -615,7 +704,13 @@ class PostgresDeliveryRepository:
                         outcome.package_record_id,
                         outcome.package_digest,
                         outcome.site_configuration_version,
-                        Json({"plan_id": str(plan.id), "plan_digest": plan.digest}),
+                        Json(
+                            {
+                                "plan_id": str(plan.id),
+                                "plan_digest": plan.digest,
+                                "configuration_digest": plan.configuration_digest,
+                            }
+                        ),
                     ),
                 )
                 cur.execute(
@@ -636,6 +731,7 @@ class PostgresDeliveryRepository:
                                 "site_configuration_version": (
                                     outcome.site_configuration_version
                                 ),
+                                "configuration_digest": plan.configuration_digest,
                             }
                         ),
                     ),
@@ -669,25 +765,25 @@ class PostgresDeliveryRepository:
                 row = cur.fetchone()
                 return self._installation_from_row(row) if row else None
 
-    def find_installation(
+    def get_site_configuration_version(
         self,
-        package_record_id: UUID,
-        package_digest: str,
-    ) -> InstallationOutcome | None:
+        version: int,
+    ) -> SiteConfigurationVersion | None:
         with self._connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, plan_id, package_record_id, package_digest,
-                           site_configuration_version, status
-                    FROM t_solution_installations
-                    WHERE package_record_id = %s AND package_digest = %s
-                    ORDER BY site_configuration_version LIMIT 1
+                    SELECT version, previous_version, installation_id,
+                           package_record_id, package_digest, parameters,
+                           secret_references, parameter_metadata,
+                           configuration_digest, actor
+                    FROM t_site_configuration_versions
+                    WHERE version = %s AND installation_id IS NOT NULL
                     """,
-                    (package_record_id, package_digest),
+                    (version,),
                 )
                 row = cur.fetchone()
-                return self._installation_from_row(row) if row else None
+                return self._site_configuration_from_row(row) if row else None
 
     def package_for_installation(
         self,

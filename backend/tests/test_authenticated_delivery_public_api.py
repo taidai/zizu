@@ -261,6 +261,16 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 f"/api/v1/delivery-reports/{report['id']}",
                 headers=operator_headers,
             )
+            engineer_configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installation['site_configuration_version']}",
+                headers=engineer_headers,
+            )
+            operator_configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installation['site_configuration_version']}",
+                headers=operator_headers,
+            )
             operator_plan = await client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
                 headers=operator_headers,
@@ -291,6 +301,8 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(operator_read.status_code, 200, operator_read.text)
         self.assertEqual(operator_read.json(), report)
+        self.assertEqual(engineer_configuration.status_code, 200)
+        self.assertEqual(operator_configuration.status_code, 403)
         self.assertEqual(operator_plan.status_code, 403, operator_plan.text)
         self.assertEqual(
             operator_plan.json()["detail"]["code"],

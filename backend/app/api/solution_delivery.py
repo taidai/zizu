@@ -1,10 +1,11 @@
 """解决方案包公开 HTTP Adapter。"""
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
+from pydantic import BaseModel, Field, ValidationError
 
 from app.api.security import require_capability
 from app.api.health import _VERSION
@@ -35,6 +36,11 @@ class ApplyInstallationRequest(BaseModel):
     plan_digest: str = Field(..., min_length=64, max_length=64)
 
 
+class CreateInstallationPlanRequest(BaseModel):
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    secret_references: dict[str, str] = Field(default_factory=dict)
+
+
 @router.get("/solution-packages")
 async def list_solution_packages(
     principal: Principal = Depends(require_capability("solution.package.read")),
@@ -54,12 +60,28 @@ async def list_solution_packages(
 )
 async def create_installation_plan(
     package_record_id: UUID,
+    request: Request,
     principal: Principal = Depends(require_capability("solution.install.plan")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
     del principal
     try:
-        return delivery.plan_install(package_record_id).public_dict()
+        body = await request.json()
+        plan_request = CreateInstallationPlanRequest.model_validate(body)
+    except (ValueError, ValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "INSTALL_PLAN_REQUEST_INVALID",
+                "message": "Installation plan request is invalid",
+            },
+        ) from None
+    try:
+        return delivery.plan_install(
+            package_record_id,
+            parameters=plan_request.parameters,
+            secret_references=plan_request.secret_references,
+        ).public_dict()
     except DeliveryError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -119,6 +141,22 @@ async def list_solution_installations(
         "items": [installation.public_dict() for installation in installations],
         "total": len(installations),
     }
+
+
+@router.get("/site-configuration-versions/{version}")
+async def get_site_configuration_version(
+    version: int,
+    principal: Principal = Depends(require_capability("solution.configuration.read")),
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    del principal
+    try:
+        return delivery.get_site_configuration_version(version).public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
 
 @router.post(

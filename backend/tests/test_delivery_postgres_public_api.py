@@ -22,8 +22,13 @@ MIGRATIONS = (
     BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql",
     BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql",
     BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_tickets.sql",
+    BACKEND_ROOT.parent / "init-db" / "migration_023_site_configuration_parameters.sql",
 )
-def build_minimal_package(*, package_id: str = "org.zizu.postgres-liveness") -> bytes:
+def build_minimal_package(
+    *,
+    package_id: str = "org.zizu.postgres-liveness",
+    parameters_yaml: str = "",
+) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
         "id: acceptance.platform-liveness\n"
@@ -45,6 +50,7 @@ def build_minimal_package(*, package_id: str = "org.zizu.postgres-liveness") -> 
         f"    sha256: \"{hashlib.sha256(acceptance).hexdigest()}\"\n"
         "acceptance:\n"
         "  - acceptance.platform-liveness\n"
+        f"{parameters_yaml}"
     ).encode()
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
@@ -82,6 +88,78 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         ) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
+                cursor.execute("DROP SCHEMA public CASCADE")
+                cursor.execute("CREATE SCHEMA public")
+                for migration in MIGRATIONS[:-1]:
+                    cursor.execute(migration.read_text(encoding="utf-8"))
+                legacy_package_id = "00000000-0000-0000-0000-000000000501"
+                legacy_plan_id = "00000000-0000-0000-0000-000000000502"
+                legacy_installation_id = "00000000-0000-0000-0000-000000000503"
+                legacy_digest = "a" * 64
+                cursor.execute(
+                    """
+                    INSERT INTO t_solution_packages
+                      (id, package_id, version, display_name, digest, status,
+                       acceptance_ids, manifest)
+                    VALUES (%s, 'org.zizu.legacy-parameterless', '1.0.0',
+                            'Legacy parameterless', %s, 'validated', '[]', '{}')
+                    """,
+                    (legacy_package_id, legacy_digest),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_solution_install_plans
+                      (id, package_record_id, package_digest,
+                       base_site_configuration_version, status, items, blockers,
+                       digest)
+                    VALUES (%s, %s, %s, 0, 'ready', '[]', '[]', %s)
+                    """,
+                    (legacy_plan_id, legacy_package_id, legacy_digest, "b" * 64),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_solution_installations
+                      (id, plan_id, package_record_id, package_digest,
+                       site_configuration_version, status)
+                    VALUES (%s, %s, %s, %s, 1, 'installed')
+                    """,
+                    (
+                        legacy_installation_id,
+                        legacy_plan_id,
+                        legacy_package_id,
+                        legacy_digest,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_site_configuration_versions
+                      (version, previous_version, installation_id,
+                       package_record_id, package_digest, actor)
+                    VALUES (1, 0, %s, %s, %s, 'user:legacy')
+                    """,
+                    (legacy_installation_id, legacy_package_id, legacy_digest),
+                )
+                cursor.execute(
+                    "UPDATE t_site_configuration_state SET current_version = 1 "
+                    "WHERE singleton = TRUE"
+                )
+                migration_023 = MIGRATIONS[-1].read_text(encoding="utf-8")
+                cursor.execute(migration_023)
+                cursor.execute(
+                    "SELECT configuration_digest FROM t_solution_install_plans "
+                    "WHERE id = %s",
+                    (legacy_plan_id,),
+                )
+                if cursor.fetchone()[0].strip() != legacy_digest:
+                    raise AssertionError("legacy plan configuration digest was not backfilled")
+                cursor.execute(
+                    "SELECT configuration_digest FROM t_site_configuration_versions "
+                    "WHERE version = 1"
+                )
+                if cursor.fetchone()[0].strip() != legacy_digest:
+                    raise AssertionError("legacy site configuration was not backfilled")
+                cursor.execute(migration_023)
+
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
                 for migration in MIGRATIONS:
@@ -283,7 +361,25 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             imported = client.post(
                 "/api/v1/solution-packages/import",
                 headers=admin_auth,
-                files={"archive": ("minimal.zizu.zip", build_minimal_package(), "application/zip")},
+                files={
+                    "archive": (
+                        "minimal.zizu.zip",
+                        build_minimal_package(
+                            parameters_yaml=(
+                                "parameters:\n"
+                                "  - id: site.code\n"
+                                "    type: string\n"
+                                "    required: true\n"
+                                "    description: Stable site code\n"
+                                "  - id: neuron.credentials\n"
+                                "    type: secret\n"
+                                "    required: true\n"
+                                "    description: Neuron credential reference\n"
+                            )
+                        ),
+                        "application/zip",
+                    )
+                },
             )
             self.assertEqual(imported.status_code, 201, imported.text)
             self.assertEqual(invalidated_admin.status_code, 401)
@@ -295,13 +391,23 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             planned = client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
                 headers=engineer_auth,
-                json={},
+                json={
+                    "parameters": {"site.code": "PG-EMS-01"},
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    },
+                },
             )
             self.assertEqual(planned.status_code, 201, planned.text)
             repeated_plan = client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
                 headers=engineer_auth,
-                json={},
+                json={
+                    "parameters": {"site.code": "PG-EMS-01"},
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    },
+                },
             )
             self.assertEqual(repeated_plan.status_code, 201, repeated_plan.text)
             self.assertEqual(repeated_plan.json(), planned.json())
@@ -459,6 +565,15 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 json=request,
                 headers=headers,
             )
+            persisted_configuration = client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installation['site_configuration_version']}",
+                headers=engineer_auth,
+            )
+            persisted_plan = client.get(
+                f"/api/v1/install-plans/{plan['id']}",
+                headers=engineer_auth,
+            )
             repeated_acceptance_after_restart = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
                 headers={
@@ -477,6 +592,21 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(persisted_admin.status_code, 200, persisted_admin.text)
         self.assertEqual(persisted_engineer.status_code, 200, persisted_engineer.text)
         self.assertEqual(persisted_operator.status_code, 200, persisted_operator.text)
+        self.assertEqual(
+            persisted_configuration.status_code,
+            200,
+            persisted_configuration.text,
+        )
+        self.assertEqual(
+            persisted_configuration.json()["parameters"],
+            {"site.code": "PG-EMS-01"},
+        )
+        self.assertEqual(
+            persisted_configuration.json()["secret_references"],
+            {"neuron.credentials": "secret://site/neuron/credentials"},
+        )
+        self.assertEqual(persisted_plan.status_code, 200, persisted_plan.text)
+        self.assertEqual(persisted_plan.json(), plan)
         persisted_packages = packages.json()
         self.assertEqual(persisted_packages["total"], 2)
         self.assertIn(package, persisted_packages["items"])
@@ -500,6 +630,13 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             all(
                 actor == f"user:{self.engineer_id}"
                 for _, _, actor, _, _ in delivery_audits
+            )
+        )
+        self.assertTrue(
+            all(
+                '"configuration_digest"' in details
+                for event, _, _, _, details in delivery_audits
+                if event == "solution.install"
             )
         )
         serialized_audits = repr(all_audits)
