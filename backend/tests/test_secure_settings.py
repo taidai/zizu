@@ -15,6 +15,9 @@ SECRET_NAMES = {
     "NEURON_PASSWORD",
     "NANOMQ_API_PASSWORD",
     "JWT_SECRET",
+    "AUTH_REQUIRE_HTTPS",
+    "AUTH_TRUST_PROXY_HEADERS",
+    "AUTH_TRUSTED_PROXY_CIDRS",
 }
 
 
@@ -116,6 +119,42 @@ class SecureSettingsTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires DEPLOYMENT_MODE=development", result.stderr)
+
+    def test_production_cannot_disable_https_authentication(self) -> None:
+        result = run_settings_import(
+            {
+                "AUTH_REQUIRE_HTTPS": "false",
+                "DB_PASSWORD": "database-secret-value",
+                "NEURON_PASSWORD": "neuron-secret-value",
+                "NANOMQ_API_PASSWORD": "nanomq-secret-value",
+                "JWT_SECRET": "jwt-secret-value-that-is-at-least-32-chars",
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("production requires AUTH_REQUIRE_HTTPS=true", result.stderr)
+
+    def test_forwarded_proto_requires_valid_trusted_proxy_cidrs(self) -> None:
+        base = {
+            "AUTH_TRUST_PROXY_HEADERS": "true",
+            "DB_PASSWORD": "database-secret-value",
+            "NEURON_PASSWORD": "neuron-secret-value",
+            "NANOMQ_API_PASSWORD": "nanomq-secret-value",
+            "JWT_SECRET": "jwt-secret-value-that-is-at-least-32-chars",
+        }
+        missing = run_settings_import(base)
+        invalid = run_settings_import(
+            {**base, "AUTH_TRUSTED_PROXY_CIDRS": '["not-a-network"]'}
+        )
+        valid = run_settings_import(
+            {**base, "AUTH_TRUSTED_PROXY_CIDRS": '["127.0.0.1/32"]'}
+        )
+
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("requires AUTH_TRUSTED_PROXY_CIDRS", missing.stderr)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("invalid AUTH_TRUSTED_PROXY_CIDRS", invalid.stderr)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
 
     def test_standalone_clients_reject_public_default_passwords(self) -> None:
         cases = (

@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 当前版本：**v0.4.30**
+> 当前版本：**v0.4.77**
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 
@@ -135,6 +135,47 @@ Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入�
 docker compose up -d --build
 ```
 
+数据库迁移完成后，首次部署必须创建唯一的首个平台管理员。推荐使用容器内的
+交互式无回显输入；密码至少 14 个字符，不接受会出现在 shell 历史或进程列表中的
+`--password` 参数：
+
+```bash
+docker compose exec backend \
+  python -m scripts.bootstrap_admin --username admin
+```
+
+非交互式部署只能从标准输入传入。例如下面的 shell 变量不要 `export`，使用后立即
+清除；正式自动化应由 Secret 管理器向标准输入提供值：
+
+```bash
+read -r -s -p "New ZiZu administrator password: " ZIZU_ADMIN_PASSWORD; printf '\n'
+printf '%s\n' "$ZIZU_ADMIN_PASSWORD" | docker compose exec -T backend \
+  python -m scripts.bootstrap_admin --username admin --password-stdin
+unset ZIZU_ADMIN_PASSWORD
+```
+
+引导在数据库事务中串行执行并写入审计。已有同名活动管理员时幂等返回；已有其他
+活动管理员时会拒绝。Ticket #3 的在线用户管理界面交付前，可用同一离线工具显式创建
+engineer/operator 或迁移旧 viewer（密码仍只走交互终端，不进入命令行参数）：
+
+```bash
+docker compose exec backend \
+  python -m scripts.bootstrap_admin \
+  --provision-user --username site-engineer --role engineer
+```
+
+离线供应只有在库中已存在活动管理员时才会放行；创建、密码重置或角色迁移都会增加
+`auth_version`、使旧会话失效并留下追加式审计。它不允许把活动管理员降权。
+
+如需离线重置活动管理员密码，必须显式使用供应模式和 `admin` 角色；普通重复引导仍
+保持幂等，不会改密码：
+
+```bash
+docker compose exec backend \
+  python -m scripts.bootstrap_admin \
+  --provision-user --username admin --role admin
+```
+
 访问：
 - `http://localhost:9000` — 前端页面（点位管理 + 实时趋势 + 规则引擎/告警中心）
 - 规则引擎支持 GoRules JDM Editor 编辑决策图/决策表
@@ -142,12 +183,52 @@ docker compose up -d --build
 
 > 首次启动会自动执行 `init-db/*.sql` 初始化数据库。
 
-### 3. 本地开发（可选）
+### 3. 认证与 HTTPS
+
+生产环境保持 `AUTH_REQUIRE_HTTPS=true`。登录接口为 `POST /api/v1/auth/login`；
+通过明文 HTTP 登录或携带 Bearer 调用受保护接口都会返回 `HTTPS_REQUIRED`，不会校验或
+保存提交的凭据。会话默认
+有效 480 分钟，可用 `AUTH_SESSION_MINUTES` 在 5-1440 分钟内调整；客户端通过
+`Authorization: Bearer <opaque-session-token>` 调用受保护接口，并可用
+`GET /api/v1/auth/me` 查询当前身份、`POST /api/v1/auth/logout` 主动注销。
+
+TLS 由反向代理终结时，backend 必须只允许该代理访问，并同时满足以下条件才可读取
+`X-Forwarded-Proto`：
+
+```env
+AUTH_REQUIRE_HTTPS=true
+AUTH_TRUST_PROXY_HEADERS=true
+AUTH_TRUSTED_PROXY_CIDRS=["127.0.0.1/32","::1/128"]
+```
+
+`AUTH_TRUSTED_PROXY_CIDRS` 必须按实际代理源地址最小化配置且不能为空。来自列表之外
+的直连客户端即使伪造 `X-Forwarded-Proto: https` 也不会被信任。默认
+`AUTH_TRUST_PROXY_HEADERS=false`，不读取这些头。只有完全隔离、不可由其他主机
+访问的开发环境，才可同时设置 `DEPLOYMENT_MODE=development` 和
+`AUTH_REQUIRE_HTTPS=false`；生产模式不得关闭 HTTPS。
+
+Ticket #2 已收口的解决方案交付接口权限如下：
+
+| 能力 | admin | engineer | operator |
+|------|:-----:|:--------:|:--------:|
+| 导入解决方案包 | ✓ | — | — |
+| 查询解决方案包 | ✓ | — | — |
+| 生成/查询/执行安装计划 | ✓ | ✓ | — |
+| 查询安装记录 | ✓ | ✓ | ✓ |
+| 运行机器验收 | ✓ | ✓ | — |
+| 查询交付报告 | ✓ | ✓ | ✓ |
+
+在上述解决方案交付主缝内，只有最小 `/api/v1/health/live` 存活探针匿名可用；这并不
+代表全站仅剩该匿名接口。这里的矩阵只描述 Ticket #2；其余存量业务 REST、WebSocket
+和控制/管理面将在后续认证迁移
+票据中逐步收口，在迁移完成前不能据此宣称整个公网 API 已生产就绪。
+
+### 4. 本地开发（可选）
 
 **后端**：
 ```bash
 cd backend
-pip install fastapi "uvicorn[standard]" psycopg2-binary paho-mqtt loguru pydantic pydantic-settings pint websockets
+pip install fastapi "uvicorn[standard]" psycopg2-binary paho-mqtt loguru pydantic pydantic-settings pint websockets python-multipart
 uvicorn app.main:app --reload --port 9000
 ```
 
@@ -158,11 +239,11 @@ npm install
 npm run dev    # Vite dev server @5173
 ```
 
-### 4. e606 裁剪内核部署
+### 5. e606 裁剪内核部署
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.e606.yml up -d
-```
+Ticket #18 会把 e606 迁移到固定 digest 的 ARM64 制品。在该制品、backend-only 编排
+和 HTTPS 入口完成前，旧的 e606 Compose/部署脚本只用于既有 v0.4.77 维护，不能用于
+上线本节的认证版本，也不得在 e606 上现场构建或直接覆盖源码。
 
 > e606 使用 `network_mode: host` + `tmpfs: /dev/mqueue`，端口直接占宿主机。
 
@@ -384,14 +465,21 @@ export NANOMQ_API_PASSWORD=nanomq-secret-value
 export JWT_SECRET=jwt-secret-value-that-is-at-least-32-chars
 
 # 本次安全与交付功能回归、F0 独立验收（不需要额外测试依赖）
-python -m unittest tests.test_secure_settings tests.test_delivery_public_api -v
+python -m unittest \
+  tests.test_secure_settings \
+  tests.test_authenticated_delivery_public_api \
+  tests.test_delivery_public_api -v
 python test_f0_pure.py
+
+# 身份离线供应工具的标准库测试（从仓库根目录运行）
+cd ..
+python -m unittest scripts.test_bootstrap_admin -v
 
 # 其余历史测试使用 pytest；如本机已安装 pytest：python -m pytest tests -q
 # 当前基线有 2 个已知聚合器失败（SUM 去重、LAST 时间排序）。
 
-# 前端构建
-cd ../frontend && npm run build
+# 前端构建（此时位于仓库根目录）
+cd frontend && npm run build
 ```
 
 ---

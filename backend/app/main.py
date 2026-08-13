@@ -80,6 +80,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "[Main] DB migrations: applied={}, skipped={}, errors={}",
             mig_result.get("applied"), mig_result.get("skipped"), mig_result.get("errors"),
         )
+        if mig_result.get("errors"):
+            message = "Database migrations did not complete successfully"
+            if settings.deployment_mode == "production":
+                raise RuntimeError(message)
+            logger.warning("[Main] {} (development mode)", message)
+        try:
+            from app.services.identity import verify_identity_schema
+
+            verify_identity_schema()
+        except Exception as identity_schema_error:
+            if settings.deployment_mode == "production":
+                raise RuntimeError(
+                    "Production identity schema is unavailable"
+                ) from identity_schema_error
+            logger.warning(
+                "[Main] Identity schema unavailable (development mode): {}",
+                identity_schema_error,
+            )
         init_config_table()
         # 幂等播种标准全局实体目录（单一数据源）
         try:
@@ -127,7 +145,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings.mqtt_telemetry_topic = persisted_topic
             logger.info("[Main] Loaded MQTT telemetry topic from DB: {}", persisted_topic)
     except Exception as e:
-        logger.warning("[Main] Failed to load runtime config from DB (non-fatal): {}", e)
+        from app.core.config import settings
+
+        if settings.deployment_mode == "production":
+            logger.error("[Main] Production database initialization failed: {}", e)
+            raise
+        logger.warning("[Main] Failed to load runtime config from DB (development): {}", e)
 
     # Phase 1 S2+: 启动 F0 数据管道 (MQTT → Parse → Normalize → Store)
     try:
@@ -228,6 +251,9 @@ def create_app() -> FastAPI:
     # Phase 1 S1: Health
     from app.api.health import router as health_router
     app.include_router(health_router, prefix="/api/v1", tags=["Health"])
+
+    from app.api.auth import router as auth_router
+    app.include_router(auth_router, prefix="/api/v1", tags=["Authentication"])
 
     # F0 可视化: Nodes + Tags + Telemetry WS
     from app.api.nodes import router as nodes_router

@@ -5,8 +5,8 @@
 # Stage 2: Python 后端 + 前端静态文件
 #
 # 构建:
-#   docker build -t zizu:0.1.0 ./backend
-#   docker buildx build --platform linux/arm64 -t zizu:0.1.0 ./backend --load
+#   docker build -t zizu:0.1.0 -f backend/Dockerfile .
+#   docker buildx build --platform linux/arm64 -t zizu:0.1.0 -f backend/Dockerfile . --load
 #
 # 说明:
 #   - 基础镜像走 DaoCloud 加速 (docker.io 直连国内 EOF)
@@ -54,6 +54,7 @@ RUN pip install --no-cache-dir \
         websockets \
         zen-engine \
         httpx \
+        python-multipart \
         "apscheduler[asyncio,timezone]>=3.10.4" \
         "pyyaml>=6.0.2"
 
@@ -64,6 +65,9 @@ RUN pip install --no-cache-dir \
 
 # 复制后端应用代码
 COPY backend/app ./app
+
+# 首个管理员一次性引导（使用 python -m scripts.bootstrap_admin 执行）
+COPY scripts/bootstrap_admin.py ./scripts/bootstrap_admin.py
 
 # 复制前端构建产物
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
@@ -78,4 +82,4 @@ EXPOSE 9000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/api/v1/health')" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000", "--log-level", "info"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000", "--log-level", "info", "--no-proxy-headers"]

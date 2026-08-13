@@ -6,8 +6,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
+from app.api.security import require_capability
 from app.api.health import _VERSION
 from app.core.config import settings
+from app.services.identity import Principal
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -35,8 +37,10 @@ class ApplyInstallationRequest(BaseModel):
 
 @router.get("/solution-packages")
 async def list_solution_packages(
+    principal: Principal = Depends(require_capability("solution.package.read")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     packages = delivery.list_packages()
     return {
         "items": [package.public_dict() for package in packages],
@@ -50,8 +54,10 @@ async def list_solution_packages(
 )
 async def create_installation_plan(
     package_record_id: UUID,
+    principal: Principal = Depends(require_capability("solution.install.plan")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     try:
         return delivery.plan_install(package_record_id).public_dict()
     except DeliveryError as exc:
@@ -64,8 +70,10 @@ async def create_installation_plan(
 @router.get("/install-plans/{plan_id}")
 async def get_installation_plan(
     plan_id: UUID,
+    principal: Principal = Depends(require_capability("solution.install.plan")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     try:
         return delivery.get_install_plan(plan_id).public_dict()
     except DeliveryError as exc:
@@ -83,6 +91,7 @@ async def apply_installation_plan(
     plan_id: UUID,
     request: ApplyInstallationRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    principal: Principal = Depends(require_capability("solution.install.apply")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
     try:
@@ -90,7 +99,7 @@ async def apply_installation_plan(
             plan_id=plan_id,
             plan_digest=request.plan_digest,
             idempotency_key=idempotency_key or "",
-            actor="anonymous-bootstrap",
+            actor=principal.actor,
         ).public_dict()
     except DeliveryError as exc:
         raise HTTPException(
@@ -101,8 +110,10 @@ async def apply_installation_plan(
 
 @router.get("/solution-installations")
 async def list_solution_installations(
+    principal: Principal = Depends(require_capability("solution.installation.read")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     installations = delivery.list_installations()
     return {
         "items": [installation.public_dict() for installation in installations],
@@ -117,13 +128,14 @@ async def list_solution_installations(
 async def run_delivery_acceptance(
     installation_id: UUID,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    principal: Principal = Depends(require_capability("solution.acceptance.run")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
     try:
         report = await delivery.run_acceptance(
             installation_id=installation_id,
             idempotency_key=idempotency_key or "",
-            actor="anonymous-bootstrap",
+            actor=principal.actor,
         )
         return report.public_dict()
     except DeliveryError as exc:
@@ -136,8 +148,10 @@ async def run_delivery_acceptance(
 @router.get("/delivery-reports/{report_id}")
 async def get_delivery_report(
     report_id: UUID,
+    principal: Principal = Depends(require_capability("solution.report.read")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     try:
         return delivery.get_report(report_id).public_dict()
     except DeliveryError as exc:
@@ -150,8 +164,10 @@ async def get_delivery_report(
 @router.post("/solution-packages/import", status_code=status.HTTP_201_CREATED)
 async def import_solution_package(
     archive: UploadFile = File(...),
+    principal: Principal = Depends(require_capability("solution.package.import")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
+    del principal
     try:
         chunks: list[bytes] = []
         received = 0

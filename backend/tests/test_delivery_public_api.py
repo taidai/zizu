@@ -8,11 +8,103 @@ import unittest
 import zipfile
 from unittest.mock import patch
 from typing import Any
+from uuid import UUID
 
 import httpx
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+
+
+TEST_PASSWORD = "test-only-delivery-password"
+
+
+class AuthenticatedDeliveryClient:
+    """Drive the public delivery seam with the role that owns each action."""
+
+    def __init__(self, app: FastAPI) -> None:
+        from app.api.auth import router as auth_router
+        from app.api.security import get_identity
+        from app.services.identity import (
+            Identity,
+            InMemoryIdentityRepository,
+            UserIdentity,
+            hash_password,
+        )
+
+        password_hash = hash_password(TEST_PASSWORD, salt=b"delivery-fixture")
+        users = [
+            UserIdentity(
+                UUID("00000000-0000-0000-0000-000000000001"),
+                "admin",
+                password_hash,
+                "admin",
+                "active",
+            ),
+            UserIdentity(
+                UUID("00000000-0000-0000-0000-000000000002"),
+                "engineer",
+                password_hash,
+                "engineer",
+                "active",
+            ),
+            UserIdentity(
+                UUID("00000000-0000-0000-0000-000000000003"),
+                "operator",
+                password_hash,
+                "operator",
+                "active",
+            ),
+        ]
+        identity = Identity(InMemoryIdentityRepository(users))
+        app.include_router(auth_router, prefix="/api/v1")
+        app.dependency_overrides[get_identity] = lambda: identity
+        self._client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://testserver",
+        )
+        self._authorization: dict[str, str] = {}
+
+    async def __aenter__(self) -> "AuthenticatedDeliveryClient":
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self._client.__aexit__(*args)
+
+    async def _bearer(self, role: str) -> str:
+        if role not in self._authorization:
+            response = await self._client.post(
+                "/api/v1/auth/login",
+                json={"username": role, "password": TEST_PASSWORD},
+            )
+            if response.status_code != 200:
+                raise AssertionError(f"{role} login failed: {response.text}")
+            self._authorization[role] = (
+                f"Bearer {response.json()['access_token']}"
+            )
+        return self._authorization[role]
+
+    @staticmethod
+    def _role(method: str, path: str) -> str:
+        if method == "POST" and path == "/api/v1/solution-packages/import":
+            return "admin"
+        if method == "GET" and path == "/api/v1/solution-packages":
+            return "admin"
+        if method == "GET" and path.startswith("/api/v1/delivery-reports/"):
+            return "operator"
+        return "engineer"
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        headers = dict(kwargs.pop("headers", {}))
+        headers["Authorization"] = await self._bearer(self._role(method, path))
+        return await self._client.request(method, path, headers=headers, **kwargs)
+
+    async def get(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self._request("GET", path, **kwargs)
+
+    async def post(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self._request("POST", path, **kwargs)
 
 
 class AsgiPublicApiProbe:
@@ -235,12 +327,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             response = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -290,12 +377,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             rejected = await client.post(
                 "/api/v1/solution-packages/import",
                 files={"archive": ("broken.zip", b"not-a-zip", "application/zip")},
@@ -325,11 +407,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             rejected = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -360,12 +438,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             original = await client.post(
                 "/api/v1/solution-packages/import",
                 files={"archive": ("original.zip", build_minimal_package(), "application/zip")},
@@ -409,13 +482,9 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
         unsafe = add_archive_entry(build_minimal_package(), "../escape.yaml", b"x")
 
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             rejected = await client.post(
                 "/api/v1/solution-packages/import",
                 files={"archive": ("unsafe.zip", unsafe, "application/zip")},
@@ -497,11 +566,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     platform_version="0.4.77",
                 )
                 app.dependency_overrides[get_solution_delivery] = lambda: delivery
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    base_url="http://testserver",
-                ) as client:
+                async with AuthenticatedDeliveryClient(app) as client:
                     rejected = await client.post(
                         "/api/v1/solution-packages/import",
                         files={"archive": ("unsafe.zip", archive, "application/zip")},
@@ -576,11 +641,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     platform_version="0.4.77",
                 )
                 app.dependency_overrides[get_solution_delivery] = lambda: delivery
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    base_url="http://testserver",
-                ) as client:
+                async with AuthenticatedDeliveryClient(app) as client:
                     rejected = await client.post(
                         "/api/v1/solution-packages/import",
                         files={"archive": ("invalid.zip", archive, "application/zip")},
@@ -612,12 +673,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             imported = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -681,12 +737,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             imported = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -776,12 +827,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             imported = await client.post(
                 "/api/v1/solution-packages/import",
                 files={"archive": ("minimal.zip", build_minimal_package(), "application/zip")},
@@ -835,12 +881,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(delivery_router, prefix="/api/v1")
         delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             first_package = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -908,12 +949,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             public_api_probe=AsgiPublicApiProbe(app),
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
-        transport = httpx.ASGITransport(app=app)
-
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
+        async with AuthenticatedDeliveryClient(app) as client:
             imported = await client.post(
                 "/api/v1/solution-packages/import",
                 files={
@@ -1017,11 +1053,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     public_api_probe=FailingPublicApiProbe(failure),
                 )
                 app.dependency_overrides[get_solution_delivery] = lambda: delivery
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    base_url="http://testserver",
-                ) as client:
+                async with AuthenticatedDeliveryClient(app) as client:
                     imported = await client.post(
                         "/api/v1/solution-packages/import",
                         files={"archive": ("minimal.zip", build_minimal_package(), "application/zip")},
