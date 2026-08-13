@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed — 2026-08-13
+Accepted — 2026-08-13
 
-维护者确认本文的公开主测试缝后转为 Accepted，并作为票据 01 的 TDD 契约。
+维护者已确认本文的公开主测试缝，本文作为票据 01 的 TDD 契约。
 
 ## Context
 

@@ -1,0 +1,175 @@
+"""解决方案包公开 HTTP Adapter。"""
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
+
+from app.api.health import _VERSION
+from app.core.config import settings
+from app.services.solution_delivery import (
+    DeliveryError,
+    HttpxPublicApiProbe,
+    MAX_PACKAGE_ARCHIVE_BYTES,
+    PostgresDeliveryRepository,
+    SolutionDelivery,
+)
+
+
+router = APIRouter()
+_delivery = SolutionDelivery(
+    PostgresDeliveryRepository(),
+    platform_version=_VERSION,
+    public_api_probe=HttpxPublicApiProbe(settings.effective_public_api_base_url),
+)
+
+
+def get_solution_delivery() -> SolutionDelivery:
+    return _delivery
+
+
+class ApplyInstallationRequest(BaseModel):
+    plan_digest: str = Field(..., min_length=64, max_length=64)
+
+
+@router.get("/solution-packages")
+async def list_solution_packages(
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    packages = delivery.list_packages()
+    return {
+        "items": [package.public_dict() for package in packages],
+        "total": len(packages),
+    }
+
+
+@router.post(
+    "/solution-packages/{package_record_id}/install-plans",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_installation_plan(
+    package_record_id: UUID,
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        return delivery.plan_install(package_record_id).public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.get("/install-plans/{plan_id}")
+async def get_installation_plan(
+    plan_id: UUID,
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        return delivery.get_install_plan(plan_id).public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.post(
+    "/install-plans/{plan_id}/apply",
+    status_code=status.HTTP_201_CREATED,
+)
+async def apply_installation_plan(
+    plan_id: UUID,
+    request: ApplyInstallationRequest,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        return delivery.apply_install(
+            plan_id=plan_id,
+            plan_digest=request.plan_digest,
+            idempotency_key=idempotency_key or "",
+            actor="anonymous-bootstrap",
+        ).public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.get("/solution-installations")
+async def list_solution_installations(
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    installations = delivery.list_installations()
+    return {
+        "items": [installation.public_dict() for installation in installations],
+        "total": len(installations),
+    }
+
+
+@router.post(
+    "/solution-installations/{installation_id}/acceptance-runs",
+    status_code=status.HTTP_201_CREATED,
+)
+async def run_delivery_acceptance(
+    installation_id: UUID,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        report = await delivery.run_acceptance(
+            installation_id=installation_id,
+            idempotency_key=idempotency_key or "",
+            actor="anonymous-bootstrap",
+        )
+        return report.public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.get("/delivery-reports/{report_id}")
+async def get_delivery_report(
+    report_id: UUID,
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        return delivery.get_report(report_id).public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.post("/solution-packages/import", status_code=status.HTTP_201_CREATED)
+async def import_solution_package(
+    archive: UploadFile = File(...),
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    try:
+        chunks: list[bytes] = []
+        received = 0
+        while True:
+            chunk = await archive.read(min(1024 * 1024, MAX_PACKAGE_ARCHIVE_BYTES + 1 - received))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+            if received > MAX_PACKAGE_ARCHIVE_BYTES:
+                raise DeliveryError(
+                    "PACKAGE_LIMIT_EXCEEDED",
+                    "ZIP archive exceeds 10 MiB",
+                )
+        package = delivery.import_package(b"".join(chunks))
+        return package.public_dict()
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc

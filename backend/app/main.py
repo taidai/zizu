@@ -276,6 +276,13 @@ def create_app() -> FastAPI:
     from app.api.nanomq import router as nanomq_router
     app.include_router(nanomq_router, prefix="/api/v1", tags=["nanoMQ"])
 
+    from app.api.solution_delivery import router as solution_delivery_router
+    app.include_router(
+        solution_delivery_router,
+        prefix="/api/v1",
+        tags=["Solution Delivery"],
+    )
+
      # ---- Static Frontend (F0 可视化 V1) ----
     # 后端直接托管前端 dist，无需独立 nginx 容器
     import os

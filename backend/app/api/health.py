@@ -2,6 +2,7 @@
 ZiZu Health Check API
 
 GET /api/v1/health → 全组件状态 + F0 Pipeline Metrics
+GET /api/v1/health/live → 最小匿名存活探针
 GET /api/v1/health/ready → K8s readiness probe
 """
 from __future__ import annotations
@@ -37,6 +38,7 @@ def _load_version() -> str:
 
 _VERSION = _load_version()
 
+
 def set_pipeline(pipeline) -> None:
     """由 main.py 在启动时注入 pipeline 实例。"""
     global _pipeline
@@ -48,7 +50,10 @@ def get_pipeline():
     return _pipeline
 
 
-
+@router.get("/health/live")
+async def liveness_check() -> dict:
+    """最小匿名存活探针，不暴露组件状态或现场拓扑。"""
+    return {"status": "alive", "version": _VERSION}
 
 async def _check_neuron() -> str:
     try:

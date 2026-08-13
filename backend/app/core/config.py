@@ -26,8 +26,10 @@ class Settings(BaseSettings):
 
     # ---- 应用基础 ----
     app_name: str = "ZiZu"
+    app_port: int = 9000
     debug: bool = False
     log_level: str = "INFO"
+    public_api_base_url: str | None = None
     deployment_mode: Literal["production", "development"] = "production"
     allow_insecure_dev_secrets: bool = False
 
@@ -37,6 +39,11 @@ class Settings(BaseSettings):
             self.deployment_mode,
             self.allow_insecure_dev_secrets,
         )
+
+    @property
+    def effective_public_api_base_url(self) -> str:
+        """验收模块访问本实例公开接口的基址。"""
+        return self.public_api_base_url or f"http://127.0.0.1:{self.app_port}"
 
     # ---- 数据库 (TimescaleDB / PostgreSQL) ----
     db_host: str = "timescaledb"

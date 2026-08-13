@@ -1,0 +1,258 @@
+"""解决方案包归档的安全读取、清单校验与规范摘要。"""
+from __future__ import annotations
+
+import hashlib
+import io
+import re
+import stat
+from typing import Any
+import zipfile
+
+import yaml
+
+from app.services.solution_delivery_contracts import (
+    DeliveryError,
+    MAX_PACKAGE_ARCHIVE_BYTES,
+)
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_MAX_ARCHIVE_FILES = 256
+_MAX_FILE_BYTES = 2 * 1024 * 1024
+_MAX_EXPANDED_BYTES = 20 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 100
+_EXECUTABLE_SUFFIXES = {
+    ".bat",
+    ".cjs",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".jar",
+    ".js",
+    ".mjs",
+    ".ps1",
+    ".py",
+    ".pyc",
+    ".sh",
+    ".so",
+    ".sql",
+    ".wasm",
+}
+
+
+def _read_archive(archive: bytes) -> dict[str, bytes]:
+    if len(archive) > MAX_PACKAGE_ARCHIVE_BYTES:
+        raise DeliveryError("PACKAGE_LIMIT_EXCEEDED", "ZIP archive exceeds 10 MiB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as package:
+            entries = [info for info in package.infolist() if not info.is_dir()]
+            if len(entries) > _MAX_ARCHIVE_FILES:
+                raise DeliveryError(
+                    "PACKAGE_LIMIT_EXCEEDED",
+                    "ZIP archive contains more than 256 files",
+                )
+            if sum(info.file_size for info in entries) > _MAX_EXPANDED_BYTES:
+                raise DeliveryError(
+                    "PACKAGE_LIMIT_EXCEEDED",
+                    "ZIP archive expands beyond 20 MiB",
+                )
+
+            files: dict[str, bytes] = {}
+            casefold_paths: set[str] = set()
+            for info in entries:
+                header = info.header_offset
+                if archive[header : header + 4] != b"PK\x03\x04":
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "ZIP local header is invalid",
+                    )
+                raw_name_length = int.from_bytes(
+                    archive[header + 26 : header + 28],
+                    "little",
+                )
+                raw_name = archive[header + 30 : header + 30 + raw_name_length]
+                if b"\\" in raw_name or b"\0" in raw_name:
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "ZIP entry uses an ambiguous raw path",
+                    )
+                path = info.filename
+                parts = path.split("/")
+                if (
+                    not path
+                    or "\0" in path
+                    or "\\" in path
+                    or path.startswith("/")
+                    or ".." in parts
+                    or any(part in ("", ".") for part in parts)
+                    or ":" in parts[0]
+                ):
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "ZIP entry has an unsafe or ambiguous path",
+                    )
+                folded = path.casefold()
+                if path in files or folded in casefold_paths:
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "ZIP entry path is duplicated or case-ambiguous",
+                    )
+                if info.flag_bits & 0x1:
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "Encrypted ZIP entries are not allowed",
+                    )
+                unix_mode = (info.external_attr >> 16) & 0xFFFF
+                file_type = stat.S_IFMT(unix_mode)
+                if file_type not in (0, stat.S_IFREG):
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "Links and device entries are not allowed",
+                    )
+                if info.file_size > _MAX_FILE_BYTES:
+                    raise DeliveryError(
+                        "PACKAGE_LIMIT_EXCEEDED",
+                        "ZIP entry expands beyond 2 MiB",
+                    )
+                if info.file_size and (
+                    info.compress_size == 0
+                    or info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO
+                ):
+                    raise DeliveryError(
+                        "PACKAGE_LIMIT_EXCEEDED",
+                        "ZIP entry compression ratio exceeds 100:1",
+                    )
+                suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+                if suffix in _EXECUTABLE_SUFFIXES:
+                    raise DeliveryError(
+                        "PACKAGE_ARCHIVE_UNSAFE",
+                        "Executable content is not allowed in a solution package",
+                    )
+                files[path] = package.read(info)
+                casefold_paths.add(folded)
+            return files
+    except DeliveryError:
+        raise
+    except (zipfile.BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+        raise DeliveryError("PACKAGE_ARCHIVE_UNSAFE", "Invalid ZIP archive") from exc
+
+
+def _load_mapping(content: bytes | None, code: str) -> dict[str, Any]:
+    if content is None:
+        raise DeliveryError(code, "Required YAML document is missing")
+    try:
+        value = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise DeliveryError(code, "Invalid YAML document") from exc
+    if not isinstance(value, dict):
+        raise DeliveryError(code, "YAML document must be a mapping")
+    return value
+
+
+def _validate_manifest(manifest: dict[str, Any]) -> None:
+    scalar_fields = ("id", "version", "displayName")
+    if manifest.get("schemaVersion") != "zizu.solution/v1alpha1" or any(
+        not isinstance(manifest.get(field), str) or not manifest[field]
+        for field in scalar_fields
+    ):
+        raise DeliveryError("MANIFEST_INVALID", "Manifest identity is invalid")
+    platform = manifest.get("platform")
+    if not isinstance(platform, dict) or not isinstance(platform.get("version"), str):
+        raise DeliveryError("MANIFEST_INVALID", "Platform range is required")
+    assets = manifest.get("assets")
+    acceptance = manifest.get("acceptance")
+    if not isinstance(assets, list) or not isinstance(acceptance, list):
+        raise DeliveryError("MANIFEST_INVALID", "Assets and acceptance must be lists")
+    asset_ids: set[str] = set()
+    asset_paths: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise DeliveryError("MANIFEST_INVALID", "Asset must be a mapping")
+        if asset.get("kind") != "acceptance" or any(
+            not isinstance(asset.get(field), str) or not asset[field]
+            for field in ("id", "path", "sha256")
+        ):
+            raise DeliveryError("MANIFEST_INVALID", "Acceptance asset is invalid")
+        if not _SHA256.fullmatch(asset["sha256"]):
+            raise DeliveryError("MANIFEST_INVALID", "Asset sha256 is invalid")
+        if asset["id"] in asset_ids or asset["path"] in asset_paths:
+            raise DeliveryError(
+                "MANIFEST_INVALID",
+                "Asset ids and paths must be unique",
+            )
+        asset_ids.add(asset["id"])
+        asset_paths.add(asset["path"])
+
+
+def _validate_acceptance_definition(
+    definition: dict[str, Any],
+    acceptance_id: str,
+) -> None:
+    allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
+    if set(definition) != allowed_fields:
+        raise DeliveryError(
+            "ASSET_REFERENCE_INVALID",
+            "Acceptance definition fields are invalid",
+        )
+    if (
+        definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+        or definition.get("id") != acceptance_id
+        or definition.get("kind") != "platform_liveness"
+        or not isinstance(definition.get("required"), bool)
+    ):
+        raise DeliveryError(
+            "ASSET_REFERENCE_INVALID",
+            "Unsupported acceptance definition",
+        )
+    _validate_timeout(definition.get("timeout"))
+
+
+def _validate_timeout(value: Any) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"([1-9]\d*)s", value) is None:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Acceptance timeout is invalid")
+
+
+def _version_tuple(value: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value)
+    if match is None:
+        raise DeliveryError("MANIFEST_INVALID", "Version must use major.minor.patch")
+    return tuple(int(part) for part in match.groups())
+
+
+def _validate_platform_range(constraint: str, current: str) -> None:
+    version = _version_tuple(current)
+    clauses = [item.strip() for item in constraint.split(",")]
+    if not clauses or any(not item for item in clauses):
+        raise DeliveryError("MANIFEST_INVALID", "Platform range is invalid")
+    for clause in clauses:
+        match = re.fullmatch(r"(>=|<=|>|<|==)(\d+\.\d+\.\d+)", clause)
+        if match is None:
+            raise DeliveryError("MANIFEST_INVALID", "Platform range is invalid")
+        operator, target_text = match.groups()
+        target = _version_tuple(target_text)
+        accepted = {
+            ">=": version >= target,
+            "<=": version <= target,
+            ">": version > target,
+            "<": version < target,
+            "==": version == target,
+        }[operator]
+        if not accepted:
+            raise DeliveryError(
+                "PLATFORM_INCOMPATIBLE",
+                "Package does not support the running platform version",
+            )
+
+
+def _package_digest(files: dict[str, bytes]) -> str:
+    canonical = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.encode("utf-8")):
+        content = files[path]
+        canonical.update(path.encode("utf-8"))
+        canonical.update(b"\0")
+        canonical.update(str(len(content)).encode("ascii"))
+        canonical.update(b"\0")
+        canonical.update(hashlib.sha256(content).digest())
+    return canonical.hexdigest()
