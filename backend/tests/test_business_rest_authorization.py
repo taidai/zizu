@@ -240,6 +240,7 @@ DELIVERY_OPERATIONS = {
     ("GET", "/api/v1/install-plans/{plan_id}"),
     ("POST", "/api/v1/install-plans/{plan_id}/apply"),
     ("GET", "/api/v1/solution-installations"),
+    ("GET", "/api/v1/site-configuration-versions/{version}"),
     (
         "POST",
         "/api/v1/solution-installations/{installation_id}/acceptance-runs",
@@ -1048,7 +1049,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 127)
+        self.assertEqual(len(registered), 128)
 
         for (method, path), capability in sorted(TICKET_03_CAPABILITIES.items()):
             with self.subTest(method=method, path=path):

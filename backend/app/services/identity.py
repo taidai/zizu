@@ -304,6 +304,7 @@ CAPABILITY_ROLES: dict[str, frozenset[str]] = {
     "solution.install.plan": frozenset({"admin", "engineer"}),
     "solution.install.apply": frozenset({"admin", "engineer"}),
     "solution.installation.read": frozenset({"admin", "engineer", "operator"}),
+    "solution.configuration.read": frozenset({"admin", "engineer"}),
     "solution.acceptance.run": frozenset({"admin", "engineer"}),
     "solution.report.read": frozenset({"admin", "engineer", "operator"}),
 }

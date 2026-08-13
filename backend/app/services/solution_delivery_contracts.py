@@ -33,6 +33,7 @@ class PackageImport:
         value = asdict(self)
         value["id"] = str(self.id)
         value["acceptance_ids"] = list(self.acceptance_ids)
+        value["parameter_contracts"] = list(self.manifest.get("parameters", []))
         value.pop("manifest")
         value.pop("assets")
         return value
@@ -45,8 +46,14 @@ class InstallationPlan:
     package_digest: str
     base_site_configuration_version: int
     status: str
-    items: tuple[dict[str, str], ...]
+    items: tuple[dict[str, Any], ...]
     blockers: tuple[dict[str, str], ...]
+    parameter_contracts: tuple[dict[str, Any], ...]
+    parameters: dict[str, Any]
+    secret_references: dict[str, str]
+    parameter_sources: dict[str, str]
+    parameter_metadata: dict[str, dict[str, str]]
+    configuration_digest: str
     digest: str
 
     def public_dict(self) -> dict[str, Any]:
@@ -55,6 +62,7 @@ class InstallationPlan:
         value["package_record_id"] = str(self.package_record_id)
         value["items"] = list(self.items)
         value["blockers"] = list(self.blockers)
+        value["parameter_contracts"] = list(self.parameter_contracts)
         return value
 
 
@@ -71,6 +79,26 @@ class InstallationOutcome:
         value = asdict(self)
         value["id"] = str(self.id)
         value["plan_id"] = str(self.plan_id)
+        value["package_record_id"] = str(self.package_record_id)
+        return value
+
+
+@dataclass(frozen=True)
+class SiteConfigurationVersion:
+    version: int
+    previous_version: int | None
+    installation_id: UUID
+    package_record_id: UUID
+    package_digest: str
+    parameters: dict[str, Any]
+    secret_references: dict[str, str]
+    parameter_metadata: dict[str, dict[str, str]]
+    digest: str
+    actor: str
+
+    def public_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["installation_id"] = str(self.installation_id)
         value["package_record_id"] = str(self.package_record_id)
         return value
 
@@ -134,11 +162,10 @@ class DeliveryRepository(Protocol):
 
     def get_installation(self, installation_id: UUID) -> InstallationOutcome | None: ...
 
-    def find_installation(
+    def get_site_configuration_version(
         self,
-        package_record_id: UUID,
-        package_digest: str,
-    ) -> InstallationOutcome | None: ...
+        version: int,
+    ) -> SiteConfigurationVersion | None: ...
 
     def package_for_installation(
         self,

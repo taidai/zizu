@@ -234,6 +234,7 @@ ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true
 | 导入解决方案包 | ✓ | — | — |
 | 查询解决方案包 | ✓ | — | — |
 | 生成/查询/执行安装计划 | ✓ | ✓ | — |
+| 查询站点配置版本 | ✓ | ✓ | — |
 | 查询安装记录 | ✓ | ✓ | ✓ |
 | 运行机器验收 | ✓ | ✓ | — |
 | 查询交付报告 | ✓ | ✓ | ✓ |
@@ -377,6 +378,7 @@ zizu/
 | GET | `/api/v1/install-plans/{id}` | 查询已保存的不可变安装计划 |
 | POST | `/api/v1/install-plans/{id}/apply` | 按计划摘要幂等安装解决方案包 |
 | GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
+| GET | `/api/v1/site-configuration-versions/{version}` | 查询不可变站点配置版本 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
 
@@ -385,7 +387,57 @@ zizu/
 但后续仍须经统一控制命令模块补齐限值、联锁、幂等和回读状态机。所有这些端点在
 业务执行前写不可变 requested 审计，成功后再写 success；审计不可用时 fail closed。
 
-解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。安装执行请求体为
+解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。创建安装计划的请求体为
+`{"parameters":{"site.code":"EMS-01","pcs.count":2},"secret_references":{"neuron.credentials":"secret://site/neuron/credentials"}}`。
+参数契约支持 string、integer、number、boolean、enum、address、port、duration 和 secret；
+可声明单位、必填、默认值、数值范围、枚举和正则模式。Secret 参数禁止提交明文值，只
+接受 `secret://` 引用；缺失或非法输入产生稳定 blocker，阻止安装且不改变站点版本。
+包导入结果和安装计划都会返回 `parameter_contracts`，实施端可据此生成配置表单；计划
+只返回规范化后的非敏感参数和 Secret 引用，不返回提交过的 Secret 明文或非法原值。
+计划与安装以规范化参数、Secret 引用和包摘要共同计算配置摘要；相同配置重复安装为
+`preserve`，参数变化为 `update` 并生成新的追加式站点配置版本。计划的参数级 items
+展示 before/after、unit、来源和 add/update/preserve/delete_candidate/block 动作；工程师
+输入和包默认值分别标记为 `engineer_input`、`package_default`，安装版本记录来源与 UTC
+修改时间。回到历史参数不是 preserve，而是创建新的版本，避免界面与当前运行配置不一致。
+
+参数契约声明在 `solution.yaml` 顶层。每项都必须有稳定 `id`、`type`、布尔
+`required` 和非空 `description`；非 Secret 项可声明与类型一致的 `default`。类型专属字段
+仅允许：string/address 的 `pattern`，integer/number 的 `unit`、`minimum`、`maximum`，
+port 的 `minimum`、`maximum`，enum 的非空唯一字符串 `values`。Secret 不允许默认值。
+以下片段可直接作为解决方案包的参数入口：
+
+```yaml
+parameters:
+  - id: site.code
+    type: string
+    required: true
+    pattern: '^[A-Z0-9-]{2,16}$'
+    description: Stable site code
+  - id: nominal.power
+    type: number
+    unit: kW
+    required: true
+    minimum: 0
+    maximum: 10000
+    description: Site nominal power
+  - id: dispatch.mode
+    type: enum
+    required: false
+    default: self_consumption
+    values: [self_consumption, peak_shaving]
+    description: Dispatch strategy
+  - id: poll.interval
+    type: duration
+    required: false
+    default: 5s
+    description: Poll interval; use ms, s, m, or h
+  - id: neuron.credentials
+    type: secret
+    required: true
+    description: Runtime Neuron credential reference
+```
+
+安装执行请求体为
 `{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带
 `Idempotency-Key` 请求头。相同调用主体、命令和请求摘要重用同一键会返回原结果，
 同一键用于不同请求返回 `IDEMPOTENCY_KEY_REUSED`。归档/清单错误返回 HTTP 422，

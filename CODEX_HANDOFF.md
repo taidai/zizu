@@ -1,5 +1,26 @@
 ---
 
+## Session 2026-08-14 — Ticket #5 强类型站点参数与 Secret 安装计划（双轴通过）
+
+### 已实现
+- 解决方案清单参数契约支持 string、integer、number、boolean、enum、address、port、duration、secret；统一深模块校验类型、单位、必填、默认值、范围、模式与枚举。
+- 包列表与公开安装计划都返回可生成向导的参数契约；计划接收站点参数与 `secret://` 引用并生成确定性 blocker，明文 Secret 被拒绝且不进入响应、计划、安装或审计。
+- 计划以包摘要、规范参数和 Secret 引用计算配置摘要；相同配置 preserve，参数变化 update；安装事务生成追加式不可变站点配置版本。
+- 安装计划提供参数级 before/after/source 动作；preserve 只比较当前配置，A→B→A 形成新版本；未显式重填的 engineer_input 站点覆盖会保留，不被包默认值静默覆盖。
+- 新增受保护的站点配置版本读接口和 migration_023；operator 不能读取站点参数/Secret 引用。
+
+### 验证
+- TDD 逐条完成必填参数阻断、完整类型、Secret 脱敏、站点配置读回和参数更新版本链。
+- 交付/认证/路由公开回归 47/47；128 个 REST 操作全部有明确票据归属。
+- 独立临时 TimescaleDB 真实运行旧记录升级、migration_023 重放、带参数/Secret 引用的公开安装、并发/幂等、进程重启与计划/配置持久读回主缝 1/1 通过；临时容器已删除，未连接现场。
+
+### 当前边界 / Next
+- Ticket #5 Standards/Spec 均 PASS；完整回归为 126 passed、1 skipped，仅 2 个既有 Aggregator baseline 失败；真实 PostgreSQL 最终主缝 1/1 通过。
+- Ticket #4 本地提交为 `12e7327`，两次 GitHub push 因 DNS 正常但 443 不通而安全失败；Ticket #5 暂叠在其上，网络恢复后按依赖顺序发布。
+- 1号机仍禁止部署；TLS、固定 ARM64 制品、现场凭据轮换与发布锁定尚未闭合。
+
+---
+
 ## Session 2026-08-14 — Ticket #4 控制/管理 REST 与 WebSocket 安全收口（双轴通过）
 
 ### 已实现

@@ -14,6 +14,7 @@ from app.services.solution_delivery_contracts import (
     DeliveryError,
     MAX_PACKAGE_ARCHIVE_BYTES,
 )
+from app.services.solution_parameters import validate_parameter_contracts
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -184,6 +185,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             )
         asset_ids.add(asset["id"])
         asset_paths.add(asset["path"])
+    validate_parameter_contracts(manifest.get("parameters"))
 
 
 def _validate_acceptance_definition(
