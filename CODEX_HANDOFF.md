@@ -2993,3 +2993,28 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 1. 修复规则删除 500（可选，非阻塞）。
 2. 验证控制下发链路：创建 W/RW 实体 + 控制规则 + 观察 Neuron 写 tag。
 3. 继续简化前端：合并告警等级/告警配置菜单、节点管理 inline 实体绑定。
+---
+
+## Session 2026-08-13 — Ticket #3 非控制业务 REST 与前端身份迁移完成
+
+### 目标校准
+- 产品目标更新为：ZiZu 是“简单配置即可交付 EMS 的工业 IoT 平台”。安全权限是配置交付的必要底座，不是最终产品价值；后续仍以四小时独立交付、无需改源码/SQL 为完成标准。
+
+### 已完成
+- 将 83 个非控制业务 REST 操作完整归入 `runtime.read`、`configuration.read`、`configuration.write`、`alarm.acknowledge` 与临时 `legacy_alarm.write` 能力矩阵；admin/engineer/operator 角色只在 Identity 策略中集中映射。
+- 匿名客户端稳定 401 并留下审计；权限不足稳定 403。配置写在业务执行前 fail-closed 记录 requested 审计，成功后记录 success；现有存量事务边界限制已在 README 明示。
+- operator 的节点、点位和实体运行投影去除连接配置、来源路径、公式、阈值及绑定/Neuron 内部标识；engineer/admin 保留诊断视图。
+- 告警确认主体固定来自服务端 `Principal.actor`，请求体不能伪造 `ack_user`；修复 `/alarms/counts` 装饰器漂移。
+- 前端统一经 `apiFetch` 动态附加 Bearer；会话只存内存和 sessionStorage，不使用 localStorage；401 只清除发起请求时的旧 token，403 不登出。补齐登录、会话恢复、退出、角色导航、operator 只读运行视图和认证下载。
+- 容器/Compose/部署脚本健康检查切至匿名 `/api/v1/health/live`；独立验收脚本使用显式 HTTPS API 与真实登录身份，不再提交硬编码操作者。
+
+### 验证
+- Ticket #3 公开 HTTP 权限测试 12/12；身份/交付/设置相关回归 52/52。
+- 完整后端：112 passed、1 个显式 Postgres 测试按环境跳过；2 个既有 Aggregator 基线失败（SUM 去重、LAST 时间排序），不是本票回归。
+- 前端 `tsc -b && vite build` 通过；8176 modules，仅保留既有大 chunk warning。
+- 静态门禁：前端只有统一 wrapper 与 login 两处 `fetch`；无 localStorage、token query、`anonymous-bootstrap` 或客户端告警主体；`git diff --check` 通过。
+- 双轴审查：Standards PASS（硬违反 0）；Spec PASS（阻断/scope creep/行为错误均 0）。
+
+### 当前边界 / Next
+- Ticket #3 不保护控制、Neuron、NanoMQ、SQL/清表及 WebSocket；这些属于 Ticket #4。1号机仍运行旧 v0.4.77 明文匿名版本，本票未部署。
+- 下一实施前沿：Ticket #4“收口控制、管理与 WebSocket 安全默认”；完成后才可把全站安全边界作为成立证据。TLS、固定 ARM64 制品、现场凭据轮换仍是生产发布门禁。

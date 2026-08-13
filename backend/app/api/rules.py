@@ -15,6 +15,12 @@ from loguru import logger
 from app.services.gorules_adapter import _normalize_jdm_content
 from pydantic import BaseModel, Field
 
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
+
 router = APIRouter()
 
 # zen-engine 为可选依赖；未安装时模拟接口回退到占位实现
@@ -68,7 +74,7 @@ def _serialize_rule(row: dict) -> dict:
     return row
 
 
-@router.get("/rules")
+@router.get("/rules", **protected(CONFIGURATION_READ))
 async def list_rules(enabled: bool | None = Query(None)) -> dict:
     """列出所有规则。"""
     from app.services.telemetry_store import get_connection
@@ -98,7 +104,7 @@ async def list_rules(enabled: bool | None = Query(None)) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rules")
+@router.post("/rules", **protected(CONFIGURATION_WRITE))
 async def create_rule(req: RuleCreateRequest) -> dict:
     """创建规则。"""
     from app.services.telemetry_store import get_connection
@@ -123,7 +129,7 @@ async def create_rule(req: RuleCreateRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/rules/{rule_id}")
+@router.get("/rules/{rule_id}", **protected(CONFIGURATION_READ))
 async def get_rule(rule_id: UUID) -> dict:
     """获取单个规则。"""
     from app.services.telemetry_store import get_connection
@@ -141,7 +147,7 @@ async def get_rule(rule_id: UUID) -> dict:
             return _serialize_rule(dict(zip(columns, row)))
 
 
-@router.put("/rules/{rule_id}")
+@router.put("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
 async def update_rule(rule_id: UUID, req: RuleUpdateRequest) -> dict:
     """更新规则，版本号 +1。"""
     from app.services.telemetry_store import get_connection
@@ -183,7 +189,7 @@ async def update_rule(rule_id: UUID, req: RuleUpdateRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/rules/{rule_id}")
+@router.delete("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
 async def delete_rule(rule_id: UUID) -> dict:
     """删除规则。"""
     from app.services.telemetry_store import get_connection
@@ -198,7 +204,7 @@ async def delete_rule(rule_id: UUID) -> dict:
     return {"status": "deleted", "id": str(rule_id)}
 
 
-@router.post("/rules/evaluate")
+@router.post("/rules/evaluate", **protected(CONFIGURATION_WRITE))
 async def evaluate_rule(req: EvaluateRequest) -> dict:
     """直接评估决策图/表内容，不依赖数据库中的规则。"""
     logger.info("[API/rules] evaluate context_keys={}", list(req.context.keys()))
@@ -322,7 +328,7 @@ def _evaluate_with_zen(jdm_content: dict, context: dict) -> dict:
     }
 
 
-@router.post("/rules/{rule_id}/simulate")
+@router.post("/rules/{rule_id}/simulate", **protected(CONFIGURATION_WRITE))
 async def simulate_rule(rule_id: UUID, req: SimulateRequest) -> dict:
     """
     规则模拟：加载 JDM 内容并使用 zen-engine 评估上下文。
@@ -350,7 +356,7 @@ async def simulate_rule(rule_id: UUID, req: SimulateRequest) -> dict:
         logger.error("[API/rules] simulate failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/rules/{rule_id}/dry-run")
+@router.post("/rules/{rule_id}/dry-run", **protected(CONFIGURATION_WRITE))
 async def dry_run_rule_endpoint(rule_id: UUID) -> dict:
     """用当前真实数据试运行单条规则，不执行告警/控制动作。"""
     from app.services.rule_engine import dry_run_rule

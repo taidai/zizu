@@ -14,6 +14,8 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
+from app.api.business_security import CONFIGURATION_READ, RUNTIME_READ, protected
+
 router = APIRouter()
 
 
@@ -27,7 +29,7 @@ class TelemetryPoint(BaseModel):
     quality: int | None
 
 
-@router.get("/telemetry")
+@router.get("/telemetry", **protected(RUNTIME_READ))
 async def list_telemetry(
     tag_id: str | None = Query(None, description="按点位过滤"),
     node_id: str | None = Query(None, description="按节点过滤"),
@@ -123,7 +125,7 @@ async def list_telemetry(
         return {"points": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
 
 
-@router.get("/telemetry/export")
+@router.get("/telemetry/export", **protected(RUNTIME_READ))
 async def export_telemetry_csv(
     tag_id: str | None = Query(None, description="按点位过滤"),
     node_id: str | None = Query(None, description="按节点过滤"),

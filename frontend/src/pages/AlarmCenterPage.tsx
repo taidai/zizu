@@ -14,7 +14,7 @@ interface Stats {
   byLevel: Record<AlarmLevel, number>
 }
 
-export default function AlarmCenterPage() {
+export default function AlarmCenterPage({ canConfigure = true, canResolve = true }: { canConfigure?: boolean; canResolve?: boolean }) {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
@@ -61,9 +61,9 @@ export default function AlarmCenterPage() {
   }
 
   useEffect(() => {
-    fetchAlarmLevels(true).then((d) => setAlarmLevels(d.items)).catch(() => {})
+    if (canConfigure) fetchAlarmLevels(true).then((d) => setAlarmLevels(d.items)).catch(() => {})
     fetchAlarmEntities().then((d) => setAlarmEntities(d.items)).catch(() => {})
-  }, [])
+  }, [canConfigure])
 
   useEffect(() => {
     setPage(1)
@@ -82,7 +82,7 @@ export default function AlarmCenterPage() {
 
   const handleAck = async (alarm: Alarm) => {
     try {
-      await acknowledgeAlarm(alarm.id, 'operator')
+      await acknowledgeAlarm(alarm.id)
       load(page)
     } catch {
       alert('确认失败')
@@ -165,7 +165,7 @@ export default function AlarmCenterPage() {
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        {canConfigure && <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">告警等级:</span>
           {alarmLevels.map((g) => (
             <button
@@ -179,7 +179,7 @@ export default function AlarmCenterPage() {
               <span className="ml-1.5 font-mono-value">{groupCounts[g.code] || 0}</span>
             </button>
           ))}
-        </div>
+        </div>}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">实体:</span>
           <select
@@ -277,7 +277,7 @@ export default function AlarmCenterPage() {
                       确认
                     </button>
                   )}
-                  {alarm.acknowledged && !alarm.resolved_at && (
+                  {canResolve && alarm.acknowledged && !alarm.resolved_at && (
                     <button
                       onClick={() => handleResolve(alarm)}
                       className="neu-btn px-3 py-1 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600"

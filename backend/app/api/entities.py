@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 import csv
 import io
@@ -26,6 +26,15 @@ from app.services.entity_resolver import (
 from app.core.standard_entities import STANDARD_ENTITIES, seed_standard_entities
 from app.services.entity_binder import auto_bind_standard_entities
 from app.api.health import _VERSION as APP_VERSION
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    RUNTIME_READ,
+    capability_metadata,
+    principal_for,
+    protected,
+)
+from app.services.identity import Principal
 
 router = APIRouter()
 
@@ -119,6 +128,25 @@ def _row_to_entity(row: dict) -> dict:
     }
 
 
+_OPERATOR_ENTITY_SOURCE_FIELDS = frozenset(
+    {"binding_id", "tag_id", "tag_name", "node_id", "node_name"}
+)
+
+
+def _runtime_entity(data: dict, principal: Principal) -> dict:
+    """Return the role-appropriate entity runtime projection.
+
+    Operators consume stable entity semantics and observed values.  Physical
+    binding identifiers and Neuron-facing names are configuration details and
+    remain available only to engineers and administrators for diagnostics.
+    """
+    projected = dict(data)
+    if principal.role == "operator":
+        for field in _OPERATOR_ENTITY_SOURCE_FIELDS:
+            projected.pop(field, None)
+    return projected
+
+
 # ========================================
 # Endpoints
 # ========================================
@@ -129,13 +157,13 @@ def _standard_entities_rows() -> list[tuple]:
     return list(STANDARD_ENTITIES)
 
 
-@router.post("/entities/seed")
+@router.post("/entities/seed", **protected(CONFIGURATION_WRITE))
 async def seed_entities() -> dict:
     """重新初始化系统内置标准实体（幂等，单一数据源）。"""
     return seed_standard_entities()
 
 
-@router.post("/entities/bindings/auto-bind")
+@router.post("/entities/bindings/auto-bind", **protected(CONFIGURATION_WRITE))
 async def auto_bind_entities(dry_run: bool = False) -> dict:
     """根据内置映射表自动把国标实体绑定到 enabled tag（幂等）。"""
     try:
@@ -146,7 +174,7 @@ async def auto_bind_entities(dry_run: bool = False) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/entities/export")
+@router.get("/entities/export", **protected(CONFIGURATION_READ))
 async def export_entities(
     format: str = Query("csv", pattern="^(csv|json)$", description="导出格式"),
     category: str | None = Query(None, description="按分类过滤"),
@@ -205,7 +233,7 @@ async def export_entities(
     )
 
 
-@router.post("/entities/import")
+@router.post("/entities/import", **protected(CONFIGURATION_WRITE))
 async def import_entities(
     request: Request,
     mode: str = Query("upsert", pattern="^(upsert|create)$", description="upsert=更新或新建, create=仅新建跳过已存在"),
@@ -334,7 +362,7 @@ async def import_entities(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/entities")
+@router.get("/entities", **protected(CONFIGURATION_READ))
 async def list_entities(
     category: str | None = Query(None, description="按分类过滤"),
     entity_type: str | None = Query(None, description="按 R/W/RW 过滤"),
@@ -407,7 +435,11 @@ async def list_entities(
         logger.error("[API/entities] list failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/entities", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/entities",
+    status_code=status.HTTP_201_CREATED,
+    **protected(CONFIGURATION_WRITE),
+)
 async def create_entity(req: EntityCreateRequest) -> dict:
     """创建全局实体。"""
     query = """
@@ -448,7 +480,7 @@ class BatchBindRequest(BaseModel):
 class BatchUnbindRequest(BaseModel):
     binding_ids: list[str] = Field(..., min_length=1, max_length=200)
 
-@router.get("/entities/bindings")
+@router.get("/entities/bindings", **protected(CONFIGURATION_READ))
 async def list_bindings(
     node_id: str | None = Query(None, description="按节点过滤"),
     entity_id: str | None = Query(None, description="按实体过滤"),
@@ -534,7 +566,7 @@ async def list_bindings(
         logger.error("[API/entities] list bindings failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/entities/bindings/batch")
+@router.post("/entities/bindings/batch", **protected(CONFIGURATION_WRITE))
 async def batch_create_bindings(req: BatchBindRequest) -> dict:
     """批量创建实体-点位绑定。重复绑定（同一 entity+tag）会自动跳过。"""
     validated = []
@@ -604,7 +636,7 @@ async def batch_create_bindings(req: BatchBindRequest) -> dict:
         logger.error("[API/entities] batch bind failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/entities/bindings/batch")
+@router.delete("/entities/bindings/batch", **protected(CONFIGURATION_WRITE))
 async def batch_delete_bindings(req: BatchUnbindRequest) -> dict:
     """批量删除实体-点位绑定。"""
     try:
@@ -628,7 +660,7 @@ async def batch_delete_bindings(req: BatchUnbindRequest) -> dict:
     except Exception as e:
         logger.error("[API/entities] batch unbind failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
-@router.get("/entities/{entity_id}")
+@router.get("/entities/{entity_id}", **protected(CONFIGURATION_READ))
 async def get_entity(entity_id: str) -> dict:
     """获取实体详情及绑定。"""
     try:
@@ -724,7 +756,7 @@ def _check_system_protected(eid: UUID, req: EntityUpdateRequest) -> None:
         )
 
 
-@router.put("/entities/{entity_id}")
+@router.put("/entities/{entity_id}", **protected(CONFIGURATION_WRITE))
 async def update_entity(entity_id: str, req: EntityUpdateRequest) -> dict:
     """更新实体元数据。"""
     try:
@@ -783,7 +815,7 @@ async def update_entity(entity_id: str, req: EntityUpdateRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/entities/{entity_id}")
+@router.delete("/entities/{entity_id}", **protected(CONFIGURATION_WRITE))
 async def delete_entity(entity_id: str) -> dict:
     """删除实体（级联删除绑定）。"""
     try:
@@ -822,7 +854,7 @@ async def delete_entity(entity_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/entities/{entity_id}/bindings")
+@router.post("/entities/{entity_id}/bindings", **protected(CONFIGURATION_WRITE))
 async def create_binding(entity_id: str, req: EntityBindingRequest) -> dict:
     """为实体绑定一个点位。"""
     try:
@@ -867,7 +899,10 @@ async def create_binding(entity_id: str, req: EntityBindingRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/entities/{entity_id}/bindings/{binding_id}")
+@router.delete(
+    "/entities/{entity_id}/bindings/{binding_id}",
+    **protected(CONFIGURATION_WRITE),
+)
 async def delete_binding(entity_id: str, binding_id: str) -> dict:
     """删除绑定。"""
     try:
@@ -894,27 +929,37 @@ async def delete_binding(entity_id: str, binding_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/entities/{entity_id}/realtime")
-async def entity_realtime(entity_id: str) -> dict:
+@router.get(
+    "/entities/{entity_id}/realtime",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
+async def entity_realtime(
+    entity_id: str,
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
+) -> dict:
     """获取实体实时值。"""
     data = get_entity_realtime(entity_id)
     if not data:
         raise HTTPException(status_code=404, detail="Entity has no active binding or no data")
-    return data
+    return _runtime_entity(data, principal)
 
 
-@router.get("/entities/{entity_id}/history")
+@router.get(
+    "/entities/{entity_id}/history",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
 async def entity_history(
     entity_id: str,
     range: str = Query("1h", pattern="^(1h|24h|7d|all)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(500, ge=1, le=2000),
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
 ) -> dict:
     """获取实体历史数据。"""
     data = get_entity_history(entity_id, range, page, page_size)
     if not data:
         raise HTTPException(status_code=404, detail="Entity has no active binding or no data")
-    return data
+    return _runtime_entity(data, principal)
 
 
 @router.post("/entities/{entity_id}/write")

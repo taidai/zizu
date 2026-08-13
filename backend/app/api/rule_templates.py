@@ -15,6 +15,12 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
+
 router = APIRouter()
 
 # ══════════════════════════════════════
@@ -376,7 +382,7 @@ def _serialize(row: dict) -> dict:
     return row
 
 
-@router.get("/rule-templates")
+@router.get("/rule-templates", **protected(CONFIGURATION_READ))
 async def list_templates() -> dict:
     """列出所有规则模板。"""
     from app.services.telemetry_store import get_connection
@@ -394,7 +400,7 @@ async def list_templates() -> dict:
     return {"templates": [_serialize(r) for r in rows], "total": len(rows)}
 
 
-@router.get("/rule-templates/{template_id}")
+@router.get("/rule-templates/{template_id}", **protected(CONFIGURATION_READ))
 async def get_template(template_id: UUID) -> dict:
     """获取单个规则模板。"""
     from app.services.telemetry_store import get_connection
@@ -414,7 +420,7 @@ async def get_template(template_id: UUID) -> dict:
             return _serialize(dict(zip(columns, row)))
 
 
-@router.post("/rule-templates")
+@router.post("/rule-templates", **protected(CONFIGURATION_WRITE))
 async def create_template(req: RuleTemplateCreate) -> dict:
     """创建规则模板。"""
     from app.services.telemetry_store import get_connection
@@ -444,7 +450,7 @@ async def create_template(req: RuleTemplateCreate) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/rule-templates/{template_id}")
+@router.put("/rule-templates/{template_id}", **protected(CONFIGURATION_WRITE))
 async def update_template(template_id: UUID, req: RuleTemplateUpdate) -> dict:
     """更新规则模板。"""
     from app.services.telemetry_store import get_connection
@@ -485,7 +491,7 @@ async def update_template(template_id: UUID, req: RuleTemplateUpdate) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/rule-templates/{template_id}")
+@router.delete("/rule-templates/{template_id}", **protected(CONFIGURATION_WRITE))
 async def delete_template(template_id: UUID) -> dict:
     """删除规则模板。"""
     from app.services.telemetry_store import get_connection
@@ -505,7 +511,7 @@ class RuleTemplateApplyRequest(BaseModel):
     enabled: bool = True
 
 
-@router.post("/rule-templates/{template_id}/apply")
+@router.post("/rule-templates/{template_id}/apply", **protected(CONFIGURATION_WRITE))
 async def apply_template(template_id: UUID, req: RuleTemplateApplyRequest) -> dict:
     """基于规则模板快速创建一条可编辑的规则。"""
     from app.services.telemetry_store import get_connection

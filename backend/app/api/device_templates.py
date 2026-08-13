@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 from psycopg2.extras import Json
 
 from app.services.telemetry_store import get_connection
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
 
 router = APIRouter()
 
@@ -53,7 +58,7 @@ def _serialize_template(row: dict) -> dict:
     return row
 
 
-@router.get("/device-templates")
+@router.get("/device-templates", **protected(CONFIGURATION_READ))
 async def list_templates() -> dict:
     """列出所有设备模板。"""
     with get_connection() as conn:
@@ -69,7 +74,7 @@ async def list_templates() -> dict:
     return {"items": [_serialize_template(r) for r in rows]}
 
 
-@router.get("/device-templates/{template_id}")
+@router.get("/device-templates/{template_id}", **protected(CONFIGURATION_READ))
 async def get_template(template_id: str) -> dict:
     """获取单个模板。"""
     try:
@@ -89,7 +94,7 @@ async def get_template(template_id: str) -> dict:
     return _serialize_template(dict(zip(cols, row)))
 
 
-@router.post("/device-templates")
+@router.post("/device-templates", **protected(CONFIGURATION_WRITE))
 async def create_template(req: DeviceTemplateCreateRequest) -> dict:
     """创建模板。"""
     with get_connection() as conn:
@@ -106,7 +111,7 @@ async def create_template(req: DeviceTemplateCreateRequest) -> dict:
     return _serialize_template(row)
 
 
-@router.put("/device-templates/{template_id}")
+@router.put("/device-templates/{template_id}", **protected(CONFIGURATION_WRITE))
 async def update_template(template_id: str, req: DeviceTemplateUpdateRequest) -> dict:
     try:
         tid = UUID(template_id)
@@ -146,7 +151,7 @@ async def update_template(template_id: str, req: DeviceTemplateUpdateRequest) ->
     return {"updated": True}
 
 
-@router.delete("/device-templates/{template_id}")
+@router.delete("/device-templates/{template_id}", **protected(CONFIGURATION_WRITE))
 async def delete_template(template_id: str) -> dict:
     try:
         tid = UUID(template_id)
@@ -161,7 +166,10 @@ async def delete_template(template_id: str) -> dict:
     return {"deleted": True}
 
 
-@router.post("/device-templates/{template_id}/apply")
+@router.post(
+    "/device-templates/{template_id}/apply",
+    **protected(CONFIGURATION_WRITE),
+)
 async def apply_template(template_id: str, req: DeviceTemplateApplyRequest) -> dict:
     """
     应用模板：在 parent_node_id 下递归创建节点、点位，并绑定全局实体。

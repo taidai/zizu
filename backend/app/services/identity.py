@@ -137,7 +137,12 @@ class IdentityRepository(Protocol):
         event: AuditEvent,
     ) -> None: ...
 
-    def append_audit(self, event: AuditEvent) -> None: ...
+    def append_audit(
+        self,
+        event: AuditEvent,
+        *,
+        connection: object | None = None,
+    ) -> None: ...
 
 
 def verify_identity_schema(connection_factory: Callable[[], object] | None = None) -> None:
@@ -250,6 +255,13 @@ def _dummy_password_hash() -> str:
 
 
 CAPABILITY_ROLES: dict[str, frozenset[str]] = {
+    "runtime.read": frozenset({"admin", "engineer", "operator"}),
+    "configuration.read": frozenset({"admin", "engineer"}),
+    "configuration.write": frozenset({"admin", "engineer"}),
+    "alarm.acknowledge": frozenset({"admin", "engineer", "operator"}),
+    # Temporary compatibility seam. Ticket #14 removes manual alarm creation
+    # and recovery after every source uses the unified alarm state machine.
+    "legacy_alarm.write": frozenset({"admin", "engineer"}),
     "solution.package.import": frozenset({"admin"}),
     "solution.package.read": frozenset({"admin"}),
     "solution.install.plan": frozenset({"admin", "engineer"}),
@@ -485,8 +497,14 @@ class Identity:
             )
         )
 
-    def audit(self, event: AuditEvent) -> None:
-        self._repository.append_audit(event)
+    def audit(
+        self,
+        event: AuditEvent,
+        *,
+        connection: object | None = None,
+    ) -> None:
+        """Append an event, optionally inside the caller's business transaction."""
+        self._repository.append_audit(event, connection=connection)
 
     def resolve(
         self,
@@ -715,7 +733,12 @@ class InMemoryIdentityRepository:
                 break
         self.audits.append(event)
 
-    def append_audit(self, event: AuditEvent) -> None:
+    def append_audit(
+        self,
+        event: AuditEvent,
+        *,
+        connection: object | None = None,
+    ) -> None:
         self.audits.append(event)
 
 
@@ -954,7 +977,16 @@ class PostgresIdentityRepository:
             self._append_audit(cur, event)
             conn.commit()
 
-    def append_audit(self, event: AuditEvent) -> None:
+    def append_audit(
+        self,
+        event: AuditEvent,
+        *,
+        connection: object | None = None,
+    ) -> None:
+        if connection is not None:
+            with connection.cursor() as cur:
+                self._append_audit(cur, event)
+            return
         with self._connection() as conn, conn.cursor() as cur:
             self._append_audit(cur, event)
             conn.commit()

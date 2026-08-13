@@ -15,6 +15,8 @@ from pathlib import Path
 from fastapi import APIRouter
 from loguru import logger
 
+from app.api.business_security import RUNTIME_READ, protected
+
 router = APIRouter()
 
 # Track startup time for uptime calculation
@@ -69,7 +71,7 @@ async def _check_neuron() -> str:
         return "disconnected"
 
 
-@router.get("/health")
+@router.get("/health", **protected(RUNTIME_READ))
 async def health_check() -> dict:
     """
     ZiZu 健康检查 — 包含 F0 Pipeline Metrics。
@@ -179,7 +181,7 @@ def _check_tsdb() -> bool | None:
         return None  # 模块未加载 (管道未启动)
 
 
-@router.get("/health/ready")
+@router.get("/health/ready", **protected(RUNTIME_READ))
 async def readiness_check() -> dict:
     """
     K8s readiness probe.
