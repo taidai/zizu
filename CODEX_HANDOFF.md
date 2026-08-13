@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-14 — Ticket #11 关闭剩余设备写旁路（本地完成，待提交）
+## Session 2026-08-14 — Ticket #11 关闭剩余设备写旁路（已本地提交，待推送）
 
 ### 已实现
 - 旧 `POST /api/v1/entities/{entity_id}/write` 不再同步写入设备，现为受认证的兼容入口：只有旧实体能唯一映射到同一已确认、活动且来源为 Neuron 的实体实例时，才创建可回查的统一控制命令；未映射请求也持久化为拒绝证据。
@@ -17,7 +17,8 @@
 
 ### 当前边界 / Next
 - 本票完成了公开 HTTP 与前端可触达的剩余直接设备写旁路；后台/部署生产可用性仍受 TLS、固定 ARM64 制品、凭据轮换、迁移演练及发布锁约束，禁止部署到 1 号机。
-- 提交并推送后，Issue #11 仍保持开放，直至隔离 PostgreSQL 主缝完成。下一主线为告警状态机与 EMS 运行工作台，均只能以实体实例和统一命令为基础。
+- 本地提交：`f403a3a feat(control): close legacy write bypasses`。GitHub HTTPS 在本次会话中无法连接，分支相对 `origin/ticket/07-multi-device-instance-consumers` 为 `ahead 1`；网络恢复后执行 `git push origin HEAD:ticket/07-multi-device-instance-consumers`。
+- Issue #11 仍保持开放，直至隔离 PostgreSQL 主缝完成。下一主线为告警状态机与 EMS 运行工作台，均只能以实体实例和统一命令为基础。
 
 ---
 
