@@ -10,6 +10,12 @@ from fastapi import APIRouter, HTTPException, Query, status
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
+
 router = APIRouter()
 
 
@@ -87,7 +93,7 @@ def _rules_to_json(rules: list[TriggerRule] | None) -> list[dict] | None:
 
 # ── Endpoints ──
 
-@router.get("/alarm-levels")
+@router.get("/alarm-levels", **protected(CONFIGURATION_READ))
 async def list_alarm_levels(enabled_only: bool = Query(False)) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -110,7 +116,11 @@ async def list_alarm_levels(enabled_only: bool = Query(False)) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/alarm-levels", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/alarm-levels",
+    status_code=status.HTTP_201_CREATED,
+    **protected(CONFIGURATION_WRITE),
+)
 async def create_alarm_level(req: AlarmLevelCreateRequest) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -139,7 +149,7 @@ async def create_alarm_level(req: AlarmLevelCreateRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/alarm-levels/{level_id}")
+@router.get("/alarm-levels/{level_id}", **protected(CONFIGURATION_READ))
 async def get_alarm_level(level_id: UUID) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -159,7 +169,7 @@ async def get_alarm_level(level_id: UUID) -> dict:
     return {"item": _serialize_level(dict(zip(columns, row)))}
 
 
-@router.put("/alarm-levels/{level_id}")
+@router.put("/alarm-levels/{level_id}", **protected(CONFIGURATION_WRITE))
 async def update_alarm_level(level_id: UUID, req: AlarmLevelUpdateRequest) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -219,7 +229,7 @@ async def update_alarm_level(level_id: UUID, req: AlarmLevelUpdateRequest) -> di
     return {"status": "updated"}
 
 
-@router.delete("/alarm-levels/{level_id}")
+@router.delete("/alarm-levels/{level_id}", **protected(CONFIGURATION_WRITE))
 async def delete_alarm_level(level_id: UUID) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -243,7 +253,10 @@ async def delete_alarm_level(level_id: UUID) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/alarm-levels/{level_id}/entities")
+@router.get(
+    "/alarm-levels/{level_id}/entities",
+    **protected(CONFIGURATION_READ),
+)
 async def list_level_entities(level_id: UUID) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -268,7 +281,10 @@ async def list_level_entities(level_id: UUID) -> dict:
     return {"items": [_serialize_binding(r) for r in rows]}
 
 
-@router.post("/alarm-levels/{level_id}/entities")
+@router.post(
+    "/alarm-levels/{level_id}/entities",
+    **protected(CONFIGURATION_WRITE),
+)
 async def batch_bind_entities(level_id: UUID, req: BatchEntityBindRequest) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -328,7 +344,10 @@ async def batch_bind_entities(level_id: UUID, req: BatchEntityBindRequest) -> di
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/alarm-levels/{level_id}/entities/{binding_id}")
+@router.delete(
+    "/alarm-levels/{level_id}/entities/{binding_id}",
+    **protected(CONFIGURATION_WRITE),
+)
 async def unbind_entity(level_id: UUID, binding_id: UUID) -> dict:
     from app.services.telemetry_store import get_connection
 
@@ -360,7 +379,10 @@ async def unbind_entity(level_id: UUID, binding_id: UUID) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/entities/{entity_id}/alarm-levels")
+@router.get(
+    "/entities/{entity_id}/alarm-levels",
+    **protected(CONFIGURATION_READ),
+)
 async def list_entity_alarm_levels(entity_id: UUID) -> dict:
     from app.services.telemetry_store import get_connection
 

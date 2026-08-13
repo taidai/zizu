@@ -117,7 +117,7 @@ services:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${APP_PORT:-9000}/api/v1/health')"]
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${APP_PORT:-9000}/api/v1/health/live')"]
       interval: 15s
       timeout: 5s
       start_period: 15s

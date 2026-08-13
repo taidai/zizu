@@ -10,6 +10,11 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.services.telemetry_store import get_connection
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
 
 router = APIRouter()
 
@@ -42,7 +47,7 @@ def _serialize(row: dict) -> dict:
     }
 
 
-@router.get("/fault-maps")
+@router.get("/fault-maps", **protected(CONFIGURATION_READ))
 async def list_fault_maps() -> dict:
     """获取全部故障码映射表。"""
     with get_connection() as conn:
@@ -53,7 +58,11 @@ async def list_fault_maps() -> dict:
     return {"items": [_serialize(r) for r in rows], "total": len(rows)}
 
 
-@router.post("/fault-maps", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/fault-maps",
+    status_code=status.HTTP_201_CREATED,
+    **protected(CONFIGURATION_WRITE),
+)
 async def create_fault_map(req: FaultMapCreate) -> dict:
     """创建故障码映射表。"""
     entries = [e.model_dump() for e in req.entries]
@@ -74,7 +83,7 @@ async def create_fault_map(req: FaultMapCreate) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/fault-maps/{map_id}")
+@router.get("/fault-maps/{map_id}", **protected(CONFIGURATION_READ))
 async def get_fault_map(map_id: UUID) -> dict:
     """获取单个映射表详情。"""
     with get_connection() as conn:
@@ -87,7 +96,7 @@ async def get_fault_map(map_id: UUID) -> dict:
     return _serialize(dict(zip(columns, row)))
 
 
-@router.put("/fault-maps/{map_id}")
+@router.put("/fault-maps/{map_id}", **protected(CONFIGURATION_WRITE))
 async def update_fault_map(map_id: UUID, req: FaultMapUpdate) -> dict:
     """更新故障码映射表。"""
     fields = []
@@ -123,7 +132,7 @@ async def update_fault_map(map_id: UUID, req: FaultMapUpdate) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/fault-maps/{map_id}")
+@router.delete("/fault-maps/{map_id}", **protected(CONFIGURATION_WRITE))
 async def delete_fault_map(map_id: UUID) -> dict:
     """删除故障码映射表（被引用的点位会自动清空 fault_map_id）。"""
     with get_connection() as conn:

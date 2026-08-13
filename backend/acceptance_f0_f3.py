@@ -1,7 +1,80 @@
-import json, os, time, urllib.request, urllib.error, paho.mqtt.client as mqtt, psycopg2
+import getpass
+import ipaddress
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import paho.mqtt.client as mqtt
+import psycopg2
 from app.core.secret_policy import validate_secret
 
-API = os.environ.get('ZIZU_API', 'http://127.0.0.1:9000/api/v1')
+
+def require_safe_api_url() -> str:
+    api = os.environ.get('ZIZU_API', '').strip().rstrip('/')
+    if not api:
+        raise RuntimeError(
+            'ZIZU_API is required; set the explicit HTTPS API base, '
+            'for example https://zizu.example/api/v1'
+        )
+    parsed = urllib.parse.urlsplit(api)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RuntimeError('ZIZU_API must not contain credentials, query, or fragment')
+    if parsed.scheme == 'https' and parsed.hostname:
+        return api
+    host = parsed.hostname or ''
+    try:
+        is_loopback = host == 'localhost' or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if (
+        parsed.scheme == 'http'
+        and is_loopback
+        and os.environ.get('ZIZU_ALLOW_INSECURE_LOCAL_HTTP', '').lower() == 'true'
+    ):
+        return api
+    raise RuntimeError(
+        'ZIZU_API must use HTTPS. Loopback HTTP is allowed only with '
+        'ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true in an isolated development environment.'
+    )
+
+
+def require_api_token(api: str) -> str:
+    token = os.environ.get('ZIZU_API_TOKEN', '').strip()
+    if token:
+        return token
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            'ZIZU_API_TOKEN is required for non-interactive runs; inject it from a secret manager'
+        )
+    username = os.environ.get('ZIZU_API_USERNAME', '').strip() or input('ZiZu username: ').strip()
+    if not username:
+        raise RuntimeError('ZiZu username is required')
+    password = getpass.getpass('ZiZu password: ')
+    try:
+        request = urllib.request.Request(
+            f'{api}/auth/login',
+            data=json.dumps({'username': username, 'password': password}).encode(),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f'ZiZu login failed with HTTP {exc.code}') from exc
+    finally:
+        password = ''
+    token = str(payload.get('access_token', '')).strip()
+    if not token:
+        raise RuntimeError('ZiZu login response did not contain an access token')
+    return token
+
+
+API = require_safe_api_url()
+API_TOKEN = require_api_token(API)
 DB_DSN = os.environ.get('ZIZU_DSN')
 if not DB_DSN or not DB_DSN.strip():
     raise RuntimeError('ZIZU_DSN is required; no database credential default is provided')
@@ -29,7 +102,10 @@ def close_to(name, actual, expected, rel_tol=1e-4, abs_tol=0.01):
     return ok
 
 def http(method, path, body=None):
-    h = {'Content-Type': 'application/json'}
+    h = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {API_TOKEN}',
+    }
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(f'{API}{path}', data=data, headers=h, method=method)
     try:
@@ -336,8 +412,13 @@ try:
         check('alarm created by rule', alarm_id is not None, alarms)
 
         if alarm_id:
-            status, ack = http('PUT', f'/alarms/{alarm_id}/acknowledge', {'ack_user': 'acceptance'})
+            status, ack = http('PUT', f'/alarms/{alarm_id}/acknowledge', {})
             check('acknowledged alarm', status == 200, f'{status}: {ack}')
+            check(
+                'alarm actor comes from authenticated session',
+                str(ack.get('ack_user', '')).startswith('user:'),
+                ack,
+            )
 
             # 确认后查 acknowledged=true 应该能查到已确认记录
             status, alarms = http('GET', '/alarms?acknowledged=true')
@@ -355,22 +436,17 @@ finally:
         print('  cleaning up alarm rule...')
         http('DELETE', f'/rules/{rule_id}')
 
-print('\n--- F2.3 RPC command writes audit log ---')
+print('\n--- F2.3 Legacy RPC side door remains closed ---')
 status, rpc_resp = http('POST', '/devices/55555555-5555-5555-5555-555555555555/rpc', {
     'command': 'test_breaker',
     'payload': {'tag': 'breaker', 'value': 1},
     'topic': 'neuron/en9_bms/write',
 })
-check('rpc endpoint accepted', status in (200, 201), f'{status}: {rpc_resp}')
-
-audit_rows = db(
-    'SELECT action, target_type, details FROM t_audit_log WHERE action = %s AND target_id = %s ORDER BY created_at DESC LIMIT 1',
-    ('RPC', '55555555-5555-5555-5555-555555555555')
+check(
+    'unregistered RPC side door is closed until the unified control seam',
+    status == 404,
+    f'{status}: {rpc_resp}',
 )
-check('rpc audit log row exists', bool(audit_rows), audit_rows)
-if audit_rows:
-    details = audit_rows[0][2]
-    check('rpc audit log contains command', 'test_breaker' in str(details), details)
 
 print('\n' + '='*60)
 print(f'RESULT: {PASS} passed, {FAIL} failed')

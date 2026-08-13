@@ -6,15 +6,28 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.api.business_security import (
+    ALARM_ACKNOWLEDGE,
+    LEGACY_ALARM_WRITE,
+    RUNTIME_READ,
+    capability_metadata,
+    principal_for,
+    protected,
+)
+from app.api.security import _client_ip, get_identity
+from app.services.identity import AuditEvent, Identity, Principal
 
 router = APIRouter()
 
 
 class AcknowledgeRequest(BaseModel):
-    ack_user: str = Field(default="operator", min_length=1, max_length=100)
+    """The actor comes from the authenticated session, never from this body."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class AlarmCreateRequest(BaseModel):
@@ -36,7 +49,7 @@ def _serialize_alarm(row: dict) -> dict:
     return row
 
 
-@router.get("/alarms")
+@router.get("/alarms", **protected(RUNTIME_READ))
 async def list_alarms(
     level: str | None = Query(None, pattern="^(INFO|WARNING|MAJOR|CRITICAL)$"),
     source_key: str | None = Query(None, pattern="^(error1|error2|error3)$"),
@@ -113,14 +126,13 @@ async def list_alarms(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/alarms/counts")
-
-@router.get("/alarms/alarm-types")
+@router.get("/alarms/alarm-types", **protected(RUNTIME_READ))
 async def list_alarm_types() -> dict:
     """返回标准告警类型列表 (GB/T 36276, GB/T 19963, GB/T 51048)。"""
     from app.services.alarm_logic import STANDARD_ALARM_TYPES
     return {"types": sorted(STANDARD_ALARM_TYPES)}
 
+@router.get("/alarms/counts", **protected(RUNTIME_READ))
 async def alarm_counts(
     node_ids: list[str] | None = Query(None, description="节点 ID 列表，逗号分隔"),
 ) -> dict:
@@ -160,7 +172,7 @@ async def alarm_counts(
 
 
 
-@router.get("/alarms/entities")
+@router.get("/alarms/entities", **protected(RUNTIME_READ))
 async def list_alarm_entities() -> dict:
     """返回当前有未恢复告警的实体列表。"""
     from app.services.telemetry_store import get_connection
@@ -178,7 +190,7 @@ async def list_alarm_entities() -> dict:
             rows = [dict(zip(columns, row)) for row in cur.fetchall()]
     return {"items": [{"id": str(r["id"]), "name": r["name"], "display_name": r.get("display_name")} for r in rows]}
 
-@router.get("/alarms/group-counts")
+@router.get("/alarms/group-counts", **protected(RUNTIME_READ))
 async def alarm_group_counts() -> dict:
     """按 error1/error2/error3 分组统计未恢复告警数量。"""
     from app.services.telemetry_store import get_connection
@@ -201,7 +213,7 @@ async def alarm_group_counts() -> dict:
     return {"counts": counts}
 
 
-@router.post("/alarms")
+@router.post("/alarms", **protected(LEGACY_ALARM_WRITE))
 async def create_alarm(req: AlarmCreateRequest) -> dict:
     """手动创建一条告警（用于测试）。"""
     from app.services.telemetry_store import get_connection
@@ -222,8 +234,17 @@ async def create_alarm(req: AlarmCreateRequest) -> dict:
     return _serialize_alarm(row)
 
 
-@router.put("/alarms/{alarm_id}/acknowledge")
-async def acknowledge_alarm(alarm_id: UUID, req: AcknowledgeRequest) -> dict:
+@router.put(
+    "/alarms/{alarm_id}/acknowledge",
+    openapi_extra=capability_metadata(ALARM_ACKNOWLEDGE),
+)
+async def acknowledge_alarm(
+    alarm_id: UUID,
+    req: AcknowledgeRequest,
+    request: Request,
+    principal: Principal = Depends(principal_for(ALARM_ACKNOWLEDGE)),
+    identity: Identity = Depends(get_identity),
+) -> dict:
     """确认告警。"""
     from app.services.telemetry_store import get_connection
 
@@ -236,16 +257,31 @@ async def acknowledge_alarm(alarm_id: UUID, req: AcknowledgeRequest) -> dict:
                 WHERE id = %s
                 RETURNING id
                 """,
-                (req.ack_user, datetime.now(timezone.utc), alarm_id),
+                (principal.actor, datetime.now(timezone.utc), alarm_id),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Alarm not found")
+            identity.audit(
+                AuditEvent(
+                    event="alarm.acknowledge",
+                    outcome="allowed",
+                    actor=principal.actor,
+                    target=f"alarm:{alarm_id}",
+                    request_id=request.headers.get("X-Request-ID"),
+                    client_ip=_client_ip(request),
+                ),
+                connection=conn,
+            )
             conn.commit()
-    return {"status": "acknowledged", "id": str(alarm_id), "ack_user": req.ack_user}
+    return {
+        "status": "acknowledged",
+        "id": str(alarm_id),
+        "ack_user": principal.actor,
+    }
 
 
-@router.put("/alarms/{alarm_id}/resolve")
+@router.put("/alarms/{alarm_id}/resolve", **protected(LEGACY_ALARM_WRITE))
 async def resolve_alarm(alarm_id: UUID) -> dict:
     """手动将告警标记为已恢复。"""
     from app.services.telemetry_store import get_connection

@@ -14,12 +14,21 @@ import yaml
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from psycopg2.extras import Json
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.models.schemas import NodeCreate
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    RUNTIME_READ,
+    capability_metadata,
+    principal_for,
+    protected,
+)
+from app.services.identity import Principal
 
 router = APIRouter()
 
@@ -50,10 +59,21 @@ def _serialize_node(row: dict) -> dict:
     return row
 
 
-@router.get("/nodes")
+def _runtime_node(row: dict, principal: Principal) -> dict:
+    serialized = _serialize_node(row)
+    if principal.role == "operator":
+        serialized.pop("config", None)
+    return serialized
+
+
+@router.get(
+    "/nodes",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
 async def list_nodes(
     layer: int | None = Query(None, description="按层级过滤 1=Site 2=Station 3=EnergyNode 4=Device 5=Tag"),
     enabled: bool = Query(True, description="只看启用节点"),
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
 ) -> dict:
     """
     返回所有节点列表，含每个节点下的 tag 数量。
@@ -100,7 +120,7 @@ async def list_nodes(
                 rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
         return {
-            "nodes": [_serialize_node(r) for r in rows],
+            "nodes": [_runtime_node(r, principal) for r in rows],
             "total": len(rows),
         }
     except Exception as e:
@@ -112,7 +132,7 @@ async def list_nodes(
 # 导入 / 导出 YAML — 注意: 静态路径须先于 /nodes/{node_id} 注册，
 # 否则 "export"/"import" 会被当作 UUID 路径参数解析
 # ---------------------------------------------------------------------------
-@router.get("/nodes/export")
+@router.get("/nodes/export", **protected(CONFIGURATION_READ))
 async def export_nodes() -> Response:
     """
     导出整棵节点树为 YAML。每个节点含其挂载的 tags（点位）。
@@ -184,8 +204,14 @@ async def export_nodes() -> Response:
         raise HTTPException(status_code=500, detail=f"Export failed: {e}")
 
 
-@router.get("/nodes/{node_id}")
-async def get_node(node_id: UUID) -> dict:
+@router.get(
+    "/nodes/{node_id}",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
+async def get_node(
+    node_id: UUID,
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
+) -> dict:
     """获取单个节点详情（含其 tags 列表）。"""
     from app.services.telemetry_store import get_connection
 
@@ -201,13 +227,14 @@ async def get_node(node_id: UUID) -> dict:
             if not row:
                 return {"error": "Node not found"}
 
-            node = _serialize_node(
+            node = _runtime_node(
                 dict(
                     zip(
                         ["id", "name", "parent_id", "layer", "node_type", "sort_order", "enabled", "config", "created_at"],
                         row,
                     )
-                )
+                ),
+                principal,
             )
 
             # Tags under this node
@@ -223,13 +250,23 @@ async def get_node(node_id: UUID) -> dict:
             for r in cur.fetchall():
                 tag = dict(zip(tag_columns, r))
                 tag["id"] = str(tag["id"])
+                if principal.role == "operator":
+                    for field in ("scale_factor", "value_offset", "source_path"):
+                        tag.pop(field, None)
                 tags.append(tag)
 
     return {"node": node, "tags": tags}
 
 
-@router.put("/nodes/{node_id}")
-async def update_node(node_id: UUID, req: NodeUpdateRequest) -> dict:
+@router.put(
+    "/nodes/{node_id}",
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def update_node(
+    node_id: UUID,
+    req: NodeUpdateRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+) -> dict:
     """更新节点（部分更新），支持改名、改配置、移动父节点。"""
     from app.services.telemetry_store import get_connection
 
@@ -305,7 +342,7 @@ async def update_node(node_id: UUID, req: NodeUpdateRequest) -> dict:
                     params.append(value)
 
             if not updates:
-                return await get_node(node_id)
+                return await get_node(node_id, principal)
 
             updates.append("updated_at = %s")
             params.append(datetime.now(timezone.utc))
@@ -324,7 +361,7 @@ async def update_node(node_id: UUID, req: NodeUpdateRequest) -> dict:
             return {"node": _serialize_node(dict(zip(columns, row)))}
 
 
-@router.post("/nodes")
+@router.post("/nodes", **protected(CONFIGURATION_WRITE))
 async def create_node(req: NodeCreate) -> dict:
     """创建节点，自动校验层级与父节点关系。"""
     from app.services.telemetry_store import get_connection
@@ -373,7 +410,7 @@ async def create_node(req: NodeCreate) -> dict:
             return {"node": _serialize_node(dict(zip(columns, row)))}
 
 
-@router.get("/nodes/{node_id}/tree")
+@router.get("/nodes/{node_id}/tree", **protected(RUNTIME_READ))
 async def get_node_tree(node_id: UUID) -> dict:
     """获取以 node_id 为根的递归子树（含 tag_count）。"""
     from app.services.telemetry_store import get_connection
@@ -421,7 +458,7 @@ async def get_node_tree(node_id: UUID) -> dict:
     return {"tree": build(str(node_id))}
 
 
-@router.delete("/nodes/{node_id}")
+@router.delete("/nodes/{node_id}", **protected(CONFIGURATION_WRITE))
 async def delete_node(node_id: UUID) -> dict:
     """删除节点及其所有子孙节点（级联删除挂载的 tags、快照、遥测、告警）。"""
     from app.services.telemetry_store import get_connection

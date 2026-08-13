@@ -3,8 +3,105 @@
  * 封装后端 REST + WebSocket 调用
  */
 
+import {
+  clearAuthSession,
+  getAuthSession,
+  invalidateAuthSession,
+  setAuthSession,
+  updateAuthUser,
+  type AuthSession,
+  type AuthUser,
+} from './authSession'
+
 const API_BASE = '/api/v1'
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/telemetry`
+
+/**
+ * Single HTTP seam for the frontend. Authentication is resolved at request
+ * time so a restored or replaced session is used without rebuilding clients.
+ */
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const session = getAuthSession()
+  const requestToken = session?.accessToken
+  const headers = new Headers(init.headers)
+  if (requestToken) headers.set('Authorization', `Bearer ${requestToken}`)
+
+  const response = await fetch(input, { ...init, headers })
+  if (response.status === 401 && requestToken) invalidateAuthSession(requestToken)
+  return response
+}
+
+async function authError(response: Response, fallback: string): Promise<Error> {
+  const payload = await response.json().catch(() => null) as {
+    detail?: string | { message?: string }
+  } | null
+  const detail = payload?.detail
+  const message = typeof detail === 'string' ? detail : detail?.message
+  return new Error(message || fallback)
+}
+
+export async function login(username: string, password: string): Promise<AuthSession> {
+  // Login is the only HTTP call that intentionally bypasses apiFetch.
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!response.ok) throw await authError(response, `Login failed: ${response.status}`)
+  const payload = await response.json() as {
+    access_token: string
+    expires_at: string
+    user: AuthUser
+  }
+  const session = {
+    accessToken: payload.access_token,
+    expiresAt: payload.expires_at,
+    user: payload.user,
+  }
+  setAuthSession(session)
+  return session
+}
+
+export async function fetchCurrentUser(): Promise<AuthUser> {
+  const response = await apiFetch(`${API_BASE}/auth/me`)
+  if (!response.ok) throw await authError(response, `Session validation failed: ${response.status}`)
+  const payload = await response.json() as { user: AuthUser }
+  updateAuthUser(payload.user)
+  return payload.user
+}
+
+export async function logout(): Promise<void> {
+  const token = getAuthSession()?.accessToken
+  if (!token) return
+  try {
+    const response = await apiFetch(`${API_BASE}/auth/logout`, { method: 'POST' })
+    if (!response.ok && response.status !== 401) {
+      throw await authError(response, `Logout failed: ${response.status}`)
+    }
+  } finally {
+    clearAuthSession(token)
+  }
+}
+
+async function downloadAuthenticated(url: string, fallbackName: string): Promise<void> {
+  const response = await apiFetch(url)
+  if (!response.ok) throw new Error(`Download failed: ${response.status}`)
+  const blobUrl = URL.createObjectURL(await response.blob())
+  const disposition = response.headers.get('Content-Disposition') || ''
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  const filename = encodedName ? decodeURIComponent(encodedName) : plainName || fallbackName
+  try {
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+}
 
 // ── Types ──
 
@@ -108,7 +205,7 @@ export interface TelemetryUpdate {
 // ── REST API ──
 
 export async function fetchNodes(): Promise<Node[]> {
-  const res = await fetch(`${API_BASE}/nodes`)
+  const res = await apiFetch(`${API_BASE}/nodes`)
   const data = await res.json()
   return data.nodes || []
 }
@@ -144,7 +241,7 @@ export interface NodeTag {
 
 /** 以 rootId 为根拉取整棵子树 (最大 5 层)。 */
 export async function fetchNodeTree(rootId: string): Promise<TreeNode | null> {
-  const res = await fetch(`${API_BASE}/nodes/${rootId}/tree`)
+  const res = await apiFetch(`${API_BASE}/nodes/${rootId}/tree`)
   if (!res.ok) throw new Error(`Fetch tree failed: ${res.status}`)
   const data = await res.json()
   return data.tree || null
@@ -152,7 +249,7 @@ export async function fetchNodeTree(rootId: string): Promise<TreeNode | null> {
 
 /** 获取单个节点详情 (含其 tags 列表，用于实时值订阅)。 */
 export async function fetchNodeDetail(nodeId: string): Promise<{ node: Node; tags: NodeTag[] }> {
-  const res = await fetch(`${API_BASE}/nodes/${nodeId}`)
+  const res = await apiFetch(`${API_BASE}/nodes/${nodeId}`)
   if (!res.ok) throw new Error(`Fetch node failed: ${res.status}`)
   return res.json()
 }
@@ -168,7 +265,7 @@ export interface NodeCreateInput {
 }
 
 export async function createNode(input: NodeCreateInput): Promise<{ node: Node }> {
-  const res = await fetch(`${API_BASE}/nodes`, {
+  const res = await apiFetch(`${API_BASE}/nodes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -181,7 +278,7 @@ export async function createNode(input: NodeCreateInput): Promise<{ node: Node }
 }
 
 export async function deleteNode(nodeId: string): Promise<{ deleted: string; cascade_nodes: number }> {
-  const res = await fetch(`${API_BASE}/nodes/${nodeId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/nodes/${nodeId}`, { method: 'DELETE' })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Delete node failed: ${res.status}`)
@@ -207,7 +304,7 @@ export interface TagCreateInput {
 }
 
 export async function createTag(input: TagCreateInput): Promise<{ status: string; id: string; name: string; tag_type: string }> {
-  const res = await fetch(`${API_BASE}/tags`, {
+  const res = await apiFetch(`${API_BASE}/tags`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -220,7 +317,7 @@ export async function createTag(input: TagCreateInput): Promise<{ status: string
 }
 
 export async function importNeuronTags(input: { node_id: string; neuron_node: string; neuron_group: string }): Promise<{ imported: number; skipped: number; total?: number; message?: string }> {
-  const res = await fetch(`${API_BASE}/tags/import-neuron`, {
+  const res = await apiFetch(`${API_BASE}/tags/import-neuron`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -235,7 +332,7 @@ export async function importNeuronTags(input: { node_id: string; neuron_node: st
 // ── Neuron Proxy API ──
 
 export async function fetchNeuronNodes(): Promise<NeuronNode[]> {
-  const res = await fetch(`${API_BASE}/neuron/nodes`)
+  const res = await apiFetch(`${API_BASE}/neuron/nodes`)
   const data = await res.json()
   return data.nodes || []
 }
@@ -248,7 +345,7 @@ export async function createNeuronNode(node: {
   device?: string
   baud?: number
 }): Promise<any> {
-  const res = await fetch(`${API_BASE}/neuron/nodes`, {
+  const res = await apiFetch(`${API_BASE}/neuron/nodes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(node),
@@ -258,7 +355,7 @@ export async function createNeuronNode(node: {
 }
 
 export async function deleteNeuronNode(name: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}`, {
+  const res = await apiFetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(`Delete node failed: ${res.status}`)
@@ -266,33 +363,33 @@ export async function deleteNeuronNode(name: string): Promise<any> {
 }
 
 export async function startNeuronNode(name: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}/start`, {
+  const res = await apiFetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}/start`, {
     method: 'POST',
   })
   return res.json()
 }
 
 export async function stopNeuronNode(name: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}/stop`, {
+  const res = await apiFetch(`${API_BASE}/neuron/nodes/${encodeURIComponent(name)}/stop`, {
     method: 'POST',
   })
   return res.json()
 }
 
 export async function fetchNeuronGroups(node: string): Promise<NeuronGroup[]> {
-  const res = await fetch(`${API_BASE}/neuron/groups?node=${encodeURIComponent(node)}`)
+  const res = await apiFetch(`${API_BASE}/neuron/groups?node=${encodeURIComponent(node)}`)
   const data = await res.json()
   return data.groups || []
 }
 
 export async function fetchNeuronTags(node: string, group: string): Promise<NeuronTag[]> {
-  const res = await fetch(`${API_BASE}/neuron/tags?node=${encodeURIComponent(node)}&group=${encodeURIComponent(group)}`)
+  const res = await apiFetch(`${API_BASE}/neuron/tags?node=${encodeURIComponent(node)}&group=${encodeURIComponent(group)}`)
   const data = await res.json()
   return data.tags || []
 }
 
 export async function writeNeuronTag(node: string, group: string, tag: string, value: any): Promise<any> {
-  const res = await fetch(`${API_BASE}/neuron/write`, {
+  const res = await apiFetch(`${API_BASE}/neuron/write`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ node, group, tag, value }),
@@ -308,7 +405,7 @@ export async function writeNeuronTag(node: string, group: string, tag: string, v
 // ── Category API ──
 
 export async function fetchCategories(): Promise<Category[]> {
-  const res = await fetch(`${API_BASE}/categories`)
+  const res = await apiFetch(`${API_BASE}/categories`)
   const data = await res.json()
   return data.categories || []
 }
@@ -318,7 +415,7 @@ export async function createCategory(category: {
   node_type: string
   description?: string
 }): Promise<any> {
-  const res = await fetch(`${API_BASE}/categories`, {
+  const res = await apiFetch(`${API_BASE}/categories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(category),
@@ -328,7 +425,7 @@ export async function createCategory(category: {
 }
 
 export async function deleteCategory(id: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/categories/${id}`, {
+  const res = await apiFetch(`${API_BASE}/categories/${id}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(`Delete category failed: ${res.status}`)
@@ -356,7 +453,7 @@ export async function fetchTags(
   if (enabled !== undefined) params.set('enabled', String(enabled))
   if (sortBy) params.set('sort_by', sortBy)
   if (sortOrder) params.set('sort_order', sortOrder)
-  const res = await fetch(`${API_BASE}/tags?${params}`)
+  const res = await apiFetch(`${API_BASE}/tags?${params}`)
   return res.json()
 }
 
@@ -375,7 +472,7 @@ export async function batchUpdateTags(
     fault_map_id?: string
   },
 ): Promise<any> {
-  const res = await fetch(`${API_BASE}/tags/batch`, {
+  const res = await apiFetch(`${API_BASE}/tags/batch`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tag_ids: tagIds, ...updates }),
@@ -385,7 +482,7 @@ export async function batchUpdateTags(
 }
 
 export async function deleteTag(tagId: string): Promise<{ status: string; deleted: string }> {
-  const res = await fetch(`${API_BASE}/tags/${tagId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/tags/${tagId}`, { method: 'DELETE' })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Delete tag failed: ${res.status}`)
@@ -393,21 +490,15 @@ export async function deleteTag(tagId: string): Promise<{ status: string; delete
   return res.json()
 }
 
-export function exportTagsCsv(nodeId?: string, search?: string): void {
+export function exportTagsCsv(nodeId?: string, search?: string): Promise<void> {
   const params = new URLSearchParams()
   if (nodeId) params.set('node_id', nodeId)
   if (search) params.set('search', search)
-  const url = `${API_BASE}/tags/export?${params}`
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  return downloadAuthenticated(`${API_BASE}/tags/export?${params}`, 'zizu_tags.csv')
 }
 
 export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale_factor' | 'value_offset' | 'unit' | 'display_name' | 'alarm_level' | 'alarm_type' | 'alarm_threshold' | 'fault_map_id'>>): Promise<any> {
-  const res = await fetch(`${API_BASE}/tags/${tagId}`, {
+  const res = await apiFetch(`${API_BASE}/tags/${tagId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -417,7 +508,7 @@ export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale
 }
 
 export async function fetchHealth(): Promise<HealthStatus> {
-  const res = await fetch(`${API_BASE}/health`)
+  const res = await apiFetch(`${API_BASE}/health`)
   return res.json()
 }
 
@@ -436,7 +527,7 @@ export interface HistoryResponse {
 }
 
 export async function fetchTagHistory(tagId: string, range: '1h' | '24h' | '7d'): Promise<HistoryResponse> {
-  const res = await fetch(`${API_BASE}/tags/${tagId}/history?range=${range}`)
+  const res = await apiFetch(`${API_BASE}/tags/${tagId}/history?range=${range}`)
   if (!res.ok) throw new Error(`History fetch failed: ${res.status}`)
   return res.json()
 }
@@ -469,21 +560,15 @@ export async function fetchTelemetry(
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), range })
   if (tagId) params.set('tag_id', tagId)
   if (nodeId) params.set('node_id', nodeId)
-  const res = await fetch(`${API_BASE}/telemetry?${params}`)
+  const res = await apiFetch(`${API_BASE}/telemetry?${params}`)
   return res.json()
 }
 
-export function exportTelemetryCsv(tagId?: string, range: '1h' | '24h' | '7d' | 'all' = '1h', nodeId?: string): void {
+export function exportTelemetryCsv(tagId?: string, range: '1h' | '24h' | '7d' | 'all' = '1h', nodeId?: string): Promise<void> {
   const params = new URLSearchParams({ range })
   if (tagId) params.set('tag_id', tagId)
   if (nodeId) params.set('node_id', nodeId)
-  const url = `${API_BASE}/telemetry/export?${params}`
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  return downloadAuthenticated(`${API_BASE}/telemetry/export?${params}`, 'zizu_telemetry.csv')
 }
 
 // ── Admin / Developer API ──
@@ -494,12 +579,12 @@ export interface PipelineConfig {
 }
 
 export async function fetchPipelineConfig(): Promise<PipelineConfig> {
-  const res = await fetch(`${API_BASE}/pipeline/config`)
+  const res = await apiFetch(`${API_BASE}/pipeline/config`)
   return res.json()
 }
 
 export async function updatePipelineConfig(config: PipelineConfig): Promise<any> {
-  const res = await fetch(`${API_BASE}/pipeline/config`, {
+  const res = await apiFetch(`${API_BASE}/pipeline/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -515,12 +600,12 @@ export interface MqttConfig {
 }
 
 export async function fetchMqttConfig(): Promise<MqttConfig> {
-  const res = await fetch(`${API_BASE}/mqtt-config`)
+  const res = await apiFetch(`${API_BASE}/mqtt-config`)
   return res.json()
 }
 
 export async function updateMqttConfig(config: { mqtt_telemetry_topic: string }): Promise<MqttConfig> {
-  const res = await fetch(`${API_BASE}/mqtt-config`, {
+  const res = await apiFetch(`${API_BASE}/mqtt-config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -537,7 +622,7 @@ export interface SqlQueryResult {
 }
 
 export async function executeSql(sql: string, limit = 500): Promise<SqlQueryResult> {
-  const res = await fetch(`${API_BASE}/query`, {
+  const res = await apiFetch(`${API_BASE}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sql, limit }),
@@ -550,7 +635,7 @@ export async function executeSql(sql: string, limit = 500): Promise<SqlQueryResu
 }
 
 export async function truncateTable(table: string, confirm: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/admin/truncate`, {
+  const res = await apiFetch(`${API_BASE}/admin/truncate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ table, confirm }),
@@ -571,6 +656,9 @@ export function connectTelemetryWS(
   onMessage: TelemetryCallback,
   tagIds?: string[],
 ): () => void {
+  // Ticket #4 will add the server-side WebSocket authentication handshake.
+  // Never put the opaque session token in the URL/query string: it would leak
+  // through browser history, proxies and access logs.
   const ws = new WebSocket(WS_URL)
 
   ws.onopen = () => {
@@ -610,7 +698,7 @@ export interface NodeUpdateRequest {
 }
 
 export async function updateNode(nodeId: string, updates: NodeUpdateRequest): Promise<Node> {
-  const res = await fetch(`${API_BASE}/nodes/${nodeId}`, {
+  const res = await apiFetch(`${API_BASE}/nodes/${nodeId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -641,19 +729,19 @@ export interface RuleCreateRequest {
 }
 
 export async function fetchRules(): Promise<Rule[]> {
-  const res = await fetch(`${API_BASE}/rules`)
+  const res = await apiFetch(`${API_BASE}/rules`)
   const data = await res.json()
   return data.rules || []
 }
 
 export async function fetchRule(ruleId: string): Promise<Rule> {
-  const res = await fetch(`${API_BASE}/rules/${ruleId}`)
+  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`)
   if (!res.ok) throw new Error(`Fetch rule failed: ${res.status}`)
   return res.json()
 }
 
 export async function createRule(rule: RuleCreateRequest): Promise<Rule> {
-  const res = await fetch(`${API_BASE}/rules`, {
+  const res = await apiFetch(`${API_BASE}/rules`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(rule),
@@ -663,7 +751,7 @@ export async function createRule(rule: RuleCreateRequest): Promise<Rule> {
 }
 
 export async function updateRule(ruleId: string, updates: Partial<RuleCreateRequest>): Promise<Rule> {
-  const res = await fetch(`${API_BASE}/rules/${ruleId}`, {
+  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -673,14 +761,14 @@ export async function updateRule(ruleId: string, updates: Partial<RuleCreateRequ
 }
 
 export async function deleteRule(ruleId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rules/${ruleId}`, {
+  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(`Delete rule failed: ${res.status}`)
 }
 
 export async function simulateRule(ruleId: string, context: Record<string, any>): Promise<any> {
-  const res = await fetch(`${API_BASE}/rules/${ruleId}/simulate`, {
+  const res = await apiFetch(`${API_BASE}/rules/${ruleId}/simulate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ context }),
@@ -690,7 +778,7 @@ export async function simulateRule(ruleId: string, context: Record<string, any>)
 }
 
 export async function evaluateGraph(graph: Record<string, any>, context: Record<string, any>): Promise<any> {
-  const res = await fetch(`${API_BASE}/rules/evaluate`, {
+  const res = await apiFetch(`${API_BASE}/rules/evaluate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content: graph, context }),
@@ -718,14 +806,14 @@ export interface RuleTemplate {
 }
 
 export async function fetchRuleTemplates(): Promise<RuleTemplate[]> {
-  const res = await fetch(`${API_BASE}/rule-templates`)
+  const res = await apiFetch(`${API_BASE}/rule-templates`)
   if (!res.ok) throw new Error(`Fetch templates failed: ${res.status}`)
   const data = await res.json()
   return data.templates || []
 }
 
 export async function fetchRuleTemplate(templateId: string): Promise<RuleTemplate> {
-  const res = await fetch(`${API_BASE}/rule-templates/${templateId}`)
+  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`)
   if (!res.ok) throw new Error(`Fetch template failed: ${res.status}`)
   return res.json()
 }
@@ -740,7 +828,7 @@ export interface RuleTemplateCreateInput {
 }
 
 export async function createRuleTemplate(input: RuleTemplateCreateInput): Promise<RuleTemplate> {
-  const res = await fetch(`${API_BASE}/rule-templates`, {
+  const res = await apiFetch(`${API_BASE}/rule-templates`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -750,7 +838,7 @@ export async function createRuleTemplate(input: RuleTemplateCreateInput): Promis
 }
 
 export async function updateRuleTemplate(templateId: string, updates: Partial<RuleTemplateCreateInput>): Promise<RuleTemplate> {
-  const res = await fetch(`${API_BASE}/rule-templates/${templateId}`, {
+  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -760,12 +848,12 @@ export async function updateRuleTemplate(templateId: string, updates: Partial<Ru
 }
 
 export async function deleteRuleTemplate(templateId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rule-templates/${templateId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete template failed: ${res.status}`)
 }
 
 export async function applyRuleTemplate(templateId: string, name: string, enabled = true): Promise<{ rule: any; status: string }> {
-  const res = await fetch(`${API_BASE}/rule-templates/${templateId}/apply`, {
+  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, enabled }),
@@ -850,7 +938,7 @@ export async function fetchAlarms(
   if (resolved !== undefined) params.set('resolved', String(resolved))
   if (nodeId) params.set('node_id', nodeId)
   if (entityId) params.set('entity_id', entityId)
-  const res = await fetch(`${API_BASE}/alarms?${params}`)
+  const res = await apiFetch(`${API_BASE}/alarms?${params}`)
   if (!res.ok) throw new Error(`Fetch alarms failed: ${res.status}`)
   return res.json()
 }
@@ -858,12 +946,12 @@ export async function fetchAlarms(
 
 
 export async function fetchAlarmEntities(): Promise<{ items: { id: string; name: string; display_name: string | null }[] }> {
-  const res = await fetch(`${API_BASE}/alarms/entities`)
+  const res = await apiFetch(`${API_BASE}/alarms/entities`)
   if (!res.ok) throw new Error(`Fetch alarm entities failed: ${res.status}`)
   return res.json()
 }
 export async function fetchAlarmGroupCounts(): Promise<Record<string, number>> {
-  const res = await fetch(`${API_BASE}/alarms/group-counts`)
+  const res = await apiFetch(`${API_BASE}/alarms/group-counts`)
   if (!res.ok) throw new Error(`Fetch alarm group counts failed: ${res.status}`)
   const data = await res.json()
   return data.counts || {}
@@ -872,23 +960,23 @@ export async function fetchAlarmGroupCounts(): Promise<Record<string, number>> {
 export async function fetchAlarmCounts(nodeIds?: string[]): Promise<Record<string, number>> {
   const params = new URLSearchParams()
   if (nodeIds && nodeIds.length > 0) params.set('node_ids', nodeIds.join(','))
-  const res = await fetch(`${API_BASE}/alarms/counts?${params}`)
+  const res = await apiFetch(`${API_BASE}/alarms/counts?${params}`)
   if (!res.ok) throw new Error(`Fetch alarm counts failed: ${res.status}`)
   const data = await res.json()
   return data.counts || {}
 }
 
-export async function acknowledgeAlarm(alarmId: string, ackUser = 'operator'): Promise<void> {
-  const res = await fetch(`${API_BASE}/alarms/${alarmId}/acknowledge`, {
+export async function acknowledgeAlarm(alarmId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/acknowledge`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ack_user: ackUser }),
+    body: JSON.stringify({}),
   })
   if (!res.ok) throw new Error(`Acknowledge alarm failed: ${res.status}`)
 }
 
 export async function resolveAlarm(alarmId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/alarms/${alarmId}/resolve`, {
+  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/resolve`, {
     method: 'PUT',
   })
   if (!res.ok) throw new Error(`Resolve alarm failed: ${res.status}`)
@@ -896,7 +984,7 @@ export async function resolveAlarm(alarmId: string): Promise<void> {
 // ── Alarm Types & Config ──
 
 export async function fetchAlarmTypes(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/alarms/alarm-types`)
+  const res = await apiFetch(`${API_BASE}/alarms/alarm-types`)
   if (!res.ok) throw new Error(`Fetch alarm types failed: ${res.status}`)
   const data = await res.json()
   return data.types || []
@@ -917,7 +1005,7 @@ export interface AlarmConfigTag {
 }
 
 export async function fetchAlarmConfig(): Promise<{ tags: AlarmConfigTag[]; total: number }> {
-  const res = await fetch(`${API_BASE}/tags/alarm-config`)
+  const res = await apiFetch(`${API_BASE}/tags/alarm-config`)
   if (!res.ok) throw new Error(`Fetch alarm config failed: ${res.status}`)
   return res.json()
 }
@@ -990,19 +1078,19 @@ export async function fetchEntities(params?: { category?: string; entity_type?: 
   if (params?.enabled !== undefined) qs.set('enabled', String(params.enabled))
   qs.set('page', String(params?.page || 1))
   qs.set('page_size', String(params?.page_size || 50))
-  const res = await fetch(`${API_BASE}/entities?${qs}`)
+  const res = await apiFetch(`${API_BASE}/entities?${qs}`)
   if (!res.ok) throw new Error(`Fetch entities failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchEntity(entityId: string): Promise<Entity & { bindings: EntityBinding[] }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}`)
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}`)
   if (!res.ok) throw new Error(`Fetch entity failed: ${res.status}`)
   return res.json()
 }
 
 export async function createEntity(input: Omit<Entity, 'id' | 'binding_count'>): Promise<{ id: string; created_at: string }> {
-  const res = await fetch(`${API_BASE}/entities`, {
+  const res = await apiFetch(`${API_BASE}/entities`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -1012,7 +1100,7 @@ export async function createEntity(input: Omit<Entity, 'id' | 'binding_count'>):
 }
 
 export async function updateEntity(entityId: string, input: Partial<Omit<Entity, 'id'>>): Promise<{ updated: boolean; updated_at?: string }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}`, {
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -1022,13 +1110,13 @@ export async function updateEntity(entityId: string, input: Partial<Omit<Entity,
 }
 
 export async function deleteEntity(entityId: string): Promise<{ deleted: boolean }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete entity failed: ${res.status}`)
   return res.json()
 }
 
 export async function bindTagToEntity(entityId: string, input: Omit<EntityBinding, 'id' | 'entity_id' | 'tag_name' | 'tag_display_name' | 'node_name'>): Promise<{ id: string; created_at: string }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}/bindings`, {
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}/bindings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -1038,13 +1126,13 @@ export async function bindTagToEntity(entityId: string, input: Omit<EntityBindin
 }
 
 export async function unbindTagFromEntity(entityId: string, bindingId: string): Promise<{ deleted: boolean }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}/bindings/${bindingId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}/bindings/${bindingId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Unbind tag failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchEntityRealtime(entityId: string): Promise<EntityRealtime> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}/realtime`)
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}/realtime`)
   if (!res.ok) throw new Error(`Fetch entity realtime failed: ${res.status}`)
   return res.json()
 }
@@ -1054,7 +1142,7 @@ export async function fetchEntitiesByNode(nodeId: string): Promise<{ items: Enti
   qs.set('node_id', nodeId)
   qs.set('page', '1')
   qs.set('page_size', '200')
-  const res = await fetch(`${API_BASE}/entities?${qs}`)
+  const res = await apiFetch(`${API_BASE}/entities?${qs}`)
   if (!res.ok) throw new Error(`Fetch entities by node failed: ${res.status}`)
   return res.json()
 }
@@ -1062,7 +1150,7 @@ export async function fetchEntityBindings(params?: { node_id?: string; entity_id
   const qs = new URLSearchParams()
   if (params?.node_id) qs.set('node_id', params.node_id)
   if (params?.entity_id) qs.set('entity_id', params.entity_id)
-  const res = await fetch(`${API_BASE}/entities/bindings?${qs}`)
+  const res = await apiFetch(`${API_BASE}/entities/bindings?${qs}`)
   if (!res.ok) throw new Error(`Fetch entity bindings failed: ${res.status}`)
   return res.json()
 }
@@ -1078,7 +1166,7 @@ export interface BatchBindingItem {
 }
 
 export async function batchBindEntityTags(bindings: BatchBindingItem[]): Promise<{ created: number; skipped: number; total: number }> {
-  const res = await fetch(`${API_BASE}/entities/bindings/batch`, {
+  const res = await apiFetch(`${API_BASE}/entities/bindings/batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ bindings }),
@@ -1088,7 +1176,7 @@ export async function batchBindEntityTags(bindings: BatchBindingItem[]): Promise
 }
 
 export async function batchUnbindEntityBindings(bindingIds: string[]): Promise<{ deleted: number }> {
-  const res = await fetch(`${API_BASE}/entities/bindings/batch`, {
+  const res = await apiFetch(`${API_BASE}/entities/bindings/batch`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ binding_ids: bindingIds }),
@@ -1099,13 +1187,13 @@ export async function batchUnbindEntityBindings(bindingIds: string[]): Promise<{
 
 
 export async function fetchEntityHistory(entityId: string, range = '1h', page = 1, pageSize = 500): Promise<{ points: { ts: string; value: number | string | boolean | null; quality: number }[]; total: number; page: number; page_size: number }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}/history?range=${range}&page=${page}&page_size=${pageSize}`)
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}/history?range=${range}&page=${page}&page_size=${pageSize}`)
   if (!res.ok) throw new Error(`Fetch entity history failed: ${res.status}`)
   return res.json()
 }
 
 export async function writeEntityValue(entityId: string, value: any): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/entities/${entityId}/write`, {
+  const res = await apiFetch(`${API_BASE}/entities/${entityId}/write`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ value }),
@@ -1114,30 +1202,18 @@ export async function writeEntityValue(entityId: string, value: any): Promise<{ 
   return res.json()
 }
 
-export function exportEntitiesCsv(category?: string): void {
+export function exportEntitiesCsv(category?: string): Promise<void> {
   const params = new URLSearchParams()
   if (category) params.set('category', category)
   params.set('format', 'csv')
-  const url = `${API_BASE}/entities/export?${params}`
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  return downloadAuthenticated(`${API_BASE}/entities/export?${params}`, 'zizu_entities.csv')
 }
 
-export function exportEntitiesJson(category?: string): void {
+export function exportEntitiesJson(category?: string): Promise<void> {
   const params = new URLSearchParams()
   if (category) params.set('category', category)
   params.set('format', 'json')
-  const url = `${API_BASE}/entities/export?${params}`
-  const a = document.createElement('a')
-  a.href = url
-  a.download = ''
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  return downloadAuthenticated(`${API_BASE}/entities/export?${params}`, 'zizu_entities.json')
 }
 
 export interface EntityImportResult {
@@ -1153,7 +1229,7 @@ export async function importEntitiesFile(file: File, mode: 'upsert' | 'create' =
   const text = await file.text()
   const params = new URLSearchParams({ mode, dry_run: String(dryRun) })
   const isJson = file.name.toLowerCase().endsWith('.json') || text.trim().startsWith('[') || text.trim().startsWith('{')
-  const res = await fetch(`${API_BASE}/entities/import?${params}`, { method: 'POST', headers: { 'Content-Type': isJson ? 'application/json' : 'text/csv' }, body: text })
+  const res = await apiFetch(`${API_BASE}/entities/import?${params}`, { method: 'POST', headers: { 'Content-Type': isJson ? 'application/json' : 'text/csv' }, body: text })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Import entities failed: ${res.status}`)
@@ -1164,7 +1240,7 @@ export async function importEntitiesFile(file: File, mode: 'upsert' | 'create' =
 
 
 export async function autoBindEntities(dryRun = false): Promise<{ created: number; skipped: number; preview: { entity_name: string; tag_name: string; node_name: string; node_type: string }[] }> {
-  const res = await fetch(`${API_BASE}/entities/bindings/auto-bind?dry_run=${dryRun}`, { method: 'POST' })
+  const res = await apiFetch(`${API_BASE}/entities/bindings/auto-bind?dry_run=${dryRun}`, { method: 'POST' })
   if (!res.ok) throw new Error(`Auto bind failed: ${res.status}`)
   return res.json()
 }
@@ -1191,13 +1267,13 @@ export interface FaultMap {
 
 
 export async function fetchAlarmLevels(enabledOnly = false): Promise<{ items: AlarmLevelEntity[] }> {
-  const res = await fetch(`${API_BASE}/alarm-levels?enabled_only=${enabledOnly}`)
+  const res = await apiFetch(`${API_BASE}/alarm-levels?enabled_only=${enabledOnly}`)
   if (!res.ok) throw new Error(`Fetch alarm levels failed: ${res.status}`)
   return res.json()
 }
 
 export async function createAlarmLevel(data: Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>): Promise<{ id: string; created_at: string }> {
-  const res = await fetch(`${API_BASE}/alarm-levels`, {
+  const res = await apiFetch(`${API_BASE}/alarm-levels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1207,7 +1283,7 @@ export async function createAlarmLevel(data: Omit<AlarmLevelEntity, 'id' | 'crea
 }
 
 export async function updateAlarmLevel(levelId: string, data: Partial<Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>>): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}`, {
+  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1217,13 +1293,13 @@ export async function updateAlarmLevel(levelId: string, data: Partial<Omit<Alarm
 }
 
 export async function deleteAlarmLevel(levelId: string): Promise<{ deleted: boolean }> {
-  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete alarm level failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchAlarmLevelEntities(levelId: string): Promise<{ items: EntityAlarmBinding[] }> {
-  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities`)
+  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities`)
   if (!res.ok) throw new Error(`Fetch alarm level entities failed: ${res.status}`)
   return res.json()
 }
@@ -1235,7 +1311,7 @@ export async function batchBindEntitiesToAlarmLevel(
   enabled = true,
   faultMapId?: string | null,
 ): Promise<{ bound: number }> {
-  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities`, {
+  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ entity_ids: entityIds, trigger_rules: triggerRules, enabled, fault_map_id: faultMapId }),
@@ -1245,18 +1321,18 @@ export async function batchBindEntitiesToAlarmLevel(
 }
 
 export async function unbindEntityFromAlarmLevel(levelId: string, bindingId: string): Promise<{ deleted: boolean }> {
-  const res = await fetch(`${API_BASE}/alarm-levels/${levelId}/entities/${bindingId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities/${bindingId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Unbind failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchFaultMaps(): Promise<{ items: FaultMap[]; total: number }> {
-  const res = await fetch(`${API_BASE}/fault-maps`)
+  const res = await apiFetch(`${API_BASE}/fault-maps`)
   return res.json()
 }
 
 export async function createFaultMap(data: Omit<FaultMap, 'id' | 'created_at' | 'updated_at'>): Promise<{ id: string; status: string }> {
-  const res = await fetch(`${API_BASE}/fault-maps`, {
+  const res = await apiFetch(`${API_BASE}/fault-maps`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1266,7 +1342,7 @@ export async function createFaultMap(data: Omit<FaultMap, 'id' | 'created_at' | 
 }
 
 export async function updateFaultMap(mapId: string, data: Partial<Omit<FaultMap, 'id' | 'created_at' | 'updated_at'>>): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/fault-maps/${mapId}`, {
+  const res = await apiFetch(`${API_BASE}/fault-maps/${mapId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1276,7 +1352,7 @@ export async function updateFaultMap(mapId: string, data: Partial<Omit<FaultMap,
 }
 
 export async function deleteFaultMap(mapId: string): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/fault-maps/${mapId}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/fault-maps/${mapId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete fault map failed: ${res.status}`)
   return res.json()
 }
@@ -1318,30 +1394,30 @@ export interface NanoMQACLRule {
 }
 
 export async function fetchNanoMQStatus(): Promise<NanoMQStatus> {
-  const res = await fetch(`${API_BASE}/nanomq/status`)
+  const res = await apiFetch(`${API_BASE}/nanomq/status`)
   return res.json()
 }
 
 export async function fetchNanoMQClients(): Promise<{ data?: NanoMQClientInfo[]; [k: string]: any }> {
-  const res = await fetch(`${API_BASE}/nanomq/clients`)
+  const res = await apiFetch(`${API_BASE}/nanomq/clients`)
   if (!res.ok) throw new Error(`Fetch clients failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchNanoMQSubscriptions(): Promise<{ data?: NanoMQSubscription[]; [k: string]: any }> {
-  const res = await fetch(`${API_BASE}/nanomq/subscriptions`)
+  const res = await apiFetch(`${API_BASE}/nanomq/subscriptions`)
   if (!res.ok) throw new Error(`Fetch subscriptions failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchNanoMQACL(): Promise<{ data?: NanoMQACLRule[]; [k: string]: any }> {
-  const res = await fetch(`${API_BASE}/nanomq/acl`)
+  const res = await apiFetch(`${API_BASE}/nanomq/acl`)
   if (!res.ok) throw new Error(`Fetch ACL failed: ${res.status}`)
   return res.json()
 }
 
 export async function updateNanoMQACL(rules: NanoMQACLRule[]): Promise<{ [k: string]: any }> {
-  const res = await fetch(`${API_BASE}/nanomq/acl`, {
+  const res = await apiFetch(`${API_BASE}/nanomq/acl`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rules }),
@@ -1351,7 +1427,7 @@ export async function updateNanoMQACL(rules: NanoMQACLRule[]): Promise<{ [k: str
 }
 
 export async function publishNanoMQMessage(topic: string, payload: string, qos = 0, retain = false): Promise<{ [k: string]: any }> {
-  const res = await fetch(`${API_BASE}/nanomq/publish`, {
+  const res = await apiFetch(`${API_BASE}/nanomq/publish`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, payload, qos, retain }),
@@ -1361,13 +1437,13 @@ export async function publishNanoMQMessage(topic: string, payload: string, qos =
 }
 
 export async function fetchNanoMQConfig(): Promise<{ content: string; path: string }> {
-  const res = await fetch(`${API_BASE}/nanomq/config`)
+  const res = await apiFetch(`${API_BASE}/nanomq/config`)
   if (!res.ok) throw new Error(`Fetch config failed: ${res.status}`)
   return res.json()
 }
 
 export async function updateNanoMQConfig(content: string): Promise<{ saved: boolean; path: string }> {
-  const res = await fetch(`${API_BASE}/nanomq/config`, {
+  const res = await apiFetch(`${API_BASE}/nanomq/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -1377,7 +1453,7 @@ export async function updateNanoMQConfig(content: string): Promise<{ saved: bool
 }
 
 export async function restartNanoMQ(): Promise<{ restarted: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/nanomq/restart`, { method: 'POST' })
+  const res = await apiFetch(`${API_BASE}/nanomq/restart`, { method: 'POST' })
   if (!res.ok) throw new Error(`Restart failed: ${res.status}`)
   return res.json()
 }
@@ -1420,19 +1496,19 @@ export interface DeviceTemplateTag {
 }
 
 export async function fetchDeviceTemplates(): Promise<{ items: DeviceTemplate[] }> {
-  const res = await fetch(`${API_BASE}/device-templates`)
+  const res = await apiFetch(`${API_BASE}/device-templates`)
   if (!res.ok) throw new Error(`Fetch templates failed: ${res.status}`)
   return res.json()
 }
 
 export async function fetchDeviceTemplate(id: string): Promise<DeviceTemplate> {
-  const res = await fetch(`${API_BASE}/device-templates/${id}`)
+  const res = await apiFetch(`${API_BASE}/device-templates/${id}`)
   if (!res.ok) throw new Error(`Fetch template failed: ${res.status}`)
   return res.json()
 }
 
 export async function createDeviceTemplate(data: Omit<DeviceTemplate, 'id' | 'created_at' | 'updated_at'>): Promise<DeviceTemplate> {
-  const res = await fetch(`${API_BASE}/device-templates`, {
+  const res = await apiFetch(`${API_BASE}/device-templates`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1442,7 +1518,7 @@ export async function createDeviceTemplate(data: Omit<DeviceTemplate, 'id' | 'cr
 }
 
 export async function updateDeviceTemplate(id: string, data: Partial<Omit<DeviceTemplate, 'id' | 'created_at' | 'updated_at'>>): Promise<{ updated: boolean }> {
-  const res = await fetch(`${API_BASE}/device-templates/${id}`, {
+  const res = await apiFetch(`${API_BASE}/device-templates/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -1452,7 +1528,7 @@ export async function updateDeviceTemplate(id: string, data: Partial<Omit<Device
 }
 
 export async function deleteDeviceTemplate(id: string): Promise<{ deleted: boolean }> {
-  const res = await fetch(`${API_BASE}/device-templates/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/device-templates/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete template failed: ${res.status}`)
   return res.json()
 }
@@ -1461,7 +1537,7 @@ export async function applyDeviceTemplate(
   id: string,
   input: { parent_node_id: string; instance_name?: string; source_prefix?: string; brand?: string }
 ): Promise<{ status: string; summary: { nodes_created: number; tags_created: number; bindings_created: number; entity_missing: string[]; warnings: string[] } }> {
-  const res = await fetch(`${API_BASE}/device-templates/${id}/apply`, {
+  const res = await apiFetch(`${API_BASE}/device-templates/${id}/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

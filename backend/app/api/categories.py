@@ -14,6 +14,12 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    protected,
+)
+
 router = APIRouter()
 
 
@@ -29,7 +35,7 @@ class CategoryUpdate(BaseModel):
     description: str | None = None
 
 
-@router.get("/categories")
+@router.get("/categories", **protected(CONFIGURATION_READ))
 async def list_categories() -> dict:
     """获取节点大类列表。"""
     from app.services.telemetry_store import get_connection
@@ -50,7 +56,7 @@ async def list_categories() -> dict:
     return {"categories": rows, "total": len(rows)}
 
 
-@router.post("/categories")
+@router.post("/categories", **protected(CONFIGURATION_WRITE))
 async def create_category(req: CategoryCreate) -> dict:
     """创建节点大类。"""
     from app.services.telemetry_store import get_connection
@@ -72,7 +78,7 @@ async def create_category(req: CategoryCreate) -> dict:
     return {"status": "ok", "id": str(row[0])}
 
 
-@router.put("/categories/{category_id}")
+@router.put("/categories/{category_id}", **protected(CONFIGURATION_WRITE))
 async def update_category(category_id: UUID, req: CategoryUpdate) -> dict:
     """更新节点大类。"""
     from app.services.telemetry_store import get_connection
@@ -104,7 +110,7 @@ async def update_category(category_id: UUID, req: CategoryUpdate) -> dict:
     return {"status": "ok"}
 
 
-@router.delete("/categories/{category_id}")
+@router.delete("/categories/{category_id}", **protected(CONFIGURATION_WRITE))
 async def delete_category(category_id: UUID) -> dict:
     """删除节点大类。"""
     from app.services.telemetry_store import get_connection

@@ -124,10 +124,13 @@ Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入�
 `ALLOW_INSECURE_DEV_SECRETS=true`；进程启动时会在标准错误输出显示
 `INSECURE DEVELOPMENT MODE` 警示。此模式不得用于任何可被其他主机访问的部署。
 
-独立验收/同步脚本也不再携带数据库或 Neuron 默认口令：运行
-`backend/acceptance_f0_f3.py` 与 `backend/test_f0_e2e.py` 前必须设置
-`ZIZU_DSN`；运行 `backend/scripts/sync_neuron_tags.py` 前必须设置
-`ZIZU_DSN` 与 `NEURON_PASSWORD`。
+独立验收/同步脚本也不再携带数据库或 Neuron 默认口令。运行
+`backend/acceptance_f0_f3.py` 与 `backend/test_f0_e2e.py` 前必须显式设置
+`ZIZU_API`（生产地址必须是 HTTPS）和 `ZIZU_DSN`。交互终端未设置
+`ZIZU_API_TOKEN` 时，脚本会提示输入用户名并用无回显方式读取密码，再通过登录接口取得
+短期会话；密码和 token 不进入命令行参数或 shell 历史。非交互式运行必须由 Secret
+管理器注入活动 engineer/admin 会话的 `ZIZU_API_TOKEN`。运行
+`backend/scripts/sync_neuron_tags.py` 前必须设置 `ZIZU_DSN` 与 `NEURON_PASSWORD`。
 
 ### 2. 一键启动（推荐）
 
@@ -176,10 +179,10 @@ docker compose exec backend \
   --provision-user --username admin --role admin
 ```
 
-访问：
-- `http://localhost:9000` — 前端页面（点位管理 + 实时趋势 + 规则引擎/告警中心）
+访问（生产环境请使用已配置 TLS 的 HTTPS 域名）：
+- `https://localhost:9000` — 前端页面（点位管理 + 实时趋势 + 规则引擎/告警中心）
 - 规则引擎支持 GoRules JDM Editor 编辑决策图/决策表
-- `http://localhost:9000/api/docs` — Swagger API 文档
+- `https://localhost:9000/api/docs` — Swagger API 文档
 
 > 首次启动会自动执行 `init-db/*.sql` 初始化数据库。
 
@@ -207,7 +210,18 @@ AUTH_TRUSTED_PROXY_CIDRS=["127.0.0.1/32","::1/128"]
 访问的开发环境，才可同时设置 `DEPLOYMENT_MODE=development` 和
 `AUTH_REQUIRE_HTTPS=false`；生产模式不得关闭 HTTPS。
 
-Ticket #2 已收口的解决方案交付接口权限如下：
+只有隔离在本机回环地址上的开发环境才可使用 HTTP。服务端必须同时显式设置
+`DEPLOYMENT_MODE=development`、`ALLOW_INSECURE_DEV_SECRETS=true` 和
+`AUTH_REQUIRE_HTTPS=false`；运行独立验收脚本时还需显式确认客户端降级：
+
+```env
+ZIZU_API=http://127.0.0.1:9000/api/v1
+ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true
+```
+
+脚本拒绝向非回环 HTTP 地址发送密码或 Bearer token；生产环境不得设置该降级开关。
+
+解决方案交付接口权限如下：
 
 | 能力 | admin | engineer | operator |
 |------|:-----:|:--------:|:--------:|
@@ -218,10 +232,29 @@ Ticket #2 已收口的解决方案交付接口权限如下：
 | 运行机器验收 | ✓ | ✓ | — |
 | 查询交付报告 | ✓ | ✓ | ✓ |
 
-在上述解决方案交付主缝内，只有最小 `/api/v1/health/live` 存活探针匿名可用；这并不
-代表全站仅剩该匿名接口。这里的矩阵只描述 Ticket #2；其余存量业务 REST、WebSocket
-和控制/管理面将在后续认证迁移
-票据中逐步收口，在迁移完成前不能据此宣称整个公网 API 已生产就绪。
+非控制业务 REST 使用以下能力矩阵；角色判断只在后端执行，前端隐藏按钮不是安全边界：
+
+| 能力 | admin | engineer | operator |
+|------|:-----:|:--------:|:--------:|
+| 运行状态、遥测与告警读取 | ✓ | ✓ | ✓ |
+| 配置读取与导出 | ✓ | ✓ | — |
+| 配置创建、修改、导入与绑定 | ✓ | ✓ | — |
+| 告警确认 | ✓ | ✓ | ✓ |
+| 临时告警创建/人工恢复（待移除） | ✓ | ✓ | — |
+
+operator 读取节点和点位运行视图时不会收到连接参数、来源路径、公式、缩放、阈值等
+配置字段。告警确认主体固定来自服务端会话，客户端不能提交或伪造 `ack_user`。
+配置写在进入业务处理前记录最小 `requested` 审计，成功返回后再记录 `success`；两者只含
+服务端身份、稳定路由和请求 ID，不保存请求体、查询参数或 Bearer。现有存量配置接口
+各自提交事务，因此 `success` 审计暂不能与全部业务写原子提交；后置审计失败会返回
+`AUDIT_UNAVAILABLE`，此时客户端不得盲目重试，应先核对配置状态。解决方案安装主缝
+已经使用同事务审计，存量配置接口将在统一 Unit of Work 后收口这一边界。
+详细 `/api/v1/health` 与 `/api/v1/health/ready` 也需要登录；只有最小
+`/api/v1/health/live` 存活探针匿名可用。
+
+控制写、系统管理、Neuron/NanoMQ 管理和 WebSocket 仍将在 Ticket #4 使用同一能力
+边界收口；在该票据以及 TLS、不可变 ARM64 制品与现场凭据轮换完成前，不能宣称整个
+公网 API 或 1 号机已生产就绪。
 
 ### 4. 本地开发（可选）
 
@@ -468,7 +501,8 @@ export JWT_SECRET=jwt-secret-value-that-is-at-least-32-chars
 python -m unittest \
   tests.test_secure_settings \
   tests.test_authenticated_delivery_public_api \
-  tests.test_delivery_public_api -v
+  tests.test_delivery_public_api \
+  tests.test_business_rest_authorization -v
 python test_f0_pure.py
 
 # 身份离线供应工具的标准库测试（从仓库根目录运行）

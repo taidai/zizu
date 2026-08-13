@@ -155,7 +155,7 @@ def restart_backend(client: paramiko.SSHClient) -> str:
     time.sleep(8)
     rc, out, err = sudo_exec(
         client,
-        "curl -sf http://127.0.0.1:9000/api/v1/health 2>/dev/null || echo HEALTH_PENDING",
+        "curl -sf http://127.0.0.1:9000/api/v1/health/live 2>/dev/null || echo HEALTH_PENDING",
         timeout=30,
     )
     log("Health: " + out.strip()[:800])

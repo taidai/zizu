@@ -6,8 +6,9 @@ import {
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
 import NodeEntityPanel from '../components/NodeEntityPanel'
+import NodeRealtimePanel from '../components/NodeRealtimePanel'
 
-type TabKey = 'overview' | 'tags' | 'entities'
+type TabKey = 'realtime' | 'overview' | 'tags' | 'entities'
 type FormMode = 'create' | 'edit'
 
 const LAYER_NAMES: Record<number, string> = {
@@ -432,13 +433,13 @@ function ImportNeuronModal({
   )
 }
 
-export default function NodeTreePage() {
+export default function NodeTreePage({ readOnly = false }: { readOnly?: boolean }) {
   const [nodes, setNodes] = useState<Node[]>([])
   const [rules, setRules] = useState<Rule[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [selectedId, setSelectedId] = useState<string>('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [activeTab, setActiveTab] = useState<TabKey>('overview')
+  const [activeTab, setActiveTab] = useState<TabKey>(readOnly ? 'realtime' : 'overview')
   const [showAssignModal, setShowAssignModal] = useState(false)
   const [nodeFormMode, setNodeFormMode] = useState<FormMode | null>(null)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -483,9 +484,11 @@ export default function NodeTreePage() {
 
   useEffect(() => {
     loadNodes()
-    loadRules()
-    loadCategories()
-  }, [])
+    if (!readOnly) {
+      loadRules()
+      loadCategories()
+    }
+  }, [readOnly])
 
   useEffect(() => {
     if (nodes.length === 0) return
@@ -556,16 +559,18 @@ export default function NodeTreePage() {
         {/* 左侧节点管理 */}
        <div className="neu-card w-80 flex flex-col p-3 overflow-hidden">
          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-bold text-gray-800">节点管理</h2>
+            <h2 className="text-sm font-bold text-gray-800">{readOnly ? '运行监控' : '节点管理'}</h2>
           <div className="flex items-center gap-1">
-            <button
-              onClick={() => setNodeFormMode('create')}
-              disabled={!canAddChild}
-              title={canAddChild ? '新建子节点' : '已是最深层级'}
-              className="neu-btn px-2 py-1 text-[10px] font-medium text-[#389e0d] disabled:opacity-40"
-            >
-              + 子节点
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => setNodeFormMode('create')}
+                disabled={!canAddChild}
+                title={canAddChild ? '新建子节点' : '已是最深层级'}
+                className="neu-btn px-2 py-1 text-[10px] font-medium text-[#389e0d] disabled:opacity-40"
+              >
+                + 子节点
+              </button>
+            )}
             <button
               onClick={loadNodes}
               disabled={loading}
@@ -600,7 +605,7 @@ export default function NodeTreePage() {
           ))}
           {filteredRoots.length === 0 && !loading && (
             <div className="text-xs text-gray-400 py-4 text-center">
-              {treeSearch ? '无匹配节点' : '暂无节点，点击「+ 子节点」创建根节点'}
+              {treeSearch ? '无匹配节点' : readOnly ? '暂无运行节点' : '暂无节点，点击「+ 子节点」创建根节点'}
             </div>
           )}
         </div>
@@ -625,7 +630,7 @@ export default function NodeTreePage() {
                   </div>
                   <p className="text-xs text-gray-500 mt-1">点位数: {selectedNode.tag_count} · ID: {selectedNode.id}</p>
                 </div>
-                <div className="flex items-center gap-2">
+                {!readOnly && <div className="flex items-center gap-2">
                   <button
                     onClick={() => setShowImportModal(true)}
                     className="neu-btn px-3 py-1.5 text-xs text-gray-600"
@@ -650,7 +655,7 @@ export default function NodeTreePage() {
                   >
                     指定规则
                   </button>
-                </div>
+                </div>}
               </div>
 
               {assignedRules.length > 0 && (
@@ -669,11 +674,13 @@ export default function NodeTreePage() {
             </div>
 
             <div className="flex items-center gap-2 mb-3">
-              {[
+              {(readOnly ? [
+                { key: 'realtime', label: '实时数据' },
+              ] : [
                 { key: 'overview', label: '节点概览' },
                 { key: 'tags', label: '点位管理' },
                 { key: 'entities', label: '全局实体' },
-              ].map((t) => (
+              ]).map((t) => (
                 <button
                   key={t.key}
                   onClick={() => setActiveTab(t.key as TabKey)}
@@ -687,6 +694,7 @@ export default function NodeTreePage() {
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
+              {activeTab === 'realtime' && <NodeRealtimePanel nodeId={selectedNode.id} />}
               {activeTab === 'overview' && (
                 <div className="neu-card p-4 space-y-3">
                   <div className="grid grid-cols-2 gap-4 text-xs">
@@ -726,7 +734,7 @@ export default function NodeTreePage() {
         )}
       </div>
 
-      {showAssignModal && selectedNode && (
+      {!readOnly && showAssignModal && selectedNode && (
         <AssignRuleModal
           node={selectedNode}
           rules={rules}
@@ -735,7 +743,7 @@ export default function NodeTreePage() {
         />
       )}
 
-      {nodeFormMode && (
+      {!readOnly && nodeFormMode && (
         <NodeFormModal
           mode={nodeFormMode}
           node={nodeFormMode === 'edit' ? selectedNode : undefined}
@@ -746,7 +754,7 @@ export default function NodeTreePage() {
         />
       )}
 
-      {showImportModal && selectedNode && (
+      {!readOnly && showImportModal && selectedNode && (
         <ImportNeuronModal
           node={selectedNode}
           onClose={() => setShowImportModal(false)}
@@ -754,7 +762,7 @@ export default function NodeTreePage() {
         />
       )}
 
-      {showDeleteConfirm && selectedNode && (
+      {!readOnly && showDeleteConfirm && selectedNode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="neu-card w-[360px] max-w-[90vw] p-5">
             <h3 className="text-sm font-bold text-gray-800 mb-2">确认删除节点？</h3>

@@ -1,5 +1,12 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
-import { fetchHealth, type HealthStatus } from './api/client'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { fetchCurrentUser, fetchHealth, login, logout, type HealthStatus } from './api/client'
+import {
+  clearAuthSession,
+  getAuthSession,
+  subscribeAuthenticationRequired,
+  type AuthRole,
+  type AuthSession,
+} from './api/authSession'
 import AdminPanel from './components/AdminPanel'
 import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle } from 'lucide-react'
 
@@ -49,20 +56,119 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
 
 type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
 
-const NAV_ITEMS: { key: PageKey; label: string; icon: React.ReactNode }[] = [
-  { key: 'tree', label: '节点管理', icon: <Network size={18} strokeWidth={1.8} /> },
-  { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} /> },
-  { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} /> },
-  { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} /> },
-  { key: 'alarm-levels', label: '告警等级', icon: <Bell size={18} strokeWidth={1.8} /> },
-  { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} /> },
-  { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} /> },
+const ROLE_LABELS: Record<AuthRole, string> = {
+  admin: '平台管理员',
+  engineer: '实施工程师',
+  operator: '业主操作员',
+}
+
+interface NavigationItem {
+  key: PageKey
+  label: string
+  operatorLabel?: string
+  icon: React.ReactNode
+  roles: AuthRole[]
+}
+
+const ALL_ROLES: AuthRole[] = ['admin', 'engineer', 'operator']
+const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
+
+const NAV_ITEMS: NavigationItem[] = [
+  { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
+  { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
+  { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  { key: 'alarm-levels', label: '告警等级', icon: <Bell size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  { key: 'templates', label: '设备模板', icon: <Layers size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  // Server-side protection for system/control APIs is intentionally Ticket #4.
+  { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} />, roles: ['admin'] },
 ]
 
-export default function App() {
+function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession) => void }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!username.trim() || !password) return
+    setSubmitting(true)
+    setError('')
+    try {
+      onAuthenticated(await login(username.trim(), password))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '登录失败，请重试')
+    } finally {
+      setPassword('')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#e8e8e8] flex items-center justify-center p-6">
+      <form onSubmit={handleSubmit} className="neu-card w-full max-w-sm p-8 space-y-5">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">ZiZu</h1>
+          <p className="mt-1 text-xs text-gray-500">工业控制系统交付与运行平台</p>
+        </div>
+        <div className="space-y-3">
+          <label className="block text-xs font-medium text-gray-600">
+            用户名
+            <input
+              autoFocus
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              className="neu-input mt-1.5 w-full px-3 py-2.5 text-sm"
+              maxLength={128}
+            />
+          </label>
+          <label className="block text-xs font-medium text-gray-600">
+            密码
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="neu-input mt-1.5 w-full px-3 py-2.5 text-sm"
+            />
+          </label>
+        </div>
+        {error && (
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+        <button
+          type="submit"
+          disabled={submitting || !username.trim() || !password}
+          className="w-full rounded-lg bg-[#52c41a] px-4 py-2.5 text-sm font-medium text-white shadow disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? '正在登录...' : '登录'}
+        </button>
+        <p className="text-[11px] leading-5 text-gray-400">账号由平台管理员线下供应，系统不提供默认账号或密码。</p>
+      </form>
+    </div>
+  )
+}
+
+function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLoggedOut: () => void }) {
   const [activePage, setActivePage] = useState<PageKey>('tree')
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [collapsed, setCollapsed] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const navigation = useMemo(
+    () => NAV_ITEMS.filter((item) => item.roles.includes(session.user.role)),
+    [session.user.role],
+  )
+
+  useEffect(() => {
+    if (!navigation.some((item) => item.key === activePage)) {
+      setActivePage(navigation[0]?.key || 'alarms')
+    }
+  }, [activePage, navigation])
 
   useEffect(() => {
     const poll = () => fetchHealth().then(setHealth).catch(() => {})
@@ -70,6 +176,17 @@ export default function App() {
     const id = setInterval(poll, 5000)
     return () => clearInterval(id)
   }, [])
+
+  const handleLogout = async () => {
+    setLoggingOut(true)
+    try {
+      await logout()
+    } catch {
+      // Local logout is authoritative even when the server is unavailable.
+    } finally {
+      onLoggedOut()
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#e8e8e8] flex">
@@ -95,11 +212,13 @@ export default function App() {
           </button>
         </div>
         <nav className={`space-y-2 w-full ${collapsed ? 'flex flex-col items-center' : ''}`}>
-          {NAV_ITEMS.map((item) => (
+          {navigation.map((item) => {
+            const label = session.user.role === 'operator' && item.operatorLabel ? item.operatorLabel : item.label
+            return (
             <button
               key={item.key}
               onClick={() => setActivePage(item.key)}
-              title={collapsed ? item.label : undefined}
+              title={collapsed ? label : undefined}
               className={`flex items-center rounded-xl text-sm font-medium transition-colors ${
                 collapsed ? 'w-10 h-10 justify-center px-0' : 'w-full gap-3 px-3 py-2.5'
               } ${
@@ -109,13 +228,36 @@ export default function App() {
               }`}
             >
               <span className="shrink-0">{item.icon}</span>
-              {!collapsed && <span className="truncate">{item.label}</span>}
+              {!collapsed && <span className="truncate">{label}</span>}
             </button>
-          ))}
+            )
+          })}
         </nav>
-        <div className={`mt-auto text-[10px] text-gray-400 ${collapsed ? 'text-center' : 'px-2 pb-1'}`}>
-          {!collapsed && <div>设备与点位采集管理</div>}
-          <div className={collapsed ? '' : 'mt-1'}>FE {__APP_VERSION__}</div>
+        <div className={`mt-auto ${collapsed ? 'text-center' : 'px-1 pb-1'}`}>
+          {!collapsed && (
+            <div className="mb-3 rounded-xl border border-white/60 bg-white/30 px-3 py-2">
+              <div className="truncate text-xs font-medium text-gray-700" title={session.user.username}>{session.user.username}</div>
+              <div className="mt-0.5 text-[10px] text-gray-500">{ROLE_LABELS[session.user.role]}</div>
+              <button
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="mt-2 text-[11px] text-gray-500 hover:text-red-600 disabled:opacity-50"
+              >
+                {loggingOut ? '正在退出...' : '退出登录'}
+              </button>
+            </div>
+          )}
+          {collapsed && (
+            <button
+              onClick={handleLogout}
+              disabled={loggingOut}
+              title={`${session.user.username} · ${ROLE_LABELS[session.user.role]} · 退出登录`}
+              className="neu-btn mb-3 h-8 w-8 text-xs font-medium text-gray-600 disabled:opacity-50"
+            >
+              {session.user.username.slice(0, 1).toUpperCase()}
+            </button>
+          )}
+          <div className="text-[10px] text-gray-400">FE {__APP_VERSION__}</div>
         </div>
       </aside>
 
@@ -124,9 +266,14 @@ export default function App() {
         <PipelineBar health={health} />
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
-            {activePage === 'tree' && <NodeTreePage />}
+            {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
-            {activePage === 'alarms' && <AlarmCenterPage />}
+            {activePage === 'alarms' && (
+              <AlarmCenterPage
+                canConfigure={session.user.role !== 'operator'}
+                canResolve={session.user.role !== 'operator'}
+              />
+            )}
             {activePage === 'alarm-levels' && <AlarmLevelManagerPage />}
             {activePage === 'alarm-config' && <AlarmConfigPage />}
             {activePage === 'entities' && <EntityManagerPage />}
@@ -137,4 +284,73 @@ export default function App() {
       </main>
     </div>
   )
+}
+
+export default function App() {
+  const [session, setSession] = useState<AuthSession | null>(null)
+  const [restoring, setRestoring] = useState(true)
+  const [restoreError, setRestoreError] = useState('')
+
+  const restoreSession = useCallback(async () => {
+    const stored = getAuthSession()
+    if (!stored) {
+      setSession(null)
+      setRestoreError('')
+      setRestoring(false)
+      return
+    }
+
+    setSession(null)
+    setRestoring(true)
+    setRestoreError('')
+    try {
+      const user = await fetchCurrentUser()
+      const current = getAuthSession()
+      if (current) setSession({ ...current, user })
+    } catch {
+      if (getAuthSession()) setRestoreError('暂时无法验证登录会话，请检查平台连接后重试。')
+      setSession(null)
+    } finally {
+      setRestoring(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = subscribeAuthenticationRequired(() => {
+      setSession(null)
+      setRestoreError('')
+      setRestoring(false)
+    })
+    void restoreSession()
+    return unsubscribe
+  }, [restoreSession])
+
+  if (restoring) {
+    return <div className="min-h-screen bg-[#e8e8e8] flex items-center justify-center text-sm text-gray-500">正在验证登录会话...</div>
+  }
+
+  if (restoreError) {
+    return (
+      <div className="min-h-screen bg-[#e8e8e8] flex items-center justify-center p-6">
+        <div className="neu-card w-full max-w-sm p-8 text-center">
+          <h1 className="text-base font-bold text-gray-800">平台连接不可用</h1>
+          <p className="mt-2 text-xs leading-5 text-gray-500">{restoreError}</p>
+          <button onClick={() => void restoreSession()} className="mt-5 rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white">重试</button>
+          <button
+            onClick={() => {
+              clearAuthSession()
+              setRestoreError('')
+              setSession(null)
+            }}
+            className="ml-3 px-3 py-2 text-xs text-gray-500 hover:text-red-600"
+          >
+            清除本地会话
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!session) return <LoginGate onAuthenticated={setSession} />
+  return <AuthenticatedApp session={session} onLoggedOut={() => setSession(null)} />
 }

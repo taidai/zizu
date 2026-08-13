@@ -10,10 +10,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
+
+from app.api.business_security import (
+    CONFIGURATION_READ,
+    CONFIGURATION_WRITE,
+    RUNTIME_READ,
+    capability_metadata,
+    principal_for,
+    protected,
+)
+from app.services.identity import Principal
 
 router = APIRouter()
 
@@ -24,6 +34,31 @@ router = APIRouter()
 
 _AGG_FNS = {"SUM", "AVG", "MAX", "MIN", "COUNT", "LAST"}
 _FORMULA_TYPES = {"expression", "aggregate", "condition"}
+
+_OPERATOR_CONFIGURATION_FIELDS = frozenset(
+    {
+        "scale_factor",
+        "value_offset",
+        "source_path",
+        "source_type",
+        "sources",
+        "formula",
+        "formula_type",
+        "aggregate_fn",
+        "fault_map_id",
+        "fault_map_name",
+        "alarm_level",
+        "alarm_type",
+        "alarm_threshold",
+    }
+)
+
+
+def _runtime_tag(tag: dict, principal: Principal) -> dict:
+    if principal.role == "operator":
+        for field in _OPERATOR_CONFIGURATION_FIELDS:
+            tag.pop(field, None)
+    return tag
 
 
 class TagUpdateRequest(BaseModel):
@@ -146,7 +181,10 @@ def _coerce_latest_value(tag: dict) -> None:
 # Endpoints
 # ══════════════════════════════════════
 
-@router.get("/tags")
+@router.get(
+    "/tags",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
 async def list_tags(
     node_id: str | None = Query(None, description="按节点过滤"),
     data_type: str | None = Query(None, description="按数据类型过滤"),
@@ -158,6 +196,7 @@ async def list_tags(
     page_size: int = Query(50, ge=1, le=200, description="每页条数"),
     sort_by: str = Query("sort_order", description="排序字段"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$", description="排序方向"),
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
 ) -> dict:
     """
     分页查询点位列表，附带每个点位的最新值。
@@ -256,6 +295,7 @@ async def list_tags(
             if row.get("latest_ts"):
                 row["latest_ts"] = row["latest_ts"].isoformat()
             _coerce_latest_value(row)
+            _runtime_tag(row, principal)
 
         return {
             "tags": rows,
@@ -269,7 +309,7 @@ async def list_tags(
         return {"tags": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
 
 
-@router.get("/tags/export")
+@router.get("/tags/export", **protected(CONFIGURATION_READ))
 async def export_tags_csv(
     node_id: str | None = Query(None, description="按节点过滤"),
     data_type: str | None = Query(None, description="按数据类型过滤"),
@@ -367,7 +407,7 @@ async def export_tags_csv(
     )
 
 
-@router.get("/tags/alarm-config")
+@router.get("/tags/alarm-config", **protected(CONFIGURATION_READ))
 async def list_alarm_configured_tags() -> dict:
     """列出所有已配置告警级别 (alarm_level) 的点位，按级别/类型分组。"""
     from app.services.telemetry_store import get_connection
@@ -397,8 +437,14 @@ async def list_alarm_configured_tags() -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/tags/{tag_id}")
-async def get_tag(tag_id: UUID) -> dict:
+@router.get(
+    "/tags/{tag_id}",
+    openapi_extra=capability_metadata(RUNTIME_READ),
+)
+async def get_tag(
+    tag_id: UUID,
+    principal: Principal = Depends(principal_for(RUNTIME_READ)),
+) -> dict:
     """获取单个点位详情 + 最新值。"""
     from app.services.telemetry_store import get_connection
 
@@ -434,11 +480,12 @@ async def get_tag(tag_id: UUID) -> dict:
             if tag.get("ts"):
                 tag["latest_ts"] = tag["ts"].isoformat()
             _coerce_latest_value(tag)
+            _runtime_tag(tag, principal)
 
     return tag
 
 
-@router.get("/tags/{tag_id}/history")
+@router.get("/tags/{tag_id}/history", **protected(RUNTIME_READ))
 async def get_tag_history(
     tag_id: UUID,
     range: str = Query("1h", pattern="^(1h|24h|7d)$", description="时间范围"),
@@ -536,7 +583,7 @@ class BatchUpdateRequest(BaseModel):
 
 
 
-@router.put("/tags/batch")
+@router.put("/tags/batch", **protected(CONFIGURATION_WRITE))
 async def batch_update_tags(req: BatchUpdateRequest) -> dict:
     """
     批量更新点位的 scale_factor / value_offset / unit / read_write / enabled，
@@ -655,7 +702,7 @@ async def batch_update_tags(req: BatchUpdateRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/tags/{tag_id}")
+@router.delete("/tags/{tag_id}", **protected(CONFIGURATION_WRITE))
 async def delete_tag(tag_id: UUID) -> dict:
     """删除单个点位及其历史遥测、最新值缓存。"""
     from app.services.telemetry_store import get_connection
@@ -674,7 +721,7 @@ async def delete_tag(tag_id: UUID) -> dict:
     return {"status": "ok", "deleted": str(tag_id)}
 
 
-@router.put("/tags/{tag_id}")
+@router.put("/tags/{tag_id}", **protected(CONFIGURATION_WRITE))
 async def update_tag(tag_id: UUID, req: TagUpdateRequest) -> dict:
     """
     更新点位配置（offset/scale/unit 等）。
@@ -768,7 +815,7 @@ _NEURON_TYPE_MAP = {
 }
 
 
-@router.post("/tags/import-neuron")
+@router.post("/tags/import-neuron", **protected(CONFIGURATION_WRITE))
 async def import_neuron_tags(req: NeuronImportRequest) -> dict:
     """
     从 Neuron 指定采集组拉取点位，作为 PHYSICAL 点位挂载到目标节点。
@@ -877,7 +924,11 @@ class TagCreateRequest(BaseModel):
     fault_map_id: str | None = Field(None, description="故障码映射表 UUID")
 
 
-@router.post("/tags", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/tags",
+    status_code=status.HTTP_201_CREATED,
+    **protected(CONFIGURATION_WRITE),
+)
 async def create_tag(req: TagCreateRequest) -> dict:
     """
     创建点位并挂载到指定节点。

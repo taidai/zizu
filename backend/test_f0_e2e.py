@@ -1,13 +1,17 @@
 """
 V4 端到端验证: 发布模拟 Neuron 消息 → 验证管道消费 → 验证 TSDB 入库
 
-用法: python test_f0_e2e.py
+用法: 设置 ZIZU_API 后运行 python test_f0_e2e.py；无 token 时交互登录
 前置: backend uvicorn 已在 :9000 运行 + mosquitto @1883 + TSDB @5432
 """
+import getpass
+import ipaddress
 import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import paho.mqtt.client as mqtt
@@ -15,7 +19,70 @@ import psycopg2
 from app.core.secret_policy import validate_secret
 
 MQTT_HOST, MQTT_PORT = "127.0.0.1", 1883
-API = "http://127.0.0.1:9000/api/v1/health"
+
+
+def require_safe_api_url() -> str:
+    api = os.environ.get("ZIZU_API", "").strip().rstrip("/")
+    if not api:
+        raise RuntimeError(
+            "ZIZU_API is required; set the explicit HTTPS API base, "
+            "for example https://zizu.example/api/v1"
+        )
+    parsed = urllib.parse.urlsplit(api)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RuntimeError("ZIZU_API must not contain credentials, query, or fragment")
+    if parsed.scheme == "https" and parsed.hostname:
+        return api
+    host = parsed.hostname or ""
+    try:
+        is_loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if (
+        parsed.scheme == "http"
+        and is_loopback
+        and os.environ.get("ZIZU_ALLOW_INSECURE_LOCAL_HTTP", "").lower() == "true"
+    ):
+        return api
+    raise RuntimeError(
+        "ZIZU_API must use HTTPS. Loopback HTTP is allowed only with "
+        "ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true in an isolated development environment."
+    )
+
+
+def require_api_token(api: str) -> str:
+    token = os.environ.get("ZIZU_API_TOKEN", "").strip()
+    if token:
+        return token
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "ZIZU_API_TOKEN is required for non-interactive runs; inject it from a secret manager"
+        )
+    username = os.environ.get("ZIZU_API_USERNAME", "").strip() or input("ZiZu username: ").strip()
+    if not username:
+        raise RuntimeError("ZiZu username is required")
+    password = getpass.getpass("ZiZu password: ")
+    try:
+        request = urllib.request.Request(
+            f"{api}/auth/login",
+            data=json.dumps({"username": username, "password": password}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"ZiZu login failed with HTTP {exc.code}") from exc
+    finally:
+        password = ""
+    token = str(payload.get("access_token", "")).strip()
+    if not token:
+        raise RuntimeError("ZiZu login response did not contain an access token")
+    return token
+
+
+API = require_safe_api_url()
+API_TOKEN = require_api_token(API)
 DB_DSN = os.environ.get("ZIZU_DSN")
 if not DB_DSN or not DB_DSN.strip():
     raise RuntimeError("ZIZU_DSN is required; no database credential default is provided")
@@ -68,7 +135,11 @@ time.sleep(3)
 # ═══ 2. Health API: pipeline metrics ═══
 print("\n--- 2. Health API pipeline metrics ---")
 try:
-    with urllib.request.urlopen(API, timeout=5) as resp:
+    request = urllib.request.Request(
+        f"{API}/health",
+        headers={"Authorization": f"Bearer {API_TOKEN}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as resp:
         health = json.loads(resp.read().decode())
     pipe = health.get("pipeline", {})
     print(f"  pipeline.status = {pipe.get('status')}")
