@@ -499,6 +499,16 @@ class DataPipeline:
         except Exception as e:
             logger.warning("[Pipeline] On-demand reload failed: {}", e)
 
+    async def flush_now(self) -> None:
+        """Flush buffered protocol observations through the production store.
+
+        Besides controlled shutdown, this is the public seam used by protocol
+        simulator acceptance tests: they publish a real Neuron MQTT-shaped
+        message through ``on_message`` and then wait for durable visibility.
+        """
+        async with self._flush_lock:
+            await self._do_flush()
+
     async def _periodic_reload_rules(self) -> None:
         """定时重载 tag 规则，让新导入点位无需重启即可生效。"""
         while True:

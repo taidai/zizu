@@ -379,6 +379,7 @@ zizu/
 | POST | `/api/v1/install-plans/{id}/apply` | 按计划摘要幂等安装解决方案包 |
 | GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
 | GET | `/api/v1/site-configuration-versions/{version}` | 查询不可变站点配置版本 |
+| GET | `/api/v1/entity-instances/{id}/realtime` | 从实体实例唯一确认主来源读取实时工程值 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
 
@@ -437,6 +438,83 @@ parameters:
     description: Runtime Neuron credential reference
 ```
 
+设备实例与实体实例也由解决方案包声明，不另建一套现场 CRUD。首版支持单设备槽位；
+安装计划根据稳定设备键与规范点位名列出候选，唯一兼容候选可预选，多候选必须由
+engineer 在 `binding_selections` 中明确确认。来源目录或站点配置在批准后变化时，执行
+返回过期错误并保持零写入；运行期只读已确认的唯一主来源，不按优先级或创建顺序猜测。
+设备节点可通过 `source_catalog_key` 配置该稳定键；升级迁移仅在节点名称站点内唯一时
+以名称初始化，重复名称必须由实施工程师显式设置不同键。
+实体实时读取要求观测未超过槽位声明的新鲜度且 OPC 质量码为 GOOD(192)；缺失、陈旧
+或坏质量分别返回 `ENTITY_DATA_MISSING`、`ENTITY_DATA_STALE`、
+`ENTITY_DATA_QUALITY_BAD`，不会以带失败布尔值的 200 响应掩盖不可用状态。
+
+```yaml
+# solution.yaml 的 assets 片段
+assets:
+  - id: pcs.activePower
+    kind: entity_definition
+    path: entities/pcs-active-power.yaml
+    sha256: "<sha256>"
+  - id: slot.pcs-primary
+    kind: entity_instance_slot
+    path: entities/pcs-primary.yaml
+    sha256: "<sha256>"
+  - id: acceptance.pcs-active-power
+    kind: acceptance
+    path: acceptance/pcs-active-power.yaml
+    sha256: "<sha256>"
+acceptance: [acceptance.pcs-active-power]
+```
+
+```yaml
+# entities/pcs-active-power.yaml
+schemaVersion: zizu.entity-definition/v1alpha1
+id: pcs.activePower
+kind: entity_definition
+displayName: Active power
+deviceCategory: pcs
+dataType: FLOAT
+unit: kW
+direction: R
+```
+
+```yaml
+# entities/pcs-primary.yaml
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.pcs-primary
+kind: entity_instance_slot
+deviceCategory: pcs
+count: 1
+instanceKeyParameter: pcs.instance_key
+displayName: Primary PCS
+freshness: 30s
+requiredEntities:
+  - definition: pcs.activePower
+    matcher:
+      id: matcher.pcs-active-power
+      deviceKeyParameter: pcs.device_key
+      tagName: ActivePower
+```
+
+```yaml
+# acceptance/pcs-active-power.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.pcs-active-power
+kind: entity_readiness
+required: true
+slot: slot.pcs-primary
+definition: pcs.activePower
+freshness: 30s
+timeout: 5s
+```
+
+创建计划时可提交
+`{"parameters":{"pcs.instance_key":"PCS-01","pcs.device_key":"PCS-01"},"binding_selections":{"slot.pcs-primary/PCS-01/pcs.activePower":"<tag UUID>"}}`。
+候选与计划使用稳定机器码：`ENTITY_BINDING_MISSING`、`ENTITY_BINDING_AMBIGUOUS`、
+`ENTITY_BINDING_TYPE_MISMATCH`、`ENTITY_BINDING_UNIT_MISMATCH`、
+`ENTITY_BINDING_DIRECTION_MISMATCH` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
+绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
+
 安装执行请求体为
 `{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带
 `Idempotency-Key` 请求头。相同调用主体、命令和请求摘要重用同一键会返回原结果，
@@ -473,6 +551,12 @@ t_tags(
 
 -- 遥测（TimescaleDB Hypertable）
 t_telemetry(ts, node_id, tag_id, value_int, value_float, value_bool, value_str)
+
+-- 新实体实例交付路径（旧全局实体表在兼容期保留）
+t_device_instances(id, identity_installation_id, slot_id, instance_key, ...)
+t_entity_instances(id, device_instance_id, definition_id, data_type, unit, direction, ...)
+t_entity_instance_bindings(id, entity_instance_id, tag_id, confirmation_audit_id, active)
+t_entity_binding_confirmations(id, entity_instance_id, binding_id, actor, plan_digest, ...)
 
 -- 节点快照（数据黑板）
 t_node_snapshot(ts, node_id, data JSONB, raw_data JSONB, raw_message JSONB)
@@ -567,6 +651,8 @@ python -m unittest \
   tests.test_secure_settings \
   tests.test_authenticated_delivery_public_api \
   tests.test_delivery_public_api \
+  tests.test_entity_instance_registry \
+  tests.test_entity_delivery_public_api \
   tests.test_business_rest_authorization -v
 python test_f0_pure.py
 
@@ -576,6 +662,8 @@ python -m unittest scripts.test_bootstrap_admin -v
 
 # 其余历史测试使用 pytest；如本机已安装 pytest：python -m pytest tests -q
 # 当前基线有 2 个已知聚合器失败（SUM 去重、LAST 时间排序）。
+# 隔离 Postgres 主缝另需指向名称以 _test 结尾的专用数据库，并设置
+# ZIZU_POSTGRES_TEST=1 后运行：python -m unittest tests.test_delivery_postgres_public_api -v
 
 # 前端构建（此时位于仓库根目录）
 cd frontend && npm run build

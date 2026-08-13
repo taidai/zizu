@@ -12,6 +12,7 @@ import time
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from uuid import UUID
 
 import httpx
 import psycopg2
@@ -23,6 +24,7 @@ MIGRATIONS = (
     BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql",
     BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_tickets.sql",
     BACKEND_ROOT.parent / "init-db" / "migration_023_site_configuration_parameters.sql",
+    BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instances.sql",
 )
 def build_minimal_package(
     *,
@@ -59,12 +61,77 @@ def build_minimal_package(
     return archive.getvalue()
 
 
+def build_entity_package() -> bytes:
+    from tests.test_entity_delivery_public_api import build_entity_package as build
+
+    return build()
+
+
 @unittest.skipUnless(
     os.environ.get("ZIZU_POSTGRES_TEST") == "1",
     "set ZIZU_POSTGRES_TEST=1 to run the isolated Postgres public seam",
 )
 class DeliveryPostgresPublicApiTest(unittest.TestCase):
     process: subprocess.Popen[str] | None = None
+
+    @staticmethod
+    def _create_source_catalog_tables(cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS t_nodes (
+                id UUID PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_catalog_key TEXT,
+                node_type TEXT NOT NULL DEFAULT 'DEVICE',
+                enabled BOOLEAN NOT NULL DEFAULT TRUE
+            );
+            CREATE TABLE IF NOT EXISTS t_tags (
+                id UUID PRIMARY KEY,
+                node_id UUID NOT NULL REFERENCES t_nodes(id),
+                name TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                unit TEXT,
+                unit_to TEXT,
+                read_write TEXT NOT NULL DEFAULT 'R',
+                source_type TEXT DEFAULT 'NEURON',
+                source_path TEXT,
+                scale_factor DOUBLE PRECISION DEFAULT 1.0,
+                value_offset DOUBLE PRECISION DEFAULT 0.0,
+                unit_from TEXT,
+                range_min DOUBLE PRECISION,
+                range_max DOUBLE PRECISION,
+                alarm_level TEXT,
+                alarm_type TEXT,
+                alarm_threshold DOUBLE PRECISION,
+                fault_map_id UUID,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE
+            );
+            CREATE TABLE IF NOT EXISTS t_telemetry (
+                ts TIMESTAMPTZ NOT NULL,
+                node_id UUID NOT NULL REFERENCES t_nodes(id),
+                tag_id UUID NOT NULL REFERENCES t_tags(id),
+                value_float DOUBLE PRECISION,
+                value_int BIGINT,
+                value_bool BOOLEAN,
+                value_str TEXT,
+                is_virtual BOOLEAN DEFAULT FALSE,
+                quality SMALLINT DEFAULT 192
+            );
+            CREATE TABLE IF NOT EXISTS t_telemetry_latest (
+                node_id UUID NOT NULL REFERENCES t_nodes(id),
+                tag_id UUID NOT NULL REFERENCES t_tags(id),
+                ts TIMESTAMPTZ NOT NULL,
+                value_float DOUBLE PRECISION,
+                value_int BIGINT,
+                value_bool BOOLEAN,
+                value_str TEXT,
+                is_virtual BOOLEAN DEFAULT FALSE,
+                quality SMALLINT DEFAULT 192,
+                updated_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (node_id, tag_id)
+            );
+            """
+        )
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -90,7 +157,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
-                for migration in MIGRATIONS[:-1]:
+                for migration in MIGRATIONS[:-2]:
                     cursor.execute(migration.read_text(encoding="utf-8"))
                 legacy_package_id = "00000000-0000-0000-0000-000000000501"
                 legacy_plan_id = "00000000-0000-0000-0000-000000000502"
@@ -143,8 +210,23 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "UPDATE t_site_configuration_state SET current_version = 1 "
                     "WHERE singleton = TRUE"
                 )
-                migration_023 = MIGRATIONS[-1].read_text(encoding="utf-8")
+                migration_023 = MIGRATIONS[-2].read_text(encoding="utf-8")
                 cursor.execute(migration_023)
+                cls._create_source_catalog_tables(cursor)
+                migration_024 = MIGRATIONS[-1].read_text(encoding="utf-8")
+                cursor.execute(migration_024)
+                cursor.execute(
+                    "SELECT target_installation_id, entity_identity_installation_id "
+                    "FROM t_solution_install_plans WHERE id = %s",
+                    (legacy_plan_id,),
+                )
+                self_ids = cursor.fetchone()
+                if tuple(str(value) for value in self_ids) != (
+                    legacy_plan_id,
+                    legacy_plan_id,
+                ):
+                    raise AssertionError("legacy entity identity was not backfilled")
+                cursor.execute(migration_024)
                 cursor.execute(
                     "SELECT configuration_digest FROM t_solution_install_plans "
                     "WHERE id = %s",
@@ -163,7 +245,30 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
                 for migration in MIGRATIONS:
+                    if migration == MIGRATIONS[-1]:
+                        cls._create_source_catalog_tables(cursor)
                     cursor.execute(migration.read_text(encoding="utf-8"))
+                cursor.execute(
+                    """
+                    INSERT INTO t_nodes (id, name, source_catalog_key, enabled)
+                    VALUES ('40000000-0000-0000-0000-000000000001',
+                            'PCS-01', 'PCS-01', TRUE),
+                           ('40000000-0000-0000-0000-000000000003',
+                            'PCS-01', NULL, TRUE);
+                    INSERT INTO t_tags
+                      (id, node_id, name, data_type, unit, read_write, enabled,
+                       source_type, source_path)
+                    VALUES ('40000000-0000-0000-0000-000000000002',
+                            '40000000-0000-0000-0000-000000000001',
+                            'ActivePower', 'FLOAT', 'kW', 'R', TRUE,
+                            'neuron', 'PCS-01/default/ActivePower');
+                    INSERT INTO t_tags
+                      (id, node_id, name, data_type, unit, read_write, enabled)
+                    VALUES ('40000000-0000-0000-0000-000000000004',
+                            '40000000-0000-0000-0000-000000000003',
+                            'ActivePower', 'FLOAT', 'kW', 'R', TRUE);
+                    """
+                )
                 # Exercise the controlled legacy-viewer migration path instead
                 # of seeding an already-privileged engineer.
                 cursor.execute(
@@ -465,6 +570,70 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             self.assertGreaterEqual(report["duration_ms"], 0)
             self.assertGreaterEqual(report["items"][0]["duration_ms"], 0)
 
+            entity_import = client.post(
+                "/api/v1/solution-packages/import",
+                headers=admin_auth,
+                files={
+                    "archive": (
+                        "single-pcs.zizu.zip",
+                        build_entity_package(),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(entity_import.status_code, 201, entity_import.text)
+            entity_plan_response = client.post(
+                f"/api/v1/solution-packages/{entity_import.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    }
+                },
+            )
+            self.assertEqual(entity_plan_response.status_code, 201, entity_plan_response.text)
+            entity_plan = entity_plan_response.json()
+            self.assertEqual("ready", entity_plan["status"])
+            entity_install = client.post(
+                f"/api/v1/install-plans/{entity_plan['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-entity-install",
+                },
+                json={"plan_digest": entity_plan["digest"]},
+            )
+            self.assertEqual(entity_install.status_code, 201, entity_install.text)
+            entity_installation = entity_install.json()
+            entity_instance_id = entity_installation["entity_instance_ids"][0]
+            protocol_publish = client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "node": "PCS-01",
+                    "group": "default",
+                    "timestamp": round(time.time() * 1000),
+                    "values": {"ActivePower": 88.5},
+                },
+            )
+            self.assertEqual(protocol_publish.status_code, 200, protocol_publish.text)
+            self.assertEqual(protocol_publish.json()["messages_received"], 1)
+            self.assertEqual(protocol_publish.json()["points_written"], 1)
+            entity_read = client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime",
+                headers=operator_auth,
+            )
+            self.assertEqual(entity_read.status_code, 200, entity_read.text)
+            self.assertEqual(entity_read.json()["value"], 88.5)
+            entity_acceptance = client.post(
+                f"/api/v1/solution-installations/{entity_installation['id']}/acceptance-runs",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-entity-acceptance",
+                },
+            )
+            self.assertEqual(entity_acceptance.status_code, 201, entity_acceptance.text)
+            self.assertEqual(entity_acceptance.json()["status"], "passed")
+
             second_import = client.post(
                 "/api/v1/solution-packages/import",
                 headers=admin_auth,
@@ -540,9 +709,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     """
                 )
                 all_audits = cursor.fetchall()
-        self.assertEqual(versions, [(0, None), (1, 0), (2, 1)])
-        self.assertEqual(audit_count, 2)
-        self.assertEqual(plan_count, 2)
+        self.assertEqual(versions, [(0, None), (1, 0), (2, 1), (3, 2)])
+        self.assertEqual(audit_count, 3)
+        self.assertEqual(plan_count, 3)
 
         self._stop_server()
         self._start_server()
@@ -573,6 +742,18 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             persisted_plan = client.get(
                 f"/api/v1/install-plans/{plan['id']}",
                 headers=engineer_auth,
+            )
+            persisted_entity = client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime",
+                headers=operator_auth,
+            )
+            repeated_entity_install = client.post(
+                f"/api/v1/install-plans/{entity_plan['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-entity-install",
+                },
+                json={"plan_digest": entity_plan["digest"]},
             )
             repeated_acceptance_after_restart = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
@@ -607,11 +788,14 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         )
         self.assertEqual(persisted_plan.status_code, 200, persisted_plan.text)
         self.assertEqual(persisted_plan.json(), plan)
+        self.assertEqual(persisted_entity.status_code, 200, persisted_entity.text)
+        self.assertEqual(persisted_entity.json()["value"], 88.5)
+        self.assertEqual(repeated_entity_install.json(), entity_installation)
         persisted_packages = packages.json()
-        self.assertEqual(persisted_packages["total"], 2)
+        self.assertEqual(persisted_packages["total"], 3)
         self.assertIn(package, persisted_packages["items"])
         self.assertEqual(installations.json()["items"][0], installation)
-        self.assertEqual(installations.json()["total"], 2)
+        self.assertEqual(installations.json()["total"], 3)
         self.assertEqual(persisted_report.json(), report)
         self.assertEqual(repeated_after_restart.json(), installation)
         self.assertEqual(repeated_acceptance_after_restart.status_code, 201)
@@ -621,6 +805,8 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(
             [(event, outcome) for event, outcome, *_ in delivery_audits],
             [
+                ("solution.install", "allowed"),
+                ("solution.acceptance", "allowed"),
                 ("solution.install", "allowed"),
                 ("solution.acceptance", "allowed"),
                 ("solution.install", "allowed"),

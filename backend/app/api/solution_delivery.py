@@ -11,6 +11,13 @@ from app.api.security import require_capability
 from app.api.health import _VERSION
 from app.core.config import settings
 from app.services.identity import Principal
+from app.services.entity_instance_postgres import (
+    PostgresEntityInstanceRepository,
+    PostgresObservationCatalog,
+    PostgresSourceCatalog,
+)
+from app.services.entity_instance_registry import EntityInstanceRegistry
+from app.services.entity_instance_runtime import EntityInstanceRuntime
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -21,15 +28,31 @@ from app.services.solution_delivery import (
 
 
 router = APIRouter()
+_repository = PostgresDeliveryRepository()
+_entity_instance_registry = EntityInstanceRegistry(
+    PostgresEntityInstanceRepository(),
+    PostgresSourceCatalog(),
+    _repository.site_configuration_version,
+)
+_entity_instance_runtime = EntityInstanceRuntime(
+    _entity_instance_registry,
+    PostgresObservationCatalog(),
+)
 _delivery = SolutionDelivery(
-    PostgresDeliveryRepository(),
+    _repository,
     platform_version=_VERSION,
     public_api_probe=HttpxPublicApiProbe(settings.effective_public_api_base_url),
+    entity_instance_registry=_entity_instance_registry,
+    entity_instance_runtime=_entity_instance_runtime,
 )
 
 
 def get_solution_delivery() -> SolutionDelivery:
     return _delivery
+
+
+def get_default_entity_instance_runtime() -> EntityInstanceRuntime:
+    return _entity_instance_runtime
 
 
 class ApplyInstallationRequest(BaseModel):
@@ -39,6 +62,7 @@ class ApplyInstallationRequest(BaseModel):
 class CreateInstallationPlanRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     secret_references: dict[str, str] = Field(default_factory=dict)
+    binding_selections: dict[str, UUID] = Field(default_factory=dict)
 
 
 @router.get("/solution-packages")
@@ -46,7 +70,6 @@ async def list_solution_packages(
     principal: Principal = Depends(require_capability("solution.package.read")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
-    del principal
     packages = delivery.list_packages()
     return {
         "items": [package.public_dict() for package in packages],
@@ -64,7 +87,6 @@ async def create_installation_plan(
     principal: Principal = Depends(require_capability("solution.install.plan")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
-    del principal
     try:
         body = await request.json()
         plan_request = CreateInstallationPlanRequest.model_validate(body)
@@ -81,6 +103,8 @@ async def create_installation_plan(
             package_record_id,
             parameters=plan_request.parameters,
             secret_references=plan_request.secret_references,
+            binding_selections=plan_request.binding_selections,
+            actor=principal.actor,
         ).public_dict()
     except DeliveryError as exc:
         raise HTTPException(
