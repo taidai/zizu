@@ -232,10 +232,5 @@ CREATE TABLE IF NOT EXISTS t_users (
 
 COMMENT ON TABLE t_users IS 'ZiZu 用户表 - 基础 RBAC: admin/operator/viewer';
 
--- ============================================================
--- 插入默认管理员用户 (密码: admin, 由应用层 bcrypt 加密)
--- 注意: 实际部署时应修改此密码或删除此行
--- ============================================================
-INSERT INTO t_users (username, password_hash, role)
-VALUES ('admin', '$2b$12$PLACEHOLDER_REPLACE_WITH_BCRYPT_HASH', 'admin')
-ON CONFLICT (username) DO NOTHING;
+-- 不播种任何默认管理员或公开密码。migration_021 应用完成后，使用
+-- scripts/bootstrap_admin.py 的交互流程创建首个管理员。

@@ -7,6 +7,7 @@ ZiZu 全局配置管理
 from __future__ import annotations
 
 from functools import lru_cache
+import ipaddress
 from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -117,6 +118,10 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440  # 24h
+    auth_session_minutes: int = Field(default=480, ge=5, le=1440)
+    auth_require_https: bool = True
+    auth_trust_proxy_headers: bool = False
+    auth_trusted_proxy_cidrs: list[str] = Field(default_factory=list)
 
     @field_validator(
         "db_password",
@@ -149,6 +154,19 @@ class Settings(BaseSettings):
             self.deployment_mode,
             self.allow_insecure_dev_secrets,
         )
+        if self.deployment_mode == "production" and not self.auth_require_https:
+            raise ValueError("production requires AUTH_REQUIRE_HTTPS=true")
+        if self.auth_trust_proxy_headers and not self.auth_trusted_proxy_cidrs:
+            raise ValueError(
+                "AUTH_TRUST_PROXY_HEADERS requires AUTH_TRUSTED_PROXY_CIDRS"
+            )
+        for cidr in self.auth_trusted_proxy_cidrs:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"invalid AUTH_TRUSTED_PROXY_CIDRS entry: {cidr!r}"
+                ) from exc
         return self
 
     # ---- 管道性能参数 ----

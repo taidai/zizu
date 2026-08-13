@@ -1,5 +1,13 @@
 ---
 
+## Session 2026-08-13 — Ticket #2 身份认证交付缝
+
+- 分支：`ticket/02-authentication-in-delivery-seam`，基线 `main@7a4818f`。
+- 已实现三角色登录、不透明持久会话、交付动作授权、旧 viewer 显式迁移、离线用户供应、统一追加式审计、HTTPS/可信代理边界和生产身份迁移 fail-fast。
+- 包生命周期仅 admin；engineer 执行安装/验收；operator 只读安装/报告。Ticket #2 不覆盖其余业务/控制/WS。
+- 双轴审查放行；相关 40/40、脚本 15/15、F0 29/29、真实 Postgres 重启主缝 1/1。完整后端 100 passed / 1 skipped，另有 2 个既有 Aggregator 失败。
+- 1号机仍缺固定 ARM64 制品、backend-only 编排和 TLS，认证版本不得部署；凭据轮换/失效、历史清理仍为外部 P0。
+
 ## Session 2026-08-10 — 规则引擎控制动作支持全局实体选择 (v0.4.77)
 
 **Date:** 2026-08-10

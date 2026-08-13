@@ -618,6 +618,28 @@ class PostgresDeliveryRepository:
                         Json({"plan_id": str(plan.id), "plan_digest": plan.digest}),
                     ),
                 )
+                cur.execute(
+                    """
+                    INSERT INTO t_audit_events
+                      (id, event, outcome, actor, target, details)
+                    VALUES (%s, 'solution.install', 'allowed', %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        actor,
+                        f"installation:{outcome.id}",
+                        Json(
+                            {
+                                "plan_id": str(plan.id),
+                                "package_record_id": str(outcome.package_record_id),
+                                "package_digest": outcome.package_digest,
+                                "site_configuration_version": (
+                                    outcome.site_configuration_version
+                                ),
+                            }
+                        ),
+                    ),
+                )
                 conn.commit()
                 return outcome
 
@@ -770,6 +792,25 @@ class PostgresDeliveryRepository:
                     VALUES ('run_acceptance', %s, %s, %s, %s)
                     """,
                     (actor, key, request_digest, report.id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO t_audit_events
+                      (id, event, outcome, actor, target, details)
+                    VALUES (%s, 'solution.acceptance', 'allowed', %s, %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        actor,
+                        f"report:{report.id}",
+                        Json(
+                            {
+                                "installation_id": str(report.installation_id),
+                                "status": report.status,
+                                "report_digest": report.digest,
+                            }
+                        ),
+                    ),
                 )
                 conn.commit()
                 return report

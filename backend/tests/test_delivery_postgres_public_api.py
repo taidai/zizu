@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import sys
@@ -17,9 +18,10 @@ import psycopg2
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql"
-
-
+MIGRATIONS = (
+    BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql",
+    BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql",
+)
 def build_minimal_package(*, package_id: str = "org.zizu.postgres-liveness") -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -66,6 +68,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         cls.base_url = f"http://127.0.0.1:{cls.port}"
         cls.server_env = os.environ.copy()
         cls.server_env["PUBLIC_API_BASE_URL"] = cls.base_url
+        cls.server_env["DEPLOYMENT_MODE"] = "development"
+        cls.server_env["AUTH_REQUIRE_HTTPS"] = "false"
+        cls.password = secrets.token_urlsafe(24)
 
         with psycopg2.connect(
             host=os.environ["DB_HOST"],
@@ -78,12 +83,110 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
-                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+                for migration in MIGRATIONS:
+                    cursor.execute(migration.read_text(encoding="utf-8"))
+                # Exercise the controlled legacy-viewer migration path instead
+                # of seeding an already-privileged engineer.
+                cursor.execute(
+                    """
+                    INSERT INTO t_users
+                      (id, username, password_hash, role, status, auth_version)
+                    VALUES (%s, %s, %s, 'viewer', 'role_migration_required', 1)
+                    """,
+                    (
+                        "00000000-0000-0000-0000-000000000102",
+                        "delivery-engineer",
+                        "legacy-viewer-password-unusable",
+                    ),
+                )
+        cls._provision_user("delivery-admin", "admin", bootstrap=True)
+        cls._provision_user("delivery-engineer", "engineer")
+        cls._provision_user("delivery-operator", "operator")
+        # Prove that the same offline, audited recovery path can rotate a
+        # forgotten administrator password after initial bootstrap.
+        cls.admin_password = secrets.token_urlsafe(24)
+        cls._provision_user(
+            "delivery-admin",
+            "admin",
+            password=cls.admin_password,
+        )
+        with psycopg2.connect(
+            host=os.environ["DB_HOST"],
+            port=int(os.environ["DB_PORT"]),
+            dbname=cls.db_name,
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT username, id, role, status FROM t_users ORDER BY username"
+                )
+                identities = {
+                    username: (str(user_id), role, status)
+                    for username, user_id, role, status in cursor.fetchall()
+                }
+        cls.admin_id = identities["delivery-admin"][0]
+        cls.engineer_id = identities["delivery-engineer"][0]
+        cls.operator_id = identities["delivery-operator"][0]
+        if identities["delivery-engineer"][1:] != ("engineer", "active"):
+            raise AssertionError("legacy viewer was not explicitly migrated")
         try:
             cls._start_server()
         except Exception:
             cls._stop_server()
             raise
+
+    @classmethod
+    def _provision_user(
+        cls,
+        username: str,
+        role: str,
+        *,
+        bootstrap: bool = False,
+        password: str | None = None,
+    ) -> None:
+        command = [
+            sys.executable,
+            "-m",
+            "scripts.bootstrap_admin",
+            "--username",
+            username,
+            "--password-stdin",
+        ]
+        if not bootstrap:
+            command.extend(("--provision-user", "--role", role))
+        result = subprocess.run(
+            command,
+            cwd=BACKEND_ROOT.parent,
+            env=cls.server_env,
+            input=(password or cls.password) + "\n",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"identity provisioning failed for {role}: {result.stderr}"
+            )
+        supplied_password = password or cls.password
+        if supplied_password in result.stdout or supplied_password in result.stderr:
+            raise AssertionError("identity provisioning reflected the password")
+
+    @classmethod
+    def _login(
+        cls,
+        client: httpx.Client,
+        username: str,
+        *,
+        password: str | None = None,
+    ) -> str:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"username": username, "password": password or cls.password},
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+        return str(response.json()["access_token"])
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -151,26 +254,62 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
 
     def test_public_delivery_survives_process_restart(self) -> None:
         with httpx.Client(base_url=self.base_url, timeout=10, trust_env=False) as client:
+            admin_token = self._login(
+                client,
+                "delivery-admin",
+                password=self.admin_password,
+            )
+            engineer_token = self._login(client, "delivery-engineer")
+            operator_token = self._login(client, "delivery-operator")
+            admin_auth = {"Authorization": f"Bearer {admin_token}"}
+            engineer_auth = {"Authorization": f"Bearer {engineer_token}"}
+            operator_auth = {"Authorization": f"Bearer {operator_token}"}
+            # An explicit offline password reset invalidates every session
+            # created under the previous auth_version, even across processes.
+            rotated_admin_password = secrets.token_urlsafe(24)
+            self._provision_user(
+                "delivery-admin",
+                "admin",
+                password=rotated_admin_password,
+            )
+            invalidated_admin = client.get("/api/v1/auth/me", headers=admin_auth)
+            admin_token = self._login(
+                client,
+                "delivery-admin",
+                password=rotated_admin_password,
+            )
+            admin_auth = {"Authorization": f"Bearer {admin_token}"}
             imported = client.post(
                 "/api/v1/solution-packages/import",
+                headers=admin_auth,
                 files={"archive": ("minimal.zizu.zip", build_minimal_package(), "application/zip")},
             )
             self.assertEqual(imported.status_code, 201, imported.text)
+            self.assertEqual(invalidated_admin.status_code, 401)
+            self.assertEqual(
+                invalidated_admin.json()["detail"]["code"],
+                "SESSION_REVOKED",
+            )
             package = imported.json()
             planned = client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
+                headers=engineer_auth,
                 json={},
             )
             self.assertEqual(planned.status_code, 201, planned.text)
             repeated_plan = client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
+                headers=engineer_auth,
                 json={},
             )
             self.assertEqual(repeated_plan.status_code, 201, repeated_plan.text)
             self.assertEqual(repeated_plan.json(), planned.json())
             plan = planned.json()
             request = {"plan_digest": plan["digest"]}
-            headers = {"Idempotency-Key": "postgres-install-once"}
+            headers = {
+                **engineer_auth,
+                "Idempotency-Key": "postgres-install-once",
+            }
             installed = client.post(
                 f"/api/v1/install-plans/{plan['id']}/apply",
                 json=request,
@@ -187,24 +326,33 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             repeated_with_new_key = client.post(
                 f"/api/v1/install-plans/{plan['id']}/apply",
                 json=request,
-                headers={"Idempotency-Key": "postgres-install-new-key"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-install-new-key",
+                },
             )
             self.assertEqual(repeated_with_new_key.status_code, 201)
             self.assertEqual(repeated_with_new_key.json(), installation)
             run = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
-                headers={"Idempotency-Key": "postgres-accept-once"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-accept-once",
+                },
             )
             self.assertEqual(run.status_code, 201, run.text)
             report = run.json()
             repeated_run = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
-                headers={"Idempotency-Key": "postgres-accept-once"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-accept-once",
+                },
             )
             self.assertEqual(repeated_run.status_code, 201, repeated_run.text)
             self.assertEqual(repeated_run.json(), report)
             self.assertEqual(report["status"], "passed")
-            self.assertEqual(report["actor"], "anonymous-bootstrap")
+            self.assertEqual(report["actor"], f"user:{self.engineer_id}")
             self.assertIn("started_at", report)
             self.assertIn("finished_at", report)
             self.assertGreaterEqual(report["duration_ms"], 0)
@@ -212,6 +360,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
 
             second_import = client.post(
                 "/api/v1/solution-packages/import",
+                headers=admin_auth,
                 files={
                     "archive": (
                         "concurrent.zizu.zip",
@@ -223,7 +372,13 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             self.assertEqual(second_import.status_code, 201, second_import.text)
             concurrent_plan_response = client.post(
                 f"/api/v1/solution-packages/{second_import.json()['id']}/install-plans",
+                headers=engineer_auth,
                 json={},
+            )
+            self.assertEqual(
+                concurrent_plan_response.status_code,
+                201,
+                concurrent_plan_response.text,
             )
             concurrent_plan = concurrent_plan_response.json()
 
@@ -231,7 +386,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             return httpx.post(
                 f"{self.base_url}/api/v1/install-plans/{concurrent_plan['id']}/apply",
                 json={"plan_digest": concurrent_plan["digest"]},
-                headers={"Idempotency-Key": "postgres-concurrent-install"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-concurrent-install",
+                },
                 timeout=10,
                 trust_env=False,
             )
@@ -249,12 +407,32 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             password=os.environ["DB_PASSWORD"],
         ) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT version, previous_version FROM t_site_configuration_versions ORDER BY version")
+                cursor.execute(
+                    "SELECT version, previous_version "
+                    "FROM t_site_configuration_versions ORDER BY version"
+                )
                 versions = cursor.fetchall()
                 cursor.execute("SELECT count(*) FROM t_solution_delivery_audit")
                 audit_count = cursor.fetchone()[0]
                 cursor.execute("SELECT count(*) FROM t_solution_install_plans")
                 plan_count = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT event, outcome, actor, target, details::text
+                    FROM t_audit_events
+                    WHERE event IN ('solution.install', 'solution.acceptance')
+                    ORDER BY created_at, id
+                    """
+                )
+                delivery_audits = cursor.fetchall()
+                cursor.execute(
+                    """
+                    SELECT event, outcome, reason, actor, target, request_id,
+                           client_ip::text, details::text
+                    FROM t_audit_events ORDER BY created_at, id
+                    """
+                )
+                all_audits = cursor.fetchall()
         self.assertEqual(versions, [(0, None), (1, 0), (2, 1)])
         self.assertEqual(audit_count, 2)
         self.assertEqual(plan_count, 2)
@@ -263,9 +441,18 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self._start_server()
 
         with httpx.Client(base_url=self.base_url, timeout=10, trust_env=False) as client:
-            packages = client.get("/api/v1/solution-packages")
-            installations = client.get("/api/v1/solution-installations")
-            persisted_report = client.get(f"/api/v1/delivery-reports/{report['id']}")
+            persisted_admin = client.get("/api/v1/auth/me", headers=admin_auth)
+            persisted_engineer = client.get("/api/v1/auth/me", headers=engineer_auth)
+            persisted_operator = client.get("/api/v1/auth/me", headers=operator_auth)
+            packages = client.get("/api/v1/solution-packages", headers=admin_auth)
+            installations = client.get(
+                "/api/v1/solution-installations",
+                headers=engineer_auth,
+            )
+            persisted_report = client.get(
+                f"/api/v1/delivery-reports/{report['id']}",
+                headers=operator_auth,
+            )
             repeated_after_restart = client.post(
                 f"/api/v1/install-plans/{plan['id']}/apply",
                 json=request,
@@ -273,13 +460,22 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             )
             repeated_acceptance_after_restart = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
-                headers={"Idempotency-Key": "postgres-accept-once"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-accept-once",
+                },
             )
             fresh_acceptance_after_restart = client.post(
                 f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
-                headers={"Idempotency-Key": "postgres-accept-after-restart"},
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-accept-after-restart",
+                },
             )
 
+        self.assertEqual(persisted_admin.status_code, 200, persisted_admin.text)
+        self.assertEqual(persisted_engineer.status_code, 200, persisted_engineer.text)
+        self.assertEqual(persisted_operator.status_code, 200, persisted_operator.text)
         persisted_packages = packages.json()
         self.assertEqual(persisted_packages["total"], 2)
         self.assertIn(package, persisted_packages["items"])
@@ -291,6 +487,27 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(repeated_acceptance_after_restart.json(), report)
         self.assertEqual(fresh_acceptance_after_restart.status_code, 201)
         self.assertNotEqual(fresh_acceptance_after_restart.json()["id"], report["id"])
+        self.assertEqual(
+            [(event, outcome) for event, outcome, *_ in delivery_audits],
+            [
+                ("solution.install", "allowed"),
+                ("solution.acceptance", "allowed"),
+                ("solution.install", "allowed"),
+            ],
+        )
+        self.assertTrue(
+            all(
+                actor == f"user:{self.engineer_id}"
+                for _, _, actor, _, _ in delivery_audits
+            )
+        )
+        serialized_audits = repr(all_audits)
+        self.assertNotIn(self.password, serialized_audits)
+        self.assertNotIn(self.admin_password, serialized_audits)
+        self.assertNotIn(rotated_admin_password, serialized_audits)
+        self.assertNotIn(admin_token, serialized_audits)
+        self.assertNotIn(engineer_token, serialized_audits)
+        self.assertNotIn(operator_token, serialized_audits)
 
 
 if __name__ == "__main__":
