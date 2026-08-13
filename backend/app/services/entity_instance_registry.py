@@ -153,6 +153,14 @@ class EntityInstanceRepository(Protocol):
 
     def resolve(self, entity_instance_id: UUID) -> ResolvedEntitySource | None: ...
 
+    def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None: ...
+
+    def entity_instance_for_definition(
+        self,
+        device_instance_id: UUID,
+        definition_id: str,
+    ) -> UUID | None: ...
+
 class InMemorySourceCatalog:
     """固定来源目录 Adapter；版本由规范内容决定，与查询顺序无关。"""
 
@@ -283,6 +291,7 @@ class InMemoryEntityInstanceRepository:
                 "unit": item["unit"],
                 "direction": item["direction"],
                 "freshness_seconds": float(item["freshness_seconds"]),
+                "control": item.get("control"),
             }
             resolved_binding = ResolvedEntitySource(
                 entity_instance_id=entity_id,
@@ -354,6 +363,24 @@ class InMemoryEntityInstanceRepository:
 
     def resolve(self, entity_instance_id: UUID) -> ResolvedEntitySource | None:
         return self._bindings.get(entity_instance_id)
+
+    def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None:
+        entity = self._entities.get(entity_instance_id)
+        return entity.get("control") if entity is not None else None
+
+    def entity_instance_for_definition(
+        self,
+        device_instance_id: UUID,
+        definition_id: str,
+    ) -> UUID | None:
+        matches = [
+            entity_id
+            for entity_id, entity in self._entities.items()
+            if entity["device_instance_id"] == device_instance_id
+            and entity["definition_id"] == definition_id
+            and entity_id in self._bindings
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
         descriptors = []
@@ -732,6 +759,7 @@ def _plan_definition(
         "unit": definition.get("unit"),
         "direction": definition["direction"],
         "freshness_seconds": float(slot["freshness_seconds"]),
+        "control": definition.get("control"),
         "status": "ready" if ready else "blocked",
         "code": code,
         "action": (

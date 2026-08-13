@@ -384,12 +384,20 @@ zizu/
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
 | POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
+| POST | `/api/v1/entity-instances/{id}/control-confirmations` | 为高风险控制申请绑定主体和内容的 60 秒二次确认 |
+| POST | `/api/v1/entity-instances/{id}/control-commands` | 以实体实例提交手动控制命令，必须携带 `Idempotency-Key` |
+| GET | `/api/v1/control-commands/{id}` | 查询命令的持久状态与稳定机器码 |
+| POST | `/api/v1/control-commands/{id}/reconcile` | 触发一次安全回读检查，不重发设备写入 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
 
 控制与管理能力矩阵：`system.manage` 仅 admin（系统、SQL、NanoMQ）；
-`gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色，
-但后续仍须经统一控制命令模块补齐限值、联锁、幂等和回读状态机。所有这些端点在
+`gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色。
+新的实体实例控制命令统一执行服务端数据类型、限值、联锁、主体幂等、持久冷却和
+回读确认；写入 Adapter 返回成功只会进入 `dispatched`，只有新鲜 GOOD 回读达到期望值
+与容差后才成为 `readback_confirmed`。命令固定记录 `control.write` 权限动作、来源类型、
+策略快照与每个状态转换关联的不可变审计事件；状态机只会前进，后台恢复只回读、不会重发
+设备写入。所有这些端点在
 业务执行前写不可变 requested 审计，成功后再写 success；审计不可用时 fail closed。
 
 解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。创建安装计划的请求体为
@@ -569,8 +577,8 @@ timeout: 5s
 `GET /api/v1/entity-instances/legacy-migration-preview` 根据已确认的物理来源将旧实体分类为
 `unique`、`missing` 或 `ambiguous`，始终返回 `writes_applied: 0`，不自动猜测或改写规则。
 实际规则引用同时持久化到带实体实例外键的 `t_rule_entity_instance_refs`。告警、控制和
-EMS 工作台将在各自状态机/命令/工作台票据中复用同一实例目录；旧控制输出路径仍是兼容
-边界，不代表统一控制命令已完成。
+EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目录；旧控制输出路径仍是兼容
+边界，Ticket 09/10/11 将把它们转换为统一控制命令，不能把旧写接口的返回当作现场成功。
 
 确需主备来源时，包在 matcher 上显式声明 `failoverPolicy: manual`，对应实例参数必须提供
 与主来源不同的 `standby_device_key`。安装计划分别展示主、备候选并要求两者都唯一兼容；
@@ -581,6 +589,45 @@ EMS 工作台将在各自状态机/命令/工作台票据中复用同一实例�
 `ENTITY_FAILOVER_STATE_CHANGED`。升级若要删除策略或更换主备来源，必须先显式切回
 primary；standby 状态下变更会返回 `ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY`，
 避免包升级在没有切换审计的情况下静默改源。
+
+可控实体在 `entity_definition` 中显式声明受限控制策略；没有 `control` 的 `W`/`RW`
+定义不能被新命令接口写入。首版只支持同设备实例内的精确联锁和一个回读实体，避免将
+任意表达式或物理地址带进站点配置：
+
+```yaml
+# entities/pcs-setpoint.yaml
+schemaVersion: zizu.entity-definition/v1alpha1
+id: pcs.setpoint
+kind: entity_definition
+displayName: PCS setpoint
+deviceCategory: pcs
+dataType: FLOAT
+unit: kW
+direction: RW
+control:
+  minimum: -100
+  maximum: 100
+  cooldown: 5s
+  readback:
+    definition: pcs.readback
+    tolerance: 0.1
+    timeout: 15s
+  interlocks:
+    - definition: bms.ready
+      equals: true
+  highRisk: false
+```
+
+数值实体必须同时声明 `minimum`、`maximum` 和非负 `tolerance`；`readback` 与目标类型、
+单位必须一致。每个 `interlocks` 条目必须引用同一槽位的读实体定义，且其观测新鲜、
+质量 GOOD 并精确等于 `equals`。`cooldown`、`timeout` 使用正整数秒；高风险值设为
+`highRisk: true` 时，先调用 confirmations 接口，再用返回的 `confirmation_id` 提交相同
+主体、目标和值的命令，确认 60 秒后或首次使用后失效。
+
+命令状态为 `accepted`、`validated`、`dispatched`、`readback_confirmed`；终态为
+`rejected`、`timeout`、`failed`、`mismatch`。同一主体与 `Idempotency-Key` 只能绑定一个
+规范化命令内容；相同内容返回原命令，不同内容返回 `IDEMPOTENCY_KEY_REUSED`。在途命令
+重启后继续观察回读，已到超时才安全进入 `timeout`，`reconcile` 不会再次下发写入。
 
 安装执行请求体为
 `{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带

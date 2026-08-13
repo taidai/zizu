@@ -152,6 +152,79 @@ def build_entity_package(
     return archive.getvalue()
 
 
+def build_control_entity_package(*, high_risk: bool = False) -> bytes:
+    """一个可配置控制、回读和联锁的最小 EMS 解决方案资产。"""
+    acceptance = (
+        "schemaVersion: zizu.acceptance/v1alpha1\n"
+        "id: acceptance.platform-liveness\n"
+        "kind: platform_liveness\n"
+        "required: true\n"
+        "timeout: 5s\n"
+    ).encode()
+    entities = {
+        "pcs.setpoint": (
+            "schemaVersion: zizu.entity-definition/v1alpha1\n"
+            "id: pcs.setpoint\nkind: entity_definition\ndisplayName: Setpoint\n"
+            "deviceCategory: pcs\ndataType: FLOAT\nunit: kW\ndirection: RW\n"
+            "control:\n  minimum: -100\n  maximum: 100\n  cooldown: 5s\n"
+            "  readback:\n    definition: pcs.readback\n    tolerance: 0.1\n    timeout: 10s\n"
+            "  interlocks:\n    - definition: bms.ready\n      equals: true\n"
+            f"  highRisk: {'true' if high_risk else 'false'}\n"
+        ).encode(),
+        "pcs.readback": (
+            "schemaVersion: zizu.entity-definition/v1alpha1\n"
+            "id: pcs.readback\nkind: entity_definition\ndisplayName: Readback\n"
+            "deviceCategory: pcs\ndataType: FLOAT\nunit: kW\ndirection: R\n"
+        ).encode(),
+        "bms.ready": (
+            "schemaVersion: zizu.entity-definition/v1alpha1\n"
+            "id: bms.ready\nkind: entity_definition\ndisplayName: BMS ready\n"
+            "deviceCategory: pcs\ndataType: BOOL\nunit: null\ndirection: R\n"
+        ).encode(),
+    }
+    slot = (
+        "schemaVersion: zizu.entity-instance-slot/v1alpha1\n"
+        "id: slot.pcs-primary\nkind: entity_instance_slot\ndeviceCategory: pcs\n"
+        "count: 1\ninstanceKeyParameter: pcs.instance_key\ndisplayName: Primary PCS\n"
+        "freshness: 30s\nrequiredEntities:\n"
+        "  - definition: pcs.setpoint\n    matcher:\n      id: matcher.setpoint\n"
+        "      deviceKeyParameter: pcs.device_key\n      tagName: Setpoint\n"
+        "  - definition: pcs.readback\n    matcher:\n      id: matcher.readback\n"
+        "      deviceKeyParameter: pcs.device_key\n      tagName: Readback\n"
+        "  - definition: bms.ready\n    matcher:\n      id: matcher.ready\n"
+        "      deviceKeyParameter: pcs.device_key\n      tagName: Ready\n"
+    ).encode()
+    declarations = [
+        ("acceptance.platform-liveness", "acceptance", "acceptance/liveness.yaml", acceptance),
+        ("slot.pcs-primary", "entity_instance_slot", "entities/pcs-primary.yaml", slot),
+        *(
+            (definition_id, "entity_definition", f"entities/{definition_id.replace('.', '-')}.yaml", content)
+            for definition_id, content in entities.items()
+        ),
+    ]
+    manifest = (
+        "schemaVersion: zizu.solution/v1alpha1\nid: org.zizu.control-pcs\nversion: 1.0.0\n"
+        "displayName: Controllable PCS EMS\nplatform:\n  version: \">=0.4.77,<0.5.0\"\n"
+        "parameters:\n"
+        "  - id: pcs.instance_key\n    type: string\n    required: true\n"
+        "    description: Stable PCS key\n"
+        "  - id: pcs.device_key\n    type: string\n    required: true\n"
+        "    description: Source catalog device key\nassets:\n"
+        + "".join(
+            f"  - id: {item_id}\n    kind: {kind}\n    path: {path}\n"
+            f"    sha256: \"{hashlib.sha256(content).hexdigest()}\"\n"
+            for item_id, kind, path, content in declarations
+        )
+        + "acceptance:\n  - acceptance.platform-liveness\n"
+    ).encode()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("solution.yaml", manifest)
+        for _item_id, _kind, path, content in declarations:
+            package.writestr(path, content)
+    return archive.getvalue()
+
+
 class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def build_app(*, sources: tuple, legacy_entities: tuple = ()) -> FastAPI:
@@ -225,6 +298,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_entity_instance_runtime] = lambda: runtime
         app.dependency_overrides[get_entity_instance_catalog] = lambda: catalog
         app.dependency_overrides[get_entity_instance_failover] = lambda: failover
+        app.state.entity_instance_registry = registry
+        app.state.entity_instance_repository = entity_repository
+        app.state.entity_instance_runtime = runtime
         return app
 
     @staticmethod

@@ -1,5 +1,27 @@
 ---
 
+## Session 2026-08-14 — Ticket #8 统一控制命令（本地完成，待审查/提交）
+
+### 已实现
+- 新 ADR-0007 固化可配置 EMS 控制语义：命令只指向已确认的实体实例，不接受页面、规则或调用方传来的物理地址。
+- 解决方案包的 `entity_definition.control` 支持受限声明：类型、数值限值、同设备实例回读、精确联锁、持久冷却及高风险二次确认；导入时完整校验并随实体实例安装持久化。
+- 新 `ControlCommandRuntime` 统一处理人工控制命令。状态单调经过 `accepted`、`validated`、`dispatched`、`readback_confirmed`，并明确落入 `rejected`、`timeout`、`failed` 或 `mismatch`；下游写入成功只代表 `dispatched`。
+- PostgreSQL migration_026 持久化命令、状态事件、每个状态的统一审计关联、主体幂等、冷却和一次性确认；恢复只回读或安全终止，绝不重发设备写入。
+- 新公开 API：控制确认、提交、读取、回读检查，均声明 `control.write` + Bearer。生产 Adapter 只凭已经确认的 tag ID 读取点位目录并调用 Neuron，响应不泄露下游地址或错误。
+
+### 验证证据
+- 控制运行时 + 公开 HTTP/协议模拟主缝 20/20 通过，覆盖限值、联锁、幂等、冷却、分派失败、超时、不一致、高风险确认、回读确认与 OpenAPI 权限声明。
+- 既有交付/认证/业务权限/控制安全/设置回归 66 项测试本体均通过（59.947 秒；外层 60 秒命令时限在输出 `OK` 后终止）。
+- 隔离真实 PostgreSQL 主缝 1/1（23.665 秒）通过，覆盖 migration_020~026、控制包安装、协议模拟观测与安全分派失败；临时 `zizu_test` 数据库及测试账户均已删除。
+- `py_compile` 与 `git diff --check` 通过；未新增依赖、未读取/写入现场或部署 1号机。
+
+### 当前边界 / Next
+- Ticket #8 只增加新的统一命令入口；旧 `/entities/{id}/write`、`/neuron/write`、MQTT RPC 与规则直接写仍是明确兼容旁路，由 Ticket #9、#10、#11 逐一迁入。因此当前不得宣称“所有控制已统一”。
+- 1号机仍为旧 v0.4.77 明文匿名版本。TLS、固定 ARM64 制品、现场凭据轮换和发布锁未闭合，禁止部署本分支。
+- 下一步：先对 Ticket #8 作 Spec/Standards 审查、提交；随后迁移 Neuron/MQTT 兼容写入口（Ticket #9）。
+
+---
+
 ## Session 2026-08-14 — Ticket #7 多设备实例消费者与显式主备（双轴通过）
 
 ### 目标与结果

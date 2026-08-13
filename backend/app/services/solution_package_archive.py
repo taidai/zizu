@@ -219,6 +219,7 @@ def _validate_entity_assets(
             "dataType",
             "unit",
             "direction",
+            "control",
         }
         if (
             set(definition) - fields
@@ -238,6 +239,13 @@ def _validate_entity_assets(
                 "Entity definition is invalid",
             )
         definitions[definition["id"]] = definition
+
+    for definition_id, definition in tuple(definitions.items()):
+        control = _validate_control_policy(definition, definitions)
+        definitions[definition_id] = {
+            **definition,
+            **({"control": control} if control is not None else {}),
+        }
 
     slot_ids: set[str] = set()
     slot_definition_ids: dict[str, set[str]] = {}
@@ -327,6 +335,11 @@ def _validate_entity_assets(
                     "data_type": definition["dataType"],
                     "unit": definition.get("unit"),
                     "direction": definition["direction"],
+                    **(
+                        {"control": definition["control"]}
+                        if definition.get("control") is not None
+                        else {}
+                    ),
                     "matcher": {
                         "id": matcher["id"],
                         "tag_name": matcher["tagName"],
@@ -343,6 +356,19 @@ def _validate_entity_assets(
                     },
                 }
             )
+        for definition in normalized_definitions:
+            control = definition.get("control")
+            if control is None:
+                continue
+            referenced = {
+                control["readback_definition"],
+                *(item["definition_id"] for item in control["interlocks"]),
+            }
+            if not referenced.issubset(required_definition_ids):
+                raise DeliveryError(
+                    "ASSET_REFERENCE_INVALID",
+                    "Control policy references must belong to the same entity slot",
+                )
         slot_ids.add(raw["id"])
         slot_definition_ids[raw["id"]] = required_definition_ids
         slots.append(
@@ -391,6 +417,111 @@ def _duration_seconds(value: Any) -> float:
     if match is None:
         raise DeliveryError("ASSET_REFERENCE_INVALID", "Duration is invalid")
     return float(match.group(1))
+
+
+def _validate_control_policy(
+    definition: dict[str, Any],
+    definitions: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Normalize the intentionally small, declarative control policy grammar."""
+    raw = definition.get("control")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control policy is invalid")
+    fields = {"minimum", "maximum", "cooldown", "readback", "interlocks", "highRisk"}
+    if (
+        set(raw) - fields
+        or any(field not in raw for field in ("cooldown", "readback", "interlocks", "highRisk"))
+        or definition["direction"] not in {"W", "RW"}
+        or not isinstance(raw["highRisk"], bool)
+        or not isinstance(raw["interlocks"], list)
+    ):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control policy is invalid")
+    numeric = definition["dataType"] in {"FLOAT", "INT"}
+    minimum = raw.get("minimum")
+    maximum = raw.get("maximum")
+    if numeric:
+        if (
+            not isinstance(minimum, (int, float))
+            or isinstance(minimum, bool)
+            or not isinstance(maximum, (int, float))
+            or isinstance(maximum, bool)
+            or float(minimum) > float(maximum)
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Control numeric limits are invalid")
+    elif minimum is not None or maximum is not None:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control limits require a numeric entity")
+    readback = raw["readback"]
+    allowed_readback = {"definition", "timeout", "tolerance"} if numeric else {"definition", "timeout"}
+    if (
+        not isinstance(readback, dict)
+        or set(readback) != allowed_readback
+        or not isinstance(readback.get("definition"), str)
+        or not readback["definition"]
+        or readback["definition"] not in definitions
+    ):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control readback is invalid")
+    readback_definition = definitions[readback["definition"]]
+    if (
+        readback_definition["deviceCategory"] != definition["deviceCategory"]
+        or readback_definition["dataType"] != definition["dataType"]
+        or (readback_definition.get("unit") or None) != (definition.get("unit") or None)
+        or readback_definition["direction"] not in {"R", "RW"}
+    ):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control readback is incompatible")
+    try:
+        cooldown = _duration_seconds(raw["cooldown"])
+        timeout = _duration_seconds(readback["timeout"])
+    except DeliveryError as exc:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control duration is invalid") from exc
+    tolerance = readback.get("tolerance")
+    if numeric and (
+        not isinstance(tolerance, (int, float))
+        or isinstance(tolerance, bool)
+        or float(tolerance) < 0
+    ):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Control tolerance is invalid")
+    interlocks: list[dict[str, Any]] = []
+    seen_interlocks: set[str] = set()
+    for item in raw["interlocks"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"definition", "equals"}
+            or not isinstance(item.get("definition"), str)
+            or item["definition"] not in definitions
+            or item["definition"] in seen_interlocks
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Control interlock is invalid")
+        referenced = definitions[item["definition"]]
+        if (
+            referenced["deviceCategory"] != definition["deviceCategory"]
+            or referenced["direction"] not in {"R", "RW"}
+            or not _control_value_matches_type(item["equals"], referenced["dataType"])
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Control interlock is incompatible")
+        seen_interlocks.add(item["definition"])
+        interlocks.append({"definition_id": item["definition"], "equals": item["equals"]})
+    return {
+        "minimum": float(minimum) if numeric else None,
+        "maximum": float(maximum) if numeric else None,
+        "cooldown_seconds": int(cooldown),
+        "readback_definition": readback["definition"],
+        "tolerance": float(tolerance) if numeric else None,
+        "timeout_seconds": int(timeout),
+        "interlocks": interlocks,
+        "high_risk": raw["highRisk"],
+    }
+
+
+def _control_value_matches_type(value: Any, data_type: str) -> bool:
+    return {
+        "FLOAT": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "INT": isinstance(value, int) and not isinstance(value, bool),
+        "BOOL": isinstance(value, bool),
+        "STRING": isinstance(value, str),
+        "ENUM": isinstance(value, str),
+    }.get(data_type, False)
 
 
 def _validate_acceptance_definition(

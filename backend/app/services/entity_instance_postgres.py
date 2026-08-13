@@ -207,14 +207,15 @@ class PostgresEntityInstanceRepository:
                         """
                         INSERT INTO t_entity_instances
                           (id, device_instance_id, definition_id, display_name,
-                           data_type, unit, direction, freshness_seconds)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           data_type, unit, direction, freshness_seconds, control_policy)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE
                         SET display_name = EXCLUDED.display_name,
                             data_type = EXCLUDED.data_type,
                             unit = EXCLUDED.unit,
                             direction = EXCLUDED.direction,
                             freshness_seconds = EXCLUDED.freshness_seconds,
+                            control_policy = EXCLUDED.control_policy,
                             updated_at = now()
                         """,
                         (
@@ -226,6 +227,7 @@ class PostgresEntityInstanceRepository:
                             item.get("unit"),
                             item["direction"],
                             item["freshness_seconds"],
+                            json.dumps(item.get("control")) if item.get("control") else None,
                         ),
                     )
                     try:
@@ -363,6 +365,38 @@ class PostgresEntityInstanceRepository:
                 )
                 row = cur.fetchone()
         return ResolvedEntitySource(*row) if row else None
+
+    def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT control_policy FROM t_entity_instances WHERE id = %s AND active = TRUE",
+                    (entity_instance_id,),
+                )
+                row = cur.fetchone()
+        return row[0] if row and isinstance(row[0], dict) else None
+
+    def entity_instance_for_definition(
+        self,
+        device_instance_id: UUID,
+        definition_id: str,
+    ) -> UUID | None:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ei.id
+                    FROM t_entity_instances ei
+                    JOIN t_entity_instance_bindings binding
+                      ON binding.entity_instance_id = ei.id AND binding.active = TRUE
+                    WHERE ei.device_instance_id = %s
+                      AND ei.definition_id = %s
+                      AND ei.active = TRUE
+                    """,
+                    (device_instance_id, definition_id),
+                )
+                rows = cur.fetchall()
+        return rows[0][0] if len(rows) == 1 else None
 
     def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
         with _connection() as conn:

@@ -20,6 +20,11 @@ from app.services.entity_instance_registry import EntityInstanceRegistry
 from app.services.entity_instance_runtime import EntityInstanceRuntime
 from app.services.entity_instance_catalog import EntityInstanceCatalog
 from app.services.entity_instance_failover import EntityFailoverPolicy
+from app.services.control_commands import (
+    ControlCommandRuntime,
+    NeuronControlDispatcher,
+    PostgresControlCommandRepository,
+)
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -43,6 +48,13 @@ _entity_instance_runtime = EntityInstanceRuntime(
 )
 _entity_instance_catalog = EntityInstanceCatalog(_entity_instance_repository)
 _entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
+_control_commands = ControlCommandRuntime(
+    registry=_entity_instance_registry,
+    policies=_entity_instance_repository,
+    readback=_entity_instance_runtime,
+    dispatcher=NeuronControlDispatcher(),
+    repository=PostgresControlCommandRepository(),
+)
 _delivery = SolutionDelivery(
     _repository,
     platform_version=_VERSION,
@@ -70,6 +82,10 @@ def get_default_entity_instance_registry() -> EntityInstanceRegistry:
 
 def get_default_entity_instance_failover() -> EntityFailoverPolicy:
     return _entity_instance_failover
+
+
+def get_default_control_commands() -> ControlCommandRuntime:
+    return _control_commands
 
 
 class ApplyInstallationRequest(BaseModel):

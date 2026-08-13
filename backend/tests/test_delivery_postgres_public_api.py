@@ -25,6 +25,7 @@ MIGRATION_022 = BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_ticke
 MIGRATION_023 = BACKEND_ROOT.parent / "init-db" / "migration_023_site_configuration_parameters.sql"
 MIGRATION_024 = BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instances.sql"
 MIGRATION_025 = BACKEND_ROOT.parent / "init-db" / "migration_025_rule_entity_instance_refs.sql"
+MIGRATION_026 = BACKEND_ROOT.parent / "init-db" / "migration_026_control_commands.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -32,6 +33,7 @@ MIGRATIONS = (
     MIGRATION_023,
     MIGRATION_024,
     MIGRATION_025,
+    MIGRATION_026,
 )
 def build_minimal_package(
     *,
@@ -72,6 +74,12 @@ def build_entity_package(**kwargs) -> bytes:
     from tests.test_entity_delivery_public_api import build_entity_package as build
 
     return build(**kwargs)
+
+
+def build_control_entity_package() -> bytes:
+    from tests.test_entity_delivery_public_api import build_control_entity_package as build
+
+    return build()
 
 
 @unittest.skipUnless(
@@ -308,6 +316,21 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                             '40000000-0000-0000-0000-000000000005',
                             'ActivePower', 'FLOAT', 'kW', 'R', TRUE,
                             'neuron', 'PCS-01-BACKUP/default/ActivePower');
+                    INSERT INTO t_tags
+                      (id, node_id, name, data_type, unit, read_write, enabled,
+                       source_type, source_path)
+                    VALUES ('40000000-0000-0000-0000-000000000007',
+                            '40000000-0000-0000-0000-000000000001',
+                            'Setpoint', 'FLOAT', 'kW', 'RW', TRUE,
+                            'neuron', 'PCS-01/default/Setpoint'),
+                           ('40000000-0000-0000-0000-000000000008',
+                            '40000000-0000-0000-0000-000000000001',
+                            'Readback', 'FLOAT', 'kW', 'R', TRUE,
+                            'neuron', 'PCS-01/default/Readback'),
+                           ('40000000-0000-0000-0000-000000000009',
+                            '40000000-0000-0000-0000-000000000001',
+                            'Ready', 'BOOL', NULL, 'R', TRUE,
+                            'neuron', 'PCS-01/default/Ready');
                     """
                 )
                 # Exercise the controlled legacy-viewer migration path instead
@@ -893,6 +916,66 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "Idempotency-Key": "postgres-accept-after-restart",
                 },
             )
+            control_import = client.post(
+                "/api/v1/solution-packages/import",
+                headers=admin_auth,
+                files={
+                    "archive": (
+                        "controllable-pcs.zizu.zip",
+                        build_control_entity_package(),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(control_import.status_code, 201, control_import.text)
+            control_plan_response = client.post(
+                f"/api/v1/solution-packages/{control_import.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-CONTROL",
+                        "pcs.device_key": "PCS-01",
+                    }
+                },
+            )
+            self.assertEqual(control_plan_response.status_code, 201, control_plan_response.text)
+            control_plan = control_plan_response.json()
+            control_install = client.post(
+                f"/api/v1/install-plans/{control_plan['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-control-install",
+                },
+                json={"plan_digest": control_plan["digest"]},
+            )
+            self.assertEqual(control_install.status_code, 201, control_install.text)
+            control_ids = {
+                item["definition_id"]: item["entity_instance_id"]
+                for item in control_plan["items"]
+                if item["kind"] == "entity_binding"
+            }
+            ready_publish = client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "node": "PCS-01",
+                    "timestamp": round(time.time() * 1000),
+                    "values": {"Ready": True, "Readback": 0.0},
+                },
+            )
+            self.assertEqual(ready_publish.status_code, 200, ready_publish.text)
+            submitted_control = client.post(
+                f"/api/v1/entity-instances/{control_ids['pcs.setpoint']}/control-commands",
+                headers={
+                    **operator_auth,
+                    "Idempotency-Key": "postgres-control-once",
+                },
+                json={"value": 20.0},
+            )
+            self.assertEqual(submitted_control.status_code, 201, submitted_control.text)
+            self.assertEqual("failed", submitted_control.json()["status"])
+            self.assertEqual("CONTROL_DISPATCH_FAILED", submitted_control.json()["code"])
+            self.assertEqual("control.write", submitted_control.json()["capability"])
+            self.assertNotIn("neuron", repr(submitted_control.json()).casefold())
 
         self.assertEqual(persisted_admin.status_code, 200, persisted_admin.text)
         self.assertEqual(persisted_engineer.status_code, 200, persisted_engineer.text)

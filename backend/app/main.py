@@ -99,6 +99,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 identity_schema_error,
             )
         init_config_table()
+        try:
+            from app.api.solution_delivery import get_default_control_commands
+
+            recovered_commands = get_default_control_commands().recover()
+            if recovered_commands:
+                logger.info(
+                    "[Main] Recovered {} in-flight control commands without redispatch",
+                    len(recovered_commands),
+                )
+        except Exception as control_recovery_error:
+            if settings.deployment_mode == "production":
+                raise RuntimeError("Control command recovery failed") from control_recovery_error
+            logger.warning(
+                "[Main] Control command recovery unavailable (development mode): {}",
+                control_recovery_error,
+            )
         # 幂等播种标准全局实体目录（单一数据源）
         try:
             from app.core.standard_entities import seed_standard_entities
@@ -316,6 +332,13 @@ def create_app() -> FastAPI:
         entity_instances_router,
         prefix="/api/v1",
         tags=["Entity Instances"],
+    )
+
+    from app.api.control_commands import router as control_commands_router
+    app.include_router(
+        control_commands_router,
+        prefix="/api/v1",
+        tags=["Control Commands"],
     )
 
      # ---- Static Frontend (F0 可视化 V1) ----
