@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import unittest
 from unittest import mock
+from uuid import uuid4
 
 os.environ.setdefault("DB_PASSWORD", "database-secret-value")
 os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
@@ -98,20 +99,39 @@ class ControlManagementAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCa
         )
 
     async def test_roles_follow_system_gateway_and_control_capabilities(self) -> None:
+        from app.api.control_commands import get_control_compatibility
+
         app = self.build_role_app()
         transport = httpx.ASGITransport(app=app)
         fake_neuron = mock.Mock()
         fake_neuron.get_nodes.return_value = []
 
-        with (
-            mock.patch(
-                "app.services.neuron_client.get_neuron_client",
-                return_value=fake_neuron,
-            ),
-            mock.patch(
-                "app.api.entities.write_entity_value",
-                return_value={"status": "accepted"},
-            ) as write_value,
+        class CompatibilityCommand:
+            status = "dispatched"
+            id = uuid4()
+
+            def public_dict(self) -> dict[str, object]:
+                return {
+                    "id": str(self.id),
+                    "status": self.status,
+                    "code": "CONTROL_DISPATCHED",
+                    "source_type": "compatibility",
+                }
+
+        class RecordingCompatibility:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def submit_legacy_entity(self, **kwargs: object) -> CompatibilityCommand:
+                self.calls.append(kwargs)
+                return CompatibilityCommand()
+
+        compatibility = RecordingCompatibility()
+        app.dependency_overrides[get_control_compatibility] = lambda: compatibility
+
+        with mock.patch(
+            "app.services.neuron_client.get_neuron_client",
+            return_value=fake_neuron,
         ):
             async with httpx.AsyncClient(
                 transport=transport,
@@ -132,15 +152,18 @@ class ControlManagementAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCa
                         )).status_code,
                         (await client.post(
                             "/api/v1/entities/00000000-0000-0000-0000-000000000099/write",
-                            headers=headers[role],
+                            headers={
+                                **headers[role],
+                                "Idempotency-Key": f"legacy-entity-{role}",
+                            },
                             json={"value": 1},
                         )).status_code,
                     )
 
-        self.assertEqual(statuses["admin"], (200, 200, 200))
-        self.assertEqual(statuses["engineer"], (403, 200, 200))
-        self.assertEqual(statuses["operator"], (403, 403, 200))
-        self.assertEqual(write_value.call_count, 3)
+        self.assertEqual(statuses["admin"], (200, 200, 201))
+        self.assertEqual(statuses["engineer"], (403, 200, 201))
+        self.assertEqual(statuses["operator"], (403, 403, 201))
+        self.assertEqual(3, len(compatibility.calls))
 
 
 if __name__ == "__main__":
@@ -169,7 +192,7 @@ class ControlManagementOpenApiCoverageTest(unittest.TestCase):
                 ),
                 "POST": (
                     "/api/v1/query", "/api/v1/admin/truncate",
-                    "/api/v1/nanomq/publish", "/api/v1/nanomq/subscribe",
+                    "/api/v1/nanomq/subscribe",
                     "/api/v1/nanomq/acl", "/api/v1/nanomq/restart",
                 ),
             }.items()
@@ -200,7 +223,7 @@ class ControlManagementOpenApiCoverageTest(unittest.TestCase):
             **{operation: "gateway.manage" for operation in gateway_manage},
             ("POST", "/api/v1/entities/{entity_id}/write"): "control.write",
         }
-        self.assertEqual(len(expected), 30)
+        self.assertEqual(len(expected), 29)
 
         for (method, path), capability in expected.items():
             with self.subTest(method=method, path=path):

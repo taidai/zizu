@@ -215,7 +215,6 @@ ISSUE_04_REST = {
         "/api/v1/neuron/groups",
         "/api/v1/neuron/tags",
         "/api/v1/entities/{entity_id}/write",
-        "/api/v1/nanomq/publish",
         "/api/v1/nanomq/subscribe",
         "/api/v1/nanomq/acl",
         "/api/v1/nanomq/restart",
@@ -1045,7 +1044,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(ALARM_ACKNOWLEDGE), 1)
         self.assertEqual(len(LEGACY_ALARM_WRITE), 2)
         self.assertEqual(len(TICKET_03_CAPABILITIES), 83)
-        self.assertEqual(len(ISSUE_04_REST), 30)
+        self.assertEqual(len(ISSUE_04_REST), 29)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1076,7 +1075,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 138)
+        self.assertEqual(len(registered), 137)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ast
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 from uuid import UUID
@@ -39,6 +41,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         from app.api.neuron import router as neuron_router
         from app.api.rpc import router as rpc_router
+        from app.api.entities import router as entities_router
         from app.services.control_commands import (
             ControlCommandCompatibility,
             ControlCommandRuntime,
@@ -66,6 +69,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(control_router, prefix="/api/v1")
         app.include_router(neuron_router, prefix="/api/v1")
         app.include_router(rpc_router, prefix="/api/v1")
+        app.include_router(entities_router, prefix="/api/v1")
         app.dependency_overrides[get_default_control_commands] = lambda: runtime
         app.dependency_overrides[get_control_compatibility] = lambda: compatibility
         app.state.control_compatibility_targets = compatibility_targets
@@ -333,6 +337,152 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("compatibility", failed.json()["source_type"])
         self.assertEqual(1, len(dispatcher.requests))
 
+    async def test_legacy_entity_write_becomes_a_queryable_command_not_a_sync_write(self) -> None:
+        """The last global-entity write route has the same compatibility contract as RPC."""
+        app, dispatcher = self.build_app()
+        legacy_entity_id = "70000000-0000-0000-0000-000000000001"
+        unknown_entity_id = "70000000-0000-0000-0000-000000000002"
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_legacy_entity(
+                entity_id=UUID(legacy_entity_id),
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "legacy-entity-setpoint-20",
+            }
+            accepted = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            replayed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            rejected = await client._client.post(
+                f"/api/v1/entities/{unknown_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-entity-unknown"},
+                json={"value": 20.0},
+            )
+            queried = await client._client.get(
+                accepted.json()["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            rejected_query = await client._client.get(
+                rejected.json()["detail"]["command"]["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(201, accepted.status_code, accepted.text)
+        self.assertEqual("compatibility", accepted.json()["source_type"])
+        self.assertEqual("dispatched", accepted.json()["status"])
+        self.assertEqual(
+            legacy_entity_id,
+            accepted.json()["origin_evidence"]["compatibility"]["legacy_entity_id"],
+        )
+        self.assertEqual(
+            "/api/v1/entity-instances/{id}/control-commands",
+            accepted.json()["migration"]["replacement"],
+        )
+        self.assertEqual(201, replayed.status_code, replayed.text)
+        self.assertEqual(accepted.json()["id"], replayed.json()["id"])
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            rejected.json()["detail"]["code"],
+        )
+        self.assertIsNone(rejected.json()["detail"]["command"]["entity_instance_id"])
+        self.assertEqual(
+            unknown_entity_id,
+            rejected.json()["detail"]["command"]["origin_evidence"]["compatibility"]["legacy_entity_id"],
+        )
+        self.assertEqual(200, rejected_query.status_code, rejected_query.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            rejected_query.json()["code"],
+        )
+        self.assertEqual(200, queried.status_code, queried.text)
+        self.assertEqual(accepted.json()["id"], queried.json()["id"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_legacy_entity_high_risk_confirmation_binds_target_value_not_route_shape(self) -> None:
+        """Compatibility preserves one high-risk confirmation contract with the new endpoint."""
+        app, dispatcher = self.build_app(high_risk=True)
+        legacy_entity_id = "70000000-0000-0000-0000-000000000011"
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client, high_risk=True)
+            app.state.control_compatibility_targets.register_legacy_entity(
+                entity_id=UUID(legacy_entity_id),
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=20.0)
+            headers = {"Authorization": await client._bearer("operator")}
+            confirmation = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-confirmations",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-confirm"},
+                json={"value": 20.0},
+            )
+            changed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-changed"},
+                json={"value": 21.0, "confirmation_id": confirmation.json()["id"]},
+            )
+            confirmed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-accepted"},
+                json={"value": 20.0, "confirmation_id": confirmation.json()["id"]},
+            )
+
+        self.assertEqual(201, confirmation.status_code, confirmation.text)
+        self.assertEqual(409, changed.status_code, changed.text)
+        self.assertEqual("CONTROL_CONFIRMATION_INVALID", changed.json()["detail"]["code"])
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        self.assertEqual("dispatched", confirmed.json()["status"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    def test_only_control_runtime_calls_the_neuron_write_adapter(self) -> None:
+        """No legacy HTTP or resolver module may retain a device write call site."""
+        repository_root = Path(__file__).resolve().parents[2]
+        write_call_sites: list[str] = []
+        client_import_sites: list[str] = []
+        for source in (repository_root / "backend" / "app").rglob("*.py"):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            if any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write_tag"
+                for node in ast.walk(tree)
+            ):
+                write_call_sites.append(source.relative_to(repository_root).as_posix())
+            if any(
+                isinstance(node, ast.ImportFrom)
+                and node.module == "app.services.neuron_client"
+                and any(alias.name == "NeuronClient" for alias in node.names)
+                for node in ast.walk(tree)
+            ):
+                client_import_sites.append(source.relative_to(repository_root).as_posix())
+
+        self.assertEqual(
+            ["backend/app/services/control_commands.py"],
+            sorted(write_call_sites),
+        )
+        self.assertEqual(
+            ["backend/app/services/control_commands.py"],
+            sorted(client_import_sites),
+        )
+
+    def test_no_public_http_route_can_publish_an_arbitrary_mqtt_payload(self) -> None:
+        """MQTT administration must not become a second, untracked control channel."""
+        from app.main import create_app
+
+        paths = {route.path for route in create_app().routes if hasattr(route, "path")}
+        self.assertNotIn("/api/v1/nanomq/publish", paths)
+
     async def test_rule_trigger_replays_as_one_command_then_confirms_via_protocol_readback(self) -> None:
         """The rule execution seam shares command audit, cooldown, and readback semantics."""
         from app.api.control_commands import get_default_control_commands
@@ -546,6 +696,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             ("post", "/api/v1/control-commands/{command_id}/reconcile"),
             ("post", "/api/v1/neuron/write"),
             ("post", "/api/v1/devices/{node_id}/rpc"),
+            ("post", "/api/v1/entities/{entity_id}/write"),
         }
         for method, path in expected:
             with self.subTest(method=method, path=path):

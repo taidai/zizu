@@ -22,13 +22,6 @@ router = APIRouter()
 # 请求/响应模型
 # ══════════════════════════════════════
 
-class NanoMQPublishRequest(BaseModel):
-    topic: str = Field(..., description="发布主题")
-    payload: str = Field(..., description="消息内容")
-    qos: int = Field(0, ge=0, le=2, description="QoS 等级")
-    retain: bool = Field(False, description="是否 Retain")
-
-
 class NanoMQSubscribeRequest(BaseModel):
     topic: str = Field(..., description="订阅主题")
     qos: int = Field(0, ge=0, le=2, description="QoS 等级")
@@ -109,18 +102,8 @@ async def nanomq_routes() -> dict:
 
 
 # ══════════════════════════════════════
-# 消息发布/订阅
+# 订阅管理
 # ══════════════════════════════════════
-
-@router.post("/nanomq/publish", **protected(SYSTEM_MANAGE))
-async def nanomq_publish(req: NanoMQPublishRequest) -> dict:
-    """通过 nanoMQ REST API 发布一条消息。"""
-    client = get_nanomq_client()
-    try:
-        return client.publish(req.topic, req.payload, req.qos, req.retain)
-    except NanoMQAPIError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
-
 
 @router.post("/nanomq/subscribe", **protected(SYSTEM_MANAGE))
 async def nanomq_subscribe(req: NanoMQSubscribeRequest) -> dict:

@@ -178,6 +178,8 @@ class ControlTargetResolver(Protocol):
 
     def legacy_rpc_target(self, *, node_id: UUID, command: str) -> UUID | None: ...
 
+    def legacy_entity_target(self, *, entity_id: UUID) -> UUID | None: ...
+
 
 class PostgresControlTargetResolver:
     """Compatibility adapter; never turns an arbitrary address into a write."""
@@ -262,6 +264,35 @@ class PostgresControlTargetResolver:
             rows = cur.fetchall()
         return rows[0][0] if len(rows) == 1 else None
 
+    def legacy_entity_target(self, *, entity_id: UUID) -> UUID | None:
+        """Map an old global entity only through an active confirmed source reservation."""
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT active_binding.entity_instance_id
+                FROM t_entity_bindings legacy_binding
+                JOIN t_entities legacy
+                  ON legacy.id = legacy_binding.entity_id AND legacy.enabled = TRUE
+                JOIN t_entity_instance_bindings active_binding
+                  ON active_binding.tag_id = legacy_binding.tag_id
+                 AND active_binding.active = TRUE
+                JOIN t_entity_instances ei
+                  ON ei.id = active_binding.entity_instance_id AND ei.active = TRUE
+                JOIN t_device_instances di
+                  ON di.id = ei.device_instance_id AND di.active = TRUE
+                JOIN t_tags active_tag
+                  ON active_tag.id = legacy_binding.tag_id AND active_tag.enabled = TRUE
+                JOIN t_nodes active_node
+                  ON active_node.id = active_tag.node_id AND active_node.enabled = TRUE
+                WHERE legacy_binding.entity_id = %s
+                  AND legacy_binding.enabled = TRUE
+                  AND (active_tag.source_type IS NULL OR lower(active_tag.source_type) = 'neuron')
+                """,
+                (entity_id,),
+            )
+            rows = cur.fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
 
 class InMemoryControlTargetResolver:
     """Compatibility resolver for the public HTTP seam."""
@@ -270,6 +301,7 @@ class InMemoryControlTargetResolver:
         self._neuron: dict[tuple[str, str, str], UUID] = {}
         self._rpc: dict[tuple[UUID, UUID], UUID] = {}
         self._legacy_rpc: dict[tuple[UUID, str], UUID] = {}
+        self._legacy_entities: dict[UUID, UUID] = {}
 
     def register_neuron(
         self,
@@ -293,6 +325,14 @@ class InMemoryControlTargetResolver:
     ) -> None:
         self._legacy_rpc[(node_id, command)] = entity_instance_id
 
+    def register_legacy_entity(
+        self,
+        *,
+        entity_id: UUID,
+        entity_instance_id: UUID,
+    ) -> None:
+        self._legacy_entities[entity_id] = entity_instance_id
+
     def neuron_target(self, *, node: str, group: str, tag: str) -> UUID | None:
         return self._neuron.get((node, group, tag))
 
@@ -306,6 +346,9 @@ class InMemoryControlTargetResolver:
 
     def legacy_rpc_target(self, *, node_id: UUID, command: str) -> UUID | None:
         return self._legacy_rpc.get((node_id, command))
+
+    def legacy_entity_target(self, *, entity_id: UUID) -> UUID | None:
+        return self._legacy_entities.get(entity_id)
 
 
 class NeuronControlDispatcher:
@@ -680,10 +723,15 @@ class ControlCommandRuntime:
 
     def request_confirmation(self, request: SubmitControlCommand) -> ControlConfirmation:
         now = self._now()
+        policy = (
+            _control_policy(self._policies.control_policy(request.entity_instance_id))
+            if request.entity_instance_id is not None
+            else None
+        )
         confirmation = ControlConfirmation(
             id=uuid4(),
             actor=request.actor,
-            request_digest=_request_digest(request),
+            request_digest=_confirmation_digest(request, policy),
             expires_at=now + timedelta(seconds=60),
         )
         self._repository.save_confirmation(confirmation)
@@ -736,7 +784,10 @@ class ControlCommandRuntime:
             if request.confirmation_id is None:
                 return self._reject(request, digest, now, "CONTROL_CONFIRMATION_REQUIRED", reserve_key=False, data_type=source.data_type)
             if not self._repository.consume_confirmation(
-                request.confirmation_id, actor=request.actor, request_digest=digest, now=now
+                request.confirmation_id,
+                actor=request.actor,
+                request_digest=_confirmation_digest(request, policy),
+                now=now,
             ):
                 return self._reject(request, digest, now, "CONTROL_CONFIRMATION_INVALID", reserve_key=True, data_type=source.data_type)
         interlock_code = self._validate_interlocks(source, policy)
@@ -787,6 +838,7 @@ class ControlCommandRuntime:
         actor: str,
         value: object,
         idempotency_key: str,
+        origin_evidence: dict[str, object] | None = None,
     ) -> ControlCommand:
         """Persist an unmappable legacy request without inventing an entity ID."""
         now = self._now()
@@ -796,14 +848,9 @@ class ControlCommandRuntime:
             entity_instance_id=None,
             value=value,
             idempotency_key=idempotency_key,
+            origin_evidence=origin_evidence or {},
         )
-        digest = hashlib.sha256(json.dumps({
-            "actor": actor,
-            "source_type": "compatibility",
-            "capability": request.capability,
-            "target": "unresolved",
-            "value": value,
-        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        digest = _request_digest(request)
         existing = self._repository.idempotent(actor, idempotency_key)
         if existing is not None:
             if existing.request_digest == digest:
@@ -1001,6 +1048,26 @@ class ControlCommandCompatibility:
             confirmation_id=confirmation_id,
         )
 
+    def submit_legacy_entity(
+        self,
+        *,
+        actor: str,
+        entity_id: UUID,
+        value: object,
+        idempotency_key: str,
+        confirmation_id: UUID | None = None,
+    ) -> ControlCommand:
+        """Accept a global-entity compatibility request only when its migration is unique."""
+        target = self._targets.legacy_entity_target(entity_id=entity_id)
+        return self._submit(
+            actor=actor,
+            entity_instance_id=target,
+            value=value,
+            idempotency_key=idempotency_key,
+            confirmation_id=confirmation_id,
+            origin_evidence={"compatibility": {"legacy_entity_id": str(entity_id)}},
+        )
+
     def _submit(
         self,
         *,
@@ -1009,12 +1076,14 @@ class ControlCommandCompatibility:
         value: object,
         idempotency_key: str,
         confirmation_id: UUID | None,
+        origin_evidence: dict[str, object] | None = None,
     ) -> ControlCommand:
         if entity_instance_id is None:
             return self._runtime.reject_unresolved_compatibility_target(
                 actor=actor,
                 value=value,
                 idempotency_key=idempotency_key,
+                origin_evidence=origin_evidence or {},
             )
         return self._runtime.submit(
             SubmitControlCommand(
@@ -1024,6 +1093,7 @@ class ControlCommandCompatibility:
                 value=value,
                 idempotency_key=idempotency_key,
                 confirmation_id=confirmation_id,
+                origin_evidence=origin_evidence or {},
             )
         )
 
@@ -1062,6 +1132,20 @@ def _request_digest(request: SubmitControlCommand) -> str:
         "entity_instance_id": str(request.entity_instance_id) if request.entity_instance_id else None,
         "value": request.value,
         "origin_evidence": request.origin_evidence,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _confirmation_digest(
+    request: SubmitControlCommand,
+    policy: ControlPolicy | None,
+) -> str:
+    """Bind a high-risk confirmation to normalized command content, not its HTTP route."""
+    return hashlib.sha256(json.dumps({
+        "actor": request.actor,
+        "capability": request.capability,
+        "entity_instance_id": str(request.entity_instance_id) if request.entity_instance_id else None,
+        "value": request.value,
+        "policy_snapshot": _policy_snapshot(policy) if policy is not None else None,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 

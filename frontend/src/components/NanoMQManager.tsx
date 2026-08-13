@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import {
   fetchNanoMQStatus, fetchNanoMQClients, fetchNanoMQSubscriptions,
-  fetchNanoMQACL, updateNanoMQACL, publishNanoMQMessage,
+  fetchNanoMQACL, updateNanoMQACL,
   fetchNanoMQConfig, updateNanoMQConfig, restartNanoMQ,
   type NanoMQACLRule,
 } from '../api/client'
 
-type TabKey = 'overview' | 'clients' | 'subscriptions' | 'publish' | 'acl' | 'config'
+type TabKey = 'overview' | 'clients' | 'subscriptions' | 'acl' | 'config'
 
 export default function NanoMQManager() {
   const [activeTab, setActiveTab] = useState<TabKey>('overview')
@@ -28,11 +28,6 @@ export default function NanoMQManager() {
   const [configSaving, setConfigSaving] = useState(false)
   const [configMsg, setConfigMsg] = useState('')
   const [restartLoading, setRestartLoading] = useState(false)
-  // publish
-  const [pubTopic, setPubTopic] = useState('test/topic')
-  const [pubPayload, setPubPayload] = useState('{"hello":"nanomq"}')
-  const [pubQos, setPubQos] = useState(0)
-  const [pubMsg, setPubMsg] = useState('')
 
   const loadStatus = async () => {
     try {
@@ -134,16 +129,6 @@ export default function NanoMQManager() {
     setAclRules(aclRules.filter((_, i) => i !== idx))
   }
 
-  const handlePublish = async () => {
-    setPubMsg('')
-    try {
-      await publishNanoMQMessage(pubTopic, pubPayload, pubQos)
-      setPubMsg('发布成功')
-    } catch (e: any) {
-      setPubMsg(`发布失败: ${e.message}`)
-    }
-  }
-
   const handleSaveConfig = async () => {
     setConfigSaving(true)
     setConfigMsg('')
@@ -174,7 +159,6 @@ export default function NanoMQManager() {
     { key: 'overview', label: '概览' },
     { key: 'clients', label: '客户端' },
     { key: 'subscriptions', label: '订阅' },
-    { key: 'publish', label: '发布测试' },
     { key: 'acl', label: 'ACL' },
     { key: 'config', label: '配置文件' },
   ]
@@ -286,43 +270,6 @@ export default function NanoMQManager() {
               )}
             </tbody>
           </table>
-        </div>
-      )}
-
-      {activeTab === 'publish' && (
-        <div className="space-y-3">
-          <div className="flex gap-2">
-            <input
-              className="neu-input px-2 py-1 text-xs flex-1"
-              placeholder="topic"
-              value={pubTopic}
-              onChange={(e) => setPubTopic(e.target.value)}
-            />
-            <select
-              className="neu-input px-2 py-1 text-xs"
-              value={pubQos}
-              onChange={(e) => setPubQos(Number(e.target.value))}
-            >
-              <option value={0}>QoS 0</option>
-              <option value={1}>QoS 1</option>
-              <option value={2}>QoS 2</option>
-            </select>
-          </div>
-          <textarea
-            className="neu-input w-full px-2 py-1 text-xs font-mono"
-            rows={4}
-            value={pubPayload}
-            onChange={(e) => setPubPayload(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handlePublish}
-              className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
-            >
-              发布消息
-            </button>
-            {pubMsg && <span className="text-xs text-gray-500">{pubMsg}</span>}
-          </div>
         </div>
       )}
 

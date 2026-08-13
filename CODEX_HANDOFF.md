@@ -1,5 +1,26 @@
 ---
 
+## Session 2026-08-14 — Ticket #11 关闭剩余设备写旁路（本地完成，待提交）
+
+### 已实现
+- 旧 `POST /api/v1/entities/{entity_id}/write` 不再同步写入设备，现为受认证的兼容入口：只有旧实体能唯一映射到同一已确认、活动且来源为 Neuron 的实体实例时，才创建可回查的统一控制命令；未映射请求也持久化为拒绝证据。
+- 兼容响应始终返回命令查询链接；高风险确认绑定主体、实体实例、值与策略快照，而不绑定 HTTP 路径，因此新命令入口申请的确认可安全用于同语义旧入口，变更值或策略则会拒绝。
+- 删除 `entity_resolver.write_entity_value` 直接 Neuron 写入器；静态回归同时限制 `NeuronClient` 直接导入与 `write_tag` 调用只能存在于 `ControlCommandRuntime` 的执行 Adapter。
+- 关闭 `/api/v1/nanomq/publish` 和前端“发布测试”：任意 MQTT topic/payload 不能再成为绕过统一命令、审计与回读的设备写路径。NanoMQ 状态、订阅、ACL、配置和重启仍由系统管理能力保护。
+- README、ADR-0007、Ticket #11 清单、OpenAPI/路由计数与公开回归均已同步。
+
+### 验证证据
+- 控制运行时、兼容 HTTP、控制/WS 权限、实体交付、业务授权：51/51 通过；覆盖旧实体写入转换、拒绝命令回查、高风险确认跨入口复用、旁路静态检查与任意 MQTT 发布路由不存在。
+- Python `compileall`、`git diff --check` 通过；前端 `npm run build` 通过（仅既有大 chunk 警告）。
+- 完整后端 pytest：161 passed、1 skipped；仅既有 `tests/test_aggregator.py` 的 SUM/LAST SQL 断言失败，本票未触及该聚合模块。
+- Spec / Standards 双轴最终 PASS，阻断为 0。真实 PostgreSQL 兼容映射仍需在隔离测试库补主缝证明，不能使用现场库代替。
+
+### 当前边界 / Next
+- 本票完成了公开 HTTP 与前端可触达的剩余直接设备写旁路；后台/部署生产可用性仍受 TLS、固定 ARM64 制品、凭据轮换、迁移演练及发布锁约束，禁止部署到 1 号机。
+- 提交并推送后，Issue #11 仍保持开放，直至隔离 PostgreSQL 主缝完成。下一主线为告警状态机与 EMS 运行工作台，均只能以实体实例和统一命令为基础。
+
+---
+
 ## Session 2026-08-14 — Ticket #10 规则自动控制迁移（已提交并推送，待 PostgreSQL 主缝）
 
 ### 已实现

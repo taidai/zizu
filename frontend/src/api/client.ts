@@ -1257,16 +1257,6 @@ export async function fetchEntityHistory(entityId: string, range = '1h', page = 
   return res.json()
 }
 
-export async function writeEntityValue(entityId: string, value: any): Promise<{ status: string }> {
-  const res = await apiFetch(`${API_BASE}/entities/${entityId}/write`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ value }),
-  })
-  if (!res.ok) throw new Error(`Write entity failed: ${res.status}`)
-  return res.json()
-}
-
 export function exportEntitiesCsv(category?: string): Promise<void> {
   const params = new URLSearchParams()
   if (category) params.set('category', category)
@@ -1488,16 +1478,6 @@ export async function updateNanoMQACL(rules: NanoMQACLRule[]): Promise<{ [k: str
     body: JSON.stringify({ rules }),
   })
   if (!res.ok) throw new Error(`Update ACL failed: ${res.status}`)
-  return res.json()
-}
-
-export async function publishNanoMQMessage(topic: string, payload: string, qos = 0, retain = false): Promise<{ [k: string]: any }> {
-  const res = await apiFetch(`${API_BASE}/nanomq/publish`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, payload, qos, retain }),
-  })
-  if (!res.ok) throw new Error(`Publish failed: ${res.status}`)
   return res.json()
 }
 

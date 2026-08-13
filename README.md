@@ -370,7 +370,7 @@ zizu/
 | DELETE | `/api/v1/entities/{id}/bindings/{bid}` | 删除绑定 |
 | GET | `/api/v1/entities/{id}/realtime` | 实体实时值 |
 | GET | `/api/v1/entities/{id}/history` | 实体历史数据 |
-| POST | `/api/v1/entities/{id}/write` | 向实体写入控制值 |
+| POST | `/api/v1/entities/{id}/write` | 旧全局实体写入兼容入口：仅在唯一映射到确认实体实例时创建控制命令，必须携带 `Idempotency-Key` |
 | GET | `/api/v1/health/live` | 最小匿名存活契约，仅返回 `status` 与版本 |
 | POST | `/api/v1/solution-packages/import` | multipart 上传并完整校验解决方案 ZIP |
 | GET | `/api/v1/solution-packages` | 查询已验证的不可变解决方案包 |
@@ -593,8 +593,16 @@ EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目�
 已将规则控制动作收口为 `entity_instance_id + value`：规则只能创建统一控制命令，命令保存
 `rule:<UUID>` 主体、规则版本、稳定动作标识和触发观测/输出证据；规则配置不得包含
 Neuron 节点/组/点位、MQTT topic/payload/QoS、全局实体或本地冷却。相同触发重放返回原命令，
-新的触发继续受持久命令冷却、联锁和回读确认约束。遗留 `/entities/{id}/write` 仍由
-Ticket 11 迁移。
+新的触发继续受持久命令冷却、联锁和回读确认约束。遗留
+`/entities/{id}/write` 已在 Ticket 11 迁为有限兼容入口：它只接收旧实体 UUID、`value`
+和 `Idempotency-Key`，仅在旧实体的已启用绑定能唯一对应一个已确认、活动、Neuron 来源的
+实体实例时创建 `source_type=compatibility` 控制命令。多个、缺失或非 Neuron 候选均产生
+持久化拒绝命令；此入口不再解析优先级、不再直接调用设备 Adapter，也不会把 `201` 解释为
+设备写入成功。调用方必须使用响应中的 `links.command` 查询状态，只有
+`readback_confirmed` 才表示现场已达到期望值。新集成必须使用
+`POST /api/v1/entity-instances/{id}/control-commands`；兼容入口将在 v1.0 移除。
+`/api/v1/nanomq/publish` 与前端“发布测试”已关闭，避免任意 MQTT topic/payload 形成未审计的
+设备控制旁路；消息总线的状态、订阅、ACL、配置和重启仍由 `system.manage` 管理。
 
 规则的控制动作是公开配置，必须只指向已确认的设备实体实例；每个 `id` 在同一规则版本内
 必须稳定且唯一，控制规则至少声明一个实体实例输入（`sourceEntityInstanceIds` 或
