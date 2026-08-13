@@ -589,8 +589,30 @@ timeout: 5s
 `unique`、`missing` 或 `ambiguous`，始终返回 `writes_applied: 0`，不自动猜测或改写规则。
 实际规则引用同时持久化到带实体实例外键的 `t_rule_entity_instance_refs`。告警、控制和
 EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目录；Neuron 与 MQTT RPC 旧控制
-入口已在 Ticket 09 转换为统一控制命令，不能把它们的创建响应当作现场成功。规则/策略与
-遗留实体写入仍是 Ticket 10/11 的兼容边界。
+入口已在 Ticket 09 转换为统一控制命令，不能把它们的创建响应当作现场成功。Ticket 10
+已将规则控制动作收口为 `entity_instance_id + value`：规则只能创建统一控制命令，命令保存
+`rule:<UUID>` 主体、规则版本、稳定动作标识和触发观测/输出证据；规则配置不得包含
+Neuron 节点/组/点位、MQTT topic/payload/QoS、全局实体或本地冷却。相同触发重放返回原命令，
+新的触发继续受持久命令冷却、联锁和回读确认约束。遗留 `/entities/{id}/write` 仍由
+Ticket 11 迁移。
+
+规则的控制动作是公开配置，必须只指向已确认的设备实体实例；每个 `id` 在同一规则版本内
+必须稳定且唯一，控制规则至少声明一个实体实例输入（`sourceEntityInstanceIds` 或
+`inputMappings`）。`value` 可以是决策输出模板或 JSON 标量。保存时会把每个动作写入实例引用目录，
+避免规则绕过设备范围、控制策略或命令审计。
+
+```yaml
+_config:
+  sourceEntityInstanceIds:
+    - "<confirmed input entity-instance UUID>"
+  inputMappings:
+    bms_ready: "<confirmed input entity-instance UUID>"
+  actions:
+    - id: output:pcs_setpoint
+      type: control
+      entity_instance_id: "<confirmed entity-instance UUID>"
+      value: "{{pcs_setpoint}}"
+```
 
 确需主备来源时，包在 matcher 上显式声明 `failoverPolicy: manual`，对应实例参数必须提供
 与主来源不同的 `standby_device_key`。安装计划分别展示主、备候选并要求两者都唯一兼容；

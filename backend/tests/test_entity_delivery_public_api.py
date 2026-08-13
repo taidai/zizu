@@ -887,7 +887,11 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             entity_instance_id=entity_id,
         )
         runtime = Mock()
-        runtime.read.return_value = SimpleNamespace(value=125.5)
+        runtime.read.return_value = SimpleNamespace(
+            value=125.5,
+            observed_at=datetime.now(timezone.utc),
+            quality=192,
+        )
         with patch(
             "app.api.solution_delivery.get_default_entity_instance_registry",
             return_value=registry,

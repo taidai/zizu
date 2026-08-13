@@ -7,7 +7,7 @@ F2 规则引擎 — 告警/控制/联动策略
   - 对每条规则通过 GoRules zen-engine 求值
   - 触发动作：
       alarm     -> 写入 t_alarms（同一规则未恢复时不再重复创建）
-      control   -> 经 MQTT 发布控制命令 + 写入 t_audit_log
+      control   -> 创建统一控制命令，由命令运行时完成下发与回读
       linkage   -> 更新指定虚拟点位的 sources 或触发另一规则（MVP 未实现）
 
 求值层：
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
 from uuid import UUID
 
 from loguru import logger
@@ -50,9 +49,9 @@ def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]
             continue
         context[raw_id] = {
             "value": observation.value,
-            "tag_id": resolved.tag_id,
-            "device_instance_id": resolved.device_instance_id,
             "entity_instance_id": resolved.entity_instance_id,
+            "observed_at": observation.observed_at.isoformat(),
+            "quality": observation.quality,
             "is_entity_instance": True,
         }
     return context
@@ -146,19 +145,30 @@ def _build_context(cur, source_node_ids: set[str] | None = None) -> dict[str, di
 
 
 def _rule_context(cur, content: dict) -> dict[str, dict[str, any]]:
+    config = content.get("_config", {})
+    if not isinstance(config, dict):
+        config = {}
+    config_actions = config.get("actions", []) if isinstance(config, dict) else []
+    top_level_actions = content.get("actions", [])
+    if not isinstance(top_level_actions, list):
+        top_level_actions = []
+    has_declarative_control = any(
+        isinstance(action, dict) and action.get("type") == "control"
+        for action in [*config_actions, *top_level_actions]
+    )
     source_node_ids = {
         str(item)
-        for item in content.get("_config", {}).get("sourceNodeIds", [])
+        for item in config.get("sourceNodeIds", [])
         if item
     }
     source_entity_instance_ids = {
         str(item)
-        for item in content.get("_config", {}).get("sourceEntityInstanceIds", [])
+        for item in config.get("sourceEntityInstanceIds", [])
         if item
     }
     raw_input_ids = {
         str(item)
-        for item in content.get("_config", {}).get("inputMappings", {}).values()
+        for item in config.get("inputMappings", {}).values()
         if item
     }
     input_entity_instance_ids = set()
@@ -170,12 +180,17 @@ def _rule_context(cur, content: dict) -> dict[str, dict[str, any]]:
         input_entity_instance_ids.add(raw_id)
     legacy_entity_ids = {
         str(item)
-        for item in content.get("_config", {}).get("sourceEntityIds", [])
+        for item in config.get("sourceEntityIds", [])
         if item
     }
     requested_instances = source_entity_instance_ids | input_entity_instance_ids
     if requested_instances:
         return _entity_instance_context(requested_instances)
+    if has_declarative_control:
+        # New automatic control has an instance-only input contract.  It must
+        # never fall back to tag/node context simply because configuration is
+        # incomplete; persisted legacy content remains read-only compatible.
+        return {}
     context = _build_context(cur, source_node_ids or None)
     if source_node_ids:
         context = {
@@ -188,6 +203,16 @@ def _rule_context(cur, content: dict) -> dict[str, dict[str, any]]:
             if str(value.get("entity_id")) in legacy_entity_ids
         }
     return context
+
+
+_LEGACY_CONTROL_FIELDS = frozenset({
+    "node", "group", "tag", "topic", "payload", "command",
+    "entity_id", "entity", "entity_name", "cooldown",
+})
+
+
+def _is_legacy_control_action(action: dict) -> bool:
+    return bool(_LEGACY_CONTROL_FIELDS.intersection(action))
 
 
 def _has_active_alarm(cur, rule_id: UUID) -> bool:
@@ -229,29 +254,6 @@ def _create_alarm(
     )
 
 
-def _log_audit(cur, action: str, target_type: str, target_id: str | UUID | None, details: dict) -> None:
-    cur.execute(
-        """
-        INSERT INTO t_audit_log (user_id, action, target_type, target_id, details, created_at)
-        VALUES (%s, %s, %s, %s, %s, now())
-        """,
-        ("system", action, target_type, target_id, json.dumps(details)),
-    )
-
-
-# 内存级控制冷却，避免同一规则每秒都发命令
-_last_control_ts: dict[UUID, datetime] = {}
-
-
-def _control_cooldown_ok(rule_id: UUID, cooldown: int = 60) -> bool:
-    last = _last_control_ts.get(rule_id)
-    now = datetime.now(timezone.utc)
-    if last is None or (now - last).total_seconds() >= cooldown:
-        _last_control_ts[rule_id] = now
-        return True
-    return False
-
-
 def _resolve_value(value: Any, outputs: dict | None, context_values: dict[str, Any]) -> Any:
     """解析 value 模板，如 {{pcs_setpoint}}。优先从决策输出取，其次从上下文取。"""
     if not isinstance(value, str):
@@ -280,8 +282,8 @@ def _resolve_value(value: Any, outputs: dict | None, context_values: dict[str, A
     return resolved
 
 
-def _coerce_neuron_value(value: Any) -> Any:
-    """把字符串数字转为数值，方便 Neuron 写入。"""
+def _coerce_control_value(value: Any) -> Any:
+    """把模板产生的字符串数字还原为配置控制值。"""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -296,94 +298,62 @@ def _coerce_neuron_value(value: Any) -> Any:
     return value
 
 
-def _execute_neuron_write(cur, rule_id: UUID, action: dict, context: dict, outputs: dict | None = None) -> bool:
-    """通过 Neuron REST API 下发写点位指令；支持直接写 entity。"""
-    raw_value = action.get("value")
-    if raw_value is None:
-        logger.warning("[RuleEngine] neuron_write action missing value: {}", action)
-        return False
-
-    context_values = _context_values(context)
-    value = _coerce_neuron_value(_resolve_value(raw_value, outputs, context_values))
-
-    # 优先按 entity 写回：规则引擎输出可作用于全局实体
-    entity_id = action.get("entity_id")
-    entity_name = action.get("entity")
-    if entity_id or entity_name:
-        from app.services.entity_resolver import write_entity_value
-        try:
-            target = entity_id or entity_name
-            result = write_entity_value(target, value)
-            _log_audit(cur, "ENTITY_WRITE", "entity", result.get("entity_id"), {
-                "rule_id": str(rule_id),
-                "entity_name": result.get("entity_name"),
-                "value": value,
-                "context": {k: v for k, v in context.items() if isinstance(v, (int, float, bool, str))},
-            })
-            return True
-        except Exception as e:
-            logger.error("[RuleEngine] entity write failed for rule {}: {}", rule_id, e)
-            return False
-
-    node = action.get("node")
-    group = action.get("group")
-    tag = action.get("tag")
-    if not node or not group or not tag:
-        logger.warning("[RuleEngine] neuron_write action missing node/group/tag: {}", action)
-        return False
-
-    from app.services.neuron_client import get_neuron_client
-    try:
-        client = get_neuron_client()
-        client.write_tag(node, group, tag, value)
-    except Exception as e:
-        logger.error("[RuleEngine] Neuron write failed for rule {}: {}", rule_id, e)
-        return False
-
-    _log_audit(cur, "NEURON_WRITE", "device", action.get("target_id"), {
-        "rule_id": str(rule_id),
-        "node": node,
-        "group": group,
-        "tag": tag,
-        "value": value,
-        "context": {k: v for k, v in context.items() if isinstance(v, (int, float, bool, str))},
-    })
-    return True
-
-
-def _execute_control(cur, rule_id: UUID, action: dict, context: dict, outputs: dict | None = None) -> bool:
-    """执行控制动作：优先走 Neuron 写点位，否则发布 MQTT 命令。"""
-    a_type = action.get("type")
-    if a_type == "neuron_write":
-        return _execute_neuron_write(cur, rule_id, action, context, outputs)
-
-    from app.services.mqtt_client import get_mqtt_client
-
-    command = action.get("command", {})
-    topic = command.get("topic")
-    payload = command.get("payload")
-    if not topic or payload is None:
-        logger.warning("[RuleEngine] control action missing topic/payload: {}", action)
-        return False
-
-    mqtt_client = get_mqtt_client()
-    if mqtt_client is None:
-        logger.warning("[RuleEngine] MQTT client not available, control skipped")
-        return False
+def _execute_control(
+    rule_id: UUID,
+    rule_version: int,
+    action: dict,
+    action_index: int,
+    context: dict,
+    outputs: dict | None = None,
+) -> bool:
+    """Create one automatic command; rules never know device addresses."""
+    from app.api.solution_delivery import get_default_automated_control_commands
+    from app.services.automated_control_commands import AutomatedControlCommandRequest
 
     try:
-        payload_str = json.dumps(payload, ensure_ascii=False)
-        mqtt_client.publish(topic, payload_str)
-    except Exception as e:
-        logger.error("[RuleEngine] MQTT publish failed for control action: {}", e)
+        entity_instance_id = UUID(str(action["entity_instance_id"]))
+        value = _coerce_control_value(
+            _resolve_value(action["value"], outputs, _context_values(context))
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("[RuleEngine] invalid declarative control action for rule {}: {}", rule_id, exc)
         return False
-
-    _log_audit(cur, "RPC", "device", action.get("target_id"), {
-        "rule_id": str(rule_id),
-        "topic": topic,
-        "payload": payload,
-        "context": {k: v for k, v in context.items() if isinstance(v, (int, float, bool, str))},
-    })
+    action_key = action.get("id")
+    if not isinstance(action_key, str) or not action_key.strip():
+        logger.warning("[RuleEngine] control action without stable id for rule {}", rule_id)
+        return False
+    evidence = {
+        "inputs": [
+            {
+                "field": field,
+                "entity_instance_id": str(item["entity_instance_id"]),
+                "value": item.get("value"),
+                "observed_at": item.get("observed_at"),
+                "quality": item.get("quality"),
+            }
+            for field, item in sorted(context.items())
+            if item.get("is_entity_instance")
+        ],
+        "outputs": outputs or {},
+    }
+    command = get_default_automated_control_commands().submit(
+        AutomatedControlCommandRequest(
+            source_type="rule",
+            subject_id=rule_id,
+            subject_version=rule_version,
+            action_key=action_key.strip(),
+            entity_instance_id=entity_instance_id,
+            value=value,
+            trigger_evidence=evidence,
+        )
+    )
+    if command.status == "rejected":
+        logger.warning(
+            "[RuleEngine] control command rejected for rule {}: {}",
+            rule_id,
+            command.code,
+        )
+        return False
     return True
 
 
@@ -473,7 +443,7 @@ def run_rule_tick() -> dict[str, int]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, rule_type, jdm_content, enabled
+                SELECT id, rule_type, jdm_content, enabled, version
                 FROM t_rules
                 WHERE enabled = TRUE
                 """
@@ -482,7 +452,7 @@ def run_rule_tick() -> dict[str, int]:
             if not rules:
                 return result
 
-            for rule_id, rule_type, jdm_content, enabled in rules:
+            for rule_id, rule_type, jdm_content, enabled, rule_version in rules:
                 result["evaluated"] += 1
                 try:
                     content = jdm_content if isinstance(jdm_content, dict) else json.loads(jdm_content)
@@ -503,7 +473,7 @@ def run_rule_tick() -> dict[str, int]:
                         continue
 
                     actions = eval_result.get("actions", [])
-                    for action in actions:
+                    for action_index, action in enumerate(actions):
                         a_type = action.get("type")
                         if a_type == "alarm":
                             level = action.get("level", "WARNING")
@@ -530,10 +500,27 @@ def run_rule_tick() -> dict[str, int]:
                                     message,
                                 )
                                 result["alarms"] += 1
-                        elif a_type in ("control", "neuron_write"):
-                            if _control_cooldown_ok(rule_id, action.get("cooldown", 60)):
-                                if _execute_control(cur, rule_id, action, context, eval_result.get("outputs")):
-                                    result["controls"] += 1
+                        elif a_type == "control":
+                            if _is_legacy_control_action(action):
+                                logger.warning(
+                                    "[RuleEngine] legacy physical control action skipped for rule {}; migrate to entity_instance_id",
+                                    rule_id,
+                                )
+                                continue
+                            if _execute_control(
+                                rule_id,
+                                rule_version,
+                                action,
+                                action_index,
+                                context,
+                                eval_result.get("outputs"),
+                            ):
+                                result["controls"] += 1
+                        elif a_type == "neuron_write":
+                            logger.warning(
+                                "[RuleEngine] legacy neuron_write action skipped for rule {}; migrate to entity_instance_id",
+                                rule_id,
+                            )
                         else:
                             logger.debug("[RuleEngine] unsupported action type: {}", a_type)
                 except Exception as e:

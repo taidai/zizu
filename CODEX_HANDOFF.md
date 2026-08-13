@@ -1,5 +1,27 @@
 ---
 
+## Session 2026-08-14 — Ticket #10 规则自动控制迁移（本地完成，待提交）
+
+### 已实现
+- 规则命中不再直接调用 Neuron、MQTT 或全局实体写入；新增 `AutomatedControlCommands`，只向既有 `ControlCommandRuntime` 创建 `source_type=rule` 的统一命令。
+- 规则动作只允许稳定且唯一的 `id + entity_instance_id + value`；控制规则必须声明实体实例输入，不能使用物理节点、点位、MQTT 字段或本地冷却。旧物理动作保持只读兼容并在运行时跳过。
+- 命令持久化 `origin_evidence`：规则/策略主体与版本、动作 ID、实体实例观测和求值输出；证据会剥离 Neuron/MQTT/点位等物理路由字段。
+- 新 `migration_028_rule_control_commands.sql` 为命令增加证据列，并在数据库层拒绝新写入的旧控制配置、缺失稳定动作 ID、缺失实例输入和重复动作 ID。
+- 规则编辑器只展示实体实例目标；测试下发创建统一命令而非宣称现场成功。遗留物理动作明确提示需要重新配置，避免保存时静默删除。
+
+### 验证证据
+- Ticket #10 控制运行时、公开 HTTP、实体交付主缝：26/26 通过；覆盖规则触发→命令幂等重放→协议模拟回读确认、持久冷却、联锁和物理字段净化。
+- 关键后端回归：97/97 通过；Python `compileall` 与 `git diff --check` 通过。
+- 前端 `npm run build` 通过（8176 modules；仅既有大 chunk 警告）。
+- 完整 pytest：157 passed、1 skipped；仅保留既有 Aggregator SUM/LAST 两项断言失败，与本票无关。
+- 双轴审查最终 PASS：Spec/Standards 阻断为 0；未新增依赖、凭据、客户参数或现场拓扑。
+
+### 当前边界 / Next
+- 真实 PostgreSQL/Uvicorn 升级缝已纳入 migration_028，但当前未提供安全隔离的 `*_test` 数据库，尚未执行；禁止使用现场库替代。
+- Ticket #10 只迁移规则自动控制；`/entities/{id}/write` 及剩余业务写旁路仍是 Ticket #11，不能宣称所有设备写入已统一。
+- 1号机仍是旧明文匿名版本；TLS、固定 ARM64 制品、凭据轮换、迁移演练和发布锁未闭合，禁止部署本分支。
+- 本票尚未提交/推送/关闭 Issue #10。下步：提交、网络恢复后推送；再进入 Ticket #11 删除最后的设备写旁路。
+
 ## Session 2026-08-14 — Ticket #9 Neuron / MQTT RPC 兼容控制迁移（本地完成，待提交）
 
 ### 已实现

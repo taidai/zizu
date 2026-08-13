@@ -87,7 +87,40 @@ def _serialize_rule(row: dict) -> dict:
             "preview_path": "/api/v1/entity-instances/legacy-migration-preview",
             "removal_ticket": 10,
         }
+    if _has_legacy_control_actions(row.get("jdm_content")):
+        row["control_action_migration"] = {
+            "code": "RULE_CONTROL_LEGACY_FORBIDDEN",
+            "status": "read_only_compatibility",
+            "replacement": "_config.actions[].entity_instance_id",
+            "removal_ticket": 10,
+        }
     return row
+
+
+def _has_legacy_control_actions(content: object) -> bool:
+    if not isinstance(content, dict):
+        return False
+    config = content.get("_config", {})
+    groups = [content.get("actions", [])]
+    if isinstance(config, dict):
+        groups.append(config.get("actions", []))
+    forbidden_fields = {
+        "node", "group", "tag", "topic", "payload", "command",
+        "entity_id", "entity", "entity_name", "cooldown",
+    }
+    for actions in groups:
+        if isinstance(actions, list) and any(
+            isinstance(action, dict) and (
+                action.get("type") == "neuron_write"
+                or (
+                    action.get("type") == "control"
+                    and bool(forbidden_fields.intersection(action))
+                )
+            )
+            for action in actions
+        ):
+            return True
+    return False
 
 
 def _replace_rule_entity_instance_references(

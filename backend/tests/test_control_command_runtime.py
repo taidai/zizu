@@ -338,6 +338,80 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual(("rejected", "CONTROL_CONFIRMATION_INVALID"), (changed.status, changed.code))
         self.assertEqual("readback_confirmed", confirmed.status)
 
+    def test_rule_trigger_records_evidence_and_uses_persistent_command_cooldown(self) -> None:
+        """A rule is an automation subject, never a second device-write path."""
+        from app.services.automated_control_commands import (
+            AutomatedControlCommandRequest,
+            AutomatedControlCommands,
+        )
+
+        rule_id = UUID("70000000-0000-0000-0000-000000000001")
+        self._observe(INTERLOCK_ID, True)
+        self._observe(READBACK_ID, 20.0)
+        request = AutomatedControlCommandRequest(
+            source_type="rule",
+            subject_id=rule_id,
+            subject_version=3,
+            action_key="output.setpoint",
+            entity_instance_id=TARGET_ID,
+            value=20.0,
+            trigger_evidence={
+                "inputs": [{"entity_instance_id": str(INTERLOCK_ID), "value": True}],
+                "outputs": {
+                    "setpoint": 20.0,
+                    "command": {"node": "must-not-persist", "tag": "must-not-persist"},
+                    "command.node": "must-not-persist",
+                },
+            },
+        )
+
+        commands = AutomatedControlCommands(self.runtime)
+        submitted = commands.submit(request)
+        replayed = commands.submit(request)
+        restarted = AutomatedControlCommands(
+            type(self.runtime)(
+                registry=self.runtime._registry,
+                policies=self.runtime._policies,
+                readback=self.readback,
+                dispatcher=self.dispatcher,
+                repository=self.repository,
+                clock=self.clock.now,
+            )
+        )
+        cooling_down = restarted.submit(
+            AutomatedControlCommandRequest(
+                source_type="rule",
+                subject_id=rule_id,
+                subject_version=3,
+                action_key="output.setpoint",
+                entity_instance_id=TARGET_ID,
+                value=21.0,
+                trigger_evidence={
+                    "inputs": [{"entity_instance_id": str(INTERLOCK_ID), "value": True}],
+                    "outputs": {"setpoint": 21.0},
+                },
+            )
+        )
+
+        self.assertEqual("rule", submitted.source_type)
+        self.assertEqual(20.0, submitted.origin_evidence["trigger"]["outputs"]["setpoint"])
+        self.assertNotIn("command", submitted.origin_evidence["trigger"]["outputs"])
+        self.assertNotIn("command.node", submitted.origin_evidence["trigger"]["outputs"])
+        self.assertEqual(f"rule:{rule_id}", submitted.actor)
+        self.assertEqual(rule_id, UUID(submitted.origin_evidence["subject"]["id"]))
+        self.assertEqual(3, submitted.origin_evidence["subject"]["version"])
+        self.assertEqual("output.setpoint", submitted.origin_evidence["action_key"])
+        self.assertEqual(
+            {
+                "inputs": [{"entity_instance_id": str(INTERLOCK_ID), "value": True}],
+                "outputs": {"setpoint": 20.0},
+            },
+            submitted.origin_evidence["trigger"],
+        )
+        self.assertEqual(submitted.id, replayed.id)
+        self.assertEqual(("rejected", "CONTROL_COOLDOWN_ACTIVE"), (cooling_down.status, cooling_down.code))
+        self.assertEqual(1, len(self.dispatcher.requests))
+
 
 if __name__ == "__main__":
     unittest.main()

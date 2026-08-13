@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -329,6 +332,208 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("CONTROL_DISPATCH_FAILED", failed.json()["code"])
         self.assertEqual("compatibility", failed.json()["source_type"])
         self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_rule_trigger_replays_as_one_command_then_confirms_via_protocol_readback(self) -> None:
+        """The rule execution seam shares command audit, cooldown, and readback semantics."""
+        from app.api.control_commands import get_default_control_commands
+        from app.services.automated_control_commands import AutomatedControlCommands
+        from app.services.rule_engine import run_rule_tick
+
+        app, dispatcher = self.build_app()
+        rule_id = UUID("80000000-0000-0000-0000-000000000001")
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            await self.publish(client, Ready=1)
+            rule_content = {
+                "when": "ready == 1",
+                "_config": {
+                    "sourceEntityInstanceIds": [ids["bms.ready"]],
+                    "inputMappings": {"ready": ids["bms.ready"]},
+                    "actions": [{
+                        "id": "setpoint-from-ready",
+                        "type": "control",
+                        "entity_instance_id": ids["pcs.setpoint"],
+                        "value": 20.0,
+                    }],
+                },
+            }
+
+            class RuleCursor:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def execute(self, query, params=()):
+                    self.query = query
+                    self.params = params
+
+                def fetchall(self):
+                    return [
+                        (
+                            rule_id,
+                            "control",
+                            json.dumps(rule_content),
+                            True,
+                            4,
+                        )
+                    ]
+
+            class RuleConnection:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def cursor(self):
+                    return RuleCursor()
+
+                def commit(self):
+                    return None
+
+            @contextmanager
+            def rule_connection():
+                yield RuleConnection()
+
+            commands = app.dependency_overrides[get_default_control_commands]()
+            with patch("app.services.telemetry_store.get_connection", rule_connection), patch(
+                "app.api.solution_delivery.get_default_entity_instance_registry",
+                return_value=app.state.entity_instance_registry,
+            ), patch(
+                "app.api.solution_delivery.get_default_entity_instance_runtime",
+                return_value=app.state.entity_instance_runtime,
+            ), patch(
+                "app.api.solution_delivery.get_default_automated_control_commands",
+                return_value=AutomatedControlCommands(commands),
+            ):
+                first_tick = run_rule_tick()
+                replay_tick = run_rule_tick()
+
+            self.assertEqual({"evaluated": 1, "alarms": 0, "controls": 1, "errors": 0}, first_tick)
+            self.assertEqual({"evaluated": 1, "alarms": 0, "controls": 1, "errors": 0}, replay_tick)
+            command_id = dispatcher.requests[0].command_id
+            first_read = await client._client.get(
+                f"/api/v1/control-commands/{command_id}",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            await self.publish(client, Readback=20.05)
+            confirmed = await client._client.post(
+                f"/api/v1/control-commands/{command_id}/reconcile",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(1, len(dispatcher.requests))
+        self.assertEqual(200, first_read.status_code, first_read.text)
+        self.assertEqual("rule", first_read.json()["source_type"])
+        self.assertEqual(f"rule:{rule_id}", first_read.json()["actor"])
+        self.assertEqual(str(rule_id), first_read.json()["origin_evidence"]["subject"]["id"])
+        self.assertEqual(4, first_read.json()["origin_evidence"]["subject"]["version"])
+        self.assertEqual("setpoint-from-ready", first_read.json()["origin_evidence"]["action_key"])
+        self.assertEqual(200, confirmed.status_code, confirmed.text)
+        self.assertEqual("readback_confirmed", confirmed.json()["status"])
+
+    async def test_rule_api_rejects_legacy_physical_control_addresses_before_write(self) -> None:
+        app, _dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            legacy_neuron = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy physical action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "neuron_write",
+                                "node": "any-node",
+                                "group": "any-group",
+                                "tag": "any-tag",
+                                "value": 1,
+                            }]
+                        }
+                    },
+                },
+            )
+            legacy_mqtt = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy MQTT action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "control",
+                                "command": {"topic": "arbitrary/unsafe", "payload": {"value": 1}},
+                                "value": 1,
+                            }]
+                        }
+                    },
+                },
+            )
+
+            missing_action_id = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Unstable automatic action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "sourceEntityInstanceIds": ["90000000-0000-0000-0000-000000000010"],
+                            "actions": [{
+                                "type": "control",
+                                "entity_instance_id": "90000000-0000-0000-0000-000000000011",
+                                "value": 1,
+                            }],
+                        },
+                    },
+                },
+            )
+            missing_inputs = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Automatic action without input evidence",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "id": "stable-action",
+                                "type": "control",
+                                "entity_instance_id": "90000000-0000-0000-0000-000000000011",
+                                "value": 1,
+                            }],
+                        },
+                    },
+                },
+            )
+
+        self.assertEqual(409, legacy_neuron.status_code, legacy_neuron.text)
+        self.assertEqual("RULE_CONTROL_LEGACY_FORBIDDEN", legacy_neuron.json()["detail"]["code"])
+        self.assertEqual(409, legacy_mqtt.status_code, legacy_mqtt.text)
+        self.assertEqual("RULE_CONTROL_LEGACY_FORBIDDEN", legacy_mqtt.json()["detail"]["code"])
+        self.assertEqual(409, missing_action_id.status_code, missing_action_id.text)
+        self.assertEqual("RULE_CONTROL_ACTION_INVALID", missing_action_id.json()["detail"]["code"])
+        self.assertEqual(409, missing_inputs.status_code, missing_inputs.text)
+        self.assertEqual("RULE_CONTROL_INPUTS_REQUIRED", missing_inputs.json()["detail"]["code"])
+
+    def test_gorules_control_outputs_cannot_define_runtime_control_targets(self) -> None:
+        from app.services.gorules_adapter import _extract_actions
+
+        actions = _extract_actions(
+            {
+                "command": {
+                    "node": "arbitrary-node",
+                    "group": "arbitrary-group",
+                    "tag": "arbitrary-tag",
+                    "value": 1,
+                },
+                "command.entity_instance_id": "90000000-0000-0000-0000-000000000001",
+                "command.value": 20.0,
+            },
+            {},
+        )
+
+        self.assertEqual([], actions)
 
     def test_every_control_route_declares_bearer_and_control_capability(self) -> None:
         from app.main import create_app

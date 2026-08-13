@@ -86,7 +86,7 @@ def validate_rule_entity_references(
     content: dict[str, Any],
     catalog: EntityInstanceCatalog,
 ) -> tuple[tuple[str, str, UUID], ...]:
-    """Reject new legacy references and validate stable rule input instance IDs."""
+    """Reject legacy control addresses and validate every stable rule instance ID."""
     config = content.get("_config", {})
     if not isinstance(config, dict):
         raise EntityInstanceReferenceError(
@@ -100,7 +100,14 @@ def validate_rule_entity_references(
         )
     source_ids = config.get("sourceEntityInstanceIds", [])
     input_mappings = config.get("inputMappings", {})
-    if not isinstance(source_ids, list) or not isinstance(input_mappings, dict):
+    config_actions = config.get("actions", [])
+    top_level_actions = content.get("actions", [])
+    if (
+        not isinstance(source_ids, list)
+        or not isinstance(input_mappings, dict)
+        or not isinstance(config_actions, list)
+        or not isinstance(top_level_actions, list)
+    ):
         raise EntityInstanceReferenceError(
             "ENTITY_INSTANCE_REFERENCE_INVALID",
             "Rule entity instance references are invalid",
@@ -112,6 +119,35 @@ def validate_rule_entity_references(
         for field, value in input_mappings.items()
         if value not in (None, "")
     ]
+    action_references = _control_action_references(config_actions, section="config")
+    action_references.extend(
+        _control_action_references(top_level_actions, section="actions")
+    )
+    action_keys = [reference[1] for reference in action_references]
+    if len(action_keys) != len(set(action_keys)):
+        raise EntityInstanceReferenceError(
+            "RULE_CONTROL_ACTION_INVALID",
+            "Rule control action identifiers must be unique",
+        )
+    references.extend(action_references)
+    if action_references:
+        control_input_values = [
+            *source_ids,
+            *[
+                value for value in input_mappings.values()
+                if value not in (None, "")
+            ],
+        ]
+        if not control_input_values:
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_INPUTS_REQUIRED",
+                "Automatic control rules require entity instance inputs",
+            )
+        if "sourceNodeIds" in config:
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_LEGACY_FORBIDDEN",
+                "Automatic control rules cannot read physical node sources",
+            )
     try:
         normalized = tuple((kind, key, UUID(value)) for kind, key, value in references)
     except (TypeError, ValueError, AttributeError) as exc:
@@ -123,3 +159,53 @@ def validate_rule_entity_references(
     if instance_ids:
         catalog.require(instance_ids)
     return normalized
+
+
+def _control_action_references(
+    actions: list[object],
+    *,
+    section: str,
+) -> list[tuple[str, str, object]]:
+    """Accept only declarative entity-instance targets for automatic control."""
+    references: list[tuple[str, str, object]] = []
+    forbidden_fields = {
+        "node", "group", "tag", "topic", "payload", "command",
+        "entity_id", "entity", "entity_name", "cooldown",
+    }
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_ACTION_INVALID",
+                "Rule actions must be mappings",
+            )
+        action_type = action.get("type")
+        if action_type == "neuron_write":
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_LEGACY_FORBIDDEN",
+                "Rule control actions must target an entity_instance_id, not a Neuron address",
+            )
+        if action_type != "control":
+            continue
+        if forbidden_fields.intersection(action):
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_LEGACY_FORBIDDEN",
+                "Rule control actions cannot contain physical addresses, MQTT payloads, or local cooldowns",
+            )
+        if "entity_instance_id" not in action or "value" not in action:
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_ACTION_INVALID",
+                "Rule control actions require entity_instance_id and value",
+            )
+        if not isinstance(action.get("id"), str):
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_ACTION_INVALID",
+                "Rule control actions require a stable string id",
+            )
+        action_key = action["id"].strip()
+        if not action_key or len(action_key) > 200:
+            raise EntityInstanceReferenceError(
+                "RULE_CONTROL_ACTION_INVALID",
+                "Rule control action identifiers must be unique and at most 200 characters",
+            )
+        references.append(("control", action_key, action["entity_instance_id"]))
+    return references

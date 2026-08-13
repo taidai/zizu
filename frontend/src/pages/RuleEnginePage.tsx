@@ -3,81 +3,82 @@ import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-e
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
-  fetchRules, fetchNodes, fetchEntities, fetchEntityBindings, fetchEntityInstances, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, writeNeuronTag, writeEntityValue, fetchRuleTemplates,
-  type Rule, type RuleCreateRequest, type Node, type Entity, type EntityBinding, type EntityInstance, type RuleTemplate,
-} from '../api/client'  
+  fetchRules, fetchEntityInstances, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, submitControlCommand, fetchRuleTemplates,
+  type Rule, type RuleCreateRequest, type EntityInstance, type RuleTemplate,
+} from '../api/client'
 
 type DecisionGraphType = {
   nodes: any[]
   edges: any[]
 }
 
-type NeuronWriteAction = {
-  type: 'neuron_write'
-  node: string
-  group: string
-  tag: string
+type ControlAction = {
+  id?: string
+  type: 'control'
+  entity_instance_id?: string
   value: any
-  cooldown?: number
-  entity_id?: string
-  entity?: string
-  entity_name?: string
 }
 
 type OutputBinding = {
   field: string
   name?: string
-  node: string
-  group: string
-  tag: string
-  cooldown: number
-  entity_id?: string
-  entity?: string
-  entity_name?: string
+  entity_instance_id?: string
 }
 
 type RuleConfig = {
   sourceEntityInstanceIds: string[]
   legacySourceEntityIds: string[]
-  actions: NeuronWriteAction[]
+  legacyControlActions: boolean
+  actions: ControlAction[]
   inputMappings?: Record<string, string>
   outputBindings?: OutputBinding[]
   template?: string
 }
 
 function extractConfig(content: any): RuleConfig {
+  const configuredActions = Array.isArray(content?._config?.actions) ? content._config.actions : []
+  const graphActions = Array.isArray(content?.actions) ? content.actions : []
+  const legacyPhysicalFields = new Set([
+    'node', 'group', 'tag', 'topic', 'payload', 'command',
+    'entity_id', 'entity', 'entity_name', 'cooldown',
+  ])
+  const legacyControlActions = [...configuredActions, ...graphActions]
+    .some((action: any) => action && typeof action === 'object' && (
+      action.type === 'neuron_write'
+      || (action.type === 'control' && Object.keys(action).some((key) => legacyPhysicalFields.has(key)))
+    ))
   if (content && typeof content === 'object' && content._config) {
     const cfg = content._config
     return {
       sourceEntityInstanceIds: cfg.sourceEntityInstanceIds || [],
       legacySourceEntityIds: cfg.sourceEntityIds || [],
-      actions: (cfg.actions || []).map((a: any) => ({
-        type: 'neuron_write',
-        node: a.node || '',
-        group: a.group || '',
-        tag: a.tag || '',
-        value: a.value ?? '',
-        cooldown: a.cooldown ?? 60,
-        entity_id: a.entity_id || '',
-        entity: a.entity || a.entity_name || '',
-        entity_name: a.entity_name || '',
-      })),
+      legacyControlActions,
+      actions: (cfg.actions || [])
+        .filter((a: any) => a?.type === 'control')
+        .map((a: any) => ({
+          id: a.id || '',
+          type: 'control',
+          entity_instance_id: a.entity_instance_id || '',
+          value: a.value ?? '',
+        })),
       inputMappings: cfg.inputMappings || {},
       outputBindings: (cfg.outputBindings || []).map((b: any) => ({
         field: b.field || '',
         name: b.name || '',
-        node: b.node || '',
-        group: b.group || '',
-        tag: b.tag || '',
-        cooldown: b.cooldown ?? 60,
-        entity_id: b.entity_id || '',
-        entity: b.entity || b.entity_name || '',
-        entity_name: b.entity_name || '',
+        entity_instance_id: b.entity_instance_id || '',
       })),
       template: cfg.template || 'custom',
     }
   }
-  return { sourceEntityInstanceIds: [], legacySourceEntityIds: [], actions: [], inputMappings: {}, outputBindings: [], template: 'custom' }
+  return {
+    sourceEntityInstanceIds: [],
+    legacySourceEntityIds: [],
+    legacyControlActions,
+    actions: [],
+    inputMappings: {},
+    outputBindings: [],
+    template: 'custom',
+  }
 }
 
 function emptyGraph(): DecisionGraphType {
@@ -128,40 +129,15 @@ function extractGraphFields(graph: DecisionGraphType) {
   return { inputs, outputs }
 }
 
-function bindingsToActions(bindings: OutputBinding[]): NeuronWriteAction[] {
+function bindingsToActions(bindings: OutputBinding[]): ControlAction[] {
   return bindings
-    .filter((b) => b.node && b.group && b.tag)
+    .filter((b) => b.entity_instance_id)
     .map((b) => ({
-      type: 'neuron_write',
-      node: b.node,
-      group: b.group,
-      tag: b.tag,
+      id: `output:${b.field}`,
+      type: 'control',
+      entity_instance_id: b.entity_instance_id,
       value: `{{${b.field}}}`,
-      cooldown: b.cooldown,
-      entity_id: b.entity_id,
-      entity: b.entity,
-      entity_name: b.entity_name,
     }))
-}
-
-function actionsToBindings(actions: NeuronWriteAction[], outputs: { id: string; name?: string }[]): OutputBinding[] {
-  const map = new Map(outputs.map((o) => [o.id, o.name || o.id]))
-  return actions
-    .filter((a) => typeof a.value === 'string' && a.value.startsWith('{{') && a.value.endsWith('}}'))
-    .map((a) => {
-      const field = a.value.slice(2, -2)
-      return {
-        field,
-        name: map.get(field) || field,
-        node: a.node,
-        group: a.group,
-        tag: a.tag,
-        cooldown: a.cooldown ?? 60,
-        entity_id: a.entity_id,
-        entity: a.entity,
-        entity_name: a.entity_name,
-      }
-    })
 }
 
 const RULE_TYPES: RuleCreateRequest['rule_type'][] = ['alarm', 'control', 'fault_map', 'linkage']
@@ -194,11 +170,8 @@ function RuleForm({
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [graph, setGraph] = useState<DecisionGraphType>(initialGraph)
   const [config, setConfig] = useState<RuleConfig>(initialConfig)
-  const [nodes, setNodes] = useState<Node[]>([])
   const [entitySearch, setEntitySearch] = useState('')
-  const [entityOptions, setEntityOptions] = useState<Entity[]>([])
   const [entityInstanceOptions, setEntityInstanceOptions] = useState<EntityInstance[]>([])
-  const [entityBindings, setEntityBindings] = useState<EntityBinding[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [simulate, setSimulate] = useState<any>()
@@ -208,23 +181,11 @@ function RuleForm({
   const [showRawActions, setShowRawActions] = useState(false)
 
   useEffect(() => {
-    fetchNodes().then((list) => setNodes(list)).catch(() => {})
-  }, [])
-
-  useEffect(() => {
     const load = async () => {
       try {
-        const [entities, bindings, instances] = await Promise.all([
-          fetchEntities({ page: 1, page_size: 10000 }),
-          fetchEntityBindings({}),
-          fetchEntityInstances(),
-        ])
-        setEntityOptions(entities.items)
-        setEntityBindings(bindings.bindings)
+        const instances = await fetchEntityInstances()
         setEntityInstanceOptions(instances.items)
       } catch {
-        setEntityOptions([])
-        setEntityBindings([])
         setEntityInstanceOptions([])
       }
     }
@@ -253,19 +214,11 @@ function RuleForm({
         .map((o: any) => existingBindings.get(o.id) || {
           field: o.id,
           name: o.name,
-          node: '',
-          group: '',
-          tag: '',
-          cooldown: 60,
+          entity_instance_id: '',
         })
       return { ...prev, inputMappings: newInputMappings, outputBindings: newBindings }
     })
   }, [graphFields.inputs.length, graphFields.outputs.length])
-
-  const resolveEntityBinding = (entityId: string | undefined) => {
-    if (!entityId) return null
-    return entityBindings.find((b) => b.entity_id === entityId) || null
-  }
 
   const applyTemplate = (templateId: string) => {
     const tmpl = templates.find((t) => t.id === templateId)
@@ -333,6 +286,10 @@ function RuleForm({
       setError('该规则仍引用旧全局实体，请按迁移预览改选明确的设备实体实例后再保存')
       return
     }
+    if (config.legacyControlActions) {
+      setError('该规则含旧物理控制动作，需重新配置为“实体实例 + 值”的统一控制命令后才能保存')
+      return
+    }
     setSaving(true)
     try {
       const derivedActions = showRawActions ? config.actions : bindingsToActions(config.outputBindings || [])
@@ -370,18 +327,15 @@ function RuleForm({
     })
   }
 
-  const testWrite = async (action: NeuronWriteAction) => {
+  const testWrite = async (action: ControlAction) => {
     try {
       const v = action.value
       if (typeof v === 'string' && v.includes('{{')) {
         if (!confirm('当前值为模板，测试下发会写入字面量，确定继续？')) return
       }
-      if (action.entity_id) {
-        await writeEntityValue(action.entity_id, action.value)
-      } else {
-        await writeNeuronTag(action.node, action.group, action.tag, action.value)
-      }
-      alert('下发成功')
+      if (!action.entity_instance_id) throw new Error('请选择已确认的实体实例')
+      const command = await submitControlCommand(action.entity_instance_id, action.value)
+      alert(`命令已创建：${command.status}。现场成功需等待回读确认。`)
     } catch (e: any) {
       alert(`下发失败: ${e.message || e}`)
     }
@@ -500,6 +454,11 @@ function RuleForm({
                 {config.legacySourceEntityIds.length > 0 && (
                   <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     该规则仍有 {config.legacySourceEntityIds.length} 个旧全局实体引用，当前只读兼容；请重新选择实体实例后保存。
+                  </div>
+                )}
+                {config.legacyControlActions && (
+                  <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    该规则含旧物理控制动作，当前只读兼容；请在输出页重新绑定设备实体实例后保存。
                   </div>
                 )}
                 <input
@@ -672,7 +631,6 @@ function RuleForm({
                         <tr>
                           <th className="text-left py-2 font-medium">决策输出</th>
                           <th className="text-left py-2 font-medium">设备实体实例</th>
-                          <th className="text-left py-2 font-medium">冷却(s)</th>
                           <th className="text-left py-2 font-medium">操作</th>
                         </tr>
                       </thead>
@@ -685,50 +643,31 @@ function RuleForm({
                             </td>
                             <td className="py-2">
                               <select
-                                value={binding.entity_id || ''}
+                                value={binding.entity_instance_id || ''}
                                 onChange={(e) => {
-                                  const entityId = e.target.value || undefined
-                                  const entity = entityOptions.find((en) => en.id === entityId)
-                                  const tagBinding = entityId ? resolveEntityBinding(entityId) : null
+                                  const entityInstanceId = e.target.value || undefined
                                   updateOutputBinding(idx, {
-                                    entity_id: entityId,
-                                    entity: entity?.name,
-                                    entity_name: entity?.name,
-                                    node: tagBinding?.node_name || '',
-                                    group: tagBinding?.tag_name?.includes('.') ? tagBinding.tag_name.split('.')[0] : '',
-                                    tag: tagBinding?.tag_name || '',
+                                    entity_instance_id: entityInstanceId,
                                   })
                                 }}
                                 className="neu-input w-full px-2 py-1 text-xs bg-transparent"
                               >
-                                <option value="">-- 选择实体 --</option>
-                                {entityOptions.map((e) => (
-                                  <option key={e.id} value={e.id}>{e.display_name || e.name}</option>
+                                <option value="">-- 选择实体实例 --</option>
+                                {entityInstanceOptions.map((e) => (
+                                  <option key={e.id} value={e.id}>{e.device_display_name} / {e.display_name}</option>
                                 ))}
                               </select>
-                            </td>
-                            <td className="py-2">
-                              <input
-                                type="number"
-                                value={binding.cooldown}
-                                onChange={(e) => updateOutputBinding(idx, { cooldown: Number(e.target.value) })}
-                                className="neu-input w-20 px-2 py-1"
-                              />
                             </td>
                             <td className="py-2">
                               <button
                                 type="button"
                                 onClick={() => testWrite({
-                                  type: 'neuron_write',
-                                  entity_id: binding.entity_id,
-                                  entity_name: binding.entity_name,
-                                  node: binding.node,
-                                  group: binding.group,
-                                  tag: binding.tag,
+                                  id: `output:${binding.field}`,
+                                  type: 'control',
+                                  entity_instance_id: binding.entity_instance_id,
                                   value: `{{${binding.field}}}`,
-                                  cooldown: binding.cooldown,
                                 })}
-                                disabled={!binding.entity_id}
+                                disabled={!binding.entity_instance_id}
                                 className="neu-btn px-2 py-1 text-[10px] text-[#389e0d] disabled:opacity-40"
                               >
                                 测试下发
@@ -745,62 +684,32 @@ function RuleForm({
                   {config.actions.map((action, idx) => (
                     <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                       <select
-                        value={action.entity_id || ''}
+                        value={action.entity_instance_id || ''}
                         onChange={(e) => {
-                          const entityId = e.target.value || undefined
-                          const entity = entityOptions.find((en) => en.id === entityId)
-                          const binding = entityId ? resolveEntityBinding(entityId) : null
+                          const entityInstanceId = e.target.value || undefined
                           const actions = [...config.actions]
                           actions[idx] = {
                             ...action,
-                            entity_id: entityId,
-                            entity: entity?.name,
-                            entity_name: entity?.name,
-                            node: binding?.node_name || '',
-                            group: '',
-                            tag: binding?.tag_name || '',
+                            entity_instance_id: entityInstanceId,
                           }
                           setConfig({ ...config, actions })
                         }}
                         className="neu-input col-span-3 px-2 py-1 bg-transparent"
                       >
                         <option value="">-- 选择实体实例 --</option>
-                        {entityOptions.map((e) => (
-                          <option key={e.id} value={e.id}>{e.display_name || e.name}</option>
+                        {entityInstanceOptions.map((e) => (
+                          <option key={e.id} value={e.id}>{e.device_display_name} / {e.display_name}</option>
                         ))}
                       </select>
                       <input
-                        value={action.node}
+                        value={action.id || ''}
                         onChange={(e) => {
                           const actions = [...config.actions]
-                          actions[idx] = { ...action, node: e.target.value }
+                          actions[idx] = { ...action, id: e.target.value }
                           setConfig({ ...config, actions })
                         }}
-                        placeholder="NE节点"
-                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
-                        disabled={!!action.entity_id}
-                      />
-                      <input
-                        value={action.group}
-                        onChange={(e) => {
-                          const actions = [...config.actions]
-                          actions[idx] = { ...action, group: e.target.value }
-                          setConfig({ ...config, actions })
-                        }}
-                        placeholder="组"
-                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
-                        disabled={!!action.entity_id}
-                      />
-                      <input
-                        value={action.tag}
-                        onChange={(e) => {
-                          const actions = [...config.actions]
-                          actions[idx] = { ...action, tag: e.target.value }
-                          setConfig({ ...config, actions })
-                        }}
-                        placeholder="点位名"
-                        className="neu-input col-span-2 px-2 py-1 disabled:opacity-50"
-                        disabled={!!action.entity_id}
+                        placeholder="稳定动作 ID"
+                        className="neu-input col-span-3 px-2 py-1"
                       />
                       <input
                         value={String(action.value ?? '')}
@@ -815,7 +724,7 @@ function RuleForm({
                       <button
                         type="button"
                         onClick={() => testWrite(action)}
-                        disabled={!action.entity_id && (!action.node || !action.group || !action.tag)}
+                        disabled={!action.entity_instance_id}
                         className="neu-btn col-span-1 px-1 py-1 text-[10px] text-[#389e0d] disabled:opacity-40"
                       >
                         测试
@@ -827,12 +736,17 @@ function RuleForm({
                     onClick={() =>
                       setConfig({
                         ...config,
-                        actions: [...config.actions, { type: 'neuron_write', node: '', group: '', tag: '', value: '1', cooldown: 60 }],
+                        actions: [...config.actions, {
+                          id: crypto.randomUUID(),
+                          type: 'control',
+                          entity_instance_id: '',
+                          value: '1',
+                        }],
                       })
                     }
                     className="neu-btn px-2 py-1 text-[10px] text-gray-600"
                   >
-                    + 添加 NE 写点位
+                    + 添加控制命令
                   </button>
                 </div>
               )}

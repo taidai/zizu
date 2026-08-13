@@ -27,6 +27,7 @@ MIGRATION_024 = BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instance
 MIGRATION_025 = BACKEND_ROOT.parent / "init-db" / "migration_025_rule_entity_instance_refs.sql"
 MIGRATION_026 = BACKEND_ROOT.parent / "init-db" / "migration_026_control_commands.sql"
 MIGRATION_027 = BACKEND_ROOT.parent / "init-db" / "migration_027_nullable_control_target.sql"
+MIGRATION_028 = BACKEND_ROOT.parent / "init-db" / "migration_028_rule_control_commands.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -36,6 +37,7 @@ MIGRATIONS = (
     MIGRATION_025,
     MIGRATION_026,
     MIGRATION_027,
+    MIGRATION_028,
 )
 def build_minimal_package(
     *,
@@ -283,6 +285,16 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 migration_025 = MIGRATION_025.read_text(encoding="utf-8")
                 cursor.execute(migration_025)
                 cursor.execute(migration_025)
+                for migration in (MIGRATION_026, MIGRATION_027, MIGRATION_028):
+                    cursor.execute(migration.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_028.read_text(encoding="utf-8"))
+                cursor.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 't_control_commands' "
+                    "AND column_name = 'origin_evidence'"
+                )
+                if cursor.fetchone() != ("origin_evidence",):
+                    raise AssertionError("rule command origin evidence was not migrated")
 
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")

@@ -27,6 +27,7 @@ from app.services.control_commands import (
     PostgresControlCommandRepository,
     PostgresControlTargetResolver,
 )
+from app.services.automated_control_commands import AutomatedControlCommands
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -61,6 +62,7 @@ _control_compatibility = ControlCommandCompatibility(
     _control_commands,
     PostgresControlTargetResolver(),
 )
+_automated_control_commands = AutomatedControlCommands(_control_commands)
 _delivery = SolutionDelivery(
     _repository,
     platform_version=_VERSION,
@@ -96,6 +98,10 @@ def get_default_control_commands() -> ControlCommandRuntime:
 
 def get_default_control_compatibility() -> ControlCommandCompatibility:
     return _control_compatibility
+
+
+def get_default_automated_control_commands() -> AutomatedControlCommands:
+    return _automated_control_commands
 
 
 class ApplyInstallationRequest(BaseModel):

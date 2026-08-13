@@ -1034,6 +1034,26 @@ export interface EntityInstance {
   freshness_seconds: number
 }
 
+export interface ControlCommand {
+  id: string
+  status: string
+  code: string
+  source_type: string
+}
+
+export async function submitControlCommand(entityInstanceId: string, value: unknown): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ value }),
+  })
+  if (!response.ok) throw await authError(response, `Control command failed: ${response.status}`)
+  return response.json()
+}
+
 export interface LegacyEntityMigrationItem {
   legacy_entity_id: string
   legacy_entity_name: string

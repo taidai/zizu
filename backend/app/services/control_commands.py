@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -47,6 +47,7 @@ class SubmitControlCommand:
     idempotency_key: str
     confirmation_id: UUID | None = None
     capability: str = "control.write"
+    origin_evidence: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class ControlCommand:
     data_type: str
     tolerance: float | None
     policy_snapshot: dict[str, object]
+    origin_evidence: dict[str, object]
     timeout_at: datetime | None
     status: str
     code: str
@@ -98,6 +100,7 @@ class ControlCommand:
             "data_type": self.data_type,
             "tolerance": self.tolerance,
             "policy_snapshot": self.policy_snapshot,
+            "origin_evidence": self.origin_evidence,
             "timeout_at": self.timeout_at.isoformat() if self.timeout_at else None,
             "status": self.status,
             "code": self.code,
@@ -483,9 +486,9 @@ class PostgresControlCommandRepository:
                 """
                 INSERT INTO t_control_commands
                   (id, actor, source_type, capability, entity_instance_id, expected_value, data_type,
-                   tolerance, policy_snapshot, timeout_at, status, code, idempotency_key, request_digest, audit_event_id,
+                   tolerance, policy_snapshot, origin_evidence, timeout_at, status, code, idempotency_key, request_digest, audit_event_id,
                    created_at, dispatched_at)
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 _command_values(command),
             )
@@ -631,6 +634,7 @@ class PostgresControlCommandRepository:
                         "command_id": str(command.id),
                         "source_type": command.source_type,
                         "capability": command.capability,
+                        "origin_evidence": command.origin_evidence,
                     }
                 ),
             ),
@@ -746,6 +750,7 @@ class ControlCommandRuntime:
             entity_instance_id=request.entity_instance_id, expected_value=request.value,
             data_type=source.data_type, tolerance=policy.tolerance,
             policy_snapshot=_policy_snapshot(policy),
+            origin_evidence=request.origin_evidence,
             timeout_at=now + timedelta(seconds=policy.timeout_seconds),
             status="accepted", code="CONTROL_ACCEPTED", idempotency_key=request.idempotency_key,
             request_digest=digest, created_at=now,
@@ -889,7 +894,8 @@ class ControlCommandRuntime:
             id=uuid4(), actor=request.actor, source_type=request.source_type,
             capability=request.capability,
             entity_instance_id=request.entity_instance_id, expected_value=request.value,
-            data_type=normalized_type, tolerance=None, policy_snapshot={}, timeout_at=None, status="rejected",
+            data_type=normalized_type, tolerance=None, policy_snapshot={},
+            origin_evidence=request.origin_evidence, timeout_at=None, status="rejected",
             code=code, idempotency_key=request.idempotency_key, request_digest=digest,
             created_at=now,
         )
@@ -1055,6 +1061,7 @@ def _request_digest(request: SubmitControlCommand) -> str:
         "capability": request.capability,
         "entity_instance_id": str(request.entity_instance_id) if request.entity_instance_id else None,
         "value": request.value,
+        "origin_evidence": request.origin_evidence,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1078,7 +1085,7 @@ def _control_policy(value: ControlPolicy | dict[str, Any] | None) -> ControlPoli
 
 _COMMAND_FIELD_NAMES = (
     "id", "actor", "source_type", "capability", "entity_instance_id", "expected_value", "data_type",
-    "tolerance", "policy_snapshot", "timeout_at", "status", "code", "idempotency_key", "request_digest",
+    "tolerance", "policy_snapshot", "origin_evidence", "timeout_at", "status", "code", "idempotency_key", "request_digest",
     "audit_event_id", "created_at", "dispatched_at",
 )
 _COMMAND_COLUMNS = ", ".join(_COMMAND_FIELD_NAMES)
@@ -1099,6 +1106,7 @@ def _command_values(command: ControlCommand) -> tuple[object, ...]:
         command.data_type,
         command.tolerance,
         json.dumps(command.policy_snapshot, ensure_ascii=True),
+        json.dumps(command.origin_evidence, ensure_ascii=True),
         command.timeout_at,
         command.status,
         command.code,
@@ -1124,14 +1132,15 @@ def _command_from_row(row: tuple[object, ...]) -> ControlCommand:
         data_type=row[6],  # type: ignore[arg-type]
         tolerance=row[7],  # type: ignore[arg-type]
         policy_snapshot=row[8] if isinstance(row[8], dict) else json.loads(row[8]),  # type: ignore[arg-type]
-        timeout_at=row[9],  # type: ignore[arg-type]
-        status=row[10],  # type: ignore[arg-type]
-        code=row[11],  # type: ignore[arg-type]
-        idempotency_key=row[12],  # type: ignore[arg-type]
-        request_digest=row[13],  # type: ignore[arg-type]
-        audit_event_id=row[14],  # type: ignore[arg-type]
-        created_at=row[15],  # type: ignore[arg-type]
-        dispatched_at=row[16],  # type: ignore[arg-type]
+        origin_evidence=row[9] if isinstance(row[9], dict) else json.loads(row[9]),  # type: ignore[arg-type]
+        timeout_at=row[10],  # type: ignore[arg-type]
+        status=row[11],  # type: ignore[arg-type]
+        code=row[12],  # type: ignore[arg-type]
+        idempotency_key=row[13],  # type: ignore[arg-type]
+        request_digest=row[14],  # type: ignore[arg-type]
+        audit_event_id=row[15],  # type: ignore[arg-type]
+        created_at=row[16],  # type: ignore[arg-type]
+        dispatched_at=row[17],  # type: ignore[arg-type]
     )
 
 
