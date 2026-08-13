@@ -21,9 +21,11 @@ from app.services.entity_instance_runtime import EntityInstanceRuntime
 from app.services.entity_instance_catalog import EntityInstanceCatalog
 from app.services.entity_instance_failover import EntityFailoverPolicy
 from app.services.control_commands import (
+    ControlCommandCompatibility,
     ControlCommandRuntime,
     NeuronControlDispatcher,
     PostgresControlCommandRepository,
+    PostgresControlTargetResolver,
 )
 from app.services.solution_delivery import (
     DeliveryError,
@@ -54,6 +56,10 @@ _control_commands = ControlCommandRuntime(
     readback=_entity_instance_runtime,
     dispatcher=NeuronControlDispatcher(),
     repository=PostgresControlCommandRepository(),
+)
+_control_compatibility = ControlCommandCompatibility(
+    _control_commands,
+    PostgresControlTargetResolver(),
 )
 _delivery = SolutionDelivery(
     _repository,
@@ -86,6 +92,10 @@ def get_default_entity_instance_failover() -> EntityFailoverPolicy:
 
 def get_default_control_commands() -> ControlCommandRuntime:
     return _control_commands
+
+
+def get_default_control_compatibility() -> ControlCommandCompatibility:
+    return _control_compatibility
 
 
 class ApplyInstallationRequest(BaseModel):

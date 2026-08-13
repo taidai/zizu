@@ -341,6 +341,9 @@ def create_app() -> FastAPI:
         tags=["Control Commands"],
     )
 
+    from app.api.rpc import router as rpc_router
+    app.include_router(rpc_router, prefix="/api/v1", tags=["Control Commands"])
+
      # ---- Static Frontend (F0 可视化 V1) ----
     # 后端直接托管前端 dist，无需独立 nginx 容器
     import os

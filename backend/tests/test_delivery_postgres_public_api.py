@@ -26,6 +26,7 @@ MIGRATION_023 = BACKEND_ROOT.parent / "init-db" / "migration_023_site_configurat
 MIGRATION_024 = BACKEND_ROOT.parent / "init-db" / "migration_024_entity_instances.sql"
 MIGRATION_025 = BACKEND_ROOT.parent / "init-db" / "migration_025_rule_entity_instance_refs.sql"
 MIGRATION_026 = BACKEND_ROOT.parent / "init-db" / "migration_026_control_commands.sql"
+MIGRATION_027 = BACKEND_ROOT.parent / "init-db" / "migration_027_nullable_control_target.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -34,6 +35,7 @@ MIGRATIONS = (
     MIGRATION_024,
     MIGRATION_025,
     MIGRATION_026,
+    MIGRATION_027,
 )
 def build_minimal_package(
     *,
@@ -964,18 +966,64 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             )
             self.assertEqual(ready_publish.status_code, 200, ready_publish.text)
             submitted_control = client.post(
-                f"/api/v1/entity-instances/{control_ids['pcs.setpoint']}/control-commands",
+                "/api/v1/neuron/write",
                 headers={
                     **operator_auth,
                     "Idempotency-Key": "postgres-control-once",
                 },
-                json={"value": 20.0},
+                json={
+                    "node": "PCS-01",
+                    "group": "default",
+                    "tag": "Setpoint",
+                    "value": 20.0,
+                },
             )
             self.assertEqual(submitted_control.status_code, 201, submitted_control.text)
             self.assertEqual("failed", submitted_control.json()["status"])
             self.assertEqual("CONTROL_DISPATCH_FAILED", submitted_control.json()["code"])
             self.assertEqual("control.write", submitted_control.json()["capability"])
             self.assertNotIn("neuron", repr(submitted_control.json()).casefold())
+            self.assertEqual(
+                "/api/v1/entity-instances/{id}/control-commands",
+                submitted_control.json()["migration"]["replacement"],
+            )
+            self.assertEqual(
+                f"/api/v1/control-commands/{submitted_control.json()['id']}",
+                submitted_control.json()["links"]["command"],
+            )
+
+            repeated_legacy_rpc = client.post(
+                "/api/v1/devices/40000000-0000-0000-0000-000000000001/rpc",
+                headers={
+                    **operator_auth,
+                    "Idempotency-Key": "postgres-control-once",
+                },
+                json={
+                    "command": "pcs.setpoint",
+                    "payload": {"value": 20.0},
+                    "topic": "ignored/arbitrary/topic",
+                },
+            )
+            self.assertEqual(repeated_legacy_rpc.status_code, 201, repeated_legacy_rpc.text)
+            self.assertEqual(
+                repeated_legacy_rpc.json()["id"],
+                submitted_control.json()["id"],
+            )
+
+            repeated_rpc = client.post(
+                "/api/v1/devices/40000000-0000-0000-0000-000000000001/rpc",
+                headers={
+                    **operator_auth,
+                    "Idempotency-Key": "postgres-control-once",
+                },
+                json={
+                    "entity_instance_id": control_ids["pcs.setpoint"],
+                    "value": 20.0,
+                },
+            )
+            self.assertEqual(repeated_rpc.status_code, 201, repeated_rpc.text)
+            self.assertEqual(repeated_rpc.json()["id"], submitted_control.json()["id"])
+            self.assertEqual("compatibility", repeated_rpc.json()["source_type"])
 
         self.assertEqual(persisted_admin.status_code, 200, persisted_admin.text)
         self.assertEqual(persisted_engineer.status_code, 200, persisted_engineer.text)

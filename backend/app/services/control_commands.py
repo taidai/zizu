@@ -42,7 +42,7 @@ class ControlPolicy:
 class SubmitControlCommand:
     actor: str
     source_type: str
-    entity_instance_id: UUID
+    entity_instance_id: UUID | None
     value: object
     idempotency_key: str
     confirmation_id: UUID | None = None
@@ -73,7 +73,7 @@ class ControlCommand:
     actor: str
     source_type: str
     capability: str
-    entity_instance_id: UUID
+    entity_instance_id: UUID | None
     expected_value: object
     data_type: str
     tolerance: float | None
@@ -93,7 +93,7 @@ class ControlCommand:
             "actor": self.actor,
             "source_type": self.source_type,
             "capability": self.capability,
-            "entity_instance_id": str(self.entity_instance_id),
+            "entity_instance_id": str(self.entity_instance_id) if self.entity_instance_id else None,
             "expected_value": self.expected_value,
             "data_type": self.data_type,
             "tolerance": self.tolerance,
@@ -159,6 +159,150 @@ class EntityInstanceReader(Protocol):
 
 class ControlDispatcher(Protocol):
     def dispatch(self, request: DispatchControlCommand) -> None: ...
+
+
+class ControlTargetResolver(Protocol):
+    """Resolve only a confirmed entity instance from a legacy control address."""
+
+    def neuron_target(self, *, node: str, group: str, tag: str) -> UUID | None: ...
+
+    def rpc_target(
+        self,
+        *,
+        node_id: UUID,
+        entity_instance_id: UUID,
+    ) -> UUID | None: ...
+
+    def legacy_rpc_target(self, *, node_id: UUID, command: str) -> UUID | None: ...
+
+
+class PostgresControlTargetResolver:
+    """Compatibility adapter; never turns an arbitrary address into a write."""
+
+    @staticmethod
+    def _connection():
+        from app.services.telemetry_store import get_connection
+
+        return get_connection()
+
+    def neuron_target(self, *, node: str, group: str, tag: str) -> UUID | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ei.id, n.name, t.name, t.source_path
+                FROM t_entity_instances ei
+                JOIN t_entity_instance_bindings binding
+                  ON binding.entity_instance_id = ei.id AND binding.active = TRUE
+                JOIN t_tags t ON t.id = binding.tag_id AND t.enabled = TRUE
+                JOIN t_nodes n ON n.id = t.node_id AND n.enabled = TRUE
+                JOIN t_device_instances di ON di.id = ei.device_instance_id AND di.active = TRUE
+                WHERE ei.active = TRUE
+                  AND n.name = %s
+                  AND t.name = %s
+                  AND (t.source_type IS NULL OR lower(t.source_type) = 'neuron')
+                """,
+                (node, tag),
+            )
+            matches = [
+                row[0]
+                for row in cur.fetchall()
+                if _neuron_target(row[1], row[2], row[3]) == (node, group, tag)
+            ]
+        return matches[0] if len(matches) == 1 else None
+
+    def rpc_target(
+        self,
+        *,
+        node_id: UUID,
+        entity_instance_id: UUID,
+    ) -> UUID | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT binding.entity_instance_id
+                FROM t_entity_instance_bindings binding
+                JOIN t_entity_instances ei ON ei.id = binding.entity_instance_id
+                JOIN t_device_instances di ON di.id = ei.device_instance_id
+                JOIN t_tags tag ON tag.id = binding.tag_id AND tag.enabled = TRUE
+                JOIN t_nodes node ON node.id = tag.node_id AND node.enabled = TRUE
+                WHERE binding.entity_instance_id = %s
+                  AND binding.active = TRUE
+                  AND ei.active = TRUE
+                  AND di.active = TRUE
+                  AND node.id = %s
+                  AND (tag.source_type IS NULL OR lower(tag.source_type) = 'neuron')
+                """,
+                (entity_instance_id, node_id),
+            )
+            rows = cur.fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
+    def legacy_rpc_target(self, *, node_id: UUID, command: str) -> UUID | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT binding.entity_instance_id
+                FROM t_entity_instance_bindings binding
+                JOIN t_entity_instances ei ON ei.id = binding.entity_instance_id
+                JOIN t_device_instances di ON di.id = ei.device_instance_id
+                JOIN t_tags tag ON tag.id = binding.tag_id AND tag.enabled = TRUE
+                JOIN t_nodes node ON node.id = tag.node_id AND node.enabled = TRUE
+                WHERE ei.definition_id = %s
+                  AND binding.active = TRUE
+                  AND ei.active = TRUE
+                  AND di.active = TRUE
+                  AND node.id = %s
+                  AND (tag.source_type IS NULL OR lower(tag.source_type) = 'neuron')
+                """,
+                (command, node_id),
+            )
+            rows = cur.fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
+
+class InMemoryControlTargetResolver:
+    """Compatibility resolver for the public HTTP seam."""
+
+    def __init__(self) -> None:
+        self._neuron: dict[tuple[str, str, str], UUID] = {}
+        self._rpc: dict[tuple[UUID, UUID], UUID] = {}
+        self._legacy_rpc: dict[tuple[UUID, str], UUID] = {}
+
+    def register_neuron(
+        self,
+        *,
+        node: str,
+        group: str,
+        tag: str,
+        entity_instance_id: UUID,
+    ) -> None:
+        self._neuron[(node, group, tag)] = entity_instance_id
+
+    def register_rpc(self, node_id: UUID, entity_instance_id: UUID) -> None:
+        self._rpc[(node_id, entity_instance_id)] = entity_instance_id
+
+    def register_legacy_rpc(
+        self,
+        *,
+        node_id: UUID,
+        command: str,
+        entity_instance_id: UUID,
+    ) -> None:
+        self._legacy_rpc[(node_id, command)] = entity_instance_id
+
+    def neuron_target(self, *, node: str, group: str, tag: str) -> UUID | None:
+        return self._neuron.get((node, group, tag))
+
+    def rpc_target(
+        self,
+        *,
+        node_id: UUID,
+        entity_instance_id: UUID,
+    ) -> UUID | None:
+        return self._rpc.get((node_id, entity_instance_id))
+
+    def legacy_rpc_target(self, *, node_id: UUID, command: str) -> UUID | None:
+        return self._legacy_rpc.get((node_id, command))
 
 
 class NeuronControlDispatcher:
@@ -477,7 +621,11 @@ class PostgresControlCommandRepository:
                 command.status,
                 command.code,
                 command.actor,
-                f"entity-instance:{command.entity_instance_id}",
+                (
+                    f"entity-instance:{command.entity_instance_id}"
+                    if command.entity_instance_id
+                    else "legacy-control-target:unresolved"
+                ),
                 json.dumps(
                     {
                         "command_id": str(command.id),
@@ -547,11 +695,33 @@ class ControlCommandRuntime:
             return self._reject(request, digest, now, "IDEMPOTENCY_KEY_REUSED", reserve_key=False)
         if not isinstance(request.idempotency_key, str) or not request.idempotency_key.strip():
             return self._reject(request, digest, now, "CONTROL_IDEMPOTENCY_KEY_INVALID", reserve_key=False)
+        if request.entity_instance_id is None:
+            return self._reject(
+                request,
+                digest,
+                now,
+                (
+                    "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED"
+                    if request.source_type == "compatibility"
+                    else "CONTROL_ENTITY_UNAVAILABLE"
+                ),
+                reserve_key=True,
+            )
 
         try:
             source: ResolvedEntitySource = self._registry.resolve(request.entity_instance_id)
         except Exception:
-            return self._reject(request, digest, now, "CONTROL_ENTITY_UNAVAILABLE", reserve_key=True)
+            return self._reject(
+                request,
+                digest,
+                now,
+                (
+                    "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED"
+                    if request.source_type == "compatibility"
+                    else "CONTROL_ENTITY_UNAVAILABLE"
+                ),
+                reserve_key=True,
+            )
         policy = _control_policy(self._policies.control_policy(request.entity_instance_id))
         if policy is None or source.direction not in {"W", "RW"}:
             return self._reject(request, digest, now, "CONTROL_NOT_CONFIGURED", reserve_key=True, data_type=source.data_type)
@@ -605,6 +775,44 @@ class ControlCommandRuntime:
             return self._transition(command, "failed", "CONTROL_DISPATCH_FAILED", at=now)
         command = self._transition(command, "dispatched", "CONTROL_DISPATCHED", at=now, dispatched_at=now)
         return self.reconcile(command.id)
+
+    def reject_unresolved_compatibility_target(
+        self,
+        *,
+        actor: str,
+        value: object,
+        idempotency_key: str,
+    ) -> ControlCommand:
+        """Persist an unmappable legacy request without inventing an entity ID."""
+        now = self._now()
+        request = SubmitControlCommand(
+            actor=actor,
+            source_type="compatibility",
+            entity_instance_id=None,
+            value=value,
+            idempotency_key=idempotency_key,
+        )
+        digest = hashlib.sha256(json.dumps({
+            "actor": actor,
+            "source_type": "compatibility",
+            "capability": request.capability,
+            "target": "unresolved",
+            "value": value,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        existing = self._repository.idempotent(actor, idempotency_key)
+        if existing is not None:
+            if existing.request_digest == digest:
+                return existing
+            return self._reject(request, digest, now, "IDEMPOTENCY_KEY_REUSED", reserve_key=False)
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            return self._reject(request, digest, now, "CONTROL_IDEMPOTENCY_KEY_INVALID", reserve_key=False)
+        return self._reject(
+            request,
+            digest,
+            now,
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            reserve_key=True,
+        )
 
     def reconcile(self, command_id: UUID) -> ControlCommand:
         command = self.get(command_id)
@@ -714,6 +922,106 @@ class ControlCommandRuntime:
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+class ControlCommandCompatibility:
+    """将遗留 Neuron/RPC 入口压缩为唯一的命令运行时接口。"""
+
+    def __init__(
+        self,
+        runtime: ControlCommandRuntime,
+        targets: ControlTargetResolver,
+    ) -> None:
+        self._runtime = runtime
+        self._targets = targets
+
+    def submit_neuron(
+        self,
+        *,
+        actor: str,
+        node: str,
+        group: str,
+        tag: str,
+        value: object,
+        idempotency_key: str,
+        confirmation_id: UUID | None = None,
+    ) -> ControlCommand:
+        target = self._targets.neuron_target(node=node, group=group, tag=tag)
+        return self._submit(
+            actor=actor,
+            entity_instance_id=target,
+            value=value,
+            idempotency_key=idempotency_key,
+            confirmation_id=confirmation_id,
+        )
+
+    def submit_rpc(
+        self,
+        *,
+        actor: str,
+        node_id: UUID,
+        entity_instance_id: UUID,
+        value: object,
+        idempotency_key: str,
+        confirmation_id: UUID | None = None,
+    ) -> ControlCommand:
+        target = self._targets.rpc_target(
+            node_id=node_id,
+            entity_instance_id=entity_instance_id,
+        )
+        return self._submit(
+            actor=actor,
+            entity_instance_id=target,
+            value=value,
+            idempotency_key=idempotency_key,
+            confirmation_id=confirmation_id,
+        )
+
+    def submit_legacy_rpc(
+        self,
+        *,
+        actor: str,
+        node_id: UUID,
+        command: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+        confirmation_id: UUID | None = None,
+    ) -> ControlCommand:
+        """Map only a declared entity definition; never use MQTT topic routing."""
+        target = self._targets.legacy_rpc_target(node_id=node_id, command=command)
+        return self._submit(
+            actor=actor,
+            entity_instance_id=target,
+            value=payload.get("value"),
+            idempotency_key=idempotency_key,
+            confirmation_id=confirmation_id,
+        )
+
+    def _submit(
+        self,
+        *,
+        actor: str,
+        entity_instance_id: UUID | None,
+        value: object,
+        idempotency_key: str,
+        confirmation_id: UUID | None,
+    ) -> ControlCommand:
+        if entity_instance_id is None:
+            return self._runtime.reject_unresolved_compatibility_target(
+                actor=actor,
+                value=value,
+                idempotency_key=idempotency_key,
+            )
+        return self._runtime.submit(
+            SubmitControlCommand(
+                actor=actor,
+                source_type="compatibility",
+                entity_instance_id=entity_instance_id,
+                value=value,
+                idempotency_key=idempotency_key,
+                confirmation_id=confirmation_id,
+            )
+        )
+
+
 def _validate_value(value: object, data_type: str, policy: ControlPolicy) -> str | None:
     valid_type = {
         "FLOAT": isinstance(value, (int, float)) and not isinstance(value, bool),
@@ -745,7 +1053,7 @@ def _request_digest(request: SubmitControlCommand) -> str:
         "actor": request.actor,
         "source_type": request.source_type,
         "capability": request.capability,
-        "entity_instance_id": str(request.entity_instance_id),
+        "entity_instance_id": str(request.entity_instance_id) if request.entity_instance_id else None,
         "value": request.value,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 

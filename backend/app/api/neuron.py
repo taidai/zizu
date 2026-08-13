@@ -6,12 +6,26 @@ Neuron Proxy API — Neuron 代理接口
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.api.business_security import GATEWAY_MANAGE, protected
+from app.api.business_security import (
+    CONTROL_WRITE,
+    GATEWAY_MANAGE,
+    capability_metadata,
+    principal_for,
+    protected,
+)
+from app.api.control_commands import (
+    compatibility_error,
+    compatibility_response,
+    get_control_compatibility,
+)
+from app.services.control_commands import ControlCommandCompatibility
+from app.services.identity import Principal
 
 router = APIRouter()
 
@@ -48,6 +62,7 @@ class NeuronWriteRequest(BaseModel):
     group: str = Field(..., description="采集组名")
     tag: str = Field(..., description="点位名")
     value: Any = Field(..., description="写入值")
+    confirmation_id: UUID | None = Field(None, description="高风险命令的确认 ID")
 
 
 # ══════════════════════════════════════
@@ -268,17 +283,28 @@ async def get_neuron_status() -> dict:
     except Exception as e:
         logger.error("[API/neuron] Get status failed: {}", e)
         return {"error": str(e)}
-@router.post("/neuron/write", **protected(GATEWAY_MANAGE))
-async def write_neuron_tag(req: NeuronWriteRequest) -> dict:
-    """通过 Neuron REST API 写单个点位。"""
-    from app.services.neuron_client import get_neuron_client
-
-    try:
-        client = get_neuron_client()
-        result = client.write_tag(req.node, req.group, req.tag, req.value)
-        logger.info("[API/neuron] Write tag: {}/{} tag={} value={}", req.node, req.group, req.tag, req.value)
-        return {"status": "ok", "result": result}
-    except Exception as e:
-        logger.error("[API/neuron] Write tag failed: {}", e)
-        raise HTTPException(status_code=400, detail=str(e))
+@router.post(
+    "/neuron/write",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONTROL_WRITE),
+)
+async def write_neuron_tag(
+    req: NeuronWriteRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200),
+    principal: Principal = Depends(principal_for(CONTROL_WRITE)),
+    compatibility: ControlCommandCompatibility = Depends(get_control_compatibility),
+) -> dict:
+    """兼容入口：仅把已确认的 Neuron 点位转换为统一控制命令。"""
+    command = compatibility.submit_neuron(
+        actor=principal.actor,
+        node=req.node,
+        group=req.group,
+        tag=req.tag,
+        value=req.value,
+        idempotency_key=idempotency_key,
+        confirmation_id=req.confirmation_id,
+    )
+    if command.status == "rejected":
+        raise compatibility_error(command)
+    return compatibility_response(command)
 

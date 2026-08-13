@@ -3,6 +3,9 @@
 > 日期：2026-07-17
 > 状态：**已确认（Phase 0 最终文档）**
 > 决策者：郝交付（交付总监）+ 用户
+>
+> 控制写入的现行契约以 ADR-0007 为准：`/devices/{node_id}/rpc` 是创建控制命令的兼容入口，
+> 不再执行任意 MQTT 发布或把下游受理当作设备成功。下文 F2 的历史 RPC 描述仅保留作阶段记录。
 
 ---
 
@@ -705,7 +708,7 @@ CREATE TABLE t_users (
 
 | Method | Path | 功能 |
 |--------|------|------|
-| POST | `/api/v1/devices/{node_id}/rpc` | 发送RPC控制指令 |
+| POST | `/api/v1/devices/{node_id}/rpc` | 兼容入口：创建控制命令并返回命令 ID |
 | GET | `/api/v1/rpc/history` | RPC操作历史 |
 | POST | `/api/v1/rules` | 创建规则 (上传JDM) |
 | GET | `/api/v1/rules` | 规则列表 |

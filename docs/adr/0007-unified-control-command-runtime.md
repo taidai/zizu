@@ -98,8 +98,18 @@ class ControlCommandRuntime:
 - `POST /control-commands/{id}/reconcile`：触发一次安全回读检查。
 
 它们使用既有 `control.write` 能力（admin、engineer、operator），并保留独立的命令
-审计。旧 `/entities/{id}/write`、`/neuron/write`、MQTT RPC 和规则动作本票不改行为；
-它们在票据 09、10、11 才转换为此接口，避免在兼容期假称设备写入已经成功。
+审计。Ticket 09 已把旧 `/neuron/write` 和 `/devices/{node_id}/rpc` 变为兼容入口：
+
+- Neuron 三段地址仅在能够唯一映射到已确认、可控实体实例时接受；不能映射时创建明确
+  拒绝证据，绝不把任意地址传给下游 Adapter。
+- RPC 不再接收任意 MQTT topic/payload；新调用方必须给出与节点一致的实体实例 ID 和目标值。
+  受限旧形态只允许 `command` 精确匹配已确认实体实例的定义 ID，并只读取
+  `payload.value`；`topic` 与 QoS 从不参与路由或执行。
+- 两种兼容响应都返回控制命令及迁移提示。`201` 只表示命令已被处理，调用方必须以命令
+  状态 `readback_confirmed` 作为现场成功的唯一依据。
+
+遗留 `/entities/{id}/write` 以及规则动作仍由票据 10、11 迁入，避免在兼容期假称设备写入
+已经成功。
 
 ### 5. 持久化
 
@@ -123,8 +133,8 @@ class ControlCommandRuntime:
 
 ## Consequences
 
-- 人工、规则、策略、兼容 API 和验收将共享唯一且可审计的控制语义；新消费者不能再
-  直接写物理地址。
+- 人工、已迁移的 Neuron/RPC 兼容 API、规则、策略和验收将共享唯一且可审计的控制语义；
+  新消费者不能再直接写物理地址。
 - 解决方案包获得可配置但受限的控制声明，实施工程师无需改平台源码或 SQL 即可交付
   基础控制；更复杂的联锁表达式、审批流和自动切换必须通过后续 ADR 扩展，不能借助
   任意脚本绕过此运行时。

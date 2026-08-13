@@ -1,6 +1,29 @@
 ---
 
-## Session 2026-08-14 — Ticket #8 统一控制命令（本地完成，待审查/提交）
+## Session 2026-08-14 — Ticket #9 Neuron / MQTT RPC 兼容控制迁移（本地完成，待提交）
+
+### 已实现
+- 旧 `POST /api/v1/neuron/write` 已改为受认证的 `control.write` 兼容入口：只有能唯一映射到已确认、活动且来源为 Neuron 的实体实例时，才创建统一控制命令；不再由 API 直接调用 Neuron。
+- `POST /api/v1/devices/{node_id}/rpc` 已注册并完全移除 MQTT publish。新形态使用 `entity_instance_id + value`；旧形态只能用同节点已确认实体实例的定义 ID `command` 和 `payload.value`，`topic/qos` 从不参与路由或执行。
+- 两种入口共享 `ControlCommandRuntime` 的类型/限值/联锁/确认/幂等/冷却/持久状态/审计/回读语义；响应的 `201` 是命令资源而非设备成功，包含 `migration` 提示和 `links.command` 查询地址。
+- Neuron 403、网络不可达或下游异常均形成 `failed / CONTROL_DISPATCH_FAILED` 命令；无映射和旧命令不匹配形成持久 `rejected / CONTROL_COMPATIBILITY_TARGET_UNRESOLVED` 证据，不会合成 UUID 或下发设备写入。
+- migration_027 将被拒绝兼容请求的 `entity_instance_id` 显式设为可空，以保留真实拒绝证据且不伪造实体身份。
+
+### 验证证据
+- 控制公开 HTTP + 兼容路径测试 6/6 通过；涵盖 Neuron/RPC 新旧形态、映射失败、命令查询链接、幂等复用、下游不可达和“只创建命令”语义。
+- 控制/权限/OpenAPI/交付定向回归 47/47 通过；Python `compileall` 与 `git diff --check` 通过。
+- 完整 unittest 集合中可由项目 `.venv` 运行的 72 项已执行；两组既有 pytest 测试因该 venv 未安装 pytest 而无法由 unittest 导入，改用现有 pytest 运行时单独执行并通过 44/44。此为既有测试基础设施分裂，未新增依赖。
+- 真实 PostgreSQL/Uvicorn 主缝已更新为 migration_020~027 并覆盖两条兼容入口；本次机器没有安全隔离的 `*_test` 数据库，故未运行，未触碰现场库。
+- 双轴审查最终 PASS：Spec/Standards 阻断均为 0；未新增依赖、凭据、客户参数或现场拓扑。
+
+### 当前边界 / Next
+- Ticket #9 仅迁移 Neuron 和 MQTT RPC。遗留 `/entities/{id}/write` 以及规则/策略输出仍是 Ticket #10/#11 的控制旁路，不能宣称全站控制已经统一。
+- 1号机仍为旧 v0.4.77 明文匿名版本；TLS、固定 ARM64 digest 制品、现场凭据轮换、数据库迁移演练与发布锁定未闭合，禁止部署本分支。
+- 下步：提交 Ticket #9 后，继续 Ticket #10，把规则与策略动作迁入统一命令，并保留同一回读验收缝。
+
+---
+
+## Session 2026-08-14 — Ticket #8 统一控制命令（已本地提交 a8ab63c）
 
 ### 已实现
 - 新 ADR-0007 固化可配置 EMS 控制语义：命令只指向已确认的实体实例，不接受页面、规则或调用方传来的物理地址。

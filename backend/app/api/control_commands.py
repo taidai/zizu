@@ -13,7 +13,12 @@ from app.api.business_security import (
     protected,
 )
 from app.api.solution_delivery import get_default_control_commands
-from app.services.control_commands import ControlCommandRuntime, SubmitControlCommand
+from app.services.control_commands import (
+    ControlCommand,
+    ControlCommandCompatibility,
+    ControlCommandRuntime,
+    SubmitControlCommand,
+)
 from app.services.identity import Principal
 
 
@@ -23,6 +28,37 @@ router = APIRouter()
 class ControlCommandRequest(BaseModel):
     value: object
     confirmation_id: UUID | None = None
+
+
+def get_control_compatibility() -> ControlCommandCompatibility:
+    from app.api.solution_delivery import get_default_control_compatibility
+
+    return get_default_control_compatibility()
+
+
+def compatibility_response(command: ControlCommand) -> dict:
+    """Return a command, never a false synchronous device-success response."""
+    public = command.public_dict()
+    public["migration"] = {
+        "deprecated": True,
+        "replacement": "/api/v1/entity-instances/{id}/control-commands",
+    }
+    public["links"] = {
+        "command": f"/api/v1/control-commands/{command.id}",
+    }
+    return public
+
+
+def compatibility_error(command: ControlCommand) -> HTTPException:
+    public = compatibility_response(command)
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": public["code"],
+            "message": "Legacy control target cannot be executed",
+            "command": public,
+        },
+    )
 
 
 def _command(

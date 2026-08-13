@@ -35,6 +35,8 @@ from app.api.rules import router as rules_router
 from app.api.security import get_identity
 from app.api.solution_delivery import router as solution_delivery_router
 from app.api.entity_instances import router as entity_instances_router
+from app.api.control_commands import router as control_commands_router
+from app.api.rpc import router as rpc_router
 from app.api.tags import router as tags_router
 from app.api.telemetry import router as telemetry_router
 from app.services.identity import (
@@ -212,7 +214,6 @@ ISSUE_04_REST = {
         "/api/v1/neuron/nodes/{name}/stop",
         "/api/v1/neuron/groups",
         "/api/v1/neuron/tags",
-        "/api/v1/neuron/write",
         "/api/v1/entities/{entity_id}/write",
         "/api/v1/nanomq/publish",
         "/api/v1/nanomq/subscribe",
@@ -257,6 +258,15 @@ TICKET_07_CAPABILITIES = {
     ("POST", "/api/v1/entity-instances/{entity_instance_id}/source-failover"): "configuration.write",
 }
 
+TICKET_08_09_CAPABILITIES = {
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/control-confirmations"): "control.write",
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/control-commands"): "control.write",
+    ("GET", "/api/v1/control-commands/{command_id}"): "control.write",
+    ("POST", "/api/v1/control-commands/{command_id}/reconcile"): "control.write",
+    ("POST", "/api/v1/neuron/write"): "control.write",
+    ("POST", "/api/v1/devices/{node_id}/rpc"): "control.write",
+}
+
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
 
 
@@ -279,6 +289,8 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     nanomq_router,
     solution_delivery_router,
     entity_instances_router,
+    control_commands_router,
+    rpc_router,
 )
 
 
@@ -1033,7 +1045,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(ALARM_ACKNOWLEDGE), 1)
         self.assertEqual(len(LEGACY_ALARM_WRITE), 2)
         self.assertEqual(len(TICKET_03_CAPABILITIES), 83)
-        self.assertEqual(len(ISSUE_04_REST), 31)
+        self.assertEqual(len(ISSUE_04_REST), 30)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1041,6 +1053,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             AUTH_OPERATIONS,
             DELIVERY_OPERATIONS,
             set(TICKET_07_CAPABILITIES),
+            set(TICKET_08_09_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1063,7 +1076,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 133)
+        self.assertEqual(len(registered), 138)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
@@ -1078,6 +1091,12 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                     capability,
                     "Every Ticket #3 route must publish its server-side policy",
                 )
+                self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_08_09_CAPABILITIES.items()):
+            with self.subTest(method=method, path=path):
+                operation = schema["paths"][path][method.lower()]
+                self.assertEqual(operation.get("x-zizu-capability"), capability)
                 self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
     def test_alarm_counts_route_is_wired_to_its_own_operation(self) -> None:

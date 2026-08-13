@@ -7,6 +7,7 @@
 > **⚠️ 此文档已被 g11-feature-domains.md (v2.1) 部分取代。**
 > **功能域架构(F0→F1→F3→F2)、统一节点模型、方案B CE、三种管道模式 → 以 g11 为准。**
 > **本文档保留作为 v1.0 原始设计参考，数据模型细节(Node/Rule/VP/RulesService)仍有效但需按 g11 Schema 对齐。**
+> **控制命令的现行安全契约以 ADR-0007 和根目录 README 为准；下方旧 RPC 时序不代表当前公开 API。**
 
 ---
 
@@ -875,7 +876,7 @@ T+17ms   WebSocket 广播给所有订阅此设备的浏览器客户端:
 总计 ~20ms（含 DB 写入和规则评估）
 ```
 
-### 5.3 下行数据流（RPC 控制）
+### 5.3 旧版下行数据流（RPC 控制，已废止）
 
 ```
 时间线:
@@ -1059,7 +1060,13 @@ GET    /api/v1/rules/templates                 # 内置规则模板列表
 POST   /api/v1/rules/from-template/{name}      # 从模板创建规则（填参数即可）
 ```
 
-### 6.4 控制 API
+### 6.4 旧版控制 API（已废止）
+
+当前 `POST /api/v1/devices/{node_id}/rpc` 的新形态接受 `entity_instance_id` 和 `value`；
+受限旧形态只允许 `command` 精确匹配已确认实体实例的定义 ID，并读取 `payload.value`。
+两种形态都会创建可查询控制命令，绝不会发布任意 MQTT topic。`POST /api/v1/neuron/write`
+同样先唯一映射到已确认的实体实例。二者的 `201` 不是现场成功，只有控制命令达到
+`readback_confirmed` 才是成功。详见 ADR-0007。
 
 ```
 POST   /api/v1/devices/{id}/rpc                # 发送 RPC 控制命令

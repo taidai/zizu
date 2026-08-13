@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import unittest
+from uuid import UUID
 
 from fastapi import FastAPI
 
@@ -17,15 +18,28 @@ class RecordingDispatcher:
         self.requests.append(request)
 
 
+class FailingDispatcher(RecordingDispatcher):
+    def dispatch(self, request: object) -> None:
+        super().dispatch(request)
+        raise RuntimeError("simulated Neuron 403")
+
+
 class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def build_app(*, high_risk: bool = False) -> tuple[FastAPI, RecordingDispatcher]:
+    def build_app(
+        *, high_risk: bool = False, dispatcher_fails: bool = False
+    ) -> tuple[FastAPI, RecordingDispatcher]:
         from app.api.control_commands import (
             get_default_control_commands,
+            get_control_compatibility,
             router as control_router,
         )
+        from app.api.neuron import router as neuron_router
+        from app.api.rpc import router as rpc_router
         from app.services.control_commands import (
+            ControlCommandCompatibility,
             ControlCommandRuntime,
+            InMemoryControlTargetResolver,
             InMemoryControlCommandRepository,
         )
         from app.services.entity_instance_registry import SourceDescriptor
@@ -36,7 +50,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             SourceDescriptor(entity_delivery_test.BACKUP_TAG_ID, "PCS-01", "PCS-01", "Ready", "BOOL", None, "R", True),
         )
         app = entity_delivery_test.EntityDeliveryPublicApiTest.build_app(sources=sources)
-        dispatcher = RecordingDispatcher()
+        dispatcher = FailingDispatcher() if dispatcher_fails else RecordingDispatcher()
         runtime = ControlCommandRuntime(
             registry=app.state.entity_instance_registry,
             policies=app.state.entity_instance_repository,
@@ -44,8 +58,14 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             dispatcher=dispatcher,
             repository=InMemoryControlCommandRepository(),
         )
+        compatibility_targets = InMemoryControlTargetResolver()
+        compatibility = ControlCommandCompatibility(runtime, compatibility_targets)
         app.include_router(control_router, prefix="/api/v1")
+        app.include_router(neuron_router, prefix="/api/v1")
+        app.include_router(rpc_router, prefix="/api/v1")
         app.dependency_overrides[get_default_control_commands] = lambda: runtime
+        app.dependency_overrides[get_control_compatibility] = lambda: compatibility
+        app.state.control_compatibility_targets = compatibility_targets
         return app, dispatcher
 
     @staticmethod
@@ -199,6 +219,117 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("readback_confirmed", reconciled.json()["status"])
         self.assertEqual(1, len(dispatcher.requests))
 
+    async def test_neuron_and_rpc_compatibility_routes_create_commands_not_direct_writes(self) -> None:
+        app, dispatcher = self.build_app()
+        node_id = UUID("30000000-0000-0000-0000-000000000001")
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_neuron(
+                node="PCS-01",
+                group="default",
+                tag="Setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            targets.register_rpc(node_id, UUID(ids["pcs.setpoint"]))
+            targets.register_legacy_rpc(
+                node_id=node_id,
+                command="pcs.setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "legacy-neuron-setpoint-20",
+            }
+            neuron = await client._client.post(
+                "/api/v1/neuron/write",
+                headers=headers,
+                json={"node": "PCS-01", "group": "default", "tag": "Setpoint", "value": 20.0},
+            )
+            unknown_neuron = await client._client.post(
+                "/api/v1/neuron/write",
+                headers={**headers, "Idempotency-Key": "legacy-neuron-unknown"},
+                json={"node": "PCS-01", "group": "default", "tag": "Unknown", "value": 20.0},
+            )
+            legacy_rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers=headers,
+                json={
+                    "command": "pcs.setpoint",
+                    "payload": {"value": 20.0},
+                    "topic": "ignored/arbitrary/topic",
+                },
+            )
+            unknown_rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers={**headers, "Idempotency-Key": "legacy-rpc-unknown"},
+                json={"command": "unknown.command", "payload": {"value": 20.0}},
+            )
+            rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers={**headers, "Idempotency-Key": "legacy-neuron-setpoint-20"},
+                json={"entity_instance_id": ids["pcs.setpoint"], "value": 20.0},
+            )
+            queried = await client._client.get(
+                neuron.json()["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(201, neuron.status_code, neuron.text)
+        self.assertEqual("compatibility", neuron.json()["source_type"])
+        self.assertEqual("dispatched", neuron.json()["status"])
+        self.assertEqual("/api/v1/entity-instances/{id}/control-commands", neuron.json()["migration"]["replacement"])
+        self.assertEqual(409, unknown_neuron.status_code, unknown_neuron.text)
+        self.assertEqual("CONTROL_COMPATIBILITY_TARGET_UNRESOLVED", unknown_neuron.json()["detail"]["code"])
+        self.assertIsNone(
+            unknown_neuron.json()["detail"]["command"]["entity_instance_id"],
+        )
+        self.assertEqual(201, legacy_rpc.status_code, legacy_rpc.text)
+        self.assertEqual(neuron.json()["id"], legacy_rpc.json()["id"])
+        self.assertEqual(409, unknown_rpc.status_code, unknown_rpc.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            unknown_rpc.json()["detail"]["code"],
+        )
+        self.assertEqual(201, rpc.status_code, rpc.text)
+        self.assertEqual("compatibility", rpc.json()["source_type"])
+        self.assertEqual(neuron.json()["id"], rpc.json()["id"])
+        self.assertEqual(
+            f"/api/v1/control-commands/{neuron.json()['id']}",
+            neuron.json()["links"]["command"],
+        )
+        self.assertEqual(200, queried.status_code, queried.text)
+        self.assertEqual(neuron.json()["id"], queried.json()["id"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_compatibility_neuron_failure_is_a_failed_command_not_device_success(self) -> None:
+        app, dispatcher = self.build_app(dispatcher_fails=True)
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_neuron(
+                node="PCS-01",
+                group="default",
+                tag="Setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            failed = await client._client.post(
+                "/api/v1/neuron/write",
+                headers={
+                    "Authorization": await client._bearer("operator"),
+                    "Idempotency-Key": "legacy-neuron-unavailable",
+                },
+                json={"node": "PCS-01", "group": "default", "tag": "Setpoint", "value": 20.0},
+            )
+
+        self.assertEqual(201, failed.status_code, failed.text)
+        self.assertEqual("failed", failed.json()["status"])
+        self.assertEqual("CONTROL_DISPATCH_FAILED", failed.json()["code"])
+        self.assertEqual("compatibility", failed.json()["source_type"])
+        self.assertEqual(1, len(dispatcher.requests))
+
     def test_every_control_route_declares_bearer_and_control_capability(self) -> None:
         from app.main import create_app
 
@@ -208,6 +339,8 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             ("post", "/api/v1/entity-instances/{entity_instance_id}/control-commands"),
             ("get", "/api/v1/control-commands/{command_id}"),
             ("post", "/api/v1/control-commands/{command_id}/reconcile"),
+            ("post", "/api/v1/neuron/write"),
+            ("post", "/api/v1/devices/{node_id}/rpc"),
         }
         for method, path in expected:
             with self.subTest(method=method, path=path):

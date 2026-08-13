@@ -388,6 +388,8 @@ zizu/
 | POST | `/api/v1/entity-instances/{id}/control-commands` | 以实体实例提交手动控制命令，必须携带 `Idempotency-Key` |
 | GET | `/api/v1/control-commands/{id}` | 查询命令的持久状态与稳定机器码 |
 | POST | `/api/v1/control-commands/{id}/reconcile` | 触发一次安全回读检查，不重发设备写入 |
+| POST | `/api/v1/neuron/write` | 兼容 Neuron 写入：按已确认的实体实例映射创建控制命令，必须携带 `Idempotency-Key` |
+| POST | `/api/v1/devices/{node_id}/rpc` | 兼容 RPC：新形态使用 `entity_instance_id` + `value`；受限旧形态使用定义 ID `command` + `payload.value`，均创建控制命令 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
 
@@ -399,6 +401,15 @@ zizu/
 策略快照与每个状态转换关联的不可变审计事件；状态机只会前进，后台恢复只回读、不会重发
 设备写入。所有这些端点在
 业务执行前写不可变 requested 审计，成功后再写 success；审计不可用时 fail closed。
+
+`/neuron/write` 与 `/devices/{node_id}/rpc` 处于有限兼容窗口：它们的 `201` 响应是控制命令
+资源，而不是设备成功回执，统一包含命令 `id`、`status`、稳定 `code` 和
+`migration.replacement`。调用方应随后查询命令或触发安全回读检查，只有
+`readback_confirmed` 才表示现场已达到期望值。Neuron 地址必须唯一映射到已确认的可控实体
+实例；RPC 的新形态必须同时提供属于该节点的 `entity_instance_id` 和 `value`。旧形态仅允许
+`command` 精确等于已确认实体实例的定义 ID，并从 `payload.value` 取得目标值；`topic` 和
+`qos` 不参与路由或执行。无映射、节点不匹配或任意 topic/payload 路由形式均返回稳定的迁移/
+拒绝机器码，绝不执行直接 Neuron 或 MQTT 写入。
 
 解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。创建安装计划的请求体为
 `{"parameters":{"site.code":"EMS-01","pcs.count":2},"secret_references":{"neuron.credentials":"secret://site/neuron/credentials"}}`。
@@ -577,8 +588,9 @@ timeout: 5s
 `GET /api/v1/entity-instances/legacy-migration-preview` 根据已确认的物理来源将旧实体分类为
 `unique`、`missing` 或 `ambiguous`，始终返回 `writes_applied: 0`，不自动猜测或改写规则。
 实际规则引用同时持久化到带实体实例外键的 `t_rule_entity_instance_refs`。告警、控制和
-EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目录；旧控制输出路径仍是兼容
-边界，Ticket 09/10/11 将把它们转换为统一控制命令，不能把旧写接口的返回当作现场成功。
+EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目录；Neuron 与 MQTT RPC 旧控制
+入口已在 Ticket 09 转换为统一控制命令，不能把它们的创建响应当作现场成功。规则/策略与
+遗留实体写入仍是 Ticket 10/11 的兼容边界。
 
 确需主备来源时，包在 matcher 上显式声明 `failoverPolicy: manual`，对应实例参数必须提供
 与主来源不同的 `standby_device_key`。安装计划分别展示主、备候选并要求两者都唯一兼容；

@@ -185,7 +185,7 @@ class ControlManagementOpenApiCoverageTest(unittest.TestCase):
                 "POST": (
                     "/api/v1/neuron/nodes", "/api/v1/neuron/nodes/{name}/start",
                     "/api/v1/neuron/nodes/{name}/stop", "/api/v1/neuron/groups",
-                    "/api/v1/neuron/tags", "/api/v1/neuron/write",
+                    "/api/v1/neuron/tags",
                 ),
                 "DELETE": (
                     "/api/v1/neuron/nodes/{name}",
@@ -200,7 +200,7 @@ class ControlManagementOpenApiCoverageTest(unittest.TestCase):
             **{operation: "gateway.manage" for operation in gateway_manage},
             ("POST", "/api/v1/entities/{entity_id}/write"): "control.write",
         }
-        self.assertEqual(len(expected), 31)
+        self.assertEqual(len(expected), 30)
 
         for (method, path), capability in expected.items():
             with self.subTest(method=method, path=path):
