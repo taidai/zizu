@@ -11,6 +11,8 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import GATEWAY_MANAGE, protected
+
 router = APIRouter()
 
 
@@ -52,7 +54,7 @@ class NeuronWriteRequest(BaseModel):
 # 节点管理
 # ══════════════════════════════════════
 
-@router.get("/neuron/nodes")
+@router.get("/neuron/nodes", **protected(GATEWAY_MANAGE))
 async def list_neuron_nodes() -> dict:
     """获取 Neuron 驱动节点列表。"""
     from app.services.neuron_client import get_neuron_client
@@ -66,7 +68,7 @@ async def list_neuron_nodes() -> dict:
         return {"nodes": [], "total": 0, "error": str(e)}
 
 
-@router.post("/neuron/nodes")
+@router.post("/neuron/nodes", **protected(GATEWAY_MANAGE))
 async def create_neuron_node(req: NeuronNodeCreate) -> dict:
     """创建 Neuron 驱动节点。"""
     from app.services.neuron_client import get_neuron_client
@@ -88,7 +90,7 @@ async def create_neuron_node(req: NeuronNodeCreate) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/neuron/nodes/{name}")
+@router.delete("/neuron/nodes/{name}", **protected(GATEWAY_MANAGE))
 async def delete_neuron_node(name: str) -> dict:
     """删除 Neuron 节点。"""
     from app.services.neuron_client import get_neuron_client
@@ -103,7 +105,7 @@ async def delete_neuron_node(name: str) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/neuron/nodes/{name}/start")
+@router.post("/neuron/nodes/{name}/start", **protected(GATEWAY_MANAGE))
 async def start_neuron_node(name: str) -> dict:
     """启动 Neuron 节点。"""
     from app.services.neuron_client import get_neuron_client
@@ -117,7 +119,7 @@ async def start_neuron_node(name: str) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/neuron/nodes/{name}/stop")
+@router.post("/neuron/nodes/{name}/stop", **protected(GATEWAY_MANAGE))
 async def stop_neuron_node(name: str) -> dict:
     """停止 Neuron 节点。"""
     from app.services.neuron_client import get_neuron_client
@@ -135,7 +137,7 @@ async def stop_neuron_node(name: str) -> dict:
 # 组管理
 # ══════════════════════════════════════
 
-@router.get("/neuron/groups")
+@router.get("/neuron/groups", **protected(GATEWAY_MANAGE))
 async def list_neuron_groups(node: str) -> dict:
     """获取节点下的组列表。"""
     from app.services.neuron_client import get_neuron_client
@@ -149,7 +151,7 @@ async def list_neuron_groups(node: str) -> dict:
         return {"groups": [], "total": 0, "error": str(e)}
 
 
-@router.post("/neuron/groups")
+@router.post("/neuron/groups", **protected(GATEWAY_MANAGE))
 async def create_neuron_group(req: NeuronGroupCreate) -> dict:
     """创建采集组。"""
     from app.services.neuron_client import get_neuron_client
@@ -164,7 +166,7 @@ async def create_neuron_group(req: NeuronGroupCreate) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/neuron/groups/{node}/{name}")
+@router.delete("/neuron/groups/{node}/{name}", **protected(GATEWAY_MANAGE))
 async def delete_neuron_group(node: str, name: str) -> dict:
     """删除采集组。"""
     from app.services.neuron_client import get_neuron_client
@@ -182,7 +184,7 @@ async def delete_neuron_group(node: str, name: str) -> dict:
 # 点位管理
 # ══════════════════════════════════════
 
-@router.get("/neuron/tags")
+@router.get("/neuron/tags", **protected(GATEWAY_MANAGE))
 async def list_neuron_tags(node: str, group: str) -> dict:
     """获取组下的点位列表。"""
     from app.services.neuron_client import get_neuron_client
@@ -196,7 +198,7 @@ async def list_neuron_tags(node: str, group: str) -> dict:
         return {"tags": [], "total": 0, "error": str(e)}
 
 
-@router.post("/neuron/tags")
+@router.post("/neuron/tags", **protected(GATEWAY_MANAGE))
 async def create_neuron_tags(req: list[NeuronTagCreate]) -> dict:
     """批量创建点位。"""
     from app.services.neuron_client import get_neuron_client
@@ -228,7 +230,7 @@ async def create_neuron_tags(req: list[NeuronTagCreate]) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/neuron/tags/{node}/{group}/{name}")
+@router.delete("/neuron/tags/{node}/{group}/{name}", **protected(GATEWAY_MANAGE))
 async def delete_neuron_tag(node: str, group: str, name: str) -> dict:
     """删除点位。"""
     from app.services.neuron_client import get_neuron_client
@@ -246,7 +248,7 @@ async def delete_neuron_tag(node: str, group: str, name: str) -> dict:
 # 状态监控
 # ══════════════════════════════════════
 
-@router.get("/neuron/status")
+@router.get("/neuron/status", **protected(GATEWAY_MANAGE))
 async def get_neuron_status() -> dict:
     """获取 Neuron 全局状态。"""
     from app.services.neuron_client import get_neuron_client
@@ -266,7 +268,7 @@ async def get_neuron_status() -> dict:
     except Exception as e:
         logger.error("[API/neuron] Get status failed: {}", e)
         return {"error": str(e)}
-@router.post("/neuron/write")
+@router.post("/neuron/write", **protected(GATEWAY_MANAGE))
 async def write_neuron_tag(req: NeuronWriteRequest) -> dict:
     """通过 Neuron REST API 写单个点位。"""
     from app.services.neuron_client import get_neuron_client

@@ -230,6 +230,7 @@ AUTH_OPERATIONS = {
     ("POST", "/api/v1/auth/login"),
     ("GET", "/api/v1/auth/me"),
     ("POST", "/api/v1/auth/logout"),
+    ("POST", "/api/v1/auth/ws-ticket"),
 }
 
 DELIVERY_OPERATIONS = {
@@ -1047,7 +1048,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 126)
+        self.assertEqual(len(registered), 127)
 
         for (method, path), capability in sorted(TICKET_03_CAPABILITIES.items()):
             with self.subTest(method=method, path=path):

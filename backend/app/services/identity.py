@@ -17,6 +17,9 @@ PASSWORD_SCHEME = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 600_000
 SESSION_TOKEN_PREFIX = "zizu_s1_"
 SESSION_TOKEN_BYTES = 32
+WS_TICKET_PREFIX = "zizu_ws1_"
+WS_TICKET_BYTES = 32
+WS_TICKET_LIFETIME = timedelta(seconds=30)
 LOGIN_MAX_FAILURES = 5
 LOGIN_IP_MAX_FAILURES = 25
 LOGIN_WINDOW = timedelta(minutes=15)
@@ -25,6 +28,7 @@ REQUIRED_IDENTITY_TABLES = frozenset(
     {
         "t_users",
         "t_auth_sessions",
+        "t_auth_ws_tickets",
         "t_auth_login_limits",
         "t_audit_events",
     }
@@ -87,6 +91,23 @@ class AuthenticatedSession:
 
 
 @dataclass(frozen=True)
+class WebSocketTicket:
+    id: UUID
+    session_id: UUID
+    token_digest: str
+    capability: str
+    created_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class IssuedWebSocketTicket:
+    ticket: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     event: str
     outcome: str
@@ -108,6 +129,18 @@ class IdentityRepository(Protocol):
     def find_user(self, username: str) -> UserIdentity | None: ...
 
     def find_session(self, token_digest: str) -> tuple[Session, UserIdentity] | None: ...
+
+    def find_session_by_id(self, session_id: UUID) -> tuple[Session, UserIdentity] | None: ...
+
+    def create_ws_ticket(self, ticket: WebSocketTicket, event: AuditEvent) -> None: ...
+
+    def consume_ws_ticket(
+        self,
+        token_digest: str,
+        capability: str,
+        consumed_at: datetime,
+        event: AuditEvent,
+    ) -> tuple[Session, UserIdentity] | None: ...
 
     def login_blocked_until(
         self,
@@ -262,6 +295,10 @@ CAPABILITY_ROLES: dict[str, frozenset[str]] = {
     # Temporary compatibility seam. Ticket #14 removes manual alarm creation
     # and recovery after every source uses the unified alarm state machine.
     "legacy_alarm.write": frozenset({"admin", "engineer"}),
+    "system.manage": frozenset({"admin"}),
+    "gateway.manage": frozenset({"admin", "engineer"}),
+    "control.write": frozenset({"admin", "engineer", "operator"}),
+    "telemetry.subscribe": frozenset({"admin", "engineer", "operator"}),
     "solution.package.import": frozenset({"admin"}),
     "solution.package.read": frozenset({"admin"}),
     "solution.install.plan": frozenset({"admin", "engineer"}),
@@ -568,6 +605,38 @@ class Identity:
             raise IdentityError("SESSION_REVOKED", "Session is no longer valid", status_code=401)
         return Principal(user.id, user.username, user.role, session.id)
 
+    def revalidate_session(
+        self,
+        principal: Principal,
+        *,
+        request_id: str | None = None,
+        client_ip: str | None = None,
+    ) -> Principal:
+        """Revalidate a long-lived connection against current session state."""
+        resolved = self._repository.find_session_by_id(principal.session_id)
+        now = self._now()
+        if resolved is not None:
+            session, user = resolved
+            if (
+                session.revoked_at is None
+                and session.expires_at > now
+                and user.status == "active"
+                and user.auth_version == session.auth_version
+                and user.role in {"admin", "engineer", "operator"}
+            ):
+                return Principal(user.id, user.username, user.role, session.id)
+        self._reject_token(
+            "session_revoked",
+            actor=principal.actor,
+            request_id=request_id,
+            client_ip=client_ip,
+        )
+        raise IdentityError(
+            "SESSION_REVOKED",
+            "Session is no longer valid",
+            status_code=401,
+        )
+
     def _reject_token(
         self,
         reason: str,
@@ -617,6 +686,97 @@ class Identity:
             )
         return principal
 
+    def issue_ws_ticket(
+        self,
+        principal: Principal,
+        *,
+        capability: str = "telemetry.subscribe",
+        request_id: str | None = None,
+        client_ip: str | None = None,
+    ) -> IssuedWebSocketTicket:
+        self.authorize(
+            principal,
+            capability,
+            request_id=request_id,
+            client_ip=client_ip,
+        )
+        now = self._now()
+        raw_ticket = WS_TICKET_PREFIX + secrets.token_urlsafe(WS_TICKET_BYTES)
+        expires_at = now + WS_TICKET_LIFETIME
+        self._repository.create_ws_ticket(
+            WebSocketTicket(
+                id=uuid4(),
+                session_id=principal.session_id,
+                token_digest=token_digest(raw_ticket),
+                capability=capability,
+                created_at=now,
+                expires_at=expires_at,
+            ),
+            AuditEvent(
+                event="authentication.ws_ticket",
+                outcome="issued",
+                actor=principal.actor,
+                target=capability,
+                request_id=request_id,
+                client_ip=client_ip,
+            ),
+        )
+        return IssuedWebSocketTicket(raw_ticket, expires_at)
+
+    def consume_ws_ticket(
+        self,
+        ticket: str,
+        *,
+        request_id: str | None = None,
+        client_ip: str | None = None,
+    ) -> Principal:
+        now = self._now()
+        try:
+            digest = token_digest(ticket)
+        except (UnicodeEncodeError, AttributeError):
+            digest = ""
+        denied_event = AuditEvent(
+            event="authentication.ws_ticket",
+            outcome="denied",
+            reason="invalid_or_consumed",
+            target="telemetry.subscribe",
+            request_id=request_id,
+            client_ip=client_ip,
+        )
+        if not ticket.startswith(WS_TICKET_PREFIX) or not digest:
+            self._repository.append_audit(denied_event)
+            raise IdentityError(
+                "WS_TICKET_INVALID",
+                "WebSocket ticket is invalid or expired",
+                status_code=401,
+            )
+        resolved = self._repository.consume_ws_ticket(
+            digest,
+            "telemetry.subscribe",
+            now,
+            denied_event,
+        )
+        if resolved is None:
+            raise IdentityError(
+                "WS_TICKET_INVALID",
+                "WebSocket ticket is invalid or expired",
+                status_code=401,
+            )
+        session, user = resolved
+        if (
+            session.revoked_at is not None
+            or session.expires_at <= now
+            or user.status != "active"
+            or user.auth_version != session.auth_version
+            or user.role not in {"admin", "engineer", "operator"}
+        ):
+            raise IdentityError(
+                "WS_TICKET_INVALID",
+                "WebSocket ticket is invalid or expired",
+                status_code=401,
+            )
+        return Principal(user.id, user.username, user.role, session.id)
+
     def revoke(self, principal: Principal) -> None:
         now = self._now()
         self._repository.revoke_session(
@@ -634,6 +794,7 @@ class InMemoryIdentityRepository:
     def __init__(self, users: list[UserIdentity] | None = None) -> None:
         self.users = {user.username: user for user in users or []}
         self.sessions: dict[str, Session] = {}
+        self.ws_tickets: dict[str, WebSocketTicket] = {}
         self.audits: list[AuditEvent] = []
         self.login_limits: dict[
             tuple[str, str], tuple[int, datetime, datetime | None]
@@ -648,6 +809,63 @@ class InMemoryIdentityRepository:
             return None
         user = next((item for item in self.users.values() if item.id == session.user_id), None)
         return (session, user) if user else None
+
+    def find_session_by_id(
+        self,
+        session_id: UUID,
+    ) -> tuple[Session, UserIdentity] | None:
+        session = next(
+            (item for item in self.sessions.values() if item.id == session_id),
+            None,
+        )
+        if session is None:
+            return None
+        user = next(
+            (item for item in self.users.values() if item.id == session.user_id),
+            None,
+        )
+        return (session, user) if user else None
+
+    def create_ws_ticket(self, ticket: WebSocketTicket, event: AuditEvent) -> None:
+        self.ws_tickets[ticket.token_digest] = ticket
+        self.audits.append(event)
+
+    def consume_ws_ticket(
+        self,
+        digest: str,
+        capability: str,
+        consumed_at: datetime,
+        event: AuditEvent,
+    ) -> tuple[Session, UserIdentity] | None:
+        ticket = self.ws_tickets.pop(digest, None)
+        if (
+            ticket is None
+            or ticket.capability != capability
+            or ticket.expires_at <= consumed_at
+        ):
+            self.audits.append(event)
+            return None
+        resolved = next(
+            (
+                (session, user)
+                for session in self.sessions.values()
+                for user in self.users.values()
+                if session.id == ticket.session_id and user.id == session.user_id
+            ),
+            None,
+        )
+        if resolved is None:
+            self.audits.append(event)
+            return None
+        self.audits.append(
+            AuditEvent(
+                event="authentication.ws_ticket",
+                outcome="consumed",
+                actor=f"user:{resolved[1].id}",
+                target=ticket.capability,
+            )
+        )
+        return resolved
 
     def login_blocked_until(
         self,
@@ -803,6 +1021,96 @@ class PostgresIdentityRepository:
             if row is None:
                 return None
             return self._session(row[:7]), self._user(row[7:])
+
+    def find_session_by_id(
+        self,
+        session_id: UUID,
+    ) -> tuple[Session, UserIdentity] | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.user_id, s.token_digest, s.auth_version,
+                       s.created_at, s.expires_at, s.revoked_at,
+                       u.id, u.username, u.password_hash, u.role, u.status,
+                       u.auth_version
+                FROM t_auth_sessions s
+                JOIN t_users u ON u.id = s.user_id
+                WHERE s.id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._session(row[:7]), self._user(row[7:])
+
+    def create_ws_ticket(self, ticket: WebSocketTicket, event: AuditEvent) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM t_auth_ws_tickets "
+                "WHERE expires_at <= %s OR consumed_at IS NOT NULL",
+                (ticket.created_at,),
+            )
+            cur.execute(
+                """
+                INSERT INTO t_auth_ws_tickets
+                  (id, session_id, token_digest, capability, created_at, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    ticket.id,
+                    ticket.session_id,
+                    ticket.token_digest,
+                    ticket.capability,
+                    ticket.created_at,
+                    ticket.expires_at,
+                ),
+            )
+            self._append_audit(cur, event)
+            conn.commit()
+
+    def consume_ws_ticket(
+        self,
+        digest: str,
+        capability: str,
+        consumed_at: datetime,
+        event: AuditEvent,
+    ) -> tuple[Session, UserIdentity] | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE t_auth_ws_tickets t
+                SET consumed_at = %s
+                FROM t_auth_sessions s
+                JOIN t_users u ON u.id = s.user_id
+                WHERE t.token_digest = %s
+                  AND t.capability = %s
+                  AND t.session_id = s.id
+                  AND t.consumed_at IS NULL
+                  AND t.expires_at > %s
+                RETURNING s.id, s.user_id, s.token_digest, s.auth_version,
+                          s.created_at, s.expires_at, s.revoked_at,
+                          u.id, u.username, u.password_hash, u.role, u.status,
+                          u.auth_version, t.capability
+                """,
+                (consumed_at, digest, capability, consumed_at),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self._append_audit(cur, event)
+                conn.commit()
+                return None
+            self._append_audit(
+                cur,
+                AuditEvent(
+                    event="authentication.ws_ticket",
+                    outcome="consumed",
+                    actor=f"user:{row[7]}",
+                    target=row[13],
+                ),
+            )
+            conn.commit()
+            return self._session(row[:7]), self._user(row[7:13])
 
     @staticmethod
     def _append_audit(cur, event: AuditEvent) -> None:

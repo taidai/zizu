@@ -263,11 +263,11 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             base_url="http://testserver",
         ) as client:
             liveness = await client.get("/api/v1/health/live")
-            openapi = await client.get("/api/openapi.json")
 
         self.assertEqual(liveness.status_code, 200)
-        self.assertEqual(openapi.status_code, 200)
-        paths = openapi.json()["paths"]
+        # Production does not publish interactive API documentation. Inspect the
+        # application's generated schema directly to prove route registration.
+        paths = app.openapi()["paths"]
         self.assertIn("/api/v1/solution-packages/import", paths)
         self.assertIn("/api/v1/solution-installations", paths)
         self.assertIn("/api/v1/delivery-reports/{report_id}", paths)

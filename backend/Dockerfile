@@ -65,6 +65,7 @@ RUN pip install --no-cache-dir \
 
 # 复制后端应用代码
 COPY backend/app ./app
+COPY init-db ./init-db
 
 # 首个管理员一次性引导（使用 python -m scripts.bootstrap_admin 执行）
 COPY scripts/bootstrap_admin.py ./scripts/bootstrap_admin.py

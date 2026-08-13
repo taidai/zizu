@@ -21,6 +21,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = (
     BACKEND_ROOT.parent / "init-db" / "migration_020_solution_delivery.sql",
     BACKEND_ROOT.parent / "init-db" / "migration_021_identity.sql",
+    BACKEND_ROOT.parent / "init-db" / "migration_022_websocket_tickets.sql",
 )
 def build_minimal_package(*, package_id: str = "org.zizu.postgres-liveness") -> bytes:
     acceptance = (

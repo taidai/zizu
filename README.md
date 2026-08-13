@@ -123,6 +123,9 @@ Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入�
 隔离的本机开发环境才可显式同时设置 `DEPLOYMENT_MODE=development` 和
 `ALLOW_INSECURE_DEV_SECRETS=true`；进程启动时会在标准错误输出显示
 `INSECURE DEVELOPMENT MODE` 警示。此模式不得用于任何可被其他主机访问的部署。
+开发环境如还要跳过登录，必须另行显式设置
+`ALLOW_INSECURE_ANONYMOUS_ACCESS=true`；生产模式设置该值会拒绝启动。匿名开发
+响应带 `X-ZiZu-Security-Mode: insecure-development`，前端持续显示红色警示横幅。
 
 独立验收/同步脚本也不再携带数据库或 Neuron 默认口令。运行
 `backend/acceptance_f0_f3.py` 与 `backend/test_f0_e2e.py` 前必须显式设置
@@ -182,7 +185,7 @@ docker compose exec backend \
 访问（生产环境请使用已配置 TLS 的 HTTPS 域名）：
 - `https://localhost:9000` — 前端页面（点位管理 + 实时趋势 + 规则引擎/告警中心）
 - 规则引擎支持 GoRules JDM Editor 编辑决策图/决策表
-- `https://localhost:9000/api/docs` — Swagger API 文档
+- `https://localhost:9000/api/docs` — Swagger API 文档（仅 development 模式提供）
 
 > 首次启动会自动执行 `init-db/*.sql` 初始化数据库。
 
@@ -194,6 +197,8 @@ docker compose exec backend \
 有效 480 分钟，可用 `AUTH_SESSION_MINUTES` 在 5-1440 分钟内调整；客户端通过
 `Authorization: Bearer <opaque-session-token>` 调用受保护接口，并可用
 `GET /api/v1/auth/me` 查询当前身份、`POST /api/v1/auth/logout` 主动注销。
+浏览器实时订阅先以 Bearer 调用 `POST /api/v1/auth/ws-ticket` 获取 30 秒一次性票据，
+再通过 WSS 首帧提交票据；长期会话令牌不会进入 WebSocket URL、代理日志或浏览器历史。
 
 TLS 由反向代理终结时，backend 必须只允许该代理访问，并同时满足以下条件才可读取
 `X-Forwarded-Proto`：
@@ -212,7 +217,8 @@ AUTH_TRUSTED_PROXY_CIDRS=["127.0.0.1/32","::1/128"]
 
 只有隔离在本机回环地址上的开发环境才可使用 HTTP。服务端必须同时显式设置
 `DEPLOYMENT_MODE=development`、`ALLOW_INSECURE_DEV_SECRETS=true` 和
-`AUTH_REQUIRE_HTTPS=false`；运行独立验收脚本时还需显式确认客户端降级：
+`AUTH_REQUIRE_HTTPS=false`；若还要匿名访问，另加
+`ALLOW_INSECURE_ANONYMOUS_ACCESS=true`。运行独立验收脚本时还需显式确认客户端降级：
 
 ```env
 ZIZU_API=http://127.0.0.1:9000/api/v1
@@ -252,9 +258,10 @@ operator 读取节点和点位运行视图时不会收到连接参数、来源�
 详细 `/api/v1/health` 与 `/api/v1/health/ready` 也需要登录；只有最小
 `/api/v1/health/live` 存活探针匿名可用。
 
-控制写、系统管理、Neuron/NanoMQ 管理和 WebSocket 仍将在 Ticket #4 使用同一能力
-边界收口；在该票据以及 TLS、不可变 ARM64 制品与现场凭据轮换完成前，不能宣称整个
-公网 API 或 1 号机已生产就绪。
+控制写、系统管理、Neuron/NanoMQ 管理和 WebSocket 已使用同一身份与能力边界收口。
+这只证明应用接口已默认拒绝匿名访问；统一控制命令的限值、联锁、幂等与回读状态机，
+以及 TLS、不可变 ARM64 制品和现场凭据轮换仍是生产发布门禁。在这些门禁完成前，不能
+宣称整个公网 API 或 1 号机已生产就绪。
 
 ### 4. 本地开发（可选）
 
@@ -349,8 +356,9 @@ zizu/
 | PUT | `/api/v1/tags/batch` | 批量修改 scale / offset |
 | GET | `/api/v1/telemetry` | 原始遥测数据查询 |
 | GET | `/api/v1/snapshots` | 节点快照查询（数据黑板） |
-| POST | `/api/v1/query` | SELECT-only SQL 查询 |
-| WS | `/api/v1/ws/telemetry` | 实时原始值/工程值推送 |
+| POST | `/api/v1/query` | admin：SELECT-only SQL 查询 |
+| POST | `/api/v1/auth/ws-ticket` | 为实时订阅签发 30 秒一次性票据 |
+| WS | `/api/v1/ws/telemetry` | WSS 首帧认证后实时原始值/工程值推送 |
 | POST | `/api/v1/rules/{id}/simulate` | 模拟规则（返回 triggered/actions/engine） |
 | GET | `/api/v1/entities` | 全局实体列表 |
 | POST | `/api/v1/entities` | 创建全局实体 |
@@ -371,6 +379,11 @@ zizu/
 | GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
+
+控制与管理能力矩阵：`system.manage` 仅 admin（系统、SQL、NanoMQ）；
+`gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色，
+但后续仍须经统一控制命令模块补齐限值、联锁、幂等和回读状态机。所有这些端点在
+业务执行前写不可变 requested 审计，成功后再写 success；审计不可用时 fail closed。
 
 解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。安装执行请求体为
 `{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带

@@ -1,5 +1,28 @@
 ---
 
+## Session 2026-08-14 — Ticket #4 控制/管理 REST 与 WebSocket 安全收口（双轴通过）
+
+### 已实现
+- 31 个控制/管理 REST 操作收口为三个集中能力：`system.manage`（admin）、`gateway.manage`（admin/engineer）、`control.write`（三角色）；拒绝与已授权高权限操作进入不可变审计。
+- WebSocket 不再匿名订阅：Bearer 会话通过 `POST /api/v1/auth/ws-ticket` 换取 30 秒一次性票据；数据库仅存 SHA-256 摘要；WSS 首帧消费票据后，每次订阅再次检查 `telemetry.subscribe`，未订阅前不推送数据。
+- 新增 migration_022_websocket_tickets.sql；统一镜像携带 init-db；生产关闭 docs/redoc/openapi；明文 WS 拒绝且不消费票据。
+- 新增独立 `ALLOW_INSECURE_ANONYMOUS_ACCESS=false`。生产开启会拒绝启动；development 显式开启时响应带不安全标记、日志警告、前端红色横幅。
+- 前端实时订阅已改用一次性票据，长期 Bearer 不进 URL/query。
+
+### 验证
+- Ticket #4 + Ticket #3 定向 21/21；身份/交付/设置相关 61/61。
+- 完整后端 120 passed / 1 skipped；仅两个既有 Aggregator SUM/LAST 基线失败。
+- 前端 `tsc -b` 通过；Vite 生产构建 8176 modules 通过（既有大 chunk warning）。
+- 显式 PostgreSQL 主缝因未提供 `*_test` 隔离库安全停止，未触碰现场库。
+- 双轴审查最终 PASS：Standards 硬违反 0；Spec 阻断、缺失、scope creep 与表面实现错误均为 0。复审期间补齐已连接 WebSocket 在会话注销后的即时订阅拒绝。
+
+### 当前边界 / Next
+- Ticket #4 代码尚未提交、推送或部署；双轴审查已经通过，可进入提交与 PR。
+- 1号机仍是明文匿名 v0.4.77，不满足本票的 TLS/WSS、固定制品和迁移门禁，禁止直接覆盖部署。
+- `control.write` 当前仅解决认证授权；限值、联锁、幂等、回读和命令状态机属于后续统一控制命令票据。
+
+---
+
 ## Session 2026-08-13 — Ticket #2 身份认证交付缝
 
 - 分支：`ticket/02-authentication-in-delivery-seam`，基线 `main@7a4818f`。

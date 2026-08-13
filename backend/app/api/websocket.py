@@ -16,8 +16,17 @@ import asyncio
 import json
 from uuid import UUID
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from loguru import logger
+
+from app.api.security import (
+    _INSECURE_DEVELOPMENT_PRINCIPAL,
+    _client_ip,
+    _request_scheme,
+    get_identity,
+)
+from app.core.config import settings
+from app.services.identity import AuditEvent, Identity, IdentityError
 
 router = APIRouter()
 
@@ -30,15 +39,16 @@ class TelemetryBroadcaster:
 
     def __init__(self):
         self._clients: set[WebSocket] = set()
-        self._subscriptions: dict[WebSocket, set[str]] = {}  # ws → tag_id set (empty = all)
+        # None means authenticated but not subscribed; an empty set explicitly
+        # means all tags. This prevents data racing out before the first command.
+        self._subscriptions: dict[WebSocket, set[str] | None] = {}
         self._poll_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
     async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
         async with self._lock:
             self._clients.add(ws)
-            self._subscriptions[ws] = set()
+            self._subscriptions[ws] = None
         logger.info("[WS] Client connected, total={}", len(self._clients))
         # 首个客户端启动轮询
         if self._poll_task is None or self._poll_task.done():
@@ -75,6 +85,8 @@ class TelemetryBroadcaster:
                 all_tag_ids: set[str] = set()
                 subscribe_all = False
                 for tags in subs.values():
+                    if tags is None:
+                        continue
                     if not tags:
                         subscribe_all = True
                         break
@@ -92,7 +104,9 @@ class TelemetryBroadcaster:
 
                 # 按客户端订阅过滤并推送
                 for ws in clients:
-                    wanted = subs.get(ws, set())
+                    wanted = subs.get(ws)
+                    if wanted is None:
+                        continue
                     payload_tags = []
                     for r in rows:
                         tid = str(r["tag_id"])
@@ -159,7 +173,10 @@ _broadcaster = TelemetryBroadcaster()
 
 
 @router.websocket("/ws/telemetry")
-async def telemetry_ws(ws: WebSocket) -> None:
+async def telemetry_ws(
+    ws: WebSocket,
+    identity: Identity = Depends(get_identity),
+) -> None:
     """
     实时遥测 WebSocket。
 
@@ -170,16 +187,102 @@ async def telemetry_ws(ws: WebSocket) -> None:
     服务端推送:
       {"tags": [{"tag_id", "raw_value", "eng_value", "ts", "quality"}, ...]}
     """
-    await _broadcaster.connect(ws)
+    await ws.accept()
+    if (
+        settings.auth_require_https
+        and _request_scheme(ws) != "https"
+        and not (
+            settings.deployment_mode == "development"
+            and settings.allow_insecure_anonymous_access
+        )
+    ):
+        try:
+            await asyncio.to_thread(
+                identity.audit,
+                AuditEvent(
+                    event="authentication.transport",
+                    outcome="denied",
+                    reason="https_required",
+                    target=ws.url.path,
+                    client_ip=_client_ip(ws),
+                ),
+            )
+        except Exception:
+            await ws.close(code=4503, reason="authentication unavailable")
+            return
+        await ws.close(code=4406, reason="secure WebSocket required")
+        return
     try:
+        try:
+            first = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=5.0))
+            ticket = first.get("authenticate", {}).get("ticket")
+            if not isinstance(ticket, str):
+                raise ValueError("ticket required")
+            if (
+                settings.deployment_mode == "development"
+                and settings.allow_insecure_anonymous_access
+                and ticket == "insecure-development"
+            ):
+                principal = _INSECURE_DEVELOPMENT_PRINCIPAL
+            else:
+                principal = await asyncio.to_thread(identity.consume_ws_ticket, ticket)
+            await asyncio.to_thread(
+                identity.authorize,
+                principal,
+                "telemetry.subscribe",
+            )
+        except (
+            IdentityError,
+            ValueError,
+            json.JSONDecodeError,
+            AttributeError,
+            TimeoutError,
+        ):
+            await ws.close(code=4401, reason="authentication required")
+            return
+
+        await _broadcaster.connect(ws)
+        await ws.send_json({"type": "authenticated"})
         while True:
             text = await ws.receive_text()
             try:
                 msg = json.loads(text)
                 if "subscribe" in msg:
-                    await _broadcaster.subscribe(ws, msg["subscribe"])
-            except json.JSONDecodeError:
-                pass
+                    tag_ids = msg["subscribe"]
+                    if not isinstance(tag_ids, list) or not all(
+                        isinstance(tag_id, str) for tag_id in tag_ids
+                    ):
+                        raise ValueError("subscribe must be a list of tag IDs")
+                    if len(tag_ids) > 1000:
+                        raise ValueError("too many tag IDs")
+                    for tag_id in tag_ids:
+                        UUID(tag_id)
+                    if principal != _INSECURE_DEVELOPMENT_PRINCIPAL:
+                        try:
+                            principal = await asyncio.to_thread(
+                                identity.revalidate_session,
+                                principal,
+                                client_ip=_client_ip(ws),
+                            )
+                        except IdentityError:
+                            await ws.close(code=4401, reason="authentication required")
+                            return
+                    await asyncio.to_thread(
+                        identity.authorize,
+                        principal,
+                        "telemetry.subscribe",
+                    )
+                    await _broadcaster.subscribe(ws, tag_ids)
+                    await ws.send_json(
+                        {"type": "subscribed", "tag_count": len(tag_ids)}
+                    )
+            except (json.JSONDecodeError, ValueError):
+                await ws.send_json(
+                    {"type": "error", "code": "SUBSCRIPTION_INVALID"}
+                )
+            except IdentityError:
+                await ws.close(code=4403, reason="permission denied")
+                return
     except WebSocketDisconnect:
         pass
     finally:

@@ -656,34 +656,41 @@ export function connectTelemetryWS(
   onMessage: TelemetryCallback,
   tagIds?: string[],
 ): () => void {
-  // Ticket #4 will add the server-side WebSocket authentication handshake.
-  // Never put the opaque session token in the URL/query string: it would leak
-  // through browser history, proxies and access logs.
-  const ws = new WebSocket(WS_URL)
+  let ws: WebSocket | null = null
+  let cancelled = false
 
-  ws.onopen = () => {
-    if (tagIds && tagIds.length > 0) {
-      ws.send(JSON.stringify({ subscribe: tagIds }))
+  void (async () => {
+    const issued = await apiFetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST' })
+    if (!issued.ok || cancelled) return
+    const { ticket } = await issued.json() as { ticket: string }
+    if (cancelled) return
+    ws = new WebSocket(WS_URL)
+
+    ws.onopen = () => {
+      ws?.send(JSON.stringify({ authenticate: { ticket } }))
     }
-  }
 
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      if (data.tags && Array.isArray(data.tags)) {
-        onMessage(data.tags)
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'authenticated') {
+          ws?.send(JSON.stringify({ subscribe: tagIds || [] }))
+        } else if (data.tags && Array.isArray(data.tags)) {
+          onMessage(data.tags)
+        }
+      } catch {
+        // ignore parse errors
       }
-    } catch {
-      // ignore parse errors
     }
-  }
 
-  ws.onerror = (err) => {
-    console.error('[WS] Error:', err)
-  }
+    ws.onerror = (err) => {
+      console.error('[WS] Error:', err)
+    }
+  })().catch((err) => console.error('[WS] Ticket failed:', err))
 
   return () => {
-    ws.close()
+    cancelled = true
+    ws?.close()
   }
 }
 

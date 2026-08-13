@@ -263,6 +263,11 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
 
       {/* 主内容 */}
       <main className="flex-1 p-6 overflow-auto min-w-0">
+        {!session.accessToken && (
+          <div role="alert" className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-semibold text-red-800">
+            不安全开发模式：当前会话未认证。不得将此实例暴露到生产网络。
+          </div>
+        )}
         <PipelineBar health={health} />
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
@@ -294,7 +299,12 @@ export default function App() {
   const restoreSession = useCallback(async () => {
     const stored = getAuthSession()
     if (!stored) {
-      setSession(null)
+      try {
+        const user = await fetchCurrentUser()
+        setSession({ accessToken: '', expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), user })
+      } catch {
+        setSession(null)
+      }
       setRestoreError('')
       setRestoring(false)
       return

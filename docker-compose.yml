@@ -9,7 +9,7 @@
 #
 # 访问:
 #   http://localhost:9000          → 前端页面
-#   http://localhost:9000/api/docs → API 文档
+#   development 模式下 http://localhost:9000/api/docs → API 文档
 #
 # e606 内核裁剪版 (5.10.160) 特殊配置:
 #   1. 无法 docker build → 使用预构建镜像: docker compose up -d

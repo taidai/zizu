@@ -227,18 +227,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """Application factory."""
+    from app.core.config import settings
+
+    expose_development_docs = settings.deployment_mode == "development"
     app = FastAPI(
         title="ZiZu API",
         description="ZiZu IoT Platform - 替代 ThingsBoard 的工业 IoT 开发平台",
         version=APP_VERSION,
         lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if expose_development_docs else None,
+        redoc_url="/api/redoc" if expose_development_docs else None,
+        openapi_url="/api/openapi.json" if expose_development_docs else None,
     )
 
     # CORS middleware
-    from app.core.config import settings
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -347,7 +349,9 @@ def create_app() -> FastAPI:
 
         @app.get("/", include_in_schema=False)
         async def root() -> RedirectResponse:
-            return RedirectResponse(url="/api/docs")
+            return RedirectResponse(
+                url="/api/docs" if expose_development_docs else "/api/v1/health/live"
+            )
 
     # TODO Phase 1 S4: app.include_router(telemetry_router, prefix="/api/v1")
     # TODO Phase 2:     app.include_router(virtual_points_router, prefix="/api/v1")

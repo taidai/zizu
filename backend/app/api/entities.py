@@ -29,6 +29,7 @@ from app.api.health import _VERSION as APP_VERSION
 from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
+    CONTROL_WRITE,
     RUNTIME_READ,
     capability_metadata,
     principal_for,
@@ -962,7 +963,7 @@ async def entity_history(
     return _runtime_entity(data, principal)
 
 
-@router.post("/entities/{entity_id}/write")
+@router.post("/entities/{entity_id}/write", **protected(CONTROL_WRITE))
 async def entity_write(entity_id: str, req: dict) -> dict:
     """向实体写入控制值。"""
     value = req.get("value")
