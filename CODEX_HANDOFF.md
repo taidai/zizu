@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-14 — Ticket #10 规则自动控制迁移（本地完成，待提交）
+## Session 2026-08-14 — Ticket #10 规则自动控制迁移（已提交并推送，待 PostgreSQL 主缝）
 
 ### 已实现
 - 规则命中不再直接调用 Neuron、MQTT 或全局实体写入；新增 `AutomatedControlCommands`，只向既有 `ControlCommandRuntime` 创建 `source_type=rule` 的统一命令。
@@ -20,7 +20,8 @@
 - 真实 PostgreSQL/Uvicorn 升级缝已纳入 migration_028，但当前未提供安全隔离的 `*_test` 数据库，尚未执行；禁止使用现场库替代。
 - Ticket #10 只迁移规则自动控制；`/entities/{id}/write` 及剩余业务写旁路仍是 Ticket #11，不能宣称所有设备写入已统一。
 - 1号机仍是旧明文匿名版本；TLS、固定 ARM64 制品、凭据轮换、迁移演练和发布锁未闭合，禁止部署本分支。
-- 本票尚未提交/推送/关闭 Issue #10。下步：提交、网络恢复后推送；再进入 Ticket #11 删除最后的设备写旁路。
+- 本票已提交并推送：`5a7bbd9 feat(control): route rules through commands`（分支
+  `ticket/07-multi-device-instance-consumers`）。Issue #10 保持开放，直到隔离 PostgreSQL 主缝补验完成；随后进入 Ticket #11 删除最后的设备写旁路。
 
 ## Session 2026-08-14 — Ticket #9 Neuron / MQTT RPC 兼容控制迁移（本地完成，待提交）
 
