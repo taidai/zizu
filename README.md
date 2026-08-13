@@ -248,6 +248,33 @@ zizu/
 | GET | `/api/v1/entities/{id}/realtime` | 实体实时值 |
 | GET | `/api/v1/entities/{id}/history` | 实体历史数据 |
 | POST | `/api/v1/entities/{id}/write` | 向实体写入控制值 |
+| GET | `/api/v1/health/live` | 最小匿名存活契约，仅返回 `status` 与版本 |
+| POST | `/api/v1/solution-packages/import` | multipart 上传并完整校验解决方案 ZIP |
+| GET | `/api/v1/solution-packages` | 查询已验证的不可变解决方案包 |
+| POST | `/api/v1/solution-packages/{package_record_id}/install-plans` | 为已验证包生成可审查安装计划 |
+| GET | `/api/v1/install-plans/{id}` | 查询已保存的不可变安装计划 |
+| POST | `/api/v1/install-plans/{id}/apply` | 按计划摘要幂等安装解决方案包 |
+| GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
+| POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
+| GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
+
+解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。安装执行请求体为
+`{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带
+`Idempotency-Key` 请求头。相同调用主体、命令和请求摘要重用同一键会返回原结果，
+同一键用于不同请求返回 `IDEMPOTENCY_KEY_REUSED`。归档/清单错误返回 HTTP 422，
+计划过期、摘要不匹配或幂等冲突返回 HTTP 409；错误体稳定表示为：
+
+```json
+{"detail":{"code":"INSTALL_PLAN_STALE","message":"..."}}
+```
+
+包表示中的 `package_id` 是清单声明的稳定字符串标识；计划与安装表示中的
+`package_record_id` 是本实例保存该包后生成的 UUID，二者不会复用同一字段名。
+
+票据 01 的最小包格式、归档限额、机器码和报告字段以
+[`docs/adr/0006-minimal-solution-delivery-tracer.md`](docs/adr/0006-minimal-solution-delivery-tracer.md)
+为准。生产验收探针默认请求本实例 `APP_PORT`；反向代理或端口映射部署需设置
+`PUBLIC_API_BASE_URL` 为 backend 可访问的公开 API 基址。
 
 ---
 
@@ -349,11 +376,22 @@ services:
 ## 开发
 
 ```bash
-# 后端测试
-cd backend && python -m pytest test_f0_pure.py -v
+# 安装项目依赖后，导出一组仅用于本机测试的非公开默认 Secret
+cd backend
+export DB_PASSWORD=database-secret-value
+export NEURON_PASSWORD=neuron-secret-value
+export NANOMQ_API_PASSWORD=nanomq-secret-value
+export JWT_SECRET=jwt-secret-value-that-is-at-least-32-chars
+
+# 本次安全与交付功能回归、F0 独立验收（不需要额外测试依赖）
+python -m unittest tests.test_secure_settings tests.test_delivery_public_api -v
+python test_f0_pure.py
+
+# 其余历史测试使用 pytest；如本机已安装 pytest：python -m pytest tests -q
+# 当前基线有 2 个已知聚合器失败（SUM 去重、LAST 时间排序）。
 
 # 前端构建
-cd frontend && npm run build
+cd ../frontend && npm run build
 ```
 
 ---

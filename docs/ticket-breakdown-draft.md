@@ -1,7 +1,7 @@
 # ZiZu 配置式交付 v1 — Tracer-bullet 票据拆分草案 v2
 
 > 来源规格：`docs/specs/configuration-delivery-v1.md`
-> 状态：等待维护者确认粒度与依赖；确认后发布为 GitHub Issues，并添加 `ready-for-agent`。
+> 状态：维护者已确认粒度、依赖和测试缝；已发布为 GitHub Issues #1–#19，使用仓库默认标签 `enhancement`。
 
 ## 01 — 建立最薄公开交付主缝
 
