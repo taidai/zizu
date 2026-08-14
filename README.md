@@ -324,7 +324,8 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 # 作为构建产物保存；它不会部署、写发布锁或触及现场。
 #
 # 也可先在受控构建机完成 Registry 登录；该命令分别 push amd64/arm64，只有 Buildx 返回的 digest
-# 才会写入 release.json。repository 不能带标签，TLS 入口镜像必须预先以 digest 审核。
+# 才会写入 release.json。--platform-version 必须与仓库根 VERSION 完全一致；repository 不能带标签，
+# TLS 入口镜像必须预先以 digest 审核。
 python scripts/build_release_images.py \
   --repository registry.example/zizu \
   --platform-version 0.4.78 \

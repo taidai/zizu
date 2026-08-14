@@ -93,6 +93,23 @@ class BuildReleaseImagesTest(unittest.TestCase):
                 )
         self.assertEqual([], calls)
 
+    def test_refuses_a_version_that_does_not_match_the_release_source(self) -> None:
+        from scripts.build_release_images import ReleaseBuildError, build_release_images
+
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ReleaseBuildError, "source VERSION"):
+                build_release_images(
+                    repository="registry.example/zizu",
+                    platform_version="0.4.77",
+                    edge_proxy_image="registry.example/caddy@sha256:" + "c" * 64,
+                    output=Path(directory) / "release.json",
+                    migrations_dir=REPO_ROOT / "init-db",
+                    build_context=REPO_ROOT,
+                    runner=calls.append,
+                )
+        self.assertEqual([], calls)
+
 
 if __name__ == "__main__":
     unittest.main()

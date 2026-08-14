@@ -44,6 +44,11 @@ def build_release_images(
     """Push amd64/arm64 images and atomically write a verified release manifest."""
     repository = _repository(repository)
     platform_version = _nonempty("platform_version", platform_version)
+    source_version = _source_version(build_context)
+    if platform_version != source_version:
+        raise ReleaseBuildError(
+            f"platform_version {platform_version!r} does not match source VERSION {source_version!r}"
+        )
     schema_version = _latest_migration_version(migrations_dir)
     # Validate every non-build input before an external push can begin.
     verify_release(
@@ -109,6 +114,16 @@ def _nonempty(name: str, value: str) -> str:
     if not isinstance(value, str) or not value.strip() or any(character.isspace() for character in value):
         raise ReleaseBuildError(f"{name} must be a non-empty value without whitespace")
     return value.strip()
+
+
+def _source_version(build_context: Path) -> str:
+    try:
+        return _nonempty(
+            "source VERSION",
+            (build_context / "VERSION").read_text(encoding="utf-8").strip(),
+        )
+    except OSError as error:
+        raise ReleaseBuildError("release source VERSION is not readable") from error
 
 
 def _metadata_digest(path: Path, architecture: str) -> str:
