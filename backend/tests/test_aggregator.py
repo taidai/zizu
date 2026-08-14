@@ -33,19 +33,20 @@ def test_sql_agg_mapping():
 
 
 def test_compute_sum():
-    """SUM 分支: 返回外层聚合值，SQL 含 DISTINCT ON 子查询。"""
+    """SUM 基于每个 source tag 的最新缓存值聚合。"""
     cur = FakeCursor((123.5,))
     val = _compute_aggregate(cur, "SUM", [uuid4(), uuid4()])
     assert val == 123.5
     assert "SUM(v.value)" in cur.last_sql
-    assert "DISTINCT ON (tag_id)" in cur.last_sql
+    assert "FROM t_telemetry_latest" in cur.last_sql
 
 
 def test_compute_last():
-    """LAST 分支: 取时间戳最新一行，SQL 为 ORDER BY ts DESC LIMIT 1。"""
+    """LAST 从最新缓存值中按观测时间取最新一行。"""
     cur = FakeCursor((88.0,))
     val = _compute_aggregate(cur, "LAST", [uuid4()])
     assert val == 88.0
+    assert "FROM t_telemetry_latest" in cur.last_sql
     assert "ORDER BY ts DESC" in cur.last_sql
     assert "LIMIT 1" in cur.last_sql
 

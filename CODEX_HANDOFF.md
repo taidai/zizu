@@ -65,11 +65,13 @@
   服务端授权复核、有限数值拒绝和 activation 锁，并新增“仅 engineer”“NaN/Infinity 拒绝”及
   停用等待活动评估边界的回归。
 - 公开控制/参考包/业务权限/交付主缝：83 项通过；参考 ZIP 可重复构建。完整后端
-  `pytest tests -q`：228 passed、1 skipped，仍仅有两个既有 Aggregator SQL 断言失败
-  （`test_compute_sum`、`test_compute_last` 仍期待旧 `DISTINCT ON`/时间排序，而生产实现读取
-  `t_telemetry_latest`）。本切片未改 Aggregator。
-- PostgreSQL 激活锁、迁移与角色 smoke 尚未在隔离 `*_test` 数据库实跑；没有真实 amd64/arm64
-  摘要制品、TLS、发布锁及维护窗证据前，不能合并为可部署声明，更不能部署至 1 号机。
+  `pytest tests -q`：230 passed、2 skipped。此前 Aggregator 的 LAST 分支确有遗漏 `ORDER BY ts
+  DESC LIMIT 1`；现已修复并以 `t_telemetry_latest` 的当前契约覆盖，完整套件不再留已知失败。
+- 隔离 PostgreSQL `zizu_ticket01_test` 已实跑 migration_031 与激活锁回归：停用等待已进入的
+  评估边界释放，再删除激活记录；返回后无残留激活。既有 PostgreSQL 公共主缝也已实跑，证明
+  migration_020–032、身份、交付、实体、告警、控制和重启持久化。
+- 仍没有真实 amd64/arm64 摘要制品、TLS、发布锁及维护窗证据；因此不能合并为可部署声明，更不能
+  部署至 1 号机。
 - 10 kW 只是协议模拟和公开参考包中的保守演练值，不是任何现场的安全许可。不得因此绕过
   TLS、固定制品、凭据轮换、隔离 PostgreSQL 迁移/角色 smoke、发布锁与 1 号机维护窗门禁。
 
