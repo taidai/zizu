@@ -3685,3 +3685,6 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   Docker Hub `python:3.12-slim` 的匿名令牌连接超时；构建尚未进入任何 Dockerfile 层。仅
   `node:22-alpine` 已在本机缓存，Python 基础镜像不在缓存中。因此当前网络也不能提供一次
   真实的本地镜像构建证据；这不是 Dockerfile 失败。
+- 根因已只读确认：Docker daemon 强制使用 `HTTP(S) Proxy: http.docker.internal:3128`，但该
+  主机无法解析、TCP 3128 不可达。不要修改仓库 Dockerfile 或改用不可信镜像源；需由本机维护者
+  在 Docker Desktop 的代理设置中修正/关闭失效代理并重启 daemon，然后重试同一构建命令。
