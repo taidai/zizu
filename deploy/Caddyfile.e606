@@ -1,0 +1,24 @@
+{
+    email {$ZIZU_ACME_EMAIL}
+}
+
+http://{$ZIZU_PUBLIC_HOST} {
+    redir https://{host}{uri} permanent
+}
+
+{$ZIZU_PUBLIC_HOST} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+    }
+
+    reverse_proxy 127.0.0.1:9000 {
+        header_up Host {host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+    }
+}

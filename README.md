@@ -296,13 +296,61 @@ npm install
 npm run dev    # Vite dev server @5173
 ```
 
-### 5. e606 裁剪内核部署
+### 5. 不可变生产发布（Ticket #18）
 
-Ticket #18 会把 e606 迁移到固定 digest 的 ARM64 制品。在该制品、backend-only 编排
-和 HTTPS 入口完成前，旧的 e606 Compose/部署脚本只用于既有 v0.4.77 维护，不能用于
-上线本节的认证版本，也不得在 e606 上现场构建或直接覆盖源码。
+生产发布以一个经审查的 `release.json` 为唯一输入。它必须同时声明 amd64 与 arm64 的
+ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本；不接受 `latest`、标签
+引用或宿主机源码覆盖。下面是格式，摘要必须替换成已发布制品的真实值，示例不是可部署
+清单：
 
-> e606 使用 `network_mode: host` + `tmpfs: /dev/mqueue`，端口直接占宿主机。
+```json
+{
+  "platform_version": "0.4.78",
+  "schema_version": "031",
+  "edge_proxy_image": "registry.example/caddy@sha256:<64-hex>",
+  "images": {
+    "linux/amd64": "registry.example/zizu@sha256:<64-hex>",
+    "linux/arm64": "registry.example/zizu@sha256:<64-hex>"
+  }
+}
+```
+
+发布工程师先在制品目录验证清单与随镜像交付的迁移目录一致，再为目标架构渲染只含摘要
+的 Compose 变量。此过程不连接现场、不写数据库：
+
+```bash
+python scripts/release_preflight.py verify \
+  --release release.json --migrations-dir init-db
+python scripts/release_preflight.py render-env \
+  --release release.json --architecture linux/arm64 > release.env
+```
+
+在受控维护窗口内，先使用 owner 凭据运行 `scripts/provision_database_roles.py` 完成迁移和
+最小权限收敛，再启动已经加载到宿主机的 digest 镜像。运行时 `.env` 必须是权限受限的
+Secret 文件；它不属于发布包，也不能写入仓库。常规 Docker 主机使用：
+
+```bash
+export ZIZU_RUNTIME_ENV=/secure/path/zizu-runtime.env
+export ZIZU_PUBLIC_HOST=ems.example.invalid
+export ZIZU_ACME_EMAIL=ops@example.invalid
+docker compose --env-file release.env -f deploy/docker-compose.release.yml \
+  up -d --no-build
+```
+
+e606 的裁剪内核使用独立的 host-network 编排；backend 固定绑定 `127.0.0.1:9000`，只有
+固定摘要的 Caddy TLS 入口监听公网 `80/443`：
+
+```bash
+docker compose --env-file release.env -f deploy/docker-compose.release.e606.yml \
+  up -d --no-build
+```
+
+两个生产编排都不启动 PostgreSQL 或 NanoMQ、不发布 `9000`、不挂载 `backend/`、`frontend/`
+或 `init-db/` 源码。Caddy 自动签发证书前，DNS 必须已指向目标主机，且防火墙只能对外放行
+`80/443`。反向代理以固定地址传递 `X-Forwarded-*`，应用只信任该地址。
+
+旧 `docker-compose*.yml`、`deploy.sh` 和旧 e606 说明属于 v0.4.77 维护遗留，**不得**用于
+认证版本或新的生产发布；不得在 e606 现场构建镜像、使用 `latest` 或覆盖镜像内源码。
 
 ---
 

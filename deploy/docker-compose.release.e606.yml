@@ -1,0 +1,55 @@
+# Immutable production release for the e606 host-network constraint.
+# It is standalone: never merge it with docker-compose.yml or its legacy
+# e606 override, because those files start and mount development services.
+name: zizu-release
+
+services:
+  edge:
+    image: ${ZIZU_EDGE_PROXY_IMAGE:?render release.env from a verified release manifest}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ZIZU_PUBLIC_HOST: ${ZIZU_PUBLIC_HOST:?set the public DNS name}
+      ZIZU_ACME_EMAIL: ${ZIZU_ACME_EMAIL:?set the certificate contact email}
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./Caddyfile.e606:/etc/caddy/Caddyfile:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  backend:
+    image: ${ZIZU_PLATFORM_IMAGE:?render release.env from a verified release manifest}
+    restart: unless-stopped
+    network_mode: host
+    tmpfs:
+      - /dev/mqueue
+    env_file:
+      - ${ZIZU_RUNTIME_ENV:?set to the secured runtime .env path}
+    environment:
+      APP_BIND_HOST: 127.0.0.1
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      MQTT_HOST: 127.0.0.1
+      MQTT_PORT: "1883"
+      DB_OWNER_USER: ""
+      DB_OWNER_PASSWORD: ""
+      AUTH_REQUIRE_HTTPS: "true"
+      AUTH_TRUST_PROXY_HEADERS: "true"
+      AUTH_TRUSTED_PROXY_CIDRS: '["127.0.0.1/32"]'
+      FRONTEND_DIST: /app/frontend/dist
+    volumes:
+      - zizu-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  caddy-data:
+  caddy-config:
+  zizu-data:
