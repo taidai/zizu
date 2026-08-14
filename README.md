@@ -319,6 +319,13 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 的 Compose 变量。此过程不连接现场、不写数据库：
 
 ```bash
+# 先在受控构建机完成 Registry 登录；该命令分别 push amd64/arm64，只有 Buildx 返回的 digest
+# 才会写入 release.json。repository 不能带标签，TLS 入口镜像必须预先以 digest 审核。
+python scripts/build_release_images.py \
+  --repository registry.example/zizu \
+  --platform-version 0.4.78 \
+  --edge-proxy-image registry.example/caddy@sha256:<64-hex> \
+  --output release.json
 python scripts/release_preflight.py verify \
   --release release.json --migrations-dir init-db
 python scripts/release_preflight.py render-env \

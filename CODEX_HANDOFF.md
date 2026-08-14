@@ -79,6 +79,10 @@
   Docker Hub 匿名令牌端点超时，无法拉取 `python:3.12-slim` 元数据；因此当前构建机不能生成
   多架构摘要制品。待可访问 Registry 的构建环境恢复后，必须从 `release_preflight` 开始继续，
   不能用 latest、源码挂载或 1 号机现网镜像替代。
+- 新增 `scripts/build_release_images.py`：构建机完成可信 Registry 登录后，该脚本逐个 push
+  `linux/amd64` 与 `linux/arm64`，只从 Buildx metadata 接收不可变 digest 并原子生成
+  `release.json`；仓库标签、缺失 digest 或不合格 TLS 入口摘要都会拒绝，不能手填制品摘要。
+  定向发布契约测试 9/9 通过，但当前网络仍不能执行真实 buildx push。
 - 新增 `docs/delivery-trial-protocol.md`：将独立实施工程师的四小时试验固定为发布前门禁、九个
   计时阶段、八项能力证据、90% 配置覆盖率算法和无现场私有数据的记录模板。实际试验仍须在
   固定制品/TLS/发布锁具备后，由未参与开发者执行；文档不能替代该人工证据。
