@@ -63,6 +63,7 @@ assets:
   - {id: acceptance.pv, kind: acceptance, path: acceptance/pv-readiness.yaml}
   - {id: acceptance.evse, kind: acceptance, path: acceptance/evse-readiness.yaml}
   - {id: acceptance.meter, kind: acceptance, path: acceptance/meter-readiness.yaml}
+  - {id: acceptance.meter-history, kind: acceptance, path: acceptance/meter-history.yaml}
   - {id: acceptance.grid-import-lifecycle, kind: acceptance, path: acceptance/grid-import-lifecycle.yaml}
   - {id: acceptance.policy-grid-import-cap, kind: acceptance, path: acceptance/policy-grid-import-cap.yaml}
   - {id: acceptance.release-lock, kind: acceptance, path: acceptance/release-lock.yaml}
@@ -73,6 +74,7 @@ acceptance:
   - acceptance.pv
   - acceptance.evse
   - acceptance.meter
+  - acceptance.meter-history
   - acceptance.grid-import-lifecycle
   - acceptance.policy-grid-import-cap
   - acceptance.release-lock

@@ -751,6 +751,7 @@ class SolutionDelivery:
                 or definition.get("kind") not in {
                     "platform_liveness",
                     "entity_readiness",
+                    "history_readiness",
                     "alarm_lifecycle",
                     "policy_execution",
                     "release_lock",
@@ -770,6 +771,16 @@ class SolutionDelivery:
                     item_started,
                 )
                 items.append(item)
+                continue
+            if definition["kind"] == "history_readiness":
+                items.append(
+                    self._run_history_readiness(
+                        installation,
+                        acceptance_id,
+                        definition,
+                        item_started,
+                    )
+                )
                 continue
             if definition["kind"] == "alarm_lifecycle":
                 item = self._run_alarm_lifecycle_acceptance(
@@ -1179,6 +1190,80 @@ class SolutionDelivery:
                 round((time.monotonic() - item_started) * 1000),
             ),
             "evidence": evidence,
+        }
+
+    def _run_history_readiness(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+    ) -> dict[str, Any]:
+        required = bool(definition.get("required", True))
+        if self._entity_instance_runtime is None:
+            return {
+                "acceptance_id": acceptance_id,
+                "status": "failed",
+                "code": "ENTITY_RUNTIME_UNAVAILABLE",
+                "required": required,
+                "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+                "evidence": {"history": "unavailable"},
+            }
+        plan = self._repository.get_plan(installation.plan_id)
+        entity_item = next(
+            (
+                item
+                for item in plan.items
+                if item.get("kind") == "entity_binding"
+                and item.get("slot_id") == definition.get("slot")
+                and item.get("definition_id") == definition.get("definition")
+            ),
+            None,
+        ) if plan is not None else None
+        if entity_item is None:
+            return {
+                "acceptance_id": acceptance_id,
+                "status": "failed",
+                "code": "ENTITY_BINDING_MISSING",
+                "required": required,
+                "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+                "evidence": {"binding": "missing", "sample_count": 0},
+            }
+        entity_instance_id = UUID(entity_item["entity_instance_id"])
+        try:
+            observations = self._entity_instance_runtime.history(
+                entity_instance_id, definition["range"]
+            )
+        except EntityInstanceError as exc:
+            return {
+                "acceptance_id": acceptance_id,
+                "status": "failed",
+                "code": exc.code,
+                "required": required,
+                "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+                "evidence": {"entity_instance_id": str(entity_instance_id), "sample_count": 0},
+            }
+        good = [item for item in observations if item.quality_good]
+        minimum = definition["minimumSamples"]
+        if len(observations) < minimum:
+            code = "HISTORY_SAMPLE_MISSING"
+        elif len(good) < minimum:
+            code = "HISTORY_QUALITY_BAD"
+        else:
+            code = "HISTORY_AVAILABLE"
+        return {
+            "acceptance_id": acceptance_id,
+            "status": "passed" if code == "HISTORY_AVAILABLE" else "failed",
+            "code": code,
+            "required": required,
+            "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+            "evidence": {
+                "entity_instance_id": str(entity_instance_id),
+                "definition_id": definition["definition"],
+                "range": definition["range"],
+                "sample_count": len(observations),
+                "good_sample_count": len(good),
+            },
         }
 
     def get_report(self, report_id: UUID) -> DeliveryReport:

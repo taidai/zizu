@@ -898,6 +898,23 @@ timeout: 5s
 绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
 
 ```yaml
+# acceptance/grid-power-history.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.grid-power-history
+kind: history_readiness
+required: true
+slot: slot.meter
+definition: grid.activePower
+range: 24h
+minimumSamples: 2
+timeout: 5s
+```
+
+`history_readiness` 对已经确认的实体实例检查指定时间窗内的历史观测，不返回原始遥测值。
+`range` 只能是 `1h`、`24h`、`7d` 或 `30d`，`minimumSamples` 必须是正整数；缺少样本或样本
+质量非 GOOD 时，会以 `HISTORY_SAMPLE_MISSING` 或 `HISTORY_QUALITY_BAD` 记录 failed 报告。
+
+```yaml
 # acceptance/release-lock.yaml
 schemaVersion: zizu.acceptance/v1alpha1
 id: acceptance.release-lock

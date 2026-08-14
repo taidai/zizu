@@ -31,6 +31,7 @@ def build_entity_package(
     manual_failover: bool = False,
     workbench_definition: str | None = None,
     entity_direction: str = "R",
+    history_acceptance: bool = False,
 ) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -93,10 +94,22 @@ def build_entity_package(
         "freshness: 30s\n"
         "timeout: 5s\n"
     ).encode()
+    history = (
+        "schemaVersion: zizu.acceptance/v1alpha1\n"
+        "id: acceptance.pcs-history\n"
+        "kind: history_readiness\n"
+        "required: true\n"
+        "slot: slot.pcs-primary\n"
+        "definition: pcs.activePower\n"
+        "range: 24h\n"
+        "minimumSamples: 2\n"
+        "timeout: 5s\n"
+    ).encode() if history_acceptance else None
     acceptance_digest = hashlib.sha256(acceptance).hexdigest()
     definition_digest = hashlib.sha256(entity_definition).hexdigest()
     entity_digest = hashlib.sha256(entity_slot).hexdigest()
     entity_acceptance_digest = hashlib.sha256(entity_acceptance).hexdigest()
+    history_digest = hashlib.sha256(history).hexdigest() if history is not None else None
     workbench = workbench_definition.encode() if workbench_definition is not None else None
     workbench_digest = hashlib.sha256(workbench).hexdigest() if workbench else None
     manifest = (
@@ -145,6 +158,14 @@ def build_entity_package(
         "    path: acceptance/pcs-active-power.yaml\n"
         f"    sha256: \"{entity_acceptance_digest}\"\n"
         + (
+            "  - id: acceptance.pcs-history\n"
+            "    kind: acceptance\n"
+            "    path: acceptance/pcs-history.yaml\n"
+            f"    sha256: \"{history_digest}\"\n"
+            if history is not None
+            else ""
+        )
+        + (
             "  - id: workbench.ems\n"
             "    kind: ems_workbench\n"
             "    path: workbench/ems.yaml\n"
@@ -156,6 +177,7 @@ def build_entity_package(
         "acceptance:\n"
         "  - acceptance.platform-liveness\n"
         "  - acceptance.pcs-active-power\n"
+        + ("  - acceptance.pcs-history\n" if history is not None else "")
     ).encode()
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
@@ -164,6 +186,8 @@ def build_entity_package(
         package.writestr("entities/pcs-primary.yaml", entity_slot)
         package.writestr("entities/pcs-active-power.yaml", entity_definition)
         package.writestr("acceptance/pcs-active-power.yaml", entity_acceptance)
+        if history is not None:
+            package.writestr("acceptance/pcs-history.yaml", history)
         if workbench is not None:
             package.writestr("workbench/ems.yaml", workbench)
     return archive.getvalue()
@@ -1261,7 +1285,10 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
 
         async with AuthenticatedDeliveryClient(app) as client:
-            imported, planned = await self.import_and_plan(client)
+            imported, planned = await self.import_and_plan(
+                client,
+                archive=build_entity_package(history_acceptance=True),
+            )
             self.assertEqual(["slot.pcs-primary"], imported.json()["entity_slot_ids"])
             self.assertEqual(201, planned.status_code, planned.text)
             plan = planned.json()
@@ -1291,11 +1318,24 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(200, published.status_code, published.text)
             self.assertEqual(1, published.json()["published"])
 
+            second_published = await client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "message": {
+                        "node": "PCS-01",
+                        "timestamp": round(datetime.now(timezone.utc).timestamp() * 1000) + 1,
+                        "values": {"ActivePower": 126.0},
+                    }
+                },
+            )
+            self.assertEqual(200, second_published.status_code, second_published.text)
+            self.assertEqual(1, second_published.json()["published"])
+
             realtime = await client.get(
                 f"/api/v1/entity-instances/{entity_instance_id}/realtime"
             )
             self.assertEqual(200, realtime.status_code, realtime.text)
-            self.assertEqual(125.5, realtime.json()["value"])
+            self.assertEqual(126.0, realtime.json()["value"])
 
             accepted = await client.post(
                 f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
@@ -1309,6 +1349,11 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(entity_instance_id, entity_evidence["evidence"]["entity_instance_id"])
             self.assertEqual(1, entity_evidence["evidence"]["primary_source_count"])
+            history_evidence = next(
+                item for item in report["items"] if item["code"] == "HISTORY_AVAILABLE"
+            )
+            self.assertEqual(2, history_evidence["evidence"]["sample_count"])
+            self.assertEqual(2, history_evidence["evidence"]["good_sample_count"])
 
             upgraded_import = await client.post(
                 "/api/v1/solution-packages/import",

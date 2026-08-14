@@ -392,14 +392,18 @@ def _validate_entity_assets(
     for acceptance_id in manifest["acceptance"]:
         declaration = declarations[acceptance_id]
         definition = _load_mapping(assets[declaration["path"]], "ASSET_REFERENCE_INVALID")
-        if definition.get("kind") != "entity_readiness":
+        if definition.get("kind") not in {"entity_readiness", "history_readiness"}:
             continue
-        allowed = {
+        entity_fields = {
             "schemaVersion", "id", "kind", "required", "slot",
             "definition", "freshness", "timeout",
         }
+        history_fields = {
+            "schemaVersion", "id", "kind", "required", "slot",
+            "definition", "range", "minimumSamples", "timeout",
+        }
         if (
-            set(definition) != allowed
+            (set(definition) != entity_fields and set(definition) != history_fields)
             or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
             or definition.get("id") != acceptance_id
             or not isinstance(definition.get("required"), bool)
@@ -408,7 +412,15 @@ def _validate_entity_assets(
             not in slot_definition_ids.get(definition.get("slot"), set())
         ):
             raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity acceptance is invalid")
-        _duration_seconds(definition.get("freshness"))
+        if definition["kind"] == "entity_readiness":
+            _duration_seconds(definition.get("freshness"))
+        elif (
+            definition.get("range") not in {"1h", "24h", "7d", "30d"}
+            or not isinstance(definition.get("minimumSamples"), int)
+            or isinstance(definition.get("minimumSamples"), bool)
+            or definition["minimumSamples"] < 1
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "History acceptance is invalid")
         _validate_timeout(definition.get("timeout"))
     return tuple(slots)
 
@@ -646,6 +658,8 @@ def _validate_acceptance_definition(
     acceptance_id: str,
 ) -> None:
     if definition.get("kind") == "entity_readiness":
+        return
+    if definition.get("kind") == "history_readiness":
         return
     if definition.get("kind") == "alarm_lifecycle":
         return
