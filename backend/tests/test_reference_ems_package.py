@@ -207,7 +207,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "status": "locked",
                     "id": "70000000-0000-0000-0000-000000000099",
-                    "platform_version": "0.4.77",
+                    "platform_version": "0.4.78",
                     "architecture": "linux/amd64",
                     "site_configuration_version": installed.json()["site_configuration_version"],
                     "package": {

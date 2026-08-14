@@ -325,7 +325,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"status": "alive", "version": "0.4.77"},
+            {"status": "alive", "version": "0.4.78"},
         )
 
     async def test_production_self_probe_ignores_environment_proxy(self) -> None:
@@ -1850,7 +1850,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         repository = InMemoryDeliveryRepository()
         delivery = SolutionDelivery(
             repository,
-            platform_version="0.4.77",
+            platform_version="0.4.78",
             public_api_probe=AsgiPublicApiProbe(app),
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
@@ -1909,7 +1909,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.json(), run.json())
         body = report.json()
         self.assertEqual(body["status"], "passed")
-        self.assertEqual(body["platform_version"], "0.4.77")
+        self.assertEqual(body["platform_version"], "0.4.78")
         self.assertEqual(body["package_id"], "org.zizu.minimal-liveness")
         self.assertEqual(body["package_version"], "1.0.0")
         self.assertEqual(body["site_configuration_version"], 1)
@@ -1923,7 +1923,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     "code": "PLATFORM_LIVE",
                     "required": True,
                     "duration_ms": body["items"][0]["duration_ms"],
-                    "evidence": {"status": "alive", "version": "0.4.77"},
+                    "evidence": {"status": "alive", "version": "0.4.78"},
                 }
             ],
         )

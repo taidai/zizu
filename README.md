@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 当前版本：**v0.4.77**
+> 当前候选版本：**v0.4.78**（尚未取得真实多架构制品、TLS、发布锁和独立交付试验证据，不能部署到现场）
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 

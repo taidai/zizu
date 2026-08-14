@@ -489,7 +489,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(rules_router, prefix="/api/v1")
         delivery = SolutionDelivery(
             delivery_repository,
-            platform_version="0.4.77",
+            platform_version="0.4.78",
             public_api_probe=AsgiPublicApiProbe(app),
             entity_instance_registry=registry,
             entity_instance_runtime=runtime,
