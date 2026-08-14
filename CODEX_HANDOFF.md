@@ -3671,3 +3671,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   （`c9c1473`），手动工作流 **Build immutable release images** 已在默认分支可用。
 - 仍需运维提供隔离目标的 DNS/TLS、ACME 邮箱、已审核 TLS 代理 digest 与维护窗；然后才可
   构建真实 `release.json`、写 release lock 并开始四小时独立交付试验。
+
+### 待审批的公开候选
+
+- 只读查询 Docker Official Image 得到 `caddy:2.11.4-alpine` 的多架构 index digest：
+  `sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648`，其中包含
+  linux/amd64 与 linux/arm64 子清单。它只是待安全/运维审核的候选，未写入 release.json、
+  未触发 GitHub Actions，也未部署。
