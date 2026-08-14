@@ -3648,7 +3648,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 ---
 
-## Session 2026-08-15 — 参考试验与发布门禁复核（待推送）
+## Session 2026-08-15 — 参考试验与发布门禁复核（本地提交待推送）
 
 - 参考 EMS 的公开主缝已以 180 秒上限完整跑完：导入、安装、协议模拟、分级告警、手动/策略
   控制回读、权限拒绝、网关失败与最终交付报告均通过。
@@ -3664,3 +3664,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - `tests.test_reference_ems_package tests.test_delivery_public_api`：49 passed（64.114s）。
 - 发布门禁 unittest：19 passed（1.768s）。
 - `git diff --check`：通过。
+
+### 外部阻断
+
+- 发布文档提交 `930e0a4` 尚未推送：连续 GitHub HTTPS push 分别出现连接重置与 443 无法连接；
+  不得在未推送的分支上合并或触发发布。
+- 即使网络恢复，仍需运维提供隔离目标的 DNS/TLS、ACME 邮箱、已审核 TLS 代理 digest 与维护窗；
+  然后才可构建真实 `release.json`、写 release lock 并开始四小时独立交付试验。
