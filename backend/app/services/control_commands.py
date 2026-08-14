@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
 
@@ -713,6 +714,7 @@ class ControlCommandRuntime:
         dispatcher: ControlDispatcher,
         repository: ControlCommandRepository,
         clock: Callable[[], datetime] | None = None,
+        policy_high_risk_authorizer: Callable[[SubmitControlCommand], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._policies = policies
@@ -720,6 +722,7 @@ class ControlCommandRuntime:
         self._dispatcher = dispatcher
         self._repository = repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._policy_high_risk_authorizer = policy_high_risk_authorizer
 
     def request_confirmation(self, request: SubmitControlCommand) -> ControlConfirmation:
         now = self._now()
@@ -781,9 +784,14 @@ class ControlCommandRuntime:
         if invalid_code:
             return self._reject(request, digest, now, invalid_code, reserve_key=True, data_type=source.data_type)
         if policy.high_risk:
-            if request.confirmation_id is None:
+            if (
+                self._policy_high_risk_authorizer is not None
+                and self._policy_high_risk_authorizer(request)
+            ):
+                pass
+            elif request.confirmation_id is None:
                 return self._reject(request, digest, now, "CONTROL_CONFIRMATION_REQUIRED", reserve_key=False, data_type=source.data_type)
-            if not self._repository.consume_confirmation(
+            elif not self._repository.consume_confirmation(
                 request.confirmation_id,
                 actor=request.actor,
                 request_digest=_confirmation_digest(request, policy),
@@ -904,6 +912,13 @@ class ControlCommandRuntime:
         if command is None:
             raise KeyError(command_id)
         return command
+
+    def set_policy_high_risk_authorizer(
+        self,
+        authorizer: Callable[[SubmitControlCommand], bool],
+    ) -> None:
+        """Install the server-owned policy verifier after policy runtime wiring."""
+        self._policy_high_risk_authorizer = authorizer
 
     def recover(self) -> tuple[ControlCommand, ...]:
         """Resume persisted in-flight commands without ever repeating a write."""
@@ -1107,6 +1122,8 @@ def _validate_value(value: object, data_type: str, policy: ControlPolicy) -> str
         "ENUM": isinstance(value, str),
     }.get(data_type, False)
     if not valid_type:
+        return "CONTROL_VALUE_TYPE_INVALID"
+    if data_type in {"FLOAT", "INT"} and not math.isfinite(float(value)):
         return "CONTROL_VALUE_TYPE_INVALID"
     if data_type in {"FLOAT", "INT"} and (
         (policy.minimum is not None and float(value) < policy.minimum)

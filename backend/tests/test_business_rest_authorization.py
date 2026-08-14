@@ -271,6 +271,7 @@ TICKET_15_CAPABILITIES = {
 TICKET_16_CAPABILITIES = {
     ("POST", "/api/v1/ems-policies/{policy_id}/simulate"): "configuration.write",
     ("POST", "/api/v1/ems-policies/{policy_id}/enable"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/disable"): "configuration.write",
     ("POST", "/api/v1/ems-policies/{policy_id}/evaluate"): "configuration.write",
 }
 
@@ -1008,7 +1009,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(ISSUE_04_REST), 29)
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
-        self.assertEqual(len(TICKET_16_CAPABILITIES), 3)
+        self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1042,7 +1043,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 144)
+        self.assertEqual(len(registered), 145)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

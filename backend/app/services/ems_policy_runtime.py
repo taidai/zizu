@@ -1,7 +1,11 @@
 """Evaluate installed declarative EMS policies through unified commands only."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import math
+from collections.abc import Iterator
+from threading import RLock
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -18,7 +22,11 @@ from app.services.solution_delivery_contracts import DeliveryError, DeliveryRepo
 class PolicyActivationRepository(Protocol):
     def enable(self, site_configuration_version: int, policy_id: str, actor: str) -> None: ...
 
+    def disable(self, site_configuration_version: int, policy_id: str, actor: str) -> None: ...
+
     def enabled(self, site_configuration_version: int, policy_id: str) -> bool: ...
+
+    def active(self, site_configuration_version: int, policy_id: str) -> Iterator[bool]: ...
 
 
 class InMemoryPolicyActivationRepository:
@@ -26,13 +34,26 @@ class InMemoryPolicyActivationRepository:
 
     def __init__(self) -> None:
         self._enabled: set[tuple[int, str]] = set()
+        self._lock = RLock()
 
     def enable(self, site_configuration_version: int, policy_id: str, actor: str) -> None:
         del actor
-        self._enabled.add((site_configuration_version, policy_id))
+        with self._lock:
+            self._enabled.add((site_configuration_version, policy_id))
+
+    def disable(self, site_configuration_version: int, policy_id: str, actor: str) -> None:
+        del actor
+        with self._lock:
+            self._enabled.discard((site_configuration_version, policy_id))
 
     def enabled(self, site_configuration_version: int, policy_id: str) -> bool:
-        return (site_configuration_version, policy_id) in self._enabled
+        with self._lock:
+            return (site_configuration_version, policy_id) in self._enabled
+
+    @contextmanager
+    def active(self, site_configuration_version: int, policy_id: str) -> Iterator[bool]:
+        with self._lock:
+            yield (site_configuration_version, policy_id) in self._enabled
 
 
 class PostgresPolicyActivationRepository:
@@ -54,6 +75,21 @@ class PostgresPolicyActivationRepository:
                 )
             conn.commit()
 
+    def disable(self, site_configuration_version: int, policy_id: str, actor: str) -> None:
+        del actor
+        from app.services.telemetry_store import get_connection
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM t_ems_policy_activations
+                    WHERE site_configuration_version = %s AND policy_id = %s
+                    """,
+                    (site_configuration_version, policy_id),
+                )
+            conn.commit()
+
     def enabled(self, site_configuration_version: int, policy_id: str) -> bool:
         from app.services.telemetry_store import get_connection
 
@@ -69,6 +105,28 @@ class PostgresPolicyActivationRepository:
                     (site_configuration_version, policy_id),
                 )
                 return bool(cur.fetchone()[0])
+
+    @contextmanager
+    def active(self, site_configuration_version: int, policy_id: str) -> Iterator[bool]:
+        """Keep disable waiting until an already-approved dispatch is recorded."""
+        from app.services.telemetry_store import get_connection
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM t_ems_policy_activations
+                    WHERE site_configuration_version = %s AND policy_id = %s
+                    FOR SHARE
+                    """,
+                    (site_configuration_version, policy_id),
+                )
+                try:
+                    yield cur.fetchone() is not None
+                except Exception:
+                    conn.rollback()
+                    raise
+            conn.commit()
 
 
 class EmsPolicyRuntime:
@@ -107,8 +165,12 @@ class EmsPolicyRuntime:
 
     def evaluate(self, policy_id: str) -> dict[str, Any]:
         version = self._delivery.site_configuration_version()
-        if not self._activations.enabled(version, policy_id):
-            raise DeliveryError("POLICY_NOT_ENABLED", "EMS policy must be enabled by an engineer")
+        with self._activations.active(version, policy_id) as active:
+            if not active:
+                raise DeliveryError("POLICY_NOT_ENABLED", "EMS policy must be enabled by an engineer")
+            return self._evaluate_active(policy_id)
+
+    def _evaluate_active(self, policy_id: str) -> dict[str, Any]:
         policy, descriptors = self._policy(policy_id)
         source = self._reference(policy["input"], descriptors)
         try:
@@ -131,6 +193,14 @@ class EmsPolicyRuntime:
             },
             "condition": dict(policy["condition"]),
         }
+        authorization = policy["action"].get("high_risk_authorization")
+        if authorization is not None:
+            evidence["high_risk_authorization"] = {
+                **authorization,
+                "policy_id": policy["id"],
+                "revision": policy["revision"],
+                "action_key": policy["action"]["id"],
+            }
         if not triggered:
             return {"policy_id": policy["id"], "triggered": False, "input": evidence["input"], "command": None}
         target = self._reference(policy["action"]["target"], descriptors)
@@ -170,6 +240,61 @@ class EmsPolicyRuntime:
                 "observed_at": observation.observed_at.isoformat(),
             },
         }
+
+    def disable(self, policy_id: str, actor: str) -> dict[str, Any]:
+        """Stop future scheduler evaluations for the active site configuration."""
+        version = self._delivery.site_configuration_version()
+        policy, _ = self._policy(policy_id)
+        self._activations.disable(version, policy_id, actor)
+        return {
+            "policy_id": policy["id"],
+            "site_configuration_version": version,
+            "status": "disabled",
+        }
+
+    def authorizes_high_risk_command(self, request: Any) -> bool:
+        """Recheck installed policy and activation state; never trust evidence alone."""
+        if request.source_type != "policy":
+            return False
+        evidence = request.origin_evidence
+        subject = evidence.get("subject") if isinstance(evidence, dict) else None
+        action_key = evidence.get("action_key") if isinstance(evidence, dict) else None
+        trigger = evidence.get("trigger") if isinstance(evidence, dict) else None
+        if (
+            not isinstance(subject, dict)
+            or not isinstance(action_key, str)
+            or not isinstance(trigger, dict)
+            or not isinstance(trigger.get("policy_id"), str)
+        ):
+            return False
+        policy_id = trigger["policy_id"]
+        version = self._delivery.site_configuration_version()
+        if not self._activations.enabled(version, policy_id):
+            return False
+        try:
+            policy, descriptors = self._policy(policy_id)
+            target = self._reference(policy["action"]["target"], descriptors)
+        except (DeliveryError, EntityInstanceError):
+            return False
+        authorization = policy["action"].get("high_risk_authorization")
+        expected_subject = str(uuid5(NAMESPACE_URL, f"zizu/ems-policy/{policy_id}"))
+        if (
+            not isinstance(authorization, dict)
+            or subject != {"type": "policy", "id": expected_subject, "version": policy["revision"]}
+            or trigger.get("revision") != policy["revision"]
+            or action_key != policy["action"]["id"]
+            or request.actor != f"policy:{expected_subject}"
+            or request.entity_instance_id != target.id
+            or request.value != policy["action"]["value"]
+            or not isinstance(request.value, (int, float))
+            or isinstance(request.value, bool)
+            or not math.isfinite(float(request.value))
+        ):
+            return False
+        maximum = authorization.get("maximum_absolute_value")
+        if not isinstance(maximum, (int, float)) or not math.isfinite(float(maximum)):
+            return False
+        return abs(float(request.value)) <= float(maximum)
 
     def acceptance_evidence(
         self,
@@ -224,12 +349,13 @@ class EmsPolicyRuntime:
             if exc.code == "POLICY_NOT_INSTALLED":
                 return result
             raise
-        version = self._delivery.site_configuration_version()
         for policy in policies:
-            if not self._activations.enabled(version, policy["id"]):
-                continue
             try:
                 outcome = self.evaluate(policy["id"])
+            except DeliveryError as exc:
+                if exc.code == "POLICY_NOT_ENABLED":
+                    continue
+                result["errors"] += 1
             except Exception:
                 result["errors"] += 1
             else:

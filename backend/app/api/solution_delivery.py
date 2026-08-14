@@ -98,6 +98,9 @@ _ems_policies = EmsPolicyRuntime(
     _automated_control_commands,
     PostgresPolicyActivationRepository(),
 )
+_control_commands.set_policy_high_risk_authorizer(
+    _ems_policies.authorizes_high_risk_command
+)
 _delivery.set_policy_runtime(_ems_policies)
 
 

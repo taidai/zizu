@@ -396,7 +396,12 @@ def build_control_entity_package(
 
 class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def build_app(*, sources: tuple, legacy_entities: tuple = ()) -> FastAPI:
+    def build_app(
+        *,
+        sources: tuple,
+        legacy_entities: tuple = (),
+        release_lock_reader=None,
+    ) -> FastAPI:
         from app.api.entity_instances import (
             get_entity_instance_catalog,
             get_entity_instance_failover,
@@ -490,6 +495,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             entity_instance_runtime=runtime,
             alarm_definitions=alarm_definitions,
             alarm_runtime=alarm_runtime,
+            release_lock_reader=release_lock_reader,
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
         app.state.solution_delivery = delivery

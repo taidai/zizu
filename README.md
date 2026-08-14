@@ -487,7 +487,8 @@ zizu/
 | GET | `/api/v1/ems-workbench` | 读取当前安装包声明的固定 EMS 工作台（导航、分组、KPI、趋势及入口） |
 | GET | `/api/v1/ems-workbench/trends/{trend_id}` | 读取工作台已声明趋势的确认实体实例历史，不接受任意点位查询 |
 | POST | `/api/v1/ems-policies/{policy_id}/simulate` | 以包中固定场景仿真已安装的 EMS 策略，不下发设备写入 |
-| POST | `/api/v1/ems-policies/{policy_id}/enable` | 在确认输入实体实例可读、新鲜且质量合格后，由工程师显式启用策略 |
+| POST | `/api/v1/ems-policies/{policy_id}/enable` | 仅实施工程师可在确认输入实体实例可读、新鲜且质量合格后显式启用策略 |
+| POST | `/api/v1/ems-policies/{policy_id}/disable` | 仅实施工程师可停用当前站点配置版本后续调度；已分派命令仍只靠回读或超时结束 |
 | POST | `/api/v1/ems-policies/{policy_id}/evaluate` | 用当前确认实体实例观测评估已安装策略；触发时仅创建统一控制命令 |
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
@@ -777,20 +778,30 @@ condition: {operator: gt, threshold: 100}
 action:
   id: cap-import
   target: {slot: slot.pcs-primary, definition: pcs.setpoint}
-  value: 50
+  value: 10
   unit: kW
+  # 仅用于目标 control.highRisk=true 的显式、固定、小功率自动化授权。
+  # 必须大于等于 value 的绝对值；不是现场通用安全值。
+  highRiskAuthorization: {maximumAbsoluteValue: 10}
 simulation:
   input: {value: 120, unit: kW}
-  expected: {triggered: true, actionValue: 50}
+  expected: {triggered: true, actionValue: 10}
 ```
 
 工程师先调用 `simulate` 获得可重放的策略证据；`evaluate` 或平台定时调度使用新鲜、GOOD 的
-确认实例观测。命中条件时只会创建 `source_type=policy` 的统一控制命令，仍受确认、限值、
-联锁、冷却和回读约束；仿真永不下发设备写入。
+确认实例观测。命中条件时只会创建 `source_type=policy` 的统一控制命令，仍受限值、联锁、
+冷却和回读约束；仿真永不下发设备写入。对 `control.highRisk: true` 的目标，默认仍要求每次
+人工确认；唯一例外是策略动作显式携带 `highRiskAuthorization`，固定数值绝对值不超过其上限，且
+当前站点配置版本已由工程师通过 `enable` 启用。该例外只适用于声明式 EMS 策略，规则、兼容接口
+和手动命令不能借此绕过二次确认。
+完整的授权主体、服务端复核与停用并发语义见
+[`ADR-0008`](docs/adr/0008-high-risk-policy-automation.md)；策略中的 `.inf`、`.nan` 等非有限数值
+不属于可接受的安全上限或动作值。
 安装计划先验证其输入/目标都能唯一落到确认实体实例；工程师还必须调用 `enable`，让平台在
 当前输入可读、新鲜且质量合格时持久记录启用状态。只有已启用策略会被定时调度；运行期出现
 缺失、陈旧或坏质量观测则明确拒绝本次评估，绝不会猜测数据或下发动作。升级后的新站点配置版本
-需要重新启用，避免包变化静默接管自动控制。
+需要重新启用，避免包变化静默接管自动控制。工程师可调用 `disable` 立即停止后续策略调度；已经
+分派的命令仍必须通过回读、超时或失败终态收敛，不能由停用操作伪造为成功。
 
 需要把策略闭环纳入交付报告时，包可声明一个严格的 `policy_execution` 验收项。它先记录固定
 仿真，再评估当前确认实例输入，并只在命令变为 `readback_confirmed` 后通过；报告保存输入、

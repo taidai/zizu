@@ -18,6 +18,18 @@ from app.services.solution_delivery_contracts import DeliveryError
 router = APIRouter()
 
 
+def _require_policy_engineer(principal: Principal) -> Principal:
+    if principal.role != "engineer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "POLICY_ENGINEER_REQUIRED",
+                "message": "Only an implementation engineer may change policy activation",
+            },
+        )
+    return principal
+
+
 @router.post("/ems-policies/{policy_id}/simulate", **protected(CONFIGURATION_WRITE))
 async def simulate_ems_policy(
     policy_id: str,
@@ -38,8 +50,25 @@ async def enable_ems_policy(
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
     policies: EmsPolicyRuntime = Depends(get_default_ems_policy_runtime),
 ) -> dict:
+    _require_policy_engineer(principal)
     try:
         return policies.enable(policy_id, actor=principal.actor)
+    except DeliveryError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post(
+    "/ems-policies/{policy_id}/disable",
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def disable_ems_policy(
+    policy_id: str,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    policies: EmsPolicyRuntime = Depends(get_default_ems_policy_runtime),
+) -> dict:
+    _require_policy_engineer(principal)
+    try:
+        return policies.disable(policy_id, actor=principal.actor)
     except DeliveryError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": exc.code, "message": str(exc)}) from exc
 

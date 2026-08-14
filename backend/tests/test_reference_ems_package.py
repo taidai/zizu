@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
+from uuid import UUID
 
 from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
+from tests.test_delivery_public_api import AuthenticatedDeliveryClient
+from tests.test_control_command_public_api import ControlCommandPublicApiTest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,7 +21,7 @@ builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
 
 
-class ReferenceEmsPackageTest(unittest.TestCase):
+class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
     def test_public_reference_package_is_reproducible_and_importable(self) -> None:
         first = builder.build_archive()
         second = builder.build_archive()
@@ -39,6 +44,188 @@ class ReferenceEmsPackageTest(unittest.TestCase):
                 "acceptance.release-lock",
             },
         )
+
+    async def test_reference_package_completes_the_public_ems_delivery_trial(self) -> None:
+        """The published package, not a private fixture, drives every delivery seam."""
+        from app.services.entity_instance_registry import SourceDescriptor
+
+        release_lock = {"status": "missing"}
+        sources = (
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000001"), "PCS-01", "PCS-01", "ActivePower", "FLOAT", "kW", "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000002"), "PCS-01", "PCS-01", "ActivePowerSetpoint", "FLOAT", "kW", "RW", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000003"), "PCS-01", "PCS-01", "ActivePowerReadback", "FLOAT", "kW", "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000004"), "PCS-01", "PCS-01", "BmsReady", "BOOL", None, "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000005"), "BMS-01", "BMS-01", "StateOfCharge", "FLOAT", "%", "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000006"), "PV-01", "PV-01", "ActivePower", "FLOAT", "kW", "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000007"), "EVSE-01", "EVSE-01", "ActivePower", "FLOAT", "kW", "R", True),
+            SourceDescriptor(UUID("70000000-0000-0000-0000-000000000008"), "METER-01", "METER-01", "ActivePower", "FLOAT", "kW", "R", True),
+        )
+        app, dispatcher = ControlCommandPublicApiTest.build_app(
+            high_risk=True,
+            sources=sources,
+            release_lock_reader=lambda: release_lock,
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": ("pv-storage-charging-ems.zizu.zip", builder.build_archive(), "application/zip")},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instances": [{"instance_key": "PCS-01", "device_key": "PCS-01"}],
+                        "bms.instances": [{"instance_key": "BMS-01", "device_key": "BMS-01"}],
+                        "pv.instances": [{"instance_key": "PV-01", "device_key": "PV-01"}],
+                        "evse.instances": [{"instance_key": "EVSE-01", "device_key": "EVSE-01"}],
+                        "meter.instance_key": "METER-01",
+                        "meter.device_key": "METER-01",
+                    },
+                    "secret_references": {"gateway.credentials": "secret://reference/gateway"},
+                },
+            )
+            self.assertEqual(201, plan.status_code, plan.text)
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "reference-ems-install"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            entity_ids = {
+                item["definition_id"]: item["entity_instance_id"]
+                for item in plan.json()["items"]
+                if item["kind"] == "entity_binding"
+            }
+
+            async def publish(
+                node: str,
+                values: dict[str, object],
+                observed_at: datetime,
+            ) -> dict:
+                response = await client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "message": {
+                            "node": node,
+                            "timestamp": round(observed_at.timestamp() * 1000),
+                            "values": values,
+                        }
+                    },
+                )
+                self.assertEqual(200, response.status_code, response.text)
+                return response.json()
+
+            initial_at = datetime.now(timezone.utc)
+            await publish("PCS-01", {"ActivePower": 20.0, "ActivePowerSetpoint": 0.0, "ActivePowerReadback": 0.0, "BmsReady": True}, initial_at)
+            await publish("BMS-01", {"StateOfCharge": 65.0}, initial_at)
+            await publish("PV-01", {"ActivePower": 80.0}, initial_at)
+            await publish("EVSE-01", {"ActivePower": 25.0}, initial_at)
+            await publish("METER-01", {"ActivePower": 100.0}, initial_at)
+            await publish("METER-01", {"ActivePower": 101.0}, initial_at + timedelta(seconds=1))
+
+            workbench = await client.get("/api/v1/ems-workbench")
+            self.assertEqual(200, workbench.status_code, workbench.text)
+            self.assertEqual("workbench.ems", workbench.json()["workbench_id"])
+
+            operator_headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "reference-manual-confirmation",
+            }
+            confirmation = await client._client.post(
+                f"/api/v1/entity-instances/{entity_ids['pcs.setpoint']}/control-confirmations",
+                headers=operator_headers,
+                json={"value": 5.0},
+            )
+            self.assertEqual(201, confirmation.status_code, confirmation.text)
+            manual = await client._client.post(
+                f"/api/v1/entity-instances/{entity_ids['pcs.setpoint']}/control-commands",
+                headers={
+                    "Authorization": await client._bearer("operator"),
+                    "Idempotency-Key": "reference-manual-command",
+                },
+                json={"value": 5.0, "confirmation_id": confirmation.json()["id"]},
+            )
+            self.assertEqual(201, manual.status_code, manual.text)
+            await publish("PCS-01", {"ActivePowerReadback": 5.0}, datetime.now(timezone.utc))
+            manual_done = await client._client.post(
+                f"/api/v1/control-commands/{manual.json()['id']}/reconcile",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            self.assertEqual("readback_confirmed", manual_done.json()["status"])
+
+            # The configured 5-second device cooldown is intentionally observed,
+            # rather than bypassed by a test-only clock.
+            await asyncio.sleep(5.1)
+            alarm_started_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+            triggered = await publish("METER-01", {"ActivePower": 550.0}, alarm_started_at)
+            self.assertEqual("ALARM_TRIGGER_PENDING", triggered["alarm_outcomes"][0]["code"])
+            activated = await publish(
+                "METER-01", {"ActivePower": 550.0}, alarm_started_at + timedelta(seconds=11)
+            )
+            self.assertEqual("ALARM_ACTIVATED", activated["alarm_outcomes"][0]["code"])
+            events = await client.get("/api/v1/alarm-events?state=open")
+            self.assertEqual(1, events.json()["total"], events.text)
+            event_id = events.json()["items"][0]["id"]
+            acknowledged = await client._client.post(
+                f"/api/v1/alarm-events/{event_id}/acknowledgements",
+                headers={"Authorization": await client._bearer("operator")},
+                json={"note": "reference trial"},
+            )
+            self.assertEqual("active_acknowledged", acknowledged.json()["state"])
+
+            engineer_headers = {"Authorization": await client._bearer("engineer")}
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable", headers=engineer_headers
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            policy = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate", headers=engineer_headers
+            )
+            self.assertEqual(200, policy.status_code, policy.text)
+            policy_command = policy.json()["command"]
+            self.assertEqual(10, policy_command["expected_value"])
+            await publish(
+                "PCS-01", {"ActivePowerReadback": 10.0}, alarm_started_at + timedelta(seconds=12)
+            )
+            policy_done = await client._client.post(
+                f"/api/v1/control-commands/{policy_command['id']}/reconcile", headers=engineer_headers
+            )
+            self.assertEqual("readback_confirmed", policy_done.json()["status"])
+            self.assertEqual(2, len(dispatcher.requests))
+
+            recovery_pending = await publish(
+                "METER-01", {"ActivePower": 450.0}, alarm_started_at + timedelta(seconds=13)
+            )
+            self.assertEqual("ALARM_RECOVERY_PENDING", recovery_pending["alarm_outcomes"][0]["code"])
+            recovered = await publish(
+                "METER-01", {"ActivePower": 450.0}, alarm_started_at + timedelta(seconds=24)
+            )
+            self.assertEqual("ALARM_RECOVERED", recovered["alarm_outcomes"][0]["code"])
+
+            release_lock.update(
+                {
+                    "status": "locked",
+                    "id": "70000000-0000-0000-0000-000000000099",
+                    "platform_version": "0.4.77",
+                    "architecture": "linux/amd64",
+                    "site_configuration_version": installed.json()["site_configuration_version"],
+                    "package": {
+                        "id": imported.json()["package_id"],
+                        "version": imported.json()["version"],
+                        "digest": imported.json()["digest"],
+                    },
+                }
+            )
+            report = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                json={"policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]}},
+                headers={"Idempotency-Key": "reference-ems-acceptance"},
+            )
+
+        self.assertEqual(201, report.status_code, report.text)
+        self.assertEqual("passed", report.json()["status"], report.text)
+        self.assertTrue(all(item["status"] == "passed" for item in report.json()["items"]))
 
 
 if __name__ == "__main__":

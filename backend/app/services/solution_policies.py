@@ -7,6 +7,7 @@ runtime later resolves those definitions through the confirmed installation.
 from __future__ import annotations
 
 import re
+import math
 from typing import Any, Callable
 
 from app.services.solution_delivery_contracts import DeliveryError
@@ -46,18 +47,17 @@ def validate_ems_policy_assets(
             not isinstance(condition, dict)
             or set(condition) != {"operator", "threshold"}
             or condition.get("operator") not in {"gt", "gte", "lt", "lte"}
-            or not isinstance(condition.get("threshold"), (int, float))
-            or isinstance(condition.get("threshold"), bool)
+            or not _finite_number(condition.get("threshold"))
         ):
             raise DeliveryError("POLICY_CONDITION_INVALID", "EMS policy condition is invalid")
         action = raw.get("action")
         if (
             not isinstance(action, dict)
-            or set(action) != {"id", "target", "value", "unit"}
+            or set(action) - {"id", "target", "value", "unit", "highRiskAuthorization"}
+            or not {"id", "target", "value", "unit"}.issubset(action)
             or not isinstance(action.get("id"), str)
             or not action["id"].strip()
-            or not isinstance(action.get("value"), (int, float))
-            or isinstance(action.get("value"), bool)
+            or not _finite_number(action.get("value"))
         ):
             raise DeliveryError("POLICY_ACTION_INVALID", "EMS policy action is invalid")
         target_reference, target_definition = _reference(action.get("target"), known, "POLICY_TARGET_INVALID")
@@ -69,6 +69,11 @@ def validate_ems_policy_assets(
             raise DeliveryError("POLICY_TARGET_INVALID", "EMS policy target must be numeric")
         if action.get("unit") != target_definition.get("unit"):
             raise DeliveryError("POLICY_UNIT_INCOMPATIBLE", "EMS policy action unit must match its target")
+        authorization = _high_risk_authorization(
+            action.get("highRiskAuthorization"),
+            target_definition,
+            action["value"],
+        )
         simulation = _simulation(raw.get("simulation"), raw["input"], condition, action)
         normalized.append(
             {
@@ -81,6 +86,7 @@ def validate_ems_policy_assets(
                     "target": target_reference,
                     "value": action["value"],
                     "unit": action["unit"],
+                    "high_risk_authorization": authorization,
                 },
                 "simulation": simulation,
             }
@@ -88,6 +94,35 @@ def validate_ems_policy_assets(
     if len({item["id"] for item in normalized}) != len(normalized):
         raise DeliveryError("POLICY_ASSET_INVALID", "EMS policy asset IDs must be unique")
     return tuple(normalized)
+
+
+def _high_risk_authorization(
+    raw: Any,
+    target_definition: dict[str, Any],
+    action_value: float | int,
+) -> dict[str, float] | None:
+    """Keep the only automated high-risk exception explicit and value-bounded."""
+    control = target_definition.get("control")
+    high_risk = isinstance(control, dict) and control.get("high_risk") is True
+    if raw is None:
+        return None
+    if not high_risk:
+        raise DeliveryError(
+            "POLICY_HIGH_RISK_AUTHORIZATION_INVALID",
+            "Only a high-risk target may declare an automation authorization",
+        )
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"maximumAbsoluteValue"}
+        or not _finite_number(raw.get("maximumAbsoluteValue"))
+        or float(raw["maximumAbsoluteValue"]) <= 0
+        or abs(float(action_value)) > float(raw["maximumAbsoluteValue"])
+    ):
+        raise DeliveryError(
+            "POLICY_HIGH_RISK_AUTHORIZATION_INVALID",
+            "High-risk policy authorization must bound the declared action value",
+        )
+    return {"maximum_absolute_value": float(raw["maximumAbsoluteValue"])}
 
 
 def validate_policy_execution_acceptances(
@@ -130,14 +165,12 @@ def _simulation(
     if (
         not isinstance(input_value, dict)
         or set(input_value) != {"value", "unit"}
-        or not isinstance(input_value.get("value"), (int, float))
-        or isinstance(input_value.get("value"), bool)
+        or not _finite_number(input_value.get("value"))
         or input_value.get("unit") != policy_input.get("unit")
         or not isinstance(expected, dict)
         or set(expected) != {"triggered", "actionValue"}
         or not isinstance(expected.get("triggered"), bool)
-        or not isinstance(expected.get("actionValue"), (int, float, type(None)))
-        or isinstance(expected.get("actionValue"), bool)
+        or (expected.get("actionValue") is not None and not _finite_number(expected.get("actionValue")))
     ):
         raise DeliveryError("POLICY_SIMULATION_INVALID", "EMS policy simulation is invalid")
     triggered = _condition_matches(float(input_value["value"]), condition["operator"], float(condition["threshold"]))
@@ -157,6 +190,14 @@ def _condition_matches(value: float, operator: str, threshold: float) -> bool:
         "lt": value < threshold,
         "lte": value <= threshold,
     }[operator]
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _reference(

@@ -7,8 +7,10 @@ condition: {operator: gt, threshold: 500}
 action:
   id: limit-grid-import
   target: {slot: slot.pcs, definition: pcs.setpoint}
-  value: 100
+  value: 10
   unit: kW
+  highRiskAuthorization:
+    maximumAbsoluteValue: 10
 simulation:
   input: {value: 550, unit: kW}
-  expected: {triggered: true, actionValue: 100}
+  expected: {triggered: true, actionValue: 10}
