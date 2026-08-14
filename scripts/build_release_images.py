@@ -78,6 +78,8 @@ def build_release_images(
                 architecture,
                 "--file",
                 str(REPO_ROOT / "backend" / "Dockerfile"),
+                "--build-arg",
+                f"ZIZU_VERSION={platform_version}",
                 "--tag",
                 tag,
                 "--push",

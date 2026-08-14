@@ -94,7 +94,8 @@
   已创建 [PR #26](https://github.com/taidai/zizu/pull/26)，当前 GitHub 合并状态为 `CLEAN`，但没有
   自动检查或审查结论。必须完成审查并合并到默认分支后，Actions 才能手动生成真实多架构摘要制品。
 - `build_release_images.py` 现会在任何 Buildx push 前核对传入的 `--platform-version` 与源码根
-  `VERSION` 完全一致，拒绝用旧版本号构建新内容；该发布门禁及工作流相关测试 18/18 通过。
+  `VERSION` 完全一致，并把该值传入镜像 OCI version label，拒绝用旧版本号构建新内容；该发布
+  门禁及工作流相关测试 19/19 通过。
 - 新增 `docs/delivery-trial-protocol.md`：将独立实施工程师的四小时试验固定为发布前门禁、九个
   计时阶段、八项能力证据、90% 配置覆盖率算法和无现场私有数据的记录模板。实际试验仍须在
   固定制品/TLS/发布锁具备后，由未参与开发者执行；文档不能替代该人工证据。

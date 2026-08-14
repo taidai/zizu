@@ -51,6 +51,12 @@ class BuildReleaseImagesTest(unittest.TestCase):
         self.assertEqual(2, len(calls))
         self.assertTrue(all("--push" in command for command in calls))
         self.assertTrue(all("--metadata-file" in command for command in calls))
+        self.assertTrue(
+            all(
+                command[command.index("--build-arg") + 1] == "ZIZU_VERSION=0.4.78"
+                for command in calls
+            )
+        )
         self.assertEqual(
             ["linux/amd64", "linux/arm64"],
             [command[command.index("--platform") + 1] for command in calls],

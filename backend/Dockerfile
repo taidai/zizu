@@ -5,8 +5,8 @@
 # Stage 2: Python 后端 + 前端静态文件
 #
 # 构建:
-#   docker build -t zizu:0.1.0 -f backend/Dockerfile .
-#   docker buildx build --platform linux/arm64 -t zizu:0.1.0 -f backend/Dockerfile . --load
+#   docker build --build-arg ZIZU_VERSION=0.4.78 -t zizu:0.4.78 -f backend/Dockerfile .
+#   docker buildx build --platform linux/arm64 --build-arg ZIZU_VERSION=0.4.78 -t zizu:0.4.78 -f backend/Dockerfile . --load
 #
 # 说明:
 #   - 正式构建使用 Docker Official Images；镜像平台摘要由 release.json 锁定
@@ -28,9 +28,10 @@ RUN npm run build
 # ---- Stage 2: Backend + Frontend ----
 FROM python:3.12-slim
 
+ARG ZIZU_VERSION
 LABEL maintainer="ZiZu Team"
 LABEL description="ZiZu IoT Platform - Unified Backend + Frontend"
-LABEL version="0.1.0"
+LABEL org.opencontainers.image.version="${ZIZU_VERSION}"
 
 WORKDIR /app
 
@@ -59,11 +60,6 @@ RUN pip install --no-cache-dir \
         python-multipart \
         "apscheduler[asyncio,timezone]>=3.10.4" \
         "pyyaml>=6.0.2"
-
-# F2 规则引擎依赖
-RUN pip install --no-cache-dir \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        zen-engine
 
 # 复制后端应用代码
 COPY backend/app ./app

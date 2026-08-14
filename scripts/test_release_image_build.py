@@ -15,6 +15,10 @@ class ReleaseImageBuildTest(unittest.TestCase):
         self.assertNotIn("docker.m.daocloud.io", dockerfile)
         self.assertIn("FROM node:22-alpine AS frontend-builder", dockerfile)
         self.assertIn("FROM python:3.12-slim", dockerfile)
+        self.assertIn("ARG ZIZU_VERSION", dockerfile)
+        self.assertIn('org.opencontainers.image.version="${ZIZU_VERSION}"', dockerfile)
+        self.assertNotIn("zizu:0.1.0", dockerfile)
+        self.assertNotIn('LABEL version="0.1.0"', dockerfile)
         self.assertIn("COPY init-db ./init-db", dockerfile)
         migration = REPO_ROOT / "init-db" / "migration_032_release_locks.sql"
         self.assertTrue(migration.exists())
