@@ -92,6 +92,10 @@ class ControlCommandEvidenceRuntime(Protocol):
     def get(self, command_id: UUID) -> Any: ...
 
 
+class AuthorizationEvidenceRuntime(Protocol):
+    def find_audit_event(self, event_id: UUID) -> Any | None: ...
+
+
 class HttpxPublicApiProbe:
     """通过本实例公开 HTTP 接口执行白名单验收。"""
 
@@ -126,6 +130,7 @@ class SolutionDelivery:
         alarm_runtime: AlarmRuntime | None = None,
         policy_runtime: PolicyExecutionRuntime | None = None,
         control_command_runtime: ControlCommandEvidenceRuntime | None = None,
+        authorization_evidence_runtime: AuthorizationEvidenceRuntime | None = None,
         gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -138,6 +143,7 @@ class SolutionDelivery:
         self._alarm_runtime = alarm_runtime
         self._policy_runtime = policy_runtime
         self._control_command_runtime = control_command_runtime
+        self._authorization_evidence_runtime = authorization_evidence_runtime
         self._gateway_readiness = gateway_readiness
         self._release_lock_reader = release_lock_reader
 
@@ -148,6 +154,12 @@ class SolutionDelivery:
     def set_control_command_runtime(self, control_command_runtime: ControlCommandEvidenceRuntime) -> None:
         """Attach the command reader in test compositions that build delivery first."""
         self._control_command_runtime = control_command_runtime
+
+    def set_authorization_evidence_runtime(
+        self,
+        authorization_evidence_runtime: AuthorizationEvidenceRuntime,
+    ) -> None:
+        self._authorization_evidence_runtime = authorization_evidence_runtime
 
     def set_gateway_readiness(self, gateway_readiness: GatewayReadiness) -> None:
         self._gateway_readiness = gateway_readiness
@@ -714,6 +726,8 @@ class SolutionDelivery:
         actor: str,
         manual_commands: dict[str, str] | None = None,
         policy_commands: dict[str, str] | None = None,
+        authorization_denials: dict[str, str] | None = None,
+        authorization_evidence_runtime: AuthorizationEvidenceRuntime | None = None,
     ) -> DeliveryReport:
         if not idempotency_key.strip():
             raise DeliveryError(
@@ -732,6 +746,7 @@ class SolutionDelivery:
         acceptance_digest = _acceptance_digest(package)
         manual_commands = dict(manual_commands or {})
         policy_commands = dict(policy_commands or {})
+        authorization_denials = dict(authorization_denials or {})
         request_digest = hashlib.sha256(
             json.dumps(
                 {
@@ -739,6 +754,7 @@ class SolutionDelivery:
                     "acceptance_digest": acceptance_digest,
                     "manual_commands": manual_commands,
                     "policy_commands": policy_commands,
+                    "authorization_denials": authorization_denials,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -773,6 +789,7 @@ class SolutionDelivery:
                     "history_readiness",
                     "operation_audit",
                     "manual_control_execution",
+                    "authorization_rejection",
                     "gateway_readiness",
                     "alarm_lifecycle",
                     "policy_execution",
@@ -831,6 +848,17 @@ class SolutionDelivery:
                         definition,
                         item_started,
                         manual_commands.get(acceptance_id),
+                    )
+                )
+                continue
+            if definition["kind"] == "authorization_rejection":
+                items.append(
+                    self._run_authorization_rejection_acceptance(
+                        acceptance_id,
+                        definition,
+                        item_started,
+                        authorization_denials.get(acceptance_id),
+                        authorization_evidence_runtime or self._authorization_evidence_runtime,
                     )
                 )
                 continue
@@ -1114,6 +1142,69 @@ class SolutionDelivery:
                 "expected_value": command.expected_value,
                 "status": command.status,
                 "audit_event_id": str(command.audit_event_id) if command.audit_event_id else None,
+            },
+        )
+
+    def _run_authorization_rejection_acceptance(
+        self,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+        audit_event_id: str | None,
+        authorization_evidence_runtime: AuthorizationEvidenceRuntime | None,
+    ) -> dict[str, Any]:
+        required = bool(definition.get("required", True))
+        if authorization_evidence_runtime is None:
+            return _acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "AUTHORIZATION_EVIDENCE_RUNTIME_UNAVAILABLE",
+                {},
+            )
+        if not audit_event_id:
+            return _acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "AUTHORIZATION_DENIAL_EVIDENCE_REQUIRED",
+                {},
+            )
+        try:
+            evidence = authorization_evidence_runtime.find_audit_event(
+                UUID(str(audit_event_id))
+            )
+        except (ValueError, TypeError):
+            evidence = None
+        if evidence is None:
+            return _acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "AUTHORIZATION_EVIDENCE_NOT_FOUND",
+                {},
+            )
+        role = (getattr(evidence, "details", None) or {}).get("role")
+        matches = (
+            getattr(evidence, "event", None) == "authorization.decision"
+            and getattr(evidence, "outcome", None) == "denied"
+            and getattr(evidence, "reason", None) == "permission_denied"
+            and getattr(evidence, "target", None) == definition["capability"]
+            and role == definition["actorRole"]
+        )
+        return _acceptance_result(
+            acceptance_id,
+            required,
+            item_started,
+            "passed" if matches else "failed",
+            "AUTHORIZATION_REJECTION_CONFIRMED" if matches else "AUTHORIZATION_EVIDENCE_MISMATCH",
+            {
+                "audit_event_id": str(getattr(evidence, "id", audit_event_id)),
+                "capability": definition["capability"],
+                "actor_role": definition["actorRole"],
             },
         )
 

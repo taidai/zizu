@@ -7,10 +7,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field, ValidationError
 
-from app.api.security import require_capability
+from app.api.security import get_identity, require_capability
 from app.api.health import _VERSION
 from app.core.config import settings
-from app.services.identity import Principal
+from app.services.identity import Identity, Principal
 from app.services.entity_instance_postgres import (
     PostgresEntityInstanceRepository,
     PostgresObservationCatalog,
@@ -166,6 +166,7 @@ class CreateInstallationPlanRequest(BaseModel):
 class RunAcceptanceRequest(BaseModel):
     manual_commands: dict[str, UUID] = Field(default_factory=dict)
     policy_commands: dict[str, UUID] = Field(default_factory=dict)
+    authorization_denials: dict[str, UUID] = Field(default_factory=dict)
 
 
 @router.get("/solution-packages")
@@ -319,6 +320,7 @@ async def run_delivery_acceptance(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     principal: Principal = Depends(require_capability("solution.acceptance.run")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
+    identity: Identity = Depends(get_identity),
 ) -> dict:
     try:
         report = await delivery.run_acceptance(
@@ -327,6 +329,10 @@ async def run_delivery_acceptance(
             actor=principal.actor,
             manual_commands={key: str(value) for key, value in request.manual_commands.items()},
             policy_commands={key: str(value) for key, value in request.policy_commands.items()},
+            authorization_denials={
+                key: str(value) for key, value in request.authorization_denials.items()
+            },
+            authorization_evidence_runtime=identity,
         )
         return report.public_dict()
     except DeliveryError as exc:

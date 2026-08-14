@@ -142,6 +142,10 @@ def identity_http_error(exc: IdentityError) -> HTTPException:
         headers["WWW-Authenticate"] = "Bearer"
     if exc.retry_after_seconds is not None:
         headers["Retry-After"] = str(exc.retry_after_seconds)
+    if exc.audit_event_id is not None:
+        # Opaque ID only: it lets a delivery acceptance prove a real denial
+        # without exposing the global audit stream or request contents.
+        headers["X-ZiZu-Audit-Event-ID"] = str(exc.audit_event_id)
     return HTTPException(
         status_code=exc.status_code,
         detail={"code": exc.code, "message": str(exc)},

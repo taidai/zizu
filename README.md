@@ -844,7 +844,8 @@ simulation:
 ```json
 {
   "manual_commands": {"acceptance.manual-pcs-setpoint": "<manual-command-uuid>"},
-  "policy_commands": {"acceptance.policy-grid-import-cap": "<policy-command-uuid>"}
+  "policy_commands": {"acceptance.policy-grid-import-cap": "<policy-command-uuid>"},
+  "authorization_denials": {"acceptance.operator-configuration-denied": "<audit-event-uuid>"}
 }
 ```
 
@@ -883,6 +884,22 @@ timeout: 10s
 
 `gateway_readiness` 只证明平台可用受控凭据访问已配置的协议网关；它不回显地址、账户、版本或
 连接参数。它必须与实体实时新鲜度和历史样本验收同时通过，才能证明“网关在线且数据已进入平台”。
+
+```yaml
+# acceptance/operator-configuration-denied.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.operator-configuration-denied
+kind: authorization_rejection
+required: true
+capability: configuration.write
+actorRole: operator
+timeout: 5s
+```
+
+`authorization_rejection` 证明一个低权限账号确实被服务端拒绝，而不接受客户端自报。实施人员以
+`operator` 身份请求对应能力保护的安全操作，得到 `403 PERMISSION_DENIED` 后读取响应头
+`X-ZiZu-Audit-Event-ID`，将该 UUID 放进 `authorization_denials`。验收服务只在内部核对这条
+append-only 审计事件的拒绝结果、能力和角色；不会暴露全局审计记录、请求正文或凭据。
 
 ```yaml
 # entities/pcs-active-power.yaml

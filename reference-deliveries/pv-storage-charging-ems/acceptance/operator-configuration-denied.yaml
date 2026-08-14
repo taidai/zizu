@@ -1,0 +1,7 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.operator-configuration-denied
+kind: authorization_rejection
+required: true
+capability: configuration.write
+actorRole: operator
+timeout: 5s

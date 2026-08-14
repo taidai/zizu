@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -43,11 +43,13 @@ class IdentityError(Exception):
         *,
         status_code: int,
         retry_after_seconds: int | None = None,
+        audit_event_id: UUID | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
+        self.audit_event_id = audit_event_id
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,7 @@ class AuditEvent:
     request_id: str | None = None
     client_ip: str | None = None
     details: dict[str, object] | None = None
+    id: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,8 @@ class IdentityRepository(Protocol):
         *,
         connection: object | None = None,
     ) -> None: ...
+
+    def find_audit_event(self, event_id: UUID) -> AuditEvent | None: ...
 
 
 def verify_identity_schema(connection_factory: Callable[[], object] | None = None) -> None:
@@ -669,23 +674,28 @@ class Identity:
         if allowed_roles is None:
             raise RuntimeError(f"Unknown capability: {capability}")
         if principal.role not in allowed_roles:
-            self._repository.append_audit(
-                AuditEvent(
-                    event="authorization.decision",
-                    outcome="denied",
-                    reason="permission_denied",
-                    actor=principal.actor,
-                    target=capability,
-                    request_id=request_id,
-                    client_ip=client_ip,
-                )
+            audit_event = AuditEvent(
+                event="authorization.decision",
+                outcome="denied",
+                reason="permission_denied",
+                actor=principal.actor,
+                target=capability,
+                request_id=request_id,
+                client_ip=client_ip,
+                details={"role": principal.role},
             )
+            self._repository.append_audit(audit_event)
             raise IdentityError(
                 "PERMISSION_DENIED",
                 "The authenticated identity is not allowed to perform this action",
                 status_code=403,
+                audit_event_id=audit_event.id,
             )
         return principal
+
+    def find_audit_event(self, event_id: UUID) -> AuditEvent | None:
+        """Read one opaque immutable event for a narrowly scoped evidence check."""
+        return self._repository.find_audit_event(event_id)
 
     def issue_ws_ticket(
         self,
@@ -960,6 +970,9 @@ class InMemoryIdentityRepository:
     ) -> None:
         self.audits.append(event)
 
+    def find_audit_event(self, event_id: UUID) -> AuditEvent | None:
+        return next((event for event in self.audits if event.id == event_id), None)
+
 
 class PostgresIdentityRepository:
     def __init__(self, connection_factory: Callable[[], object] | None = None) -> None:
@@ -1123,7 +1136,7 @@ class PostgresIdentityRepository:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                uuid4(),
+                event.id,
                 event.event,
                 event.outcome,
                 event.reason,
@@ -1299,3 +1312,30 @@ class PostgresIdentityRepository:
         with self._connection() as conn, conn.cursor() as cur:
             self._append_audit(cur, event)
             conn.commit()
+
+    def find_audit_event(self, event_id: UUID) -> AuditEvent | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, event, outcome, reason, actor, target, request_id,
+                       host(client_ip), details
+                FROM t_audit_events
+                WHERE id = %s
+                """,
+                (event_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        details = row[8] if isinstance(row[8], dict) else json.loads(row[8] or "{}")
+        return AuditEvent(
+            id=row[0],
+            event=row[1],
+            outcome=row[2],
+            reason=row[3],
+            actor=row[4],
+            target=row[5],
+            request_id=row[6],
+            client_ip=row[7],
+            details=details,
+        )

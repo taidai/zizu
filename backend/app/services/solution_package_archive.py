@@ -691,6 +691,25 @@ def _validate_acceptance_definition(
             )
         _validate_timeout(definition.get("timeout"))
         return
+    if definition.get("kind") == "authorization_rejection":
+        allowed_fields = {
+            "schemaVersion", "id", "kind", "required", "capability", "actorRole", "timeout",
+        }
+        if (
+            set(definition) != allowed_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+            or not isinstance(definition.get("capability"), str)
+            or not definition["capability"].strip()
+            or definition.get("actorRole") != "operator"
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Authorization rejection acceptance is invalid",
+            )
+        _validate_timeout(definition.get("timeout"))
+        return
     if definition.get("kind") == "gateway_readiness":
         allowed_fields = {"schemaVersion", "id", "kind", "required", "gateway", "timeout"}
         if (

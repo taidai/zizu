@@ -39,7 +39,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             {
                 "acceptance.platform-liveness", "acceptance.neuron-gateway", "acceptance.pcs", "acceptance.bms",
                 "acceptance.pv", "acceptance.evse", "acceptance.meter", "acceptance.meter-history",
-                "acceptance.operation-audit", "acceptance.manual-pcs-setpoint",
+                "acceptance.operation-audit", "acceptance.operator-configuration-denied", "acceptance.manual-pcs-setpoint",
                 "acceptance.grid-import-lifecycle", "acceptance.policy-grid-import-cap",
                 "acceptance.release-lock",
             },
@@ -154,6 +154,15 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual("readback_confirmed", manual_done.json()["status"])
 
+            denied = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            self.assertEqual(403, denied.status_code, denied.text)
+            self.assertEqual("PERMISSION_DENIED", denied.json()["detail"]["code"])
+            denied_audit_id = denied.headers.get("X-ZiZu-Audit-Event-ID")
+            self.assertIsNotNone(denied_audit_id)
+
             # The configured 5-second device cooldown is intentionally observed,
             # rather than bypassed by a test-only clock.
             await asyncio.sleep(5.1)
@@ -227,6 +236,9 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 json={
                     "manual_commands": {"acceptance.manual-pcs-setpoint": manual_done.json()["id"]},
                     "policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]},
+                    "authorization_denials": {
+                        "acceptance.operator-configuration-denied": denied_audit_id
+                    },
                 },
                 headers={"Idempotency-Key": "reference-ems-acceptance"},
             )
@@ -261,6 +273,11 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             if item["acceptance_id"] == "acceptance.manual-pcs-setpoint"
         )
         self.assertEqual("MANUAL_CONTROL_COMMAND_REQUIRED", manual_item["code"])
+        denial_item = next(
+            item for item in missing_manual.json()["items"]
+            if item["acceptance_id"] == "acceptance.operator-configuration-denied"
+        )
+        self.assertEqual("AUTHORIZATION_DENIAL_EVIDENCE_REQUIRED", denial_item["code"])
         self.assertEqual(201, gateway_down.status_code, gateway_down.text)
         self.assertEqual("failed", gateway_down.json()["status"])
         gateway_item = next(
