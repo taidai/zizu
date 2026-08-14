@@ -1012,11 +1012,14 @@ schemaVersion: zizu.acceptance/v1alpha1
 id: acceptance.operation-audit
 kind: operation_audit
 required: true
+requiredEvidence: [installation, manual_control, policy_control, alarm_acknowledgement, authorization_denial]
 timeout: 5s
 ```
 
-`operation_audit` 证明本次安装已经写入不可变审计流；报告只携带事件类型、结果、服务端主体和
-计数，不携带请求体、凭据或完整审计详情。实施工程师可通过
+`operation_audit` 默认仅证明本次安装已经写入不可变审计流。需要交付报告汇总运行审计闭环时，
+可用 `requiredEvidence` 要求 `manual_control`、`policy_control`、`alarm_acknowledgement` 与
+`authorization_denial`；这些证据必须由同一次报告中的已通过验收项实际给出审计 ID。报告只携带
+事件类型、结果、服务端主体、计数和覆盖结论，不携带请求体、凭据或完整审计详情。实施工程师可通过
 `GET /api/v1/solution-installations/{installation_id}/audit-events` 读取该安装限定范围内的只读证据，
 接口需要 `solution.report.read` 权限。
 

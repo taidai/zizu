@@ -737,12 +737,26 @@ def _validate_acceptance_definition(
         _validate_timeout(definition.get("timeout"))
         return
     if definition.get("kind") == "operation_audit":
-        allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
+        allowed_fields = {"schemaVersion", "id", "kind", "required", "requiredEvidence", "timeout"}
+        required_evidence = definition.get("requiredEvidence", ["installation"])
         if (
-            set(definition) != allowed_fields
+            set(definition) - allowed_fields
             or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
             or definition.get("id") != acceptance_id
             or not isinstance(definition.get("required"), bool)
+            or not isinstance(required_evidence, list)
+            or not required_evidence
+            or len(set(required_evidence)) != len(required_evidence)
+            or any(
+                item not in {
+                    "installation",
+                    "manual_control",
+                    "policy_control",
+                    "alarm_acknowledgement",
+                    "authorization_denial",
+                }
+                for item in required_evidence
+            )
         ):
             raise DeliveryError(
                 "ASSET_REFERENCE_INVALID",

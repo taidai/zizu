@@ -2,4 +2,10 @@ schemaVersion: zizu.acceptance/v1alpha1
 id: acceptance.operation-audit
 kind: operation_audit
 required: true
+requiredEvidence:
+  - installation
+  - manual_control
+  - policy_control
+  - alarm_acknowledgement
+  - authorization_denial
 timeout: 5s

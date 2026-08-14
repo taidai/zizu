@@ -768,6 +768,7 @@ class SolutionDelivery:
         if repeated is not None:
             return repeated
         items: list[dict[str, Any]] = []
+        operation_audits: list[tuple[str, dict[str, Any], float]] = []
         started_at = datetime.now(timezone.utc)
         run_started = time.monotonic()
         for acceptance_id in package.acceptance_ids:
@@ -822,14 +823,10 @@ class SolutionDelivery:
                 )
                 continue
             if definition["kind"] == "operation_audit":
-                items.append(
-                    self._run_operation_audit(
-                        installation,
-                        acceptance_id,
-                        bool(definition.get("required", True)),
-                        item_started,
-                    )
-                )
+                # Audit coverage summarizes evidence created by other required
+                # checks, so it must run after those checks regardless of the
+                # manifest's display order.
+                operation_audits.append((acceptance_id, definition, item_started))
                 continue
             if definition["kind"] == "gateway_readiness":
                 items.append(
@@ -944,6 +941,17 @@ class SolutionDelivery:
                     "duration_ms": item_duration_ms,
                     "evidence": evidence,
                 }
+            )
+
+        for acceptance_id, definition, item_started in operation_audits:
+            items.append(
+                self._run_operation_audit(
+                    installation,
+                    acceptance_id,
+                    definition,
+                    item_started,
+                    items,
+                )
             )
 
         overall = "failed" if any(
@@ -1525,21 +1533,49 @@ class SolutionDelivery:
         self,
         installation: InstallationOutcome,
         acceptance_id: str,
-        required: bool,
+        definition: dict[str, Any],
         item_started: float,
+        completed_items: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Prove the installation itself entered the immutable audit trail."""
+        """Prove all declared operation evidence is represented in this report."""
+        required = bool(definition.get("required", True))
+        required_evidence = tuple(definition.get("requiredEvidence", ["installation"]))
         try:
             events = self._repository.list_installation_audit_events(installation.id)
         except Exception:
             events = []
-            code = "OPERATION_AUDIT_UNAVAILABLE"
+            installation_available = False
         else:
-            code = (
-                "OPERATION_AUDIT_AVAILABLE"
-                if any(event.event == "solution.install" and event.outcome == "allowed" for event in events)
-                else "OPERATION_AUDIT_MISSING"
+            installation_available = any(
+                event.event == "solution.install" and event.outcome == "allowed"
+                for event in events
             )
+        coverage = {
+            "installation": installation_available,
+            "manual_control": any(
+                item["code"] == "MANUAL_CONTROL_EXECUTION_CONFIRMED"
+                and bool(item.get("evidence", {}).get("audit_event_id"))
+                for item in completed_items
+            ),
+            "policy_control": any(
+                item["code"] == "POLICY_EXECUTION_CONFIRMED"
+                and bool(item.get("evidence", {}).get("command", {}).get("audit_event_id"))
+                for item in completed_items
+            ),
+            "alarm_acknowledgement": any(
+                item["code"] == "ALARM_LIFECYCLE_CONFIRMED"
+                and bool(item.get("evidence", {}).get("events"))
+                and all(event.get("acknowledgement_audit_event_ids") for event in item.get("evidence", {}).get("events", []))
+                for item in completed_items
+            ),
+            "authorization_denial": any(
+                item["code"] == "AUTHORIZATION_REJECTION_CONFIRMED"
+                and bool(item.get("evidence", {}).get("audit_event_id"))
+                for item in completed_items
+            ),
+        }
+        missing = [item for item in required_evidence if not coverage[item]]
+        code = "OPERATION_AUDIT_AVAILABLE" if not missing else "OPERATION_AUDIT_EVIDENCE_MISSING"
         return {
             "acceptance_id": acceptance_id,
             "status": "passed" if code == "OPERATION_AUDIT_AVAILABLE" else "failed",
@@ -1549,6 +1585,8 @@ class SolutionDelivery:
             "evidence": {
                 "installation_id": str(installation.id),
                 "event_count": len(events),
+                "required_evidence": list(required_evidence),
+                "coverage": {item: coverage[item] for item in required_evidence},
                 "events": [
                     {"event": event.event, "outcome": event.outcome, "actor": event.actor}
                     for event in events

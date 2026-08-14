@@ -3610,3 +3610,20 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - `tests.test_business_rest_authorization tests.test_authenticated_delivery_public_api`：25 passed。
 - 前端 `npm run build`：通过（仅既有大 bundle warning）。
 - `git diff --check`：通过。
+
+---
+
+## Session 2026-08-15 — 交付报告操作审计覆盖（待推送）
+
+- `operation_audit` 支持可选 `requiredEvidence`：`installation`、`manual_control`、
+  `policy_control`、`alarm_acknowledgement`、`authorization_denial`。它在其他验收项完成后汇总
+  同一份报告中实际验证过的审计 ID；不读写控制设备、不重放命令。
+- 光储充参考包把以上五类证据设为 required，因此任一控制、告警确认或权限拒绝证据缺失都会使
+  机器交付报告失败；README 与包文档已给出公开格式。
+
+### 验证
+
+- 参考 EMS 完整公开试验：1 passed。
+- 旧 `operation_audit` 安装审计兼容缝：1 passed。
+- `tests.test_delivery_public_api tests.test_reference_ems_package` 完整运行显示 49 passed；外层
+  60 秒命令时限在输出完成后返回超时，故不把它记作完整套件成功证据。
