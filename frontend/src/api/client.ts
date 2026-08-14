@@ -1264,6 +1264,7 @@ export async function fetchSolutionInstallations(): Promise<SolutionInstallation
 export interface DeliveryAcceptanceInput {
   manual_commands?: Record<string, string>
   policy_commands?: Record<string, string>
+  authorization_denials?: Record<string, string>
 }
 
 export async function runDeliveryAcceptance(

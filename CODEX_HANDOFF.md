@@ -3627,3 +3627,16 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 旧 `operation_audit` 安装审计兼容缝：1 passed。
 - `tests.test_delivery_public_api tests.test_reference_ems_package` 完整运行显示 49 passed；外层
   60 秒命令时限在输出完成后返回超时，故不把它记作完整套件成功证据。
+
+---
+
+## Session 2026-08-15 — 产品界面补齐权限拒绝验收证据（待推送）
+
+- “解决方案交付”页面现在可填写 `authorization_denials` 映射，并随验收请求发送服务端生成的
+  `X-ZiZu-Audit-Event-ID`。这让参考 EMS 包要求的权限拒绝证据可以通过产品界面提供，而不必改用
+  临时脚本；服务端仍自行核验审计事件的角色、能力与拒绝结果。
+
+### 验证
+
+- 前端 `npm run build`：通过（仅既有大 bundle warning）。
+- `git diff --check`：通过。
