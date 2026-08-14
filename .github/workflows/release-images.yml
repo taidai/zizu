@@ -48,9 +48,20 @@ jobs:
           --release release.json
           --migrations-dir init-db
 
-      - name: Preserve immutable release manifest
+      - name: Build public EMS reference package
+        run: |
+          mkdir -p release-artifacts
+          python scripts/build_reference_delivery.py \
+            --output release-artifacts/pv-storage-charging-ems.zizu.zip
+          sha256sum release-artifacts/pv-storage-charging-ems.zizu.zip \
+            > release-artifacts/pv-storage-charging-ems.zizu.zip.sha256
+
+      - name: Preserve immutable release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zizu-release-${{ inputs.platform_version }}
-          path: release.json
+          path: |
+            release.json
+            release-artifacts/pv-storage-charging-ems.zizu.zip
+            release-artifacts/pv-storage-charging-ems.zizu.zip.sha256
           retention-days: 90

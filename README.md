@@ -399,6 +399,8 @@ docker compose --env-file release.env -f deploy/docker-compose.release.e606.yml 
 [`reference-deliveries/pv-storage-charging-ems`](reference-deliveries/pv-storage-charging-ems/README.md)。
 发布流水线用 `scripts/build_reference_delivery.py` 生成并签出 ZIP；实施工程师只使用发布的
 ZIP、本文档和产品界面完成设备接入、参数填写与确定性绑定，绝不修改源码或直接操作数据库。
+手动触发 `Build immutable release images` 后，GitHub Actions 会把该 ZIP、其 SHA-256 文件与
+`release.json` 一起保存为同一个发布 artifact；缺少其中任一文件的候选不可作为交付试验输入。
 固定制品、TLS 和发布锁定准备完毕后，由未参与开发的实施工程师按
 [`交付试验协议`](docs/delivery-trial-protocol.md) 在干净环境中计时完成交付；机器报告与该记录
 共同构成“交付就绪”证据。
