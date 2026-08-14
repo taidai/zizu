@@ -84,6 +84,7 @@ _delivery = SolutionDelivery(
     entity_instance_runtime=_entity_instance_runtime,
     alarm_definitions=_alarm_definition_catalog,
     alarm_runtime=_alarm_runtime,
+    control_command_runtime=_control_commands,
     release_lock_reader=current_release_lock_summary,
 )
 _ems_workbench = EmsWorkbench(
@@ -160,6 +161,7 @@ class CreateInstallationPlanRequest(BaseModel):
 
 
 class RunAcceptanceRequest(BaseModel):
+    manual_commands: dict[str, UUID] = Field(default_factory=dict)
     policy_commands: dict[str, UUID] = Field(default_factory=dict)
 
 
@@ -320,6 +322,7 @@ async def run_delivery_acceptance(
             installation_id=installation_id,
             idempotency_key=idempotency_key or "",
             actor=principal.actor,
+            manual_commands={key: str(value) for key, value in request.manual_commands.items()},
             policy_commands={key: str(value) for key, value in request.policy_commands.items()},
         )
         return report.public_dict()

@@ -833,11 +833,16 @@ simulation:
 仿真、命令及回读状态。该验收项会执行已声明的安全测试动作，因此只能指向经现场批准的测试
 策略，不能替代运行期审批或高风险命令确认。
 
-验收运行请求以 `policy_commands` 显式引用此前由工程师通过公开 `evaluate`、协议侧回读和公开
-`reconcile` 完成的命令；报告不会自行下发策略动作：
+验收运行请求以 `manual_commands` 和 `policy_commands` 显式引用此前已完成的控制命令；报告
+不会自行下发动作。`manual_commands` 只接受由 operator 发起、目标属于本次安装、已二次确认并
+处于 `readback_confirmed` 的人工命令；平台同时要求该命令已有不可变审计证据。`policy_commands`
+只引用此前由工程师通过公开 `evaluate`、协议侧回读和公开 `reconcile` 完成的策略命令：
 
 ```json
-{"policy_commands": {"acceptance.policy-grid-import-cap": "<readback-confirmed-command-uuid>"}}
+{
+  "manual_commands": {"acceptance.manual-pcs-setpoint": "<manual-command-uuid>"},
+  "policy_commands": {"acceptance.policy-grid-import-cap": "<policy-command-uuid>"}
+}
 ```
 
 ```yaml
@@ -849,6 +854,18 @@ required: true
 policy: policy.grid-import-cap
 expectedAction: cap-import
 timeout: 5s
+```
+
+```yaml
+# acceptance/manual-pcs-setpoint.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.manual-pcs-setpoint
+kind: manual_control_execution
+required: true
+entityDefinition: pcs.setpoint
+expectedValue: 5
+actorRole: operator
+timeout: 30s
 ```
 
 ```yaml

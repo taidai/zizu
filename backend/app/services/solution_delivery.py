@@ -87,6 +87,10 @@ class PolicyExecutionRuntime(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class ControlCommandEvidenceRuntime(Protocol):
+    def get(self, command_id: UUID) -> Any: ...
+
+
 class HttpxPublicApiProbe:
     """通过本实例公开 HTTP 接口执行白名单验收。"""
 
@@ -120,6 +124,7 @@ class SolutionDelivery:
         alarm_definitions: AlarmDefinitionInstaller | None = None,
         alarm_runtime: AlarmRuntime | None = None,
         policy_runtime: PolicyExecutionRuntime | None = None,
+        control_command_runtime: ControlCommandEvidenceRuntime | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._repository = repository
@@ -130,11 +135,16 @@ class SolutionDelivery:
         self._alarm_definitions = alarm_definitions
         self._alarm_runtime = alarm_runtime
         self._policy_runtime = policy_runtime
+        self._control_command_runtime = control_command_runtime
         self._release_lock_reader = release_lock_reader
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
         """Attach the runtime after construction to avoid a delivery-policy cycle."""
         self._policy_runtime = policy_runtime
+
+    def set_control_command_runtime(self, control_command_runtime: ControlCommandEvidenceRuntime) -> None:
+        """Attach the command reader in test compositions that build delivery first."""
+        self._control_command_runtime = control_command_runtime
 
     def import_package(self, archive: bytes) -> PackageImport:
         files = _read_archive(archive)
@@ -696,6 +706,7 @@ class SolutionDelivery:
         installation_id: UUID,
         idempotency_key: str,
         actor: str,
+        manual_commands: dict[str, str] | None = None,
         policy_commands: dict[str, str] | None = None,
     ) -> DeliveryReport:
         if not idempotency_key.strip():
@@ -713,12 +724,14 @@ class SolutionDelivery:
         if package is None:
             raise DeliveryError("PACKAGE_NOT_FOUND", "Installed package was not found")
         acceptance_digest = _acceptance_digest(package)
+        manual_commands = dict(manual_commands or {})
         policy_commands = dict(policy_commands or {})
         request_digest = hashlib.sha256(
             json.dumps(
                 {
                     "installation_id": str(installation_id),
                     "acceptance_digest": acceptance_digest,
+                    "manual_commands": manual_commands,
                     "policy_commands": policy_commands,
                 },
                 sort_keys=True,
@@ -753,6 +766,7 @@ class SolutionDelivery:
                     "entity_readiness",
                     "history_readiness",
                     "operation_audit",
+                    "manual_control_execution",
                     "alarm_lifecycle",
                     "policy_execution",
                     "release_lock",
@@ -790,6 +804,17 @@ class SolutionDelivery:
                         acceptance_id,
                         bool(definition.get("required", True)),
                         item_started,
+                    )
+                )
+                continue
+            if definition["kind"] == "manual_control_execution":
+                items.append(
+                    self._run_manual_control_execution_acceptance(
+                        installation,
+                        acceptance_id,
+                        definition,
+                        item_started,
+                        manual_commands.get(acceptance_id),
                     )
                 )
                 continue
@@ -976,6 +1001,83 @@ class SolutionDelivery:
             "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
             "evidence": evidence,
         }
+
+    def _run_manual_control_execution_acceptance(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+        command_id: str | None,
+    ) -> dict[str, Any]:
+        """Verify a prior operator command without issuing or repeating a device write."""
+        required = bool(definition.get("required", True))
+        if self._control_command_runtime is None:
+            return _control_acceptance_result(
+                acceptance_id, required, item_started, "failed", "CONTROL_RUNTIME_UNAVAILABLE", {}
+            )
+        if not isinstance(command_id, str) or not command_id:
+            return _control_acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "MANUAL_CONTROL_COMMAND_REQUIRED",
+                {"entity_definition": definition["entityDefinition"]},
+            )
+        try:
+            command = self._control_command_runtime.get(UUID(command_id))
+        except (KeyError, ValueError):
+            return _control_acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "MANUAL_CONTROL_COMMAND_NOT_FOUND",
+                {"entity_definition": definition["entityDefinition"]},
+            )
+        plan = self._repository.get_plan(installation.plan_id)
+        entity_plan = plan.entity_plan if plan is not None else None
+        expected_instances = {
+            UUID(item["entity_instance_id"])
+            for item in entity_plan.get("items", [])
+            if item.get("code") == "ENTITY_BINDING_READY"
+            and item.get("definition_id") == definition["entityDefinition"]
+            and item.get("entity_instance_id")
+        } if isinstance(entity_plan, dict) else set()
+        evidence = getattr(command, "origin_evidence", {})
+        actor_role = evidence.get("actor_role") if isinstance(evidence, dict) else None
+        expected_value = definition["expectedValue"]
+        value_matches = (
+            isinstance(command.expected_value, (int, float))
+            and not isinstance(command.expected_value, bool)
+            and float(command.expected_value) == float(expected_value)
+        )
+        valid = (
+            command.source_type == "manual"
+            and command.status == "readback_confirmed"
+            and command.entity_instance_id in expected_instances
+            and value_matches
+            and actor_role == definition["actorRole"]
+            and command.audit_event_id is not None
+        )
+        code = "MANUAL_CONTROL_EXECUTION_CONFIRMED" if valid else "MANUAL_CONTROL_EXECUTION_INCOMPLETE"
+        return _control_acceptance_result(
+            acceptance_id,
+            required,
+            item_started,
+            "passed" if valid else "failed",
+            code,
+            {
+                "command_id": str(command.id),
+                "actor": command.actor,
+                "actor_role": actor_role,
+                "entity_definition": definition["entityDefinition"],
+                "expected_value": command.expected_value,
+                "status": command.status,
+                "audit_event_id": str(command.audit_event_id) if command.audit_event_id else None,
+            },
+        )
 
     def _run_policy_execution_acceptance(
         self,
@@ -1883,14 +1985,7 @@ def _alarm_acceptance_result(
     code: str,
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "acceptance_id": acceptance_id,
-        "status": state,
-        "code": code,
-        "required": required,
-        "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
-        "evidence": evidence,
-    }
+    return _acceptance_result(acceptance_id, required, item_started, state, code, evidence)
 
 
 def _policy_acceptance_result(
@@ -1902,6 +1997,28 @@ def _policy_acceptance_result(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
     """Format policy acceptance evidence with the same immutable report contract."""
+    return _acceptance_result(acceptance_id, required, item_started, state, code, evidence)
+
+
+def _control_acceptance_result(
+    acceptance_id: str,
+    required: bool,
+    item_started: float,
+    state: str,
+    code: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    return _acceptance_result(acceptance_id, required, item_started, state, code, evidence)
+
+
+def _acceptance_result(
+    acceptance_id: str,
+    required: bool,
+    item_started: float,
+    state: str,
+    code: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "acceptance_id": acceptance_id,
         "status": state,

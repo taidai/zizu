@@ -39,7 +39,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             {
                 "acceptance.platform-liveness", "acceptance.pcs", "acceptance.bms",
                 "acceptance.pv", "acceptance.evse", "acceptance.meter", "acceptance.meter-history",
-                "acceptance.operation-audit",
+                "acceptance.operation-audit", "acceptance.manual-pcs-setpoint",
                 "acceptance.grid-import-lifecycle", "acceptance.policy-grid-import-cap",
                 "acceptance.release-lock",
             },
@@ -219,13 +219,28 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             )
             report = await client.post(
                 f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
-                json={"policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]}},
+                json={
+                    "manual_commands": {"acceptance.manual-pcs-setpoint": manual_done.json()["id"]},
+                    "policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]},
+                },
                 headers={"Idempotency-Key": "reference-ems-acceptance"},
+            )
+            missing_manual = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                json={"policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]}},
+                headers={"Idempotency-Key": "reference-ems-acceptance-missing-manual"},
             )
 
         self.assertEqual(201, report.status_code, report.text)
         self.assertEqual("passed", report.json()["status"], report.text)
         self.assertTrue(all(item["status"] == "passed" for item in report.json()["items"]))
+        self.assertEqual(201, missing_manual.status_code, missing_manual.text)
+        self.assertEqual("failed", missing_manual.json()["status"])
+        manual_item = next(
+            item for item in missing_manual.json()["items"]
+            if item["acceptance_id"] == "acceptance.manual-pcs-setpoint"
+        )
+        self.assertEqual("MANUAL_CONTROL_COMMAND_REQUIRED", manual_item["code"])
 
 
 if __name__ == "__main__":

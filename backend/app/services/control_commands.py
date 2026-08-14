@@ -409,6 +409,9 @@ class InMemoryControlCommandRepository:
                 if existing.request_digest == command.request_digest:
                     return existing
                 raise ControlIdempotencyConflict()
+        # Keep the test adapter semantically aligned with the production
+        # repository: every persisted command carries immutable audit evidence.
+        command = replace(command, audit_event_id=command.audit_event_id or uuid4())
         self._commands[command.id] = command
         if idempotent:
             self._idempotency[(command.actor, command.idempotency_key)] = command.id

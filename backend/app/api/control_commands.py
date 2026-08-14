@@ -74,6 +74,7 @@ def _command(
         value=body.value,
         idempotency_key=idempotency_key,
         confirmation_id=body.confirmation_id,
+        origin_evidence={"actor_role": principal.role},
     )
 
 

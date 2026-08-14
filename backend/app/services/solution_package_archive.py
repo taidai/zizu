@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import re
 import stat
 from typing import Any
@@ -664,6 +665,31 @@ def _validate_acceptance_definition(
     if definition.get("kind") == "alarm_lifecycle":
         return
     if definition.get("kind") == "policy_execution":
+        return
+    if definition.get("kind") == "manual_control_execution":
+        allowed_fields = {
+            "schemaVersion", "id", "kind", "required", "entityDefinition",
+            "expectedValue", "actorRole", "timeout",
+        }
+        expected_value = definition.get("expectedValue")
+        if (
+            set(definition) != allowed_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+            or not isinstance(definition.get("entityDefinition"), str)
+            or not definition["entityDefinition"].strip()
+            or not isinstance(definition.get("actorRole"), str)
+            or definition.get("actorRole") != "operator"
+            or isinstance(expected_value, bool)
+            or not isinstance(expected_value, (int, float))
+            or not math.isfinite(float(expected_value))
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Manual control execution acceptance is invalid",
+            )
+        _validate_timeout(definition.get("timeout"))
         return
     if definition.get("kind") == "release_lock":
         allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}

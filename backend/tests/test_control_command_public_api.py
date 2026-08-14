@@ -96,6 +96,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             policy_runtime.authorizes_high_risk_command
         )
         app.state.solution_delivery.set_policy_runtime(policy_runtime)
+        app.state.solution_delivery.set_control_command_runtime(runtime)
         app.state.policy_runtime = policy_runtime
         app.dependency_overrides[get_default_ems_policy_runtime] = lambda: policy_runtime
         app.state.control_compatibility_targets = compatibility_targets

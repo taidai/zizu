@@ -65,6 +65,7 @@ assets:
   - {id: acceptance.meter, kind: acceptance, path: acceptance/meter-readiness.yaml}
   - {id: acceptance.meter-history, kind: acceptance, path: acceptance/meter-history.yaml}
   - {id: acceptance.operation-audit, kind: acceptance, path: acceptance/operation-audit.yaml}
+  - {id: acceptance.manual-pcs-setpoint, kind: acceptance, path: acceptance/manual-pcs-setpoint.yaml}
   - {id: acceptance.grid-import-lifecycle, kind: acceptance, path: acceptance/grid-import-lifecycle.yaml}
   - {id: acceptance.policy-grid-import-cap, kind: acceptance, path: acceptance/policy-grid-import-cap.yaml}
   - {id: acceptance.release-lock, kind: acceptance, path: acceptance/release-lock.yaml}
@@ -77,6 +78,7 @@ acceptance:
   - acceptance.meter
   - acceptance.meter-history
   - acceptance.operation-audit
+  - acceptance.manual-pcs-setpoint
   - acceptance.grid-import-lifecycle
   - acceptance.policy-grid-import-cap
   - acceptance.release-lock

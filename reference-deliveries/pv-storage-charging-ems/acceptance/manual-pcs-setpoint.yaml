@@ -1,0 +1,8 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.manual-pcs-setpoint
+kind: manual_control_execution
+required: true
+entityDefinition: pcs.setpoint
+expectedValue: 5
+actorRole: operator
+timeout: 30s

@@ -1261,11 +1261,19 @@ export async function fetchSolutionInstallations(): Promise<SolutionInstallation
   return (await response.json() as { items: SolutionInstallation[] }).items
 }
 
-export async function runDeliveryAcceptance(installationId: string, policyCommands: Record<string, string> = {}): Promise<DeliveryReport> {
+export interface DeliveryAcceptanceInput {
+  manual_commands?: Record<string, string>
+  policy_commands?: Record<string, string>
+}
+
+export async function runDeliveryAcceptance(
+  installationId: string,
+  input: DeliveryAcceptanceInput = {},
+): Promise<DeliveryReport> {
   const response = await apiFetch(`${API_BASE}/solution-installations/${encodeURIComponent(installationId)}/acceptance-runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
-    body: JSON.stringify({ policy_commands: policyCommands }),
+    body: JSON.stringify(input),
   })
   if (!response.ok) throw await authError(response, `Run delivery acceptance failed: ${response.status}`)
   return response.json()
