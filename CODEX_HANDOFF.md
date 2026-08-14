@@ -3701,3 +3701,9 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   与 OCI label 相同的候选版本。相关静态发布测试 6/6 通过，`git diff --check` 通过。
 - 下一步：提交、推送并合并该小修复，然后以相同参数重新触发 build-only 工作流；只有工作流成功并
   产出真实 amd64/arm64 摘要后，才讨论隔离目标的 TLS、owner migration、release lock 和独立交付试验。
+
+### 后续状态
+
+- 修复已通过 PR #31 于 2026-08-15 合并至 `main`（merge commit `50060e0`）。同一参数的第二次
+  build-only 工作流为 `31839239668`，当前仍在“双架构构建与发布”步骤中；不得在它完成前声称已有
+  `release.json`、可部署镜像或发布锁。
