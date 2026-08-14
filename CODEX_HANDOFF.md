@@ -3586,3 +3586,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 - 未部署到 1 号机；仍缺固定 ARM64 发布制品、TLS、真实 release lock 和独立四小时交付试验。
 - 本地提交 `ba773ea` 与 `18187c4` 仍因 GitHub 网络失败未推送；本会话变更同样尚未提交。
+
+### 后续更新
+
+- 网络恢复后，`ba773ea`、`18187c4` 与 `86907ab` 已一并推送至
+  `ticket/07-multi-device-instance-consumers`；没有推送到 `main` 或执行现场部署。
+- 已新增 Proposed ADR-0009，定义不等同于工单的“交付分配”最小授权边界；它尚未实现，不能
+  作为工程师包可见性或计划/安装范围的现有保证。
