@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
@@ -56,6 +56,10 @@ from app.services.entity_instance_registry import (
 )
 from app.services.entity_instance_runtime import EntityInstanceRuntime
 from app.services.solution_workbench import validate_ems_workbench_assets
+from app.services.solution_policies import (
+    validate_ems_policy_assets,
+    validate_policy_execution_acceptances,
+)
 
 __all__ = [
     "DeliveryError",
@@ -70,6 +74,16 @@ __all__ = [
     "SolutionDelivery",
     "SiteConfigurationVersion",
 ]
+
+
+class PolicyExecutionRuntime(Protocol):
+    def acceptance_evidence(
+        self,
+        policy_id: str,
+        expected_action: str,
+        command_id: str,
+        installation_id: str,
+    ) -> dict[str, Any]: ...
 
 
 class HttpxPublicApiProbe:
@@ -104,6 +118,7 @@ class SolutionDelivery:
         entity_instance_runtime: EntityInstanceRuntime | None = None,
         alarm_definitions: AlarmDefinitionInstaller | None = None,
         alarm_runtime: AlarmRuntime | None = None,
+        policy_runtime: PolicyExecutionRuntime | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
@@ -112,6 +127,11 @@ class SolutionDelivery:
         self._entity_instance_runtime = entity_instance_runtime
         self._alarm_definitions = alarm_definitions
         self._alarm_runtime = alarm_runtime
+        self._policy_runtime = policy_runtime
+
+    def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
+        """Attach the runtime after construction to avoid a delivery-policy cycle."""
+        self._policy_runtime = policy_runtime
 
     def import_package(self, archive: bytes) -> PackageImport:
         files = _read_archive(archive)
@@ -179,6 +199,20 @@ class SolutionDelivery:
         )
         if normalized_workbenches:
             manifest["_workbench_assets"] = list(normalized_workbenches)
+        normalized_policies = validate_ems_policy_assets(
+            manifest,
+            declared_assets,
+            normalized_slots,
+            _load_mapping,
+        )
+        if normalized_policies:
+            manifest["_policy_assets"] = list(normalized_policies)
+        validate_policy_execution_acceptances(
+            manifest,
+            declared_assets,
+            normalized_policies,
+            _load_mapping,
+        )
         _validate_alarm_lifecycle_acceptances(
             manifest,
             declared_assets,
@@ -286,6 +320,16 @@ class SolutionDelivery:
         alarm_plan: AlarmDefinitionPlan | None = None
         alarm_items: tuple[dict[str, Any], ...] = ()
         alarm_assets = tuple(package.manifest.get("_alarm_assets", ()))
+        policy_assets = tuple(package.manifest.get("_policy_assets", ()))
+        policy_items = tuple(
+            {
+                "asset_id": item["id"],
+                "kind": "ems_policy",
+                "action": "add" if base_version == 0 else "update",
+                "revision": item["revision"],
+            }
+            for item in policy_assets
+        )
         if package.manifest.get("_entity_slots"):
             if self._entity_instance_registry is None:
                 raise DeliveryError(
@@ -347,6 +391,7 @@ class SolutionDelivery:
             # Use the validated package declaration here. Definition IDs are
             # derived only after this content determines the installation ID.
             "alarm_definitions": list(alarm_assets) if alarm_assets else None,
+            "ems_policies": list(policy_assets) if policy_assets else None,
         }
         configuration_digest = (
             package.digest
@@ -354,6 +399,7 @@ class SolutionDelivery:
             and not secret_values
             and not entity_items
             and not alarm_assets
+            and not policy_assets
             else hashlib.sha256(
                 json.dumps(
                     configuration_content,
@@ -419,6 +465,7 @@ class SolutionDelivery:
             *parameter_items,
             *entity_items,
             *alarm_items,
+            *policy_items,
         )
         plan_content = {
             "package_record_id": str(package.id),
@@ -593,6 +640,7 @@ class SolutionDelivery:
         installation_id: UUID,
         idempotency_key: str,
         actor: str,
+        policy_commands: dict[str, str] | None = None,
     ) -> DeliveryReport:
         if not idempotency_key.strip():
             raise DeliveryError(
@@ -609,11 +657,13 @@ class SolutionDelivery:
         if package is None:
             raise DeliveryError("PACKAGE_NOT_FOUND", "Installed package was not found")
         acceptance_digest = _acceptance_digest(package)
+        policy_commands = dict(policy_commands or {})
         request_digest = hashlib.sha256(
             json.dumps(
                 {
                     "installation_id": str(installation_id),
                     "acceptance_digest": acceptance_digest,
+                    "policy_commands": policy_commands,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -652,6 +702,7 @@ class SolutionDelivery:
                     "platform_liveness",
                     "entity_readiness",
                     "alarm_lifecycle",
+                    "policy_execution",
                 }
             ):
                 raise DeliveryError(
@@ -675,6 +726,16 @@ class SolutionDelivery:
                     acceptance_id,
                     definition,
                     item_started,
+                )
+                items.append(item)
+                continue
+            if definition["kind"] == "policy_execution":
+                item = self._run_policy_execution_acceptance(
+                    installation,
+                    acceptance_id,
+                    definition,
+                    item_started,
+                    policy_commands.get(acceptance_id),
                 )
                 items.append(item)
                 continue
@@ -774,6 +835,48 @@ class SolutionDelivery:
             actor,
             idempotency_key,
             request_digest,
+        )
+
+    def _run_policy_execution_acceptance(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+        command_id: str | None,
+    ) -> dict[str, Any]:
+        required = bool(definition.get("required", True))
+        if self._policy_runtime is None:
+            return _policy_acceptance_result(
+                acceptance_id, required, item_started, "failed", "POLICY_RUNTIME_UNAVAILABLE", {}
+            )
+        if not isinstance(command_id, str) or not command_id:
+            return _policy_acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "POLICY_EXECUTION_COMMAND_REQUIRED",
+                {"policy": definition["policy"]},
+            )
+        try:
+            evidence = self._policy_runtime.acceptance_evidence(
+                definition["policy"],
+                definition["expectedAction"],
+                command_id,
+                str(installation.id),
+            )
+        except DeliveryError as exc:
+            return _policy_acceptance_result(
+                acceptance_id, required, item_started, "failed", exc.code, {"policy": definition["policy"]}
+            )
+        return _policy_acceptance_result(
+            acceptance_id,
+            required,
+            item_started,
+            "passed",
+            "POLICY_EXECUTION_CONFIRMED",
+            evidence,
         )
 
     def _run_alarm_lifecycle_acceptance(
@@ -1250,6 +1353,25 @@ def _alarm_acceptance_result(
     code: str,
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
+    return {
+        "acceptance_id": acceptance_id,
+        "status": state,
+        "code": code,
+        "required": required,
+        "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+        "evidence": evidence,
+    }
+
+
+def _policy_acceptance_result(
+    acceptance_id: str,
+    required: bool,
+    item_started: float,
+    state: str,
+    code: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Format policy acceptance evidence with the same immutable report contract."""
     return {
         "acceptance_id": acceptance_id,
         "status": state,

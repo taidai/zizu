@@ -51,6 +51,14 @@ class AutomatedControlCommands:
             )
         )
 
+    def reconcile(self, command_id: UUID) -> ControlCommand:
+        """Observe an already-dispatched automatic command without issuing another write."""
+        return self._runtime.reconcile(command_id)
+
+    def get(self, command_id: UUID) -> ControlCommand:
+        """Read one automatic command's public, persisted state."""
+        return self._runtime.get(command_id)
+
 
 def _origin_evidence(request: AutomatedControlCommandRequest) -> dict[str, object]:
     """Keep the actor, action and replayable trigger proof with the command."""

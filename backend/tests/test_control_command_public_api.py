@@ -42,6 +42,8 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         from app.api.neuron import router as neuron_router
         from app.api.rpc import router as rpc_router
         from app.api.entities import router as entities_router
+        from app.api.ems_policies import router as ems_policy_router
+        from app.api.solution_delivery import get_default_ems_policy_runtime
         from app.services.control_commands import (
             ControlCommandCompatibility,
             ControlCommandRuntime,
@@ -49,11 +51,14 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
             InMemoryControlCommandRepository,
         )
         from app.services.entity_instance_registry import SourceDescriptor
+        from app.services.automated_control_commands import AutomatedControlCommands
+        from app.services.ems_policy_runtime import EmsPolicyRuntime
 
         sources = (
             SourceDescriptor(entity_delivery_test.TAG_ID, "PCS-01", "PCS-01", "Setpoint", "FLOAT", "kW", "RW", True),
             SourceDescriptor(entity_delivery_test.OTHER_TAG_ID, "PCS-01", "PCS-01", "Readback", "FLOAT", "kW", "R", True),
             SourceDescriptor(entity_delivery_test.BACKUP_TAG_ID, "PCS-01", "PCS-01", "Ready", "BOOL", None, "R", True),
+            SourceDescriptor(entity_delivery_test.GRID_TAG_ID, "PCS-01", "PCS-01", "GridPower", "FLOAT", "kW", "R", True),
         )
         app = entity_delivery_test.EntityDeliveryPublicApiTest.build_app(sources=sources)
         dispatcher = FailingDispatcher() if dispatcher_fails else RecordingDispatcher()
@@ -70,8 +75,18 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(neuron_router, prefix="/api/v1")
         app.include_router(rpc_router, prefix="/api/v1")
         app.include_router(entities_router, prefix="/api/v1")
+        app.include_router(ems_policy_router, prefix="/api/v1")
         app.dependency_overrides[get_default_control_commands] = lambda: runtime
         app.dependency_overrides[get_control_compatibility] = lambda: compatibility
+        policy_runtime = EmsPolicyRuntime(
+            app.state.delivery_repository,
+            app.state.entity_instance_catalog,
+            app.state.entity_instance_runtime,
+            AutomatedControlCommands(runtime),
+        )
+        app.state.solution_delivery.set_policy_runtime(policy_runtime)
+        app.state.policy_runtime = policy_runtime
+        app.dependency_overrides[get_default_ems_policy_runtime] = lambda: policy_runtime
         app.state.control_compatibility_targets = compatibility_targets
         return app, dispatcher
 
@@ -153,6 +168,209 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(dispatcher.requests))
         self.assertEqual(200, reconciled.status_code, reconciled.text)
         self.assertEqual("readback_confirmed", reconciled.json()["status"])
+
+    async def test_engineer_simulates_then_evaluates_installed_policy_through_unified_command(self) -> None:
+        """A package policy has deterministic simulation evidence and no control bypass."""
+        app, dispatcher = self.build_app()
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "policy-pcs.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(),
+                    ),
+                    "application/zip",
+                )},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            self.assertEqual(201, plan.status_code, plan.text)
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-policy-pcs"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            headers = {"Authorization": await client._bearer("engineer")}
+            simulated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/simulate",
+                headers=headers,
+            )
+            unavailable = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(409, unavailable.status_code, unavailable.text)
+            self.assertEqual("ENTITY_DATA_MISSING", unavailable.json()["detail"]["code"])
+            scheduler = app.state.policy_runtime
+            self.assertEqual({"evaluated": 0, "commands": 0, "errors": 0}, scheduler.tick())
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            self.assertEqual("enabled", enabled.json()["status"])
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers=headers,
+            )
+            self.assertEqual(200, simulated.status_code, simulated.text)
+            self.assertTrue(simulated.json()["result"]["triggered"])
+            self.assertEqual(200, evaluated.status_code, evaluated.text)
+            command = evaluated.json()["command"]
+            self.assertEqual("policy", command["source_type"])
+            self.assertEqual("dispatched", command["status"])
+            self.assertEqual("policy.grid-import-cap", command["origin_evidence"]["trigger"]["policy_id"])
+            self.assertEqual(1, len(dispatcher.requests))
+            await self.publish(client, Readback=50.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{command['id']}/reconcile",
+                headers=headers,
+            )
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual("readback_confirmed", reconciled.json()["status"])
+
+    async def test_high_risk_policy_cannot_bypass_the_manual_confirmation_gate(self) -> None:
+        app, dispatcher = self.build_app(high_risk=True)
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "high-risk-policy.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                    ),
+                    "application/zip",
+                )},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            applied = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-high-risk-policy"},
+            )
+            self.assertEqual(201, applied.status_code, applied.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            rejected = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+        self.assertEqual(200, rejected.status_code, rejected.text)
+        self.assertEqual("rejected", rejected.json()["command"]["status"])
+        self.assertEqual("CONTROL_CONFIRMATION_REQUIRED", rejected.json()["command"]["code"])
+        self.assertEqual([], dispatcher.requests)
+
+    async def test_delivery_report_keeps_policy_simulation_command_and_readback_evidence(self) -> None:
+        app, dispatcher = self.build_app()
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        acceptance = (
+            "schemaVersion: zizu.acceptance/v1alpha1\n"
+            "id: acceptance.policy-grid-import-cap\n"
+            "kind: policy_execution\n"
+            "required: true\n"
+            "policy: policy.grid-import-cap\n"
+            "expectedAction: cap-import\n"
+            "timeout: 5s\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "policy-acceptance.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(),
+                        acceptance_definition=acceptance,
+                    ),
+                    "application/zip",
+                )},
+            )
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-policy-acceptance"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            headers = {"Authorization": await client._bearer("engineer")}
+            simulated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/simulate",
+                headers=headers,
+            )
+            self.assertEqual(200, simulated.status_code, simulated.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers=headers,
+            )
+            self.assertEqual(200, evaluated.status_code, evaluated.text)
+            command_id = evaluated.json()["command"]["id"]
+            await self.publish(client, Readback=50.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{command_id}/reconcile",
+                headers=headers,
+            )
+            self.assertEqual(200, reconciled.status_code, reconciled.text)
+            self.assertEqual("readback_confirmed", reconciled.json()["status"])
+            report = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                json={"policy_commands": {"acceptance.policy-grid-import-cap": command_id}},
+                headers={"Idempotency-Key": "accept-policy-evidence"},
+            )
+        self.assertEqual(201, report.status_code, report.text)
+        item = next(item for item in report.json()["items"] if item["acceptance_id"] == "acceptance.policy-grid-import-cap")
+        self.assertEqual("passed", item["status"], item)
+        self.assertEqual("POLICY_EXECUTION_CONFIRMED", item["code"])
+        self.assertEqual("policy.grid-import-cap", item["evidence"]["simulation"]["policy_id"])
+        self.assertEqual("readback_confirmed", item["evidence"]["command"]["status"])
+        self.assertEqual(1, len(dispatcher.requests))
 
     async def test_operator_cannot_bypass_interlock_or_limit(self) -> None:
         app, dispatcher = self.build_app()

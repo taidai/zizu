@@ -29,6 +29,8 @@ MIGRATION_026 = BACKEND_ROOT.parent / "init-db" / "migration_026_control_command
 MIGRATION_027 = BACKEND_ROOT.parent / "init-db" / "migration_027_nullable_control_target.sql"
 MIGRATION_028 = BACKEND_ROOT.parent / "init-db" / "migration_028_rule_control_commands.sql"
 MIGRATION_029 = BACKEND_ROOT.parent / "init-db" / "migration_029_unified_alarm_runtime.sql"
+MIGRATION_030 = BACKEND_ROOT.parent / "init-db" / "migration_030_rule_alarm_and_legacy_gate.sql"
+MIGRATION_031 = BACKEND_ROOT.parent / "init-db" / "migration_031_ems_policy_activations.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -40,6 +42,8 @@ MIGRATIONS = (
     MIGRATION_027,
     MIGRATION_028,
     MIGRATION_029,
+    MIGRATION_030,
+    MIGRATION_031,
 )
 def build_minimal_package(
     *,

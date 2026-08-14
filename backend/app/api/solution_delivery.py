@@ -41,6 +41,10 @@ from app.services.solution_delivery import (
     SolutionDelivery,
 )
 from app.services.ems_workbench import EmsWorkbench
+from app.services.ems_policy_runtime import (
+    EmsPolicyRuntime,
+    PostgresPolicyActivationRepository,
+)
 
 
 router = APIRouter()
@@ -85,6 +89,14 @@ _ems_workbench = EmsWorkbench(
     _entity_instance_catalog,
     _entity_instance_runtime,
 )
+_ems_policies = EmsPolicyRuntime(
+    _repository,
+    _entity_instance_catalog,
+    _entity_instance_runtime,
+    _automated_control_commands,
+    PostgresPolicyActivationRepository(),
+)
+_delivery.set_policy_runtime(_ems_policies)
 
 
 def get_solution_delivery() -> SolutionDelivery:
@@ -93,6 +105,10 @@ def get_solution_delivery() -> SolutionDelivery:
 
 def get_default_ems_workbench() -> EmsWorkbench:
     return _ems_workbench
+
+
+def get_default_ems_policy_runtime() -> EmsPolicyRuntime:
+    return _ems_policies
 
 
 def get_default_entity_instance_runtime() -> EntityInstanceRuntime:
@@ -135,6 +151,10 @@ class CreateInstallationPlanRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     secret_references: dict[str, str] = Field(default_factory=dict)
     binding_selections: dict[str, UUID] = Field(default_factory=dict)
+
+
+class RunAcceptanceRequest(BaseModel):
+    policy_commands: dict[str, UUID] = Field(default_factory=dict)
 
 
 @router.get("/solution-packages")
@@ -261,6 +281,7 @@ async def get_site_configuration_version(
 )
 async def run_delivery_acceptance(
     installation_id: UUID,
+    request: RunAcceptanceRequest = RunAcceptanceRequest(),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     principal: Principal = Depends(require_capability("solution.acceptance.run")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
@@ -270,6 +291,7 @@ async def run_delivery_acceptance(
             installation_id=installation_id,
             idempotency_key=idempotency_key or "",
             actor=principal.actor,
+            policy_commands={key: str(value) for key, value in request.policy_commands.items()},
         )
         return report.public_dict()
     except DeliveryError as exc:

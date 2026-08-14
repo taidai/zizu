@@ -399,6 +399,9 @@ zizu/
 | GET | `/api/v1/entity-instances` | 查询规则/工作台可引用的稳定实体实例目录 |
 | GET | `/api/v1/ems-workbench` | 读取当前安装包声明的固定 EMS 工作台（导航、分组、KPI、趋势及入口） |
 | GET | `/api/v1/ems-workbench/trends/{trend_id}` | 读取工作台已声明趋势的确认实体实例历史，不接受任意点位查询 |
+| POST | `/api/v1/ems-policies/{policy_id}/simulate` | 以包中固定场景仿真已安装的 EMS 策略，不下发设备写入 |
+| POST | `/api/v1/ems-policies/{policy_id}/enable` | 在确认输入实体实例可读、新鲜且质量合格后，由工程师显式启用策略 |
+| POST | `/api/v1/ems-policies/{policy_id}/evaluate` | 用当前确认实体实例观测评估已安装策略；触发时仅创建统一控制命令 |
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
 | POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
@@ -647,6 +650,71 @@ controls: {visible: true}
 
 `overview`、`trends`、`alarms` 与 `controls` 是仅有的内置导航 ID。`controls` 只展示已确认且
 可写的实体实例；真正下发仍必须经过统一控制命令权限、限值、联锁和回读，工作台配置不能扩权。
+
+### 基础 EMS 策略与固定仿真
+
+策略也是包内数据资产，不接受表达式、脚本、设备地址、MQTT 或 Neuron 配置。首版策略只支持
+一个数值输入、一个阈值判断和一个固定数值动作；输入和目标都必须引用同一包中声明的
+`slot + definition`，单位必须精确匹配，目标还必须声明可写控制策略。每个策略都携带一个
+固定仿真；导入时仿真期望不成立即拒绝整个包。
+
+```yaml
+# solution.yaml 的 assets 增量
+assets:
+  - id: policy.grid-import-cap
+    kind: ems_policy
+    path: policies/grid-import-cap.yaml
+    sha256: "<sha256>"
+```
+
+```yaml
+# policies/grid-import-cap.yaml
+schemaVersion: zizu.ems-policy/v1alpha1
+id: policy.grid-import-cap
+kind: ems_policy
+revision: 1
+input: {slot: slot.pcs-primary, definition: grid.activePower, unit: kW}
+condition: {operator: gt, threshold: 100}
+action:
+  id: cap-import
+  target: {slot: slot.pcs-primary, definition: pcs.setpoint}
+  value: 50
+  unit: kW
+simulation:
+  input: {value: 120, unit: kW}
+  expected: {triggered: true, actionValue: 50}
+```
+
+工程师先调用 `simulate` 获得可重放的策略证据；`evaluate` 或平台定时调度使用新鲜、GOOD 的
+确认实例观测。命中条件时只会创建 `source_type=policy` 的统一控制命令，仍受确认、限值、
+联锁、冷却和回读约束；仿真永不下发设备写入。
+安装计划先验证其输入/目标都能唯一落到确认实体实例；工程师还必须调用 `enable`，让平台在
+当前输入可读、新鲜且质量合格时持久记录启用状态。只有已启用策略会被定时调度；运行期出现
+缺失、陈旧或坏质量观测则明确拒绝本次评估，绝不会猜测数据或下发动作。升级后的新站点配置版本
+需要重新启用，避免包变化静默接管自动控制。
+
+需要把策略闭环纳入交付报告时，包可声明一个严格的 `policy_execution` 验收项。它先记录固定
+仿真，再评估当前确认实例输入，并只在命令变为 `readback_confirmed` 后通过；报告保存输入、
+仿真、命令及回读状态。该验收项会执行已声明的安全测试动作，因此只能指向经现场批准的测试
+策略，不能替代运行期审批或高风险命令确认。
+
+验收运行请求以 `policy_commands` 显式引用此前由工程师通过公开 `evaluate`、协议侧回读和公开
+`reconcile` 完成的命令；报告不会自行下发策略动作：
+
+```json
+{"policy_commands": {"acceptance.policy-grid-import-cap": "<readback-confirmed-command-uuid>"}}
+```
+
+```yaml
+# acceptance/policy-grid-import-cap.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.policy-grid-import-cap
+kind: policy_execution
+required: true
+policy: policy.grid-import-cap
+expectedAction: cap-import
+timeout: 5s
+```
 
 ```yaml
 # entities/pcs-active-power.yaml

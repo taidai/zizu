@@ -37,6 +37,7 @@ from app.api.security import get_identity
 from app.api.solution_delivery import router as solution_delivery_router
 from app.api.entity_instances import router as entity_instances_router
 from app.api.ems_workbench import router as ems_workbench_router
+from app.api.ems_policies import router as ems_policy_router
 from app.api.control_commands import router as control_commands_router
 from app.api.rpc import router as rpc_router
 from app.api.tags import router as tags_router
@@ -266,6 +267,12 @@ TICKET_15_CAPABILITIES = {
     ("GET", "/api/v1/ems-workbench/trends/{trend_id}"): "runtime.read",
 }
 
+TICKET_16_CAPABILITIES = {
+    ("POST", "/api/v1/ems-policies/{policy_id}/simulate"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/enable"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/evaluate"): "configuration.write",
+}
+
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
 
 
@@ -289,6 +296,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     nanomq_router,
     solution_delivery_router,
     ems_workbench_router,
+    ems_policy_router,
     entity_instances_router,
     control_commands_router,
     rpc_router,
@@ -999,6 +1007,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(ISSUE_04_REST), 29)
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
+        self.assertEqual(len(TICKET_16_CAPABILITIES), 3)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1009,6 +1018,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             set(TICKET_08_09_CAPABILITIES),
             set(TICKET_12_CAPABILITIES),
             set(TICKET_15_CAPABILITIES),
+            set(TICKET_16_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1031,7 +1041,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 140)
+        self.assertEqual(len(registered), 143)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
@@ -1061,6 +1071,11 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
         for (method, path), capability in sorted(TICKET_15_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_16_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
             self.assertEqual(operation.get("x-zizu-capability"), capability)
             self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])

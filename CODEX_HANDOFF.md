@@ -3292,3 +3292,23 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 ### 部署门禁
 
 - 不能直接部署到 1 号机：ARM64 构建基础镜像源不可用、现有部署入口不满足固定制品/TLS/受控主机密钥要求。须先完成 Ticket 18 发布制品与 TLS 门禁，再进行现场升级。
+
+---
+
+## Session 2026-08-14 — Ticket #16 基础 EMS 策略与仿真验收（待本地提交）
+
+### 已完成
+
+- 新增严格的 `ems_policy` 包资产。首版只允许一个数值输入、阈值判断、固定数值动作和固定仿真；不接受脚本、表达式、设备地址、MQTT 或 Neuron 内容。
+- 导入期校验实体槽位、数值类型、单位、可写方向、控制策略和仿真期望；只读实体不能被伪装成策略控制目标。
+- 安装计划明确展示策略资产与 revision。策略须由工程师通过公开 `enable` 接口显式启用；启用前平台读取确认实体实例，缺失、陈旧或坏质量输入都会拒绝。启用记录按站点配置版本持久化，升级不会静默继承自动控制。
+- 工程师通过公开 `simulate → enable → evaluate → reconcile` 和协议侧回读完成闭环；命中后仅创建 `source_type=policy` 的统一控制命令。高风险策略仍被 `CONTROL_CONFIRMATION_REQUIRED` 拒绝，策略没有旁路。
+- `policy_execution` 验收不再自行驱动内部策略对象。它显式验证前述公开工作流产生的命令 ID、策略主体/版本/动作、目标和 `readback_confirmed` 状态，并把输入、固定仿真、命令和回读证据写入不可变交付报告。
+- 新增 migration_031 保存策略启用状态；PostgreSQL 主缝迁移列表已纳入 030/031。
+
+### 验证与边界
+
+- 策略/控制/实体/权限定向回归：41 passed（100 subtests）；策略控制文件：17 passed。`compileall` 与 `git diff --check` 通过。
+- 完整后端 pytest：189 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` SUM/LAST 两项 SQL 断言失败，本票未触及该模块。
+- Spec 与 Standards 双轴复审无阻断；非阻断建议是后续在隔离 PostgreSQL 补“启用后进程重启仍保持状态”的主缝。
+- Ticket #17、#18 和干净环境交付试验仍未开始；不得声称产品已可生产交付或直接部署到 1 号机。

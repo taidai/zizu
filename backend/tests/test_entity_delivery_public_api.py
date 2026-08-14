@@ -20,6 +20,7 @@ from tests.test_delivery_public_api import (
 TAG_ID = UUID("20000000-0000-0000-0000-000000000001")
 OTHER_TAG_ID = UUID("20000000-0000-0000-0000-000000000002")
 BACKUP_TAG_ID = UUID("20000000-0000-0000-0000-000000000003")
+GRID_TAG_ID = UUID("20000000-0000-0000-0000-000000000004")
 
 
 def build_entity_package(
@@ -166,6 +167,50 @@ def build_entity_package(
     return archive.getvalue()
 
 
+def build_policy_package(
+    policy_definition: str,
+    *,
+    base_archive: bytes | None = None,
+    acceptance_definition: str | None = None,
+) -> bytes:
+    """Append one declarative EMS policy asset to the minimal public package."""
+    policy = policy_definition.encode()
+    source = base_archive or build_entity_package()
+    with zipfile.ZipFile(io.BytesIO(source)) as existing:
+        files = {
+            info.filename: existing.read(info)
+            for info in existing.infolist()
+            if not info.is_dir()
+        }
+    manifest = files["solution.yaml"].decode()
+    asset = (
+        "  - id: policy.grid-import-cap\n"
+        "    kind: ems_policy\n"
+        "    path: policies/grid-import-cap.yaml\n"
+        f"    sha256: \"{hashlib.sha256(policy).hexdigest()}\"\n"
+    )
+    if acceptance_definition is not None:
+        acceptance = acceptance_definition.encode()
+        asset += (
+            "  - id: acceptance.policy-grid-import-cap\n"
+            "    kind: acceptance\n"
+            "    path: acceptance/policy-grid-import-cap.yaml\n"
+            f"    sha256: \"{hashlib.sha256(acceptance).hexdigest()}\"\n"
+        )
+        manifest = manifest.replace(
+            "  - acceptance.platform-liveness\n",
+            "  - acceptance.platform-liveness\n  - acceptance.policy-grid-import-cap\n",
+        )
+        files["acceptance/policy-grid-import-cap.yaml"] = acceptance
+    files["solution.yaml"] = manifest.replace("acceptance:\n", asset + "acceptance:\n").encode()
+    files["policies/grid-import-cap.yaml"] = policy
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        for path, content in files.items():
+            package.writestr(path, content)
+    return archive.getvalue()
+
+
 def build_alarm_entity_package(
     *,
     package_version: str = "1.0.0",
@@ -265,6 +310,11 @@ def build_control_entity_package(*, high_risk: bool = False) -> bytes:
             "id: bms.ready\nkind: entity_definition\ndisplayName: BMS ready\n"
             "deviceCategory: pcs\ndataType: BOOL\nunit: null\ndirection: R\n"
         ).encode(),
+        "grid.activePower": (
+            "schemaVersion: zizu.entity-definition/v1alpha1\n"
+            "id: grid.activePower\nkind: entity_definition\ndisplayName: Grid power\n"
+            "deviceCategory: pcs\ndataType: FLOAT\nunit: kW\ndirection: R\n"
+        ).encode(),
     }
     slot = (
         "schemaVersion: zizu.entity-instance-slot/v1alpha1\n"
@@ -277,6 +327,8 @@ def build_control_entity_package(*, high_risk: bool = False) -> bytes:
         "      deviceKeyParameter: pcs.device_key\n      tagName: Readback\n"
         "  - definition: bms.ready\n    matcher:\n      id: matcher.ready\n"
         "      deviceKeyParameter: pcs.device_key\n      tagName: Ready\n"
+        "  - definition: grid.activePower\n    matcher:\n      id: matcher.grid-power\n"
+        "      deviceKeyParameter: pcs.device_key\n      tagName: GridPower\n"
     ).encode()
     declarations = [
         ("acceptance.platform-liveness", "acceptance", "acceptance/liveness.yaml", acceptance),
@@ -407,6 +459,10 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_runtime=alarm_runtime,
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        app.state.solution_delivery = delivery
+        app.state.delivery_repository = delivery_repository
+        app.state.entity_instance_catalog = catalog
+        app.state.entity_instance_runtime = runtime
         app.dependency_overrides[get_default_ems_workbench] = lambda: EmsWorkbench(
             delivery_repository,
             catalog,
@@ -510,6 +566,76 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("ASSET_REFERENCE_INVALID", rejected.json()["detail"]["code"])
             packages = await client.get("/api/v1/solution-packages")
             self.assertEqual(0, packages.json()["total"])
+
+    async def test_import_rejects_policy_target_that_is_not_a_writable_confirmed_entity(self) -> None:
+        """A policy cannot turn a read-only measurement into a control bypass."""
+        app = self.build_app(sources=(self.source(),))
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\n"
+            "kind: ems_policy\n"
+            "revision: 1\n"
+            "input:\n"
+            "  slot: slot.pcs-primary\n"
+            "  definition: pcs.activePower\n"
+            "  unit: kW\n"
+            "condition:\n"
+            "  operator: gt\n"
+            "  threshold: 100\n"
+            "action:\n"
+            "  id: cap-import\n"
+            "  target:\n"
+            "    slot: slot.pcs-primary\n"
+            "    definition: pcs.activePower\n"
+            "  value: 50\n"
+            "  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            response = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": ("invalid-policy.zizu.zip", build_policy_package(policy), "application/zip")},
+            )
+            self.assertEqual(422, response.status_code, response.text)
+            self.assertEqual("POLICY_TARGET_NOT_WRITABLE", response.json()["detail"]["code"])
+            packages = await client.get("/api/v1/solution-packages")
+            self.assertEqual(0, packages.json()["total"])
+
+    async def test_valid_policy_is_a_reviewable_installation_plan_item(self) -> None:
+        """A policy is versioned package data, not an untracked rule-engine edit."""
+        from app.services.entity_instance_registry import SourceDescriptor
+
+        app = self.build_app(sources=(
+            SourceDescriptor(TAG_ID, "PCS-01", "PCS-01", "Setpoint", "FLOAT", "kW", "RW", True),
+            SourceDescriptor(OTHER_TAG_ID, "PCS-01", "PCS-01", "Readback", "FLOAT", "kW", "R", True),
+            SourceDescriptor(BACKUP_TAG_ID, "PCS-01", "PCS-01", "Ready", "BOOL", None, "R", True),
+        ))
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\n"
+            "kind: ems_policy\n"
+            "revision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: pcs.readback\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": ("policy-pcs.zizu.zip", build_policy_package(policy, base_archive=build_control_entity_package()), "application/zip")},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            self.assertEqual(["policy.grid-import-cap"], imported.json()["policy_asset_ids"])
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+        self.assertEqual(201, plan.status_code, plan.text)
+        self.assertIn(
+            {"asset_id": "policy.grid-import-cap", "kind": "ems_policy", "action": "add", "revision": 1},
+            plan.json()["items"],
+        )
 
     async def test_operator_reads_package_configured_workbench_from_confirmed_entity_instances(self) -> None:
         app = self.build_app(sources=(self.source(),))

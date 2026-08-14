@@ -177,6 +177,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "entity_instance_slot",
             "alarm_definition",
             "ems_workbench",
+            "ems_policy",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
@@ -647,6 +648,8 @@ def _validate_acceptance_definition(
     if definition.get("kind") == "entity_readiness":
         return
     if definition.get("kind") == "alarm_lifecycle":
+        return
+    if definition.get("kind") == "policy_execution":
         return
     allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
     if set(definition) != allowed_fields:

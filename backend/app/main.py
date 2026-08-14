@@ -38,7 +38,7 @@ _scheduler_tasks = []
 AGGREGATION_INTERVAL_SEC = 60
 # F1 公式 tick 间隔 (秒)，比聚合更频繁，保证虚拟点先产出
 FORMULA_INTERVAL_SEC = 30
-# F2 规则 tick 间隔 (秒)
+# F2 规则与固定 EMS 策略 tick 间隔 (秒)
 RULE_INTERVAL_SEC = 60
 
 
@@ -197,6 +197,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.aggregator import run_aggregation_tick
         from app.services.formula_engine import run_formula_tick
         from app.services.rule_engine import run_rule_tick
+        from app.api.solution_delivery import get_default_ems_policy_runtime
 
         async def _periodic_task(name: str, interval: int, fn) -> None:
             while True:
@@ -222,6 +223,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             asyncio.create_task(
                 _periodic_task("rules", RULE_INTERVAL_SEC, run_rule_tick),
                 name="f2_rules",
+            )
+        )
+        _scheduler_tasks.append(
+            asyncio.create_task(
+                _periodic_task("ems-policies", RULE_INTERVAL_SEC, get_default_ems_policy_runtime().tick),
+                name="ems_policies",
             )
         )
         logger.success(
@@ -338,6 +345,9 @@ def create_app() -> FastAPI:
         prefix="/api/v1",
         tags=["EMS Workbench"],
     )
+
+    from app.api.ems_policies import router as ems_policy_router
+    app.include_router(ems_policy_router, prefix="/api/v1", tags=["EMS Policies"])
 
     from app.api.entity_instances import router as entity_instances_router
     app.include_router(
