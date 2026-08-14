@@ -1084,6 +1084,11 @@ export interface ControlCommand {
   source_type: string
 }
 
+export interface ControlConfirmation {
+  id: string
+  expires_at: string
+}
+
 export interface WorkbenchEntity {
   entity_instance_id: string
   slot_id: string
@@ -1133,8 +1138,11 @@ export async function fetchEmsWorkbenchTrend(
   return response.json()
 }
 
-export async function submitControlCommand(entityInstanceId: string, value: unknown): Promise<ControlCommand> {
-  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
+export async function requestControlConfirmation(
+  entityInstanceId: string,
+  value: unknown,
+): Promise<ControlConfirmation> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-confirmations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1142,7 +1150,38 @@ export async function submitControlCommand(entityInstanceId: string, value: unkn
     },
     body: JSON.stringify({ value }),
   })
+  if (!response.ok) throw await authError(response, `Control confirmation failed: ${response.status}`)
+  return response.json()
+}
+
+export async function submitControlCommand(
+  entityInstanceId: string,
+  value: unknown,
+  confirmationId?: string,
+): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ value, ...(confirmationId ? { confirmation_id: confirmationId } : {}) }),
+  })
   if (!response.ok) throw await authError(response, `Control command failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchControlCommand(commandId: string): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/control-commands/${encodeURIComponent(commandId)}`)
+  if (!response.ok) throw await authError(response, `Fetch control command failed: ${response.status}`)
+  return response.json()
+}
+
+export async function reconcileControlCommand(commandId: string): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/control-commands/${encodeURIComponent(commandId)}/reconcile`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await authError(response, `Reconcile control command failed: ${response.status}`)
   return response.json()
 }
 

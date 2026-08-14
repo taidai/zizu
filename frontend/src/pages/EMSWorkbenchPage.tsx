@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  fetchControlCommand,
   fetchEmsWorkbench,
   fetchEmsWorkbenchTrend,
+  reconcileControlCommand,
+  requestControlConfirmation,
   submitControlCommand,
+  type ControlCommand,
+  type ControlConfirmation,
   type EmsWorkbench,
   type EmsWorkbenchTrend,
   type WorkbenchEntity,
@@ -61,17 +66,60 @@ function TrendChart({ trend }: { trend: EmsWorkbenchTrend | null }) {
 
 function Controls({ entities }: { entities: WorkbenchEntity[] }) {
   const [values, setValues] = useState<Record<string, string>>({})
+  const [confirmation, setConfirmation] = useState<{
+    entity: WorkbenchEntity
+    value: unknown
+    receipt: ControlConfirmation
+  } | null>(null)
+  const [commands, setCommands] = useState<Record<string, ControlCommand>>({})
   const [message, setMessage] = useState('')
-  const execute = async (entity: WorkbenchEntity) => {
+  const valueFor = (entity: WorkbenchEntity): unknown | null => {
     const raw = values[entity.entity_instance_id]
-    if (raw == null || raw === '') return setMessage(`请先填写 ${entity.display_name} 的目标值。`)
+    if (raw == null || raw === '') {
+      setMessage(`请先填写 ${entity.display_name} 的目标值。`)
+      return null
+    }
     const value = entity.data_type === 'bool' ? raw === 'true' : ['float', 'int'].includes(entity.data_type) ? Number(raw) : raw
-    if (typeof value === 'number' && !Number.isFinite(value)) return setMessage('目标值必须是有效数字。')
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      setMessage('目标值必须是有效数字。')
+      return null
+    }
+    return value
+  }
+  const prepare = async (entity: WorkbenchEntity) => {
+    const value = valueFor(entity)
+    if (value === null) return
     try {
-      const command = await submitControlCommand(entity.entity_instance_id, value)
-      setMessage(`命令已受理：${command.id}（${command.status}）。请等待回读确认。`)
+      const receipt = await requestControlConfirmation(entity.entity_instance_id, value)
+      setConfirmation({ entity, value, receipt })
+      setMessage(`请核对目标值后在 60 秒内确认下发：${entity.display_name} = ${String(value)}${entity.unit ? ` ${entity.unit}` : ''}。`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '控制二次确认申请失败。')
+    }
+  }
+  const execute = async () => {
+    if (!confirmation) return
+    try {
+      const command = await submitControlCommand(
+        confirmation.entity.entity_instance_id,
+        confirmation.value,
+        confirmation.receipt.id,
+      )
+      setCommands((previous) => ({ ...previous, [confirmation.entity.entity_instance_id]: command }))
+      setConfirmation(null)
+      setMessage(`命令已受理：${command.id}（${command.status}）。请等待设备回读后刷新状态。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '控制命令提交失败。')
+    }
+  }
+  const refresh = async (entityInstanceId: string, command: ControlCommand) => {
+    try {
+      const reconciled = await reconcileControlCommand(command.id)
+      const current = reconciled.status === 'dispatched' ? await fetchControlCommand(command.id) : reconciled
+      setCommands((previous) => ({ ...previous, [entityInstanceId]: current }))
+      setMessage(`命令 ${current.id} 当前状态：${current.status}（${current.code}）。`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '命令状态刷新失败。')
     }
   }
   if (entities.length === 0) return <p className="text-sm text-gray-400">当前包没有可授权控制的实体。</p>
@@ -82,9 +130,11 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
         {entity.data_type === 'bool' ? (
           <select value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues({ ...values, [entity.entity_instance_id]: event.target.value })} className="neu-input mt-3 w-full px-3 py-2 text-sm sm:mt-0 sm:w-28"><option value="">选择</option><option value="true">开启</option><option value="false">关闭</option></select>
         ) : <input value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues({ ...values, [entity.entity_instance_id]: event.target.value })} type={['float', 'int'].includes(entity.data_type) ? 'number' : 'text'} className="neu-input mt-3 w-full px-3 py-2 text-sm sm:mt-0 sm:w-36" placeholder={entity.unit || '目标值'} />}
-        <button onClick={() => void execute(entity)} className="mt-3 w-full rounded-lg bg-[#52c41a] px-3 py-2 text-sm font-medium text-white sm:mt-0 sm:w-auto">提交命令</button>
+        <button onClick={() => void prepare(entity)} className="mt-3 w-full rounded-lg bg-[#52c41a] px-3 py-2 text-sm font-medium text-white sm:mt-0 sm:w-auto">核对目标</button>
+        {commands[entity.entity_instance_id] && <button onClick={() => void refresh(entity.entity_instance_id, commands[entity.entity_instance_id])} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 sm:mt-0 sm:w-auto">刷新回读</button>}
       </div>
     ))}
+    {confirmation && <div role="alertdialog" aria-label="确认控制命令" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-semibold">请确认控制目标</p><p className="mt-1">{confirmation.entity.display_name} = {String(confirmation.value)}{confirmation.entity.unit ? ` ${confirmation.entity.unit}` : ''}</p><p className="mt-1 text-xs">二次确认仅在 {new Date(confirmation.receipt.expires_at).toLocaleTimeString()} 前有效。提交后仍需等待设备回读确认。</p><div className="mt-3 flex gap-2"><button onClick={() => void execute()} className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-medium text-white">确认下发</button><button onClick={() => setConfirmation(null)} className="rounded-lg border border-amber-300 px-3 py-2 text-sm font-medium">取消</button></div></div>}
     {message && <p role="status" className="text-xs text-gray-500">{message}</p>}
   </div>
 }

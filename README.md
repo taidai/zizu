@@ -986,6 +986,9 @@ Neuron 节点/组/点位、MQTT topic/payload/QoS、全局实体或本地冷却�
 设备写入成功。调用方必须使用响应中的 `links.command` 查询状态，只有
 `readback_confirmed` 才表示现场已达到期望值。新集成必须使用
 `POST /api/v1/entity-instances/{id}/control-commands`；兼容入口将在 v1.0 移除。
+EMS 工作台中的手动控制始终先展示目标值并申请 60 秒、与主体和内容绑定的二次确认；操作员必须
+再次点击“确认下发”才会创建命令。下发后可通过“刷新回读”触发一次安全状态检查，它不会重发
+设备写入，只有 `readback_confirmed` 表示现场已达到目标。
 `/api/v1/nanomq/publish` 与前端“发布测试”已关闭，避免任意 MQTT topic/payload 形成未审计的
 设备控制旁路；消息总线的状态、订阅、ACL、配置和重启仍由 `system.manage` 管理。
 
