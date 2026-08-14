@@ -17,8 +17,9 @@
 - 参考包导入 + 交付公开 API + 实体交付公开 API：42/42 通过；其中协议模拟主缝验证两条
   实体样本、实时最新值和 `history_readiness` 的 24 小时 GOOD 样本计数。`compileall` 与
   diff check 通过。
-- 本地提交：`c4dcd2e feat(reference): add pv storage charging ems package`。首次 push 因 GitHub
-  连接被重置失败，网络恢复后执行 `git push origin HEAD`。
+- 本地提交：`c4dcd2e feat(reference): add pv storage charging ems package`、
+  `a9c1fbc feat(delivery): verify historical telemetry`。GitHub push 已多次因连接重置失败；
+  当前分支尚有本地提交待网络恢复后推送，不能把它视为已发布制品。
 
 ### 真实边界 / Next
 
