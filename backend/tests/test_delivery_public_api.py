@@ -273,6 +273,8 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/v1/solution-packages/import", paths)
         self.assertIn("/api/v1/solution-installations", paths)
         self.assertIn("/api/v1/delivery-reports/{report_id}", paths)
+        self.assertIn("/api/v1/alarm-events", paths)
+        self.assertIn("/api/v1/alarm-events/{event_id}/acknowledgements", paths)
 
     async def test_anonymous_liveness_exposes_only_stable_public_contract(self) -> None:
         app = FastAPI()

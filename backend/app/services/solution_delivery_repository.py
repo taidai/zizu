@@ -293,7 +293,8 @@ class PostgresDeliveryRepository:
             target_installation_id=row[13],
             entity_identity_installation_id=row[14],
             entity_plan=row[15],
-            digest=row[16],
+            alarm_plan=row[16],
+            digest=row[17],
         )
 
     @staticmethod
@@ -470,8 +471,8 @@ class PostgresDeliveryRepository:
                        parameter_contracts, parameters, secret_references,
                        parameter_sources, parameter_metadata,
                        configuration_digest, target_installation_id,
-                       entity_identity_installation_id, entity_plan, digest)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       entity_identity_installation_id, entity_plan, alarm_plan, digest)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING id, package_record_id, package_digest,
                               base_site_configuration_version, status,
@@ -479,7 +480,7 @@ class PostgresDeliveryRepository:
                               secret_references, parameter_sources,
                               parameter_metadata, configuration_digest,
                               target_installation_id,
-                              entity_identity_installation_id, entity_plan, digest
+                              entity_identity_installation_id, entity_plan, alarm_plan, digest
                     """,
                     (
                         plan.id,
@@ -498,6 +499,7 @@ class PostgresDeliveryRepository:
                         plan.target_installation_id,
                         plan.entity_identity_installation_id,
                         Json(plan.entity_plan) if plan.entity_plan is not None else None,
+                        Json(plan.alarm_plan) if plan.alarm_plan is not None else None,
                         plan.digest,
                     ),
                 )
@@ -511,7 +513,7 @@ class PostgresDeliveryRepository:
                                secret_references, parameter_sources,
                                parameter_metadata, configuration_digest,
                                target_installation_id,
-                               entity_identity_installation_id, entity_plan, digest
+                               entity_identity_installation_id, entity_plan, alarm_plan, digest
                         FROM t_solution_install_plans WHERE digest = %s
                         """,
                         (plan.digest,),
@@ -531,7 +533,7 @@ class PostgresDeliveryRepository:
                            parameter_contracts, parameters, secret_references,
                            parameter_sources, parameter_metadata,
                            configuration_digest, target_installation_id,
-                           entity_identity_installation_id, entity_plan, digest
+                           entity_identity_installation_id, entity_plan, alarm_plan, digest
                     FROM t_solution_install_plans WHERE id = %s
                     """,
                     (plan_id,),

@@ -28,6 +28,7 @@ MIGRATION_025 = BACKEND_ROOT.parent / "init-db" / "migration_025_rule_entity_ins
 MIGRATION_026 = BACKEND_ROOT.parent / "init-db" / "migration_026_control_commands.sql"
 MIGRATION_027 = BACKEND_ROOT.parent / "init-db" / "migration_027_nullable_control_target.sql"
 MIGRATION_028 = BACKEND_ROOT.parent / "init-db" / "migration_028_rule_control_commands.sql"
+MIGRATION_029 = BACKEND_ROOT.parent / "init-db" / "migration_029_unified_alarm_runtime.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -38,6 +39,7 @@ MIGRATIONS = (
     MIGRATION_026,
     MIGRATION_027,
     MIGRATION_028,
+    MIGRATION_029,
 )
 def build_minimal_package(
     *,
@@ -84,6 +86,16 @@ def build_control_entity_package() -> bytes:
     from tests.test_entity_delivery_public_api import build_control_entity_package as build
 
     return build()
+
+
+def build_alarm_entity_package() -> bytes:
+    from tests.test_entity_delivery_public_api import build_alarm_entity_package as build
+
+    return build(
+        package_version="1.0.1",
+        multiple_devices=True,
+        manual_failover=True,
+    )
 
 
 @unittest.skipUnless(
@@ -288,6 +300,8 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 for migration in (MIGRATION_026, MIGRATION_027, MIGRATION_028):
                     cursor.execute(migration.read_text(encoding="utf-8"))
                 cursor.execute(MIGRATION_028.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_029.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_029.read_text(encoding="utf-8"))
                 cursor.execute(
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 't_control_commands' "
@@ -791,6 +805,104 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             self.assertEqual(entity_acceptance.status_code, 201, entity_acceptance.text)
             self.assertEqual(entity_acceptance.json()["status"], "passed")
 
+            alarm_import = client.post(
+                "/api/v1/solution-packages/import",
+                headers=admin_auth,
+                files={
+                    "archive": (
+                        "single-pcs-alarm.zizu.zip",
+                        build_alarm_entity_package(),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(alarm_import.status_code, 201, alarm_import.text)
+            alarm_plan_response = client.post(
+                f"/api/v1/solution-packages/{alarm_import.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={
+                    "parameters": {
+                        "pcs.instances": [
+                            {
+                                "instance_key": "PCS-01",
+                                "device_key": "PCS-01",
+                                "standby_device_key": "PCS-01-BACKUP",
+                            }
+                        ],
+                    }
+                },
+            )
+            self.assertEqual(alarm_plan_response.status_code, 201, alarm_plan_response.text)
+            alarm_plan = alarm_plan_response.json()
+            self.assertEqual("ready", alarm_plan["status"])
+            self.assertIsNotNone(alarm_plan["alarm_plan"])
+            alarm_install = client.post(
+                f"/api/v1/install-plans/{alarm_plan['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-alarm-install",
+                },
+                json={"plan_digest": alarm_plan["digest"]},
+            )
+            self.assertEqual(alarm_install.status_code, 201, alarm_install.text)
+            alarm_installation = alarm_install.json()
+            self.assertEqual([entity_instance_id], alarm_installation["entity_instance_ids"])
+
+            alarm_started_at = round(time.time() * 1000)
+            for value, offset_ms in ((101.0, 0), (101.0, 1_100)):
+                published_alarm = client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "node": "PCS-01",
+                        "timestamp": alarm_started_at + offset_ms,
+                        "values": {"ActivePower": value},
+                    },
+                )
+                self.assertEqual(published_alarm.status_code, 200, published_alarm.text)
+            events = client.get("/api/v1/alarm-events", headers=operator_auth)
+            self.assertEqual(events.status_code, 200, events.text)
+            alarm_event = events.json()["items"][0]
+            self.assertEqual("active_unacknowledged", alarm_event["state"])
+            alarm_event_id = alarm_event["id"]
+            acknowledged_alarm = client.post(
+                f"/api/v1/alarm-events/{alarm_event_id}/acknowledgements",
+                headers=operator_auth,
+                json={"note": "Postgres public lifecycle seam"},
+            )
+            self.assertEqual(acknowledged_alarm.status_code, 200, acknowledged_alarm.text)
+            self.assertEqual("active_acknowledged", acknowledged_alarm.json()["state"])
+            for value, offset_ms in ((90.0, 2_100), (90.0, 3_200)):
+                published_recovery = client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "node": "PCS-01",
+                        "timestamp": alarm_started_at + offset_ms,
+                        "values": {"ActivePower": value},
+                    },
+                )
+                self.assertEqual(published_recovery.status_code, 200, published_recovery.text)
+            recovered_alarm = client.get(
+                f"/api/v1/alarm-events/{alarm_event_id}",
+                headers=operator_auth,
+            )
+            self.assertEqual(recovered_alarm.status_code, 200, recovered_alarm.text)
+            self.assertEqual("recovered", recovered_alarm.json()["state"])
+            alarm_acceptance = client.post(
+                f"/api/v1/solution-installations/{alarm_installation['id']}/acceptance-runs",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-alarm-acceptance",
+                },
+            )
+            self.assertEqual(alarm_acceptance.status_code, 201, alarm_acceptance.text)
+            alarm_lifecycle_item = next(
+                item
+                for item in alarm_acceptance.json()["items"]
+                if item["acceptance_id"] == "acceptance.pcs-overpower-lifecycle"
+            )
+            self.assertEqual("ALARM_LIFECYCLE_CONFIRMED", alarm_lifecycle_item["code"])
+            self.assertEqual("passed", alarm_lifecycle_item["status"])
+
             second_import = client.post(
                 "/api/v1/solution-packages/import",
                 headers=admin_auth,
@@ -866,9 +978,12 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     """
                 )
                 all_audits = cursor.fetchall()
-        self.assertEqual(versions, [(0, None), (1, 0), (2, 1), (3, 2)])
-        self.assertEqual(audit_count, 3)
-        self.assertEqual(plan_count, 3)
+        self.assertEqual(
+            versions,
+            [(0, None), (1, 0), (2, 1), (3, 2), (4, 3)],
+        )
+        self.assertEqual(audit_count, 4)
+        self.assertEqual(plan_count, 4)
 
         self._stop_server()
         self._start_server()
@@ -907,6 +1022,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             persisted_failover = client.get(
                 f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
                 headers=engineer_auth,
+            )
+            persisted_alarm_event = client.get(
+                f"/api/v1/alarm-events/{alarm_event_id}",
+                headers=operator_auth,
             )
             repeated_entity_install = client.post(
                 f"/api/v1/install-plans/{entity_plan['id']}/apply",
@@ -1063,10 +1182,12 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(1, len(persisted_failover.json()["audit"]))
         self.assertEqual(repeated_entity_install.json(), entity_installation)
         persisted_packages = packages.json()
-        self.assertEqual(persisted_packages["total"], 3)
+        self.assertEqual(persisted_packages["total"], 4)
         self.assertIn(package, persisted_packages["items"])
         self.assertEqual(installations.json()["items"][0], installation)
-        self.assertEqual(installations.json()["total"], 3)
+        self.assertEqual(installations.json()["total"], 4)
+        self.assertEqual(persisted_alarm_event.status_code, 200, persisted_alarm_event.text)
+        self.assertEqual("recovered", persisted_alarm_event.json()["state"])
         self.assertEqual(persisted_report.json(), report)
         self.assertEqual(repeated_after_restart.json(), installation)
         self.assertEqual(repeated_acceptance_after_restart.status_code, 201)
@@ -1076,6 +1197,8 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(
             [(event, outcome) for event, outcome, *_ in delivery_audits],
             [
+                ("solution.install", "allowed"),
+                ("solution.acceptance", "allowed"),
                 ("solution.install", "allowed"),
                 ("solution.acceptance", "allowed"),
                 ("solution.install", "allowed"),

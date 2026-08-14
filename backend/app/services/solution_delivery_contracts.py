@@ -69,6 +69,7 @@ class InstallationPlan:
     entity_identity_installation_id: UUID
     entity_plan: dict[str, Any] | None
     digest: str
+    alarm_plan: dict[str, Any] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)

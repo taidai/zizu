@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import hashlib
 import io
@@ -152,6 +152,76 @@ def build_entity_package(
     return archive.getvalue()
 
 
+def build_alarm_entity_package(
+    *,
+    package_version: str = "1.0.0",
+    multiple_devices: bool = False,
+    manual_failover: bool = False,
+) -> bytes:
+    """为最小 PCS 包增加一个只引用实体实例的告警定义。"""
+    alarm_definition = (
+        "schemaVersion: zizu.alarm-definition/v1alpha1\n"
+        "id: alarm.pcs.overpower\n"
+        "kind: alarm_definition\n"
+        "version: 1.0.0\n"
+        "slot: slot.pcs-primary\n"
+        "entityDefinition: pcs.activePower\n"
+        "trigger:\n  op: gt\n  value: 100\n"
+        "triggerDuration: 1s\n"
+        "recovery:\n  op: lte\n  value: 90\n"
+        "recoveryDuration: 1s\n"
+        "severity: MAJOR\n"
+        "notificationThrottle: 60s\n"
+    ).encode()
+    alarm_acceptance = (
+        "schemaVersion: zizu.acceptance/v1alpha1\n"
+        "id: acceptance.pcs-overpower-lifecycle\n"
+        "kind: alarm_lifecycle\n"
+        "required: true\n"
+        "alarmDefinition: alarm.pcs.overpower\n"
+        "expectedState: recovered\n"
+        "timeout: 5s\n"
+    ).encode()
+    source = io.BytesIO(
+        build_entity_package(
+            package_version=package_version,
+            multiple_devices=multiple_devices,
+            manual_failover=manual_failover,
+        )
+    )
+    with zipfile.ZipFile(source) as package:
+        files = {
+            item.filename: package.read(item.filename)
+            for item in package.infolist()
+            if not item.is_dir()
+        }
+    declaration = (
+        "  - id: alarm.pcs.overpower\n"
+        "    kind: alarm_definition\n"
+        "    path: alarms/pcs-overpower.yaml\n"
+        f"    sha256: \"{hashlib.sha256(alarm_definition).hexdigest()}\"\n"
+    ).encode()
+    acceptance_declaration = (
+        "  - id: acceptance.pcs-overpower-lifecycle\n"
+        "    kind: acceptance\n"
+        "    path: acceptance/pcs-overpower-lifecycle.yaml\n"
+        f"    sha256: \"{hashlib.sha256(alarm_acceptance).hexdigest()}\"\n"
+    ).encode()
+    files["solution.yaml"] = files["solution.yaml"].replace(
+        b"acceptance:\n",
+        declaration
+        + acceptance_declaration
+        + b"acceptance:\n  - acceptance.pcs-overpower-lifecycle\n",
+    )
+    files["alarms/pcs-overpower.yaml"] = alarm_definition
+    files["acceptance/pcs-overpower-lifecycle.yaml"] = alarm_acceptance
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        for path, content in files.items():
+            package.writestr(path, content)
+    return archive.getvalue()
+
+
 def build_control_entity_package(*, high_risk: bool = False) -> bytes:
     """一个可配置控制、回读和联锁的最小 EMS 解决方案资产。"""
     acceptance = (
@@ -238,6 +308,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             get_solution_delivery,
             router as delivery_router,
         )
+        from app.api.alarm_events import get_alarm_runtime, router as alarm_event_router
         from app.api.health import router as health_router
         from app.api.rules import router as rules_router
         from app.services.entity_instance_registry import (
@@ -253,6 +324,12 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         from app.services.entity_instance_catalog import EntityInstanceCatalog
         from app.services.entity_instance_failover import EntityFailoverPolicy
+        from app.services.alarm_runtime import (
+            AlarmRuntime,
+            InMemoryAlarmDefinitionCatalog,
+            InMemoryAlarmRepository,
+        )
+        from app.services.entity_alarm_adapter import EntityAlarmAdapter
         from app.services.solution_delivery import (
             InMemoryDeliveryRepository,
             SolutionDelivery,
@@ -269,6 +346,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         observations = InMemoryObservationCatalog()
         simulator = InMemoryNeuronProtocolSimulator(source_catalog, observations)
         runtime = EntityInstanceRuntime(registry, observations)
+        alarm_definitions = InMemoryAlarmDefinitionCatalog()
+        alarm_runtime = AlarmRuntime(alarm_definitions, InMemoryAlarmRepository())
+        alarm_adapter = EntityAlarmAdapter(alarm_definitions, runtime, alarm_runtime)
         catalog = EntityInstanceCatalog(entity_repository)
         failover = EntityFailoverPolicy(entity_repository)
         app = FastAPI()
@@ -281,11 +361,19 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 payload=json.dumps(message, separators=(",", ":")).encode("utf-8"),
                 quality=int(payload.get("quality", 192)),
             )
-            return {"published": published}
+            alarm_outcomes = alarm_adapter.submit_all()
+            return {
+                "published": published,
+                "alarm_outcomes": [
+                    {"event_id": str(item.event_id) if item.event_id else None, "state": item.state, "code": item.code}
+                    for item in alarm_outcomes
+                ],
+            }
 
         app.include_router(health_router, prefix="/api/v1")
         app.include_router(delivery_router, prefix="/api/v1")
         app.include_router(entity_instance_router, prefix="/api/v1")
+        app.include_router(alarm_event_router, prefix="/api/v1")
         app.include_router(rules_router, prefix="/api/v1")
         delivery = SolutionDelivery(
             delivery_repository,
@@ -293,14 +381,18 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             public_api_probe=AsgiPublicApiProbe(app),
             entity_instance_registry=registry,
             entity_instance_runtime=runtime,
+            alarm_definitions=alarm_definitions,
+            alarm_runtime=alarm_runtime,
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
         app.dependency_overrides[get_entity_instance_runtime] = lambda: runtime
         app.dependency_overrides[get_entity_instance_catalog] = lambda: catalog
         app.dependency_overrides[get_entity_instance_failover] = lambda: failover
+        app.dependency_overrides[get_alarm_runtime] = lambda: alarm_runtime
         app.state.entity_instance_registry = registry
         app.state.entity_instance_repository = entity_repository
         app.state.entity_instance_runtime = runtime
+        app.state.alarm_runtime = alarm_runtime
         return app
 
     @staticmethod
@@ -319,13 +411,18 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    async def import_and_plan(client: AuthenticatedDeliveryClient, **body):
+    async def import_and_plan(
+        client: AuthenticatedDeliveryClient,
+        *,
+        archive: bytes | None = None,
+        **body,
+    ):
         imported = await client.post(
             "/api/v1/solution-packages/import",
             files={
                 "archive": (
                     "single-pcs.zizu.zip",
-                    build_entity_package(),
+                    archive or build_entity_package(),
                     "application/zip",
                 )
             },
@@ -343,6 +440,102 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         return imported, planned
+
+    async def test_protocol_observation_drives_auditable_entity_alarm_lifecycle(self) -> None:
+        app = self.build_app(sources=(self.source(),))
+        started_at = datetime.now(timezone.utc)
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            _, planned = await self.import_and_plan(
+                client,
+                archive=build_alarm_entity_package(),
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            self.assertEqual(
+                "alarm_definition",
+                next(
+                    item["kind"]
+                    for item in planned.json()["items"]
+                    if item["kind"] == "alarm_definition"
+                ),
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-entity-alarm"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+
+            async def publish(
+                value: float,
+                after_seconds: float,
+                *,
+                quality: int = 192,
+            ) -> dict:
+                response = await client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "message": {
+                            "node": "PCS-01",
+                            "timestamp": round(
+                                (started_at + timedelta(seconds=after_seconds)).timestamp()
+                                * 1000
+                            ),
+                            "values": {"ActivePower": value},
+                        },
+                        "quality": quality,
+                    },
+                )
+                self.assertEqual(200, response.status_code, response.text)
+                return response.json()
+
+            self.assertEqual("ALARM_TRIGGER_PENDING", (await publish(101, 0))["alarm_outcomes"][0]["code"])
+            activated = await publish(101, 1.1)
+            self.assertEqual("ALARM_ACTIVATED", activated["alarm_outcomes"][0]["code"])
+
+            listed = await client.get("/api/v1/alarm-events")
+            self.assertEqual(200, listed.status_code, listed.text)
+            event_id = listed.json()["items"][0]["id"]
+            self.assertEqual("active_unacknowledged", listed.json()["items"][0]["state"])
+
+            operator_headers = {"Authorization": await client._bearer("operator")}
+            acknowledged = await client._client.post(
+                f"/api/v1/alarm-events/{event_id}/acknowledgements",
+                headers=operator_headers,
+                json={"note": "已知悉"},
+            )
+            self.assertEqual(200, acknowledged.status_code, acknowledged.text)
+            self.assertEqual("active_acknowledged", acknowledged.json()["state"])
+
+            self.assertEqual("ALARM_RECOVERY_PENDING", (await publish(90, 2.0))["alarm_outcomes"][0]["code"])
+            self.assertEqual(
+                "ALARM_STILL_ACTIVE",
+                (await publish(90, 2.5, quality=0))["alarm_outcomes"][0]["code"],
+            )
+            self.assertEqual("ALARM_RECOVERY_PENDING", (await publish(90, 3.1))["alarm_outcomes"][0]["code"])
+            recovered = await publish(90, 4.2)
+            self.assertEqual("ALARM_RECOVERED", recovered["alarm_outcomes"][0]["code"])
+            event = await client.get(f"/api/v1/alarm-events/{event_id}")
+            self.assertEqual(200, event.status_code, event.text)
+            self.assertEqual("recovered", event.json()["state"])
+            self.assertEqual(
+                "user:00000000-0000-0000-0000-000000000003",
+                event.json()["acknowledged_by"],
+            )
+
+            accepted = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "accept-entity-alarm-lifecycle"},
+            )
+            self.assertEqual(201, accepted.status_code, accepted.text)
+            lifecycle_item = next(
+                item
+                for item in accepted.json()["items"]
+                if item["acceptance_id"] == "acceptance.pcs-overpower-lifecycle"
+            )
+            self.assertEqual("passed", lifecycle_item["status"], accepted.text)
+            self.assertEqual("ALARM_LIFECYCLE_CONFIRMED", lifecycle_item["code"])
+            self.assertEqual("recovered", lifecycle_item["evidence"]["events"][0]["state"])
 
     async def test_package_to_confirmed_fresh_entity_delivery_report(self) -> None:
         app = self.build_app(

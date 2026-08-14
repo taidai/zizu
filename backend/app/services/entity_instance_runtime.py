@@ -122,6 +122,27 @@ class EntityInstanceRuntime:
         self._observations = observations
 
     def read(self, entity_instance_id: UUID) -> EntityInstanceObservation:
+        observation = self.read_for_alarm(entity_instance_id)
+        if not observation.fresh:
+            raise EntityInstanceError(
+                "ENTITY_DATA_STALE",
+                "Confirmed entity source observation is stale",
+            )
+        if not observation.quality_good:
+            raise EntityInstanceError(
+                "ENTITY_DATA_QUALITY_BAD",
+                "Confirmed entity source quality is not good",
+            )
+        return observation
+
+    def read_for_alarm(self, entity_instance_id: UUID) -> EntityInstanceObservation:
+        """Read the confirmed source without hiding bad/stale samples from alarms.
+
+        The normal read seam rejects unavailable data for callers that need a
+        usable engineering value.  The alarm seam must instead observe every
+        sample from the confirmed source so an invalid sample resets a pending
+        recovery interval rather than bridging a data-quality gap.
+        """
         resolved = self._registry.resolve(entity_instance_id)
         observation = self._observations.latest(resolved.tag_id)
         if observation is None:
@@ -136,16 +157,6 @@ class EntityInstanceRuntime:
             0.0,
             (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds(),
         )
-        if age_seconds > resolved.freshness_seconds:
-            raise EntityInstanceError(
-                "ENTITY_DATA_STALE",
-                "Confirmed entity source observation is stale",
-            )
-        if observation.quality != 192:
-            raise EntityInstanceError(
-                "ENTITY_DATA_QUALITY_BAD",
-                "Confirmed entity source quality is not good",
-            )
         return EntityInstanceObservation(
             entity_instance_id=resolved.entity_instance_id,
             definition_id=resolved.definition_id,
@@ -156,6 +167,6 @@ class EntityInstanceRuntime:
             observed_at=observed_at,
             quality=observation.quality,
             age_ms=round(age_seconds * 1000),
-            fresh=True,
-            quality_good=True,
+            fresh=age_seconds <= resolved.freshness_seconds,
+            quality_good=observation.quality == 192,
         )

@@ -38,7 +38,6 @@ from app.services.parser import parse_neuron_json
 from app.services.alarm_processor import process_alarm_message, ERROR_LEVELS
 from app.services.telemetry_store import batch_insert_telemetry, upsert_telemetry_latest, TelemetryRecord
 from app.services.tag_alarm_engine import process_tag_alarms
-from app.services.entity_alarm_engine import process_entity_alarms
 
 
 class DataPipeline:
@@ -60,7 +59,7 @@ class DataPipeline:
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
         self._alarm_tag_map: dict[str, dict] = {}          # {tag_id(str): alarm meta}
         self._alarm_name_map: dict[str, dict] = {}         # {tag_name(str): alarm meta} for MQTT path
-        self._entity_alarm_index: dict[str, list[dict]] = {} # {tag_id(str): [entity alarm bindings]}
+        self._entity_alarm_adapter = None
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
 
@@ -235,18 +234,6 @@ class DataPipeline:
             except Exception as e:
                 logger.error("[Pipeline] Tag alarm processing failed: {}", e)
         
-
-        if records and self._entity_alarm_index:
-            try:
-                entity_alarm_result = await asyncio.to_thread(
-                    process_entity_alarms,
-                    [r.model_dump() for r in records],
-                    self._entity_alarm_index,
-                )
-                logger.debug("[Pipeline] Entity alarms processed: {}", entity_alarm_result)
-            except Exception as e:
-                logger.error("[Pipeline] Entity alarm processing failed: {}", e)
-
         async with self._buffer_lock:
             self._buffer.extend(records)
             if len(self._buffer) >= settings.pipeline_batch_size:
@@ -425,67 +412,9 @@ class DataPipeline:
 
             self._alarm_tag_map = _fetch_alarm_meta()
             self._alarm_name_map = {m["tag_name"]: m for m in self._alarm_tag_map.values()}
-            # 加载实体-告警等级绑定索引（tag_id -> [binding...]）
-            def _fetch_entity_alarm_index() -> dict[str, list[dict]]:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT
-                                b.id AS binding_id,
-                                b.entity_id,
-                                e.name AS entity_name,
-                                e.display_name AS entity_display_name,
-                                b.alarm_level_id,
-                                l.code AS alarm_level_code,
-                                l.name AS alarm_level_name,
-                                l.severity AS alarm_level_severity,
-                                COALESCE(b.trigger_rules, l.trigger_rules) AS trigger_rules,
-                                t.id AS tag_id,
-                                t.node_id,
-                                n.name AS node_name,
-                                COALESCE(fm_b.entries, fm_t.entries) AS fault_map_entries
-                            FROM t_entity_alarm_bindings b
-                            JOIN t_entities e ON e.id = b.entity_id
-                            JOIN t_alarm_levels l ON l.id = b.alarm_level_id
-                            JOIN t_entity_bindings eb ON eb.entity_id = e.id
-                            JOIN t_tags t ON t.id = eb.tag_id
-                            JOIN t_nodes n ON n.id = t.node_id
-                            LEFT JOIN t_fault_maps fm_b ON fm_b.id = b.fault_map_id
-                            LEFT JOIN t_fault_maps fm_t ON fm_t.id = t.fault_map_id
-                            WHERE b.enabled = TRUE
-                              AND l.enabled = TRUE
-                              AND e.enabled = TRUE
-                              AND t.enabled = TRUE
-                              AND n.enabled = TRUE
-                              AND eb.enabled = TRUE
-                        """)
-                        index: dict[str, list[dict]] = {}
-                        columns = [desc[0] for desc in cur.description]
-                        for row in cur.fetchall():
-                            rec = dict(zip(columns, row))
-                            tag_id = str(rec["tag_id"])
-                            index.setdefault(tag_id, []).append({
-                                "binding_id": str(rec["binding_id"]),
-                                "entity_id": str(rec["entity_id"]),
-                                "entity_name": rec["entity_name"],
-                                "entity_display_name": rec["entity_display_name"],
-                                "alarm_level_id": str(rec["alarm_level_id"]),
-                                "alarm_level_code": rec["alarm_level_code"],
-                                "alarm_level_name": rec["alarm_level_name"],
-                                "alarm_level_severity": rec["alarm_level_severity"],
-                                "trigger_rules": rec["trigger_rules"] or [],
-                                "node_id": str(rec["node_id"]),
-                                "node_name": rec["node_name"],
-                                "fault_map_entries": rec["fault_map_entries"] or [],
-                            })
-                        return index
-
-            self._entity_alarm_index = _fetch_entity_alarm_index()
-
-
             logger.info(
-                "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} alarm tags, {} entity alarm bindings",
-                len(self._rules), len(self._neuron_tag_map), len(self._alarm_tag_map), sum(len(v) for v in self._entity_alarm_index.values())
+                "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} legacy tag alarms",
+                len(self._rules), len(self._neuron_tag_map), len(self._alarm_tag_map),
             )
 
         except Exception as e:
@@ -549,6 +478,27 @@ class DataPipeline:
             self.metrics.db_write_errors += 1
             logger.error("[Pipeline] DB write error ({} records): {}",
                         len(batch), e)
+            return
+        try:
+            if batch:
+                await asyncio.to_thread(self._submit_installed_entity_alarms)
+        except Exception as e:
+            logger.error("[Pipeline] Installed entity alarm processing failed: {}", e)
+
+    def _submit_installed_entity_alarms(self) -> None:
+        """Submit only persisted, confirmed entity observations to ADR-0004."""
+        if self._entity_alarm_adapter is None:
+            from app.services.entity_alarm_adapter import (
+                build_postgres_entity_alarm_adapter,
+            )
+
+            self._entity_alarm_adapter = build_postgres_entity_alarm_adapter()
+        outcomes = self._entity_alarm_adapter.submit_all()
+        if outcomes:
+            logger.debug(
+                "[Pipeline] Installed entity alarm observations processed: {}",
+                len(outcomes),
+            )
 
     @property
     def uptime_seconds(self) -> float:

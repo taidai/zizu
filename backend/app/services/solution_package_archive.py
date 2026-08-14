@@ -175,6 +175,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "acceptance",
             "entity_definition",
             "entity_instance_slot",
+            "alarm_definition",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
@@ -410,6 +411,120 @@ def _validate_entity_assets(
     return tuple(slots)
 
 
+def _validate_alarm_assets(
+    manifest: dict[str, Any],
+    assets: dict[str, bytes],
+    slots: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Normalize the deliberately small v1 alarm-definition grammar."""
+    definitions_by_id = {
+        definition["id"]: definition
+        for slot in slots
+        for definition in slot["definitions"]
+    }
+    slots_by_id = {slot["id"]: slot for slot in slots}
+    normalized: list[dict[str, Any]] = []
+    seen_asset_ids: set[str] = set()
+    for declaration in manifest["assets"]:
+        if declaration["kind"] != "alarm_definition":
+            continue
+        raw = _load_mapping(assets[declaration["path"]], "ASSET_REFERENCE_INVALID")
+        fields = {
+            "schemaVersion", "id", "kind", "version", "slot", "entityDefinition",
+            "trigger", "triggerDuration", "recovery", "recoveryDuration", "severity",
+            "notificationThrottle",
+        }
+        if (
+            set(raw) != fields
+            or raw.get("schemaVersion") != "zizu.alarm-definition/v1alpha1"
+            or raw.get("id") != declaration["id"]
+            or raw.get("kind") != "alarm_definition"
+            or not isinstance(raw.get("version"), str)
+            or not raw["version"]
+            or raw.get("id") in seen_asset_ids
+            or raw.get("slot") not in slots_by_id
+            or raw.get("entityDefinition") not in definitions_by_id
+            or raw.get("entityDefinition")
+            not in {item["id"] for item in slots_by_id[raw["slot"]]["definitions"]}
+            or raw.get("severity") not in {"INFO", "WARNING", "MAJOR", "CRITICAL"}
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Alarm definition is invalid")
+        trigger = _validate_alarm_condition(raw.get("trigger"))
+        recovery = _validate_alarm_condition(raw.get("recovery"))
+        normalized.append(
+            {
+                "id": raw["id"],
+                "version": raw["version"],
+                "slot": raw["slot"],
+                "entity_definition": raw["entityDefinition"],
+                "trigger": trigger,
+                "trigger_duration_seconds": _duration_seconds(raw["triggerDuration"]),
+                "recovery": recovery,
+                "recovery_duration_seconds": _duration_seconds(raw["recoveryDuration"]),
+                "severity": raw["severity"],
+                "notification_throttle_seconds": _duration_seconds(raw["notificationThrottle"]),
+            }
+        )
+        seen_asset_ids.add(raw["id"])
+    return tuple(normalized)
+
+
+def _validate_alarm_lifecycle_acceptances(
+    manifest: dict[str, Any],
+    assets: dict[str, bytes],
+    alarm_assets: tuple[dict[str, Any], ...],
+) -> None:
+    """Validate report-only alarm lifecycle acceptance declarations."""
+    declarations = {item["id"]: item for item in manifest["assets"]}
+    known_alarm_ids = {item["id"] for item in alarm_assets}
+    for acceptance_id in manifest["acceptance"]:
+        declaration = declarations[acceptance_id]
+        definition = _load_mapping(
+            assets[declaration["path"]],
+            "ASSET_REFERENCE_INVALID",
+        )
+        if definition.get("kind") != "alarm_lifecycle":
+            continue
+        required_fields = {
+            "schemaVersion",
+            "id",
+            "kind",
+            "required",
+            "alarmDefinition",
+            "expectedState",
+            "timeout",
+        }
+        if (
+            set(definition) != required_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+            or definition.get("alarmDefinition") not in known_alarm_ids
+            or definition.get("expectedState") not in {"recovered"}
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Alarm lifecycle acceptance is invalid",
+            )
+        _validate_timeout(definition.get("timeout"))
+
+
+def _validate_alarm_condition(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or set(raw) != {"op", "value"}:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Alarm condition is invalid")
+    operator = raw.get("op")
+    value = raw.get("value")
+    if operator not in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Alarm condition is invalid")
+    if operator in {"gt", "gte", "lt", "lte"} and (
+        not isinstance(value, (int, float)) or isinstance(value, bool)
+    ):
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Alarm numeric condition is invalid")
+    if not isinstance(value, (str, int, float, bool)) or value is None:
+        raise DeliveryError("ASSET_REFERENCE_INVALID", "Alarm condition value is invalid")
+    return {"op": operator, "value": value}
+
+
 def _duration_seconds(value: Any) -> float:
     if not isinstance(value, str):
         raise DeliveryError("ASSET_REFERENCE_INVALID", "Duration is invalid")
@@ -529,6 +644,8 @@ def _validate_acceptance_definition(
     acceptance_id: str,
 ) -> None:
     if definition.get("kind") == "entity_readiness":
+        return
+    if definition.get("kind") == "alarm_lifecycle":
         return
     allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
     if set(definition) != allowed_fields:

@@ -334,6 +334,13 @@ def create_app() -> FastAPI:
         tags=["Entity Instances"],
     )
 
+    from app.api.alarm_events import router as alarm_events_router
+    app.include_router(
+        alarm_events_router,
+        prefix="/api/v1",
+        tags=["Alarm Events"],
+    )
+
     from app.api.control_commands import router as control_commands_router
     app.include_router(
         control_commands_router,

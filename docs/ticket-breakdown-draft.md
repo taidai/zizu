@@ -154,10 +154,10 @@
 
 **What it delivers:** 实体观测驱动一个告警事件经历 normal、pending、active_unacknowledged、active_acknowledged、recovered；确认不等于恢复。
 
-- [ ] 支持续时、迟滞、恢复条件和通知节流。
-- [ ] 一次连续故障只形成一个活动事件，不按采样累加。
-- [ ] 仍活动时不能人工恢复。
-- [ ] 报告证明触发、确认和现场恢复证据。
+- [x] 支持续时、迟滞、恢复条件和通知节流。
+- [x] 一次连续故障只形成一个活动事件，不按采样累加。
+- [x] 仍活动时不能人工恢复。
+- [x] 报告证明触发、确认和现场恢复证据。
 
 **Interface / test seam:** 按
 [`ADR-0004`](adr/0004-unified-alarm-state-machine-interface.md) 实现

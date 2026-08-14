@@ -384,6 +384,10 @@ zizu/
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
 | POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
+| GET | `/api/v1/alarm-events` | 查询 `model_version=v1` 的统一告警事件 |
+| GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
+| GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
+| POST | `/api/v1/alarm-events/{id}/acknowledgements` | 确认活动未确认事件；不提供人工恢复命令 |
 | POST | `/api/v1/entity-instances/{id}/control-confirmations` | 为高风险控制申请绑定主体和内容的 60 秒二次确认 |
 | POST | `/api/v1/entity-instances/{id}/control-commands` | 以实体实例提交手动控制命令，必须携带 `Idempotency-Key` |
 | GET | `/api/v1/control-commands/{id}` | 查询命令的持久状态与稳定机器码 |
@@ -481,6 +485,60 @@ engineer 在 `binding_selections` 中明确确认。来源目录或站点配置�
 实体实时读取要求观测未超过槽位声明的新鲜度且 OPC 质量码为 GOOD(192)；缺失、陈旧
 或坏质量分别返回 `ENTITY_DATA_MISSING`、`ENTITY_DATA_STALE`、
 `ENTITY_DATA_QUALITY_BAD`，不会以带失败布尔值的 200 响应掩盖不可用状态。
+
+实体实例告警也是包资产：它只引用稳定的槽位和实体定义，运行期由已确认实体观测驱动，
+而不是引用 Neuron 节点、点位地址或 MQTT topic。`triggerDuration`、`recoveryDuration`
+与 `notificationThrottle` 只能是正整数秒；恢复条件只能由连续的新鲜 GOOD 观测满足，
+坏质量或陈旧观测会打断恢复计时，不能跨越数据空洞关闭事件。新告警事件 API 固定返回
+`model_version: v1`；操作员只能确认 `active_unacknowledged`，确认后仍保持活动，直到现场
+观测满足恢复条件。旧 `/alarms` 仍是兼容历史面，不能将其 `alarm_count` 当作新事件数量。
+数据管道已停止调用旧实体告警引擎；新产生的实体实例告警只进入这一事件模型。标签与 MQTT
+来源仍在下一迁移批次收口，不能据此宣称旧告警面已完全退役。
+
+```yaml
+# solution.yaml 的 assets/acceptance 增量
+assets:
+  - id: alarm.pcs.overpower
+    kind: alarm_definition
+    path: alarms/pcs-overpower.yaml
+    sha256: "<sha256>"
+  - id: acceptance.pcs-overpower-lifecycle
+    kind: acceptance
+    path: acceptance/pcs-overpower-lifecycle.yaml
+    sha256: "<sha256>"
+acceptance:
+  - acceptance.pcs-overpower-lifecycle
+```
+
+```yaml
+# alarms/pcs-overpower.yaml
+schemaVersion: zizu.alarm-definition/v1alpha1
+id: alarm.pcs.overpower
+kind: alarm_definition
+version: 1.0.0
+slot: slot.pcs-primary
+entityDefinition: pcs.activePower
+trigger: {op: gt, value: 100}
+triggerDuration: 10s
+recovery: {op: lte, value: 90}
+recoveryDuration: 5s
+severity: MAJOR
+notificationThrottle: 60s
+```
+
+```yaml
+# acceptance/pcs-overpower-lifecycle.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.pcs-overpower-lifecycle
+kind: alarm_lifecycle
+required: true
+alarmDefinition: alarm.pcs.overpower
+expectedState: recovered
+timeout: 5s
+```
+
+`alarm_lifecycle` 验收只检查本次安装的定义是否已产生事件并进入声明状态；报告保留
+事件 ID、状态和机器转换码，不回显物理来源地址或原始协议负载。
 
 ```yaml
 # solution.yaml 的 assets 片段

@@ -29,6 +29,10 @@ _AUDITED_OPERATION_POLICIES = {
         "configuration.change",
         "Configuration audit service is unavailable",
     ),
+    ALARM_ACKNOWLEDGE: (
+        "alarm.acknowledge",
+        "Alarm acknowledgement audit service is unavailable",
+    ),
     SYSTEM_MANAGE: (
         "system.operation",
         "Privileged operation audit is unavailable",

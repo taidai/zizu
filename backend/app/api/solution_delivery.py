@@ -28,6 +28,11 @@ from app.services.control_commands import (
     PostgresControlTargetResolver,
 )
 from app.services.automated_control_commands import AutomatedControlCommands
+from app.services.alarm_postgres import (
+    PostgresAlarmDefinitionCatalog,
+    PostgresAlarmRepository,
+)
+from app.services.alarm_runtime import AlarmRuntime
 from app.services.solution_delivery import (
     DeliveryError,
     HttpxPublicApiProbe,
@@ -51,6 +56,8 @@ _entity_instance_runtime = EntityInstanceRuntime(
 )
 _entity_instance_catalog = EntityInstanceCatalog(_entity_instance_repository)
 _entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
+_alarm_definition_catalog = PostgresAlarmDefinitionCatalog()
+_alarm_runtime = AlarmRuntime(_alarm_definition_catalog, PostgresAlarmRepository())
 _control_commands = ControlCommandRuntime(
     registry=_entity_instance_registry,
     policies=_entity_instance_repository,
@@ -69,6 +76,8 @@ _delivery = SolutionDelivery(
     public_api_probe=HttpxPublicApiProbe(settings.effective_public_api_base_url),
     entity_instance_registry=_entity_instance_registry,
     entity_instance_runtime=_entity_instance_runtime,
+    alarm_definitions=_alarm_definition_catalog,
+    alarm_runtime=_alarm_runtime,
 )
 
 
@@ -78,6 +87,10 @@ def get_solution_delivery() -> SolutionDelivery:
 
 def get_default_entity_instance_runtime() -> EntityInstanceRuntime:
     return _entity_instance_runtime
+
+
+def get_default_alarm_runtime() -> AlarmRuntime:
+    return _alarm_runtime
 
 
 def get_default_entity_instance_catalog() -> EntityInstanceCatalog:

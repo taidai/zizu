@@ -32,6 +32,8 @@ from app.services.solution_package_archive import (
     _read_archive,
     _validate_acceptance_definition,
     _validate_entity_assets,
+    _validate_alarm_assets,
+    _validate_alarm_lifecycle_acceptances,
     _validate_manifest,
     _validate_platform_range,
     _version_tuple,
@@ -40,6 +42,12 @@ from app.services.solution_parameters import (
     resolve_site_parameters,
     validate_parameter_contracts,
 )
+from app.services.alarm_definitions import (
+    AlarmDefinitionInstaller,
+    AlarmDefinitionPlan,
+    InstalledAlarmDefinition,
+)
+from app.services.alarm_runtime import AlarmRuntime
 from app.services.entity_instance_registry import (
     ApplyEntityInstancePlan,
     EntityInstanceError,
@@ -93,12 +101,16 @@ class SolutionDelivery:
         public_api_probe: PublicApiProbe | None = None,
         entity_instance_registry: EntityInstanceRegistry | None = None,
         entity_instance_runtime: EntityInstanceRuntime | None = None,
+        alarm_definitions: AlarmDefinitionInstaller | None = None,
+        alarm_runtime: AlarmRuntime | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
         self._public_api_probe = public_api_probe
         self._entity_instance_registry = entity_instance_registry
         self._entity_instance_runtime = entity_instance_runtime
+        self._alarm_definitions = alarm_definitions
+        self._alarm_runtime = alarm_runtime
 
     def import_package(self, archive: bytes) -> PackageImport:
         files = _read_archive(archive)
@@ -151,6 +163,18 @@ class SolutionDelivery:
         normalized_slots = _validate_entity_assets(manifest, declared_assets)
         if normalized_slots:
             manifest["_entity_slots"] = list(normalized_slots)
+        normalized_alarm_assets = _validate_alarm_assets(
+            manifest,
+            declared_assets,
+            normalized_slots,
+        )
+        if normalized_alarm_assets:
+            manifest["_alarm_assets"] = list(normalized_alarm_assets)
+        _validate_alarm_lifecycle_acceptances(
+            manifest,
+            declared_assets,
+            normalized_alarm_assets,
+        )
 
         package = PackageImport(
             id=uuid4(),
@@ -250,6 +274,9 @@ class SolutionDelivery:
         entity_plan = None
         entity_items: tuple[dict[str, Any], ...] = ()
         entity_blockers: tuple[dict[str, str], ...] = ()
+        alarm_plan: AlarmDefinitionPlan | None = None
+        alarm_items: tuple[dict[str, Any], ...] = ()
+        alarm_assets = tuple(package.manifest.get("_alarm_assets", ()))
         if package.manifest.get("_entity_slots"):
             if self._entity_instance_registry is None:
                 raise DeliveryError(
@@ -291,6 +318,12 @@ class SolutionDelivery:
             )
             entity_blockers = entity_plan.blockers
             blockers = (*blockers, *entity_blockers)
+        if alarm_assets:
+            if entity_plan is None:
+                raise DeliveryError(
+                    "ALARM_ENTITY_PLAN_REQUIRED",
+                    "Alarm definitions require resolved entity instance slots",
+                )
         configuration_content = {
             **parameter_configuration_content,
             "entity_bindings": [
@@ -302,10 +335,16 @@ class SolutionDelivery:
                 }
                 for item in entity_items
             ],
+            # Use the validated package declaration here. Definition IDs are
+            # derived only after this content determines the installation ID.
+            "alarm_definitions": list(alarm_assets) if alarm_assets else None,
         }
         configuration_digest = (
             package.digest
-            if not parameter_values and not secret_values and not entity_items
+            if not parameter_values
+            and not secret_values
+            and not entity_items
+            and not alarm_assets
             else hashlib.sha256(
                 json.dumps(
                     configuration_content,
@@ -322,6 +361,28 @@ class SolutionDelivery:
                 f"{configuration_digest}"
             ),
         )
+        if alarm_assets:
+            # A definition belongs to this immutable installation, not to the
+            # stable entity-identity installation used for binding resolution.
+            alarm_plan = _alarm_definition_plan(
+                package_digest=package.digest,
+                target_installation_id=target_installation_id,
+                site_configuration_version=base_version + 1,
+                entity_plan=entity_plan.public_dict(),
+                assets=alarm_assets,
+            )
+            alarm_items = tuple(
+                {
+                    "asset_id": definition.asset_id,
+                    "kind": "alarm_definition",
+                    "action": "add" if base_version == 0 else "update",
+                    "entity_instance_id": str(definition.entity_instance_id),
+                    "entity_definition_id": definition.entity_definition_id,
+                    "severity": definition.severity,
+                    "definition_version": definition.version,
+                }
+                for definition in alarm_plan.definitions
+            )
         action = (
             "preserve"
             if current_configuration is not None
@@ -348,6 +409,7 @@ class SolutionDelivery:
             ),
             *parameter_items,
             *entity_items,
+            *alarm_items,
         )
         plan_content = {
             "package_record_id": str(package.id),
@@ -370,6 +432,7 @@ class SolutionDelivery:
                 entity_identity_installation_id
             ),
             "entity_plan": entity_plan.public_dict() if entity_plan else None,
+            "alarm_plan": alarm_plan.public_dict() if alarm_plan else None,
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -402,6 +465,7 @@ class SolutionDelivery:
                 entity_identity_installation_id=entity_identity_installation_id,
                 entity_plan=entity_plan.public_dict() if entity_plan else None,
                 digest=digest,
+                alarm_plan=alarm_plan.public_dict() if alarm_plan else None,
             )
         )
 
@@ -458,6 +522,7 @@ class SolutionDelivery:
                 "Package digest changed after the plan was created",
             )
         entity_plan = plan.entity_plan
+        alarm_plan = plan.alarm_plan
 
         def apply_entities(transaction: Any | None) -> tuple[UUID, ...]:
             if entity_plan is None:
@@ -480,12 +545,26 @@ class SolutionDelivery:
                 raise DeliveryError(exc.code, str(exc)) from exc
             return entity_outcome.entity_instance_ids
 
+        def apply_configuration(transaction: Any | None) -> tuple[UUID, ...]:
+            entity_ids = apply_entities(transaction)
+            if alarm_plan is not None:
+                if self._alarm_definitions is None:
+                    raise DeliveryError(
+                        "ALARM_RUNTIME_UNAVAILABLE",
+                        "Alarm definition runtime is not configured",
+                    )
+                self._alarm_definitions.install_definitions(
+                    _alarm_plan_from_dict(alarm_plan),
+                    transaction,
+                )
+            return entity_ids
+
         return self._repository.install(
             plan,
             actor,
             idempotency_key,
             request_digest,
-            apply_entities if entity_plan is not None else None,
+            apply_configuration if entity_plan is not None else None,
         )
 
     def list_installations(self) -> list[InstallationOutcome]:
@@ -563,6 +642,7 @@ class SolutionDelivery:
                 or definition.get("kind") not in {
                     "platform_liveness",
                     "entity_readiness",
+                    "alarm_lifecycle",
                 }
             ):
                 raise DeliveryError(
@@ -573,6 +653,15 @@ class SolutionDelivery:
             item_started = time.monotonic()
             if definition["kind"] == "entity_readiness":
                 item = self._run_entity_readiness(
+                    installation,
+                    acceptance_id,
+                    definition,
+                    item_started,
+                )
+                items.append(item)
+                continue
+            if definition["kind"] == "alarm_lifecycle":
+                item = self._run_alarm_lifecycle_acceptance(
                     installation,
                     acceptance_id,
                     definition,
@@ -676,6 +765,85 @@ class SolutionDelivery:
             actor,
             idempotency_key,
             request_digest,
+        )
+
+    def _run_alarm_lifecycle_acceptance(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+    ) -> dict[str, Any]:
+        """Prove an installed alarm's lifecycle without exposing a physical source."""
+        required = bool(definition.get("required", True))
+        if self._alarm_runtime is None:
+            return _alarm_acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "ALARM_RUNTIME_UNAVAILABLE",
+                {"alarm_definition": definition["alarmDefinition"]},
+            )
+        plan = self._repository.get_plan(installation.plan_id)
+        alarm_plan = plan.alarm_plan if plan is not None else None
+        definitions = (
+            tuple(
+                item
+                for item in alarm_plan.get("definitions", [])
+                if item.get("asset_id") == definition["alarmDefinition"]
+            )
+            if isinstance(alarm_plan, dict)
+            else ()
+        )
+        if not definitions:
+            return _alarm_acceptance_result(
+                acceptance_id,
+                required,
+                item_started,
+                "failed",
+                "ALARM_DEFINITION_NOT_INSTALLED",
+                {"alarm_definition": definition["alarmDefinition"]},
+            )
+        expected_state = definition["expectedState"]
+        events_by_definition = {
+            str(event.definition_id): event
+            for event in self._alarm_runtime.list()
+        }
+        evidence: list[dict[str, Any]] = []
+        passed = True
+        for installed_definition in definitions:
+            event = events_by_definition.get(installed_definition["id"])
+            if event is None:
+                passed = False
+                evidence.append(
+                    {
+                        "definition_id": installed_definition["id"],
+                        "event": "missing",
+                    }
+                )
+                continue
+            timeline = self._alarm_runtime.timeline(event.id)
+            evidence.append(
+                {
+                    "definition_id": installed_definition["id"],
+                    "event_id": str(event.id),
+                    "state": event.state,
+                    "transitions": [
+                        {"to_state": item.to_state, "code": item.code}
+                        for item in timeline
+                    ],
+                }
+            )
+            if event.state != expected_state:
+                passed = False
+        return _alarm_acceptance_result(
+            acceptance_id,
+            required,
+            item_started,
+            "passed" if passed else "failed",
+            "ALARM_LIFECYCLE_CONFIRMED" if passed else "ALARM_LIFECYCLE_INCOMPLETE",
+            {"events": evidence},
         )
 
     def _run_entity_readiness(
@@ -957,3 +1125,115 @@ def _acceptance_digest(package: PackageImport) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _alarm_definition_plan(
+    *,
+    package_digest: str,
+    target_installation_id: UUID,
+    site_configuration_version: int,
+    entity_plan: dict[str, Any],
+    assets: tuple[dict[str, Any], ...],
+) -> AlarmDefinitionPlan:
+    by_slot_definition = {
+        (item["slot_id"], item["definition_id"]): UUID(item["entity_instance_id"])
+        for item in entity_plan["items"]
+        if item.get("code") == "ENTITY_BINDING_READY"
+    }
+    definitions: list[InstalledAlarmDefinition] = []
+    for asset in assets:
+        entity_instance_id = by_slot_definition.get(
+            (asset["slot"], asset["entity_definition"])
+        )
+        if entity_instance_id is None:
+            raise DeliveryError(
+                "ALARM_ENTITY_INSTANCE_MISSING",
+                "Alarm definition does not have a confirmed entity instance",
+            )
+        definition_id = uuid5(
+            NAMESPACE_URL,
+            (
+                f"zizu/alarm-definition/{package_digest}/{target_installation_id}/"
+                f"{asset['id']}/{entity_instance_id}"
+            ),
+        )
+        definitions.append(
+            InstalledAlarmDefinition(
+                id=definition_id,
+                asset_id=asset["id"],
+                version=asset["version"],
+                installation_id=target_installation_id,
+                site_configuration_version=site_configuration_version,
+                entity_instance_id=entity_instance_id,
+                entity_definition_id=asset["entity_definition"],
+                trigger=dict(asset["trigger"]),
+                trigger_duration_seconds=asset["trigger_duration_seconds"],
+                recovery=dict(asset["recovery"]),
+                recovery_duration_seconds=asset["recovery_duration_seconds"],
+                severity=asset["severity"],
+                notification_throttle_seconds=asset[
+                    "notification_throttle_seconds"
+                ],
+            )
+        )
+    content = {
+        "package_digest": package_digest,
+        "installation_id": str(target_installation_id),
+        "site_configuration_version": site_configuration_version,
+        "definitions": [item.public_dict() for item in definitions],
+    }
+    return AlarmDefinitionPlan(
+        installation_id=target_installation_id,
+        site_configuration_version=site_configuration_version,
+        package_digest=package_digest,
+        definitions=tuple(definitions),
+        digest=hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+
+def _alarm_plan_from_dict(raw: dict[str, Any]) -> AlarmDefinitionPlan:
+    definitions = tuple(
+        InstalledAlarmDefinition(
+            id=UUID(item["id"]),
+            asset_id=item["asset_id"],
+            version=item["version"],
+            installation_id=UUID(item["installation_id"]),
+            site_configuration_version=item["site_configuration_version"],
+            entity_instance_id=UUID(item["entity_instance_id"]),
+            entity_definition_id=item["entity_definition_id"],
+            trigger=dict(item["trigger"]),
+            trigger_duration_seconds=item["trigger_duration_seconds"],
+            recovery=dict(item["recovery"]),
+            recovery_duration_seconds=item["recovery_duration_seconds"],
+            severity=item["severity"],
+            notification_throttle_seconds=item["notification_throttle_seconds"],
+        )
+        for item in raw["definitions"]
+    )
+    return AlarmDefinitionPlan(
+        installation_id=UUID(raw["installation_id"]),
+        site_configuration_version=raw["site_configuration_version"],
+        package_digest=raw["package_digest"],
+        definitions=definitions,
+        digest=raw["digest"],
+    )
+
+
+def _alarm_acceptance_result(
+    acceptance_id: str,
+    required: bool,
+    item_started: float,
+    state: str,
+    code: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "acceptance_id": acceptance_id,
+        "status": state,
+        "code": code,
+        "required": required,
+        "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+        "evidence": evidence,
+    }
