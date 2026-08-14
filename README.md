@@ -319,7 +319,11 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 的 Compose 变量。此过程不连接现场、不写数据库：
 
 ```bash
-# 先在受控构建机完成 Registry 登录；该命令分别 push amd64/arm64，只有 Buildx 返回的 digest
+# 推荐路径：在 GitHub Actions 的 “Build immutable release images” 手动工作流中，输入平台版本及
+# 已审核的 TLS 入口镜像 digest。工作流会把 amd64/arm64 制品 push 到 GHCR，并把 release.json
+# 作为构建产物保存；它不会部署、写发布锁或触及现场。
+#
+# 也可先在受控构建机完成 Registry 登录；该命令分别 push amd64/arm64，只有 Buildx 返回的 digest
 # 才会写入 release.json。repository 不能带标签，TLS 入口镜像必须预先以 digest 审核。
 python scripts/build_release_images.py \
   --repository registry.example/zizu \

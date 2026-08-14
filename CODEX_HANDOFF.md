@@ -83,6 +83,10 @@
   `linux/amd64` 与 `linux/arm64`，只从 Buildx metadata 接收不可变 digest 并原子生成
   `release.json`；仓库标签、缺失 digest 或不合格 TLS 入口摘要都会拒绝，不能手填制品摘要。
   定向发布契约测试 9/9 通过，但当前网络仍不能执行真实 buildx push。
+- 新增手动 GitHub Actions 工作流 `Build immutable release images`：使用仓库临时
+  `GITHUB_TOKEN` 写入 GHCR，调用同一构建脚本并保存 `release.json` artifact；它不部署、不写
+  发布锁、不触及现场。待分支推送且 GitHub Actions 的 Packages 写权限可用后，才能在云端生成
+  真实多架构摘要制品。
 - 新增 `docs/delivery-trial-protocol.md`：将独立实施工程师的四小时试验固定为发布前门禁、九个
   计时阶段、八项能力证据、90% 配置覆盖率算法和无现场私有数据的记录模板。实际试验仍须在
   固定制品/TLS/发布锁具备后，由未参与开发者执行；文档不能替代该人工证据。
