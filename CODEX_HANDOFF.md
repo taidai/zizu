@@ -3566,7 +3566,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 ---
 
-## Session 2026-08-15 — 高风险策略授权收紧与参考试验修复（待推送）
+## Session 2026-08-15 — 高风险策略授权收紧与参考试验修复（已推送）
 
 - 参考 EMS 策略保持 **10 kW** 隔离动作；仅作协议模拟与交付演练，不是现场默认值。
 - 高风险策略例外新增进程内、不可持久化的服务端授权证明。`origin_evidence` 只保留审计用途；
@@ -3596,7 +3596,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 ---
 
-## Session 2026-08-15 — 工程师从产品界面开始交付（待推送）
+## Session 2026-08-15 — 工程师从产品界面开始交付（已推送）
 
 - 基于单站实例与已验证包不含现场 Secret 的约束，拒绝引入交付分配/工单子系统：engineer 现在可只读
   已验证解决方案包，直接从“解决方案交付”页面填写参数、创建计划、安装并运行验收；admin 仍独占包
@@ -3618,7 +3618,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 ---
 
-## Session 2026-08-15 — 交付报告操作审计覆盖（待推送）
+## Session 2026-08-15 — 交付报告操作审计覆盖（已推送）
 
 - `operation_audit` 支持可选 `requiredEvidence`：`installation`、`manual_control`、
   `policy_control`、`alarm_acknowledgement`、`authorization_denial`。它在其他验收项完成后汇总
@@ -3635,7 +3635,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 ---
 
-## Session 2026-08-15 — 产品界面补齐权限拒绝验收证据（待推送）
+## Session 2026-08-15 — 产品界面补齐权限拒绝验收证据（已推送）
 
 - “解决方案交付”页面现在可填写 `authorization_denials` 映射，并随验收请求发送服务端生成的
   `X-ZiZu-Audit-Event-ID`。这让参考 EMS 包要求的权限拒绝证据可以通过产品界面提供，而不必改用
