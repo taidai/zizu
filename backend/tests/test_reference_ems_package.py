@@ -32,7 +32,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(imported.package_id, "org.zizu.pv-storage-charging-ems")
         self.assertEqual(imported.version, "1.0.0")
         self.assertEqual(len(imported.manifest["_entity_slots"]), 5)
-        self.assertEqual(len(imported.manifest["_alarm_assets"]), 1)
+        self.assertEqual(len(imported.manifest["_alarm_assets"]), 3)
         self.assertEqual(len(imported.manifest["_policy_assets"]), 1)
         self.assertEqual(
             set(imported.acceptance_ids),
@@ -165,8 +165,13 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual("ALARM_ACTIVATED", activated["alarm_outcomes"][0]["code"])
             events = await client.get("/api/v1/alarm-events?state=open")
-            self.assertEqual(1, events.json()["total"], events.text)
-            event_id = events.json()["items"][0]["id"]
+            self.assertEqual(2, events.json()["total"], events.text)
+            self.assertEqual(1, events.json()["summary"]["by_severity"]["WARNING"])
+            self.assertEqual(1, events.json()["summary"]["by_severity"]["MAJOR"])
+            self.assertEqual(0, events.json()["summary"]["by_severity"]["CRITICAL"])
+            event_id = next(
+                item["id"] for item in events.json()["items"] if item["severity"] == "MAJOR"
+            )
             acknowledged = await client._client.post(
                 f"/api/v1/alarm-events/{event_id}/acknowledgements",
                 headers={"Authorization": await client._bearer("operator")},
@@ -195,11 +200,11 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(2, len(dispatcher.requests))
 
             recovery_pending = await publish(
-                "METER-01", {"ActivePower": 450.0}, alarm_started_at + timedelta(seconds=13)
+                "METER-01", {"ActivePower": 200.0}, alarm_started_at + timedelta(seconds=13)
             )
             self.assertEqual("ALARM_RECOVERY_PENDING", recovery_pending["alarm_outcomes"][0]["code"])
             recovered = await publish(
-                "METER-01", {"ActivePower": 450.0}, alarm_started_at + timedelta(seconds=24)
+                "METER-01", {"ActivePower": 200.0}, alarm_started_at + timedelta(seconds=24)
             )
             self.assertEqual("ALARM_RECOVERED", recovered["alarm_outcomes"][0]["code"])
 

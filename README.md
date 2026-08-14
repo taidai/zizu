@@ -397,6 +397,9 @@ docker compose --env-file release.env -f deploy/docker-compose.release.e606.yml 
 
 首个公开参考交付位于
 [`reference-deliveries/pv-storage-charging-ems`](reference-deliveries/pv-storage-charging-ems/README.md)。
+其中的关口购电告警按 WARNING、MAJOR、CRITICAL 分级声明；交付试验会实际触发并经公开告警
+接口验证 WARNING/MAJOR 级别，未触发的 CRITICAL 仍作为独立的安装资产保留，避免把演练阈值
+误当作现场默认值。
 发布流水线用 `scripts/build_reference_delivery.py` 生成并签出 ZIP；实施工程师只使用发布的
 ZIP、本文档和产品界面完成设备接入、参数填写与确定性绑定，绝不修改源码或直接操作数据库。
 手动触发 `Build immutable release images` 后，GitHub Actions 会把该 ZIP、其 SHA-256 文件与

@@ -55,6 +55,8 @@ assets:
   - {id: slot.evse, kind: entity_instance_slot, path: slots/evse.yaml}
   - {id: slot.meter, kind: entity_instance_slot, path: slots/meter.yaml}
   - {id: alarm.grid-import-high, kind: alarm_definition, path: alarms/grid-import-high.yaml}
+  - {id: alarm.grid-import-warning, kind: alarm_definition, path: alarms/grid-import-warning.yaml}
+  - {id: alarm.grid-import-critical, kind: alarm_definition, path: alarms/grid-import-critical.yaml}
   - {id: workbench.ems, kind: ems_workbench, path: workbench/ems.yaml}
   - {id: policy.grid-import-cap, kind: ems_policy, path: policies/grid-import-cap.yaml}
   - {id: acceptance.platform-liveness, kind: acceptance, path: acceptance/platform-liveness.yaml}

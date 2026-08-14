@@ -19,6 +19,8 @@
 - 参考包新增必需 `gateway_readiness` 验收：生产实现以受控 Neuron API 的版本探针证明网关
   可认证连接，报告只保留 `neuron/connected` 等机器状态；它与实体实时/历史验收共同证明协议
   数据路径，不能用缓存观测替代网关状态。
+- 参考包关口购电告警扩为 WARNING、MAJOR、CRITICAL；隔离演练实际由 550 kW 输入触发并通过
+  公共告警事件 API 验证 WARNING/MAJOR，CRITICAL 保持为独立已安装等级资产。
 - 参考包公开演练及其控制/网关回归 24/24 通过（含网关不可用时报告失败）；前端生产构建通过。完整 `pytest tests -q` 本次运行
   超过 120 秒工具时限而被终止，终止前未输出失败；不得把它记为已通过，需在后续长时 CI 环境复跑。
 - `0a42a84 feat(delivery): verify gateway readiness` 仅本地提交；2026-08-14 GitHub push 因连接被重置失败，

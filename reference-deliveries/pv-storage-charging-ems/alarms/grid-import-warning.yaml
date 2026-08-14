@@ -1,0 +1,12 @@
+schemaVersion: zizu.alarm-definition/v1alpha1
+id: alarm.grid-import-warning
+kind: alarm_definition
+version: 1.0.0
+slot: slot.meter
+entityDefinition: grid.active_power
+trigger: {op: gt, value: 300}
+triggerDuration: 10s
+recovery: {op: lte, value: 250}
+recoveryDuration: 10s
+severity: WARNING
+notificationThrottle: 300s
