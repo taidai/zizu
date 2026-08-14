@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-14 — Ticket #18 不可变发布首个切片（本地完成，待提交）
+## Session 2026-08-14 — Ticket #18 不可变发布首个切片（已提交并推送）
 
 ### 本轮已实现
 
@@ -19,6 +19,9 @@
 
 - 发布预检、常规/e606 Compose 渲染与入口绑定：8/8 通过。
 - `deploy.sh` 退役边界验证通过（稳定退出 64，不发起连接）；Bash 语法与 `git diff --check` 通过。
+- 完整后端 pytest：195 passed、1 skipped；仅 Aggregator 的 SUM/LAST 两项既有 SQL 断言失败，本票未触及。
+- Docker Buildx 定义检查暴露构建环境外部阻断：旧镜像源返回 401，改用 Docker Official Images 后当前构建机仍无法连接 Docker Hub 的认证端点。因此尚未生成/验证任何真实多架构 digest。
+- 本地提交并已推送：`50857ed feat(release): add immutable deployment gate`。
 
 ### 未完成 / Next
 
