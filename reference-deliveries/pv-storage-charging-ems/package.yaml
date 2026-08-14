@@ -1,0 +1,90 @@
+package:
+  id: org.zizu.pv-storage-charging-ems
+  version: 1.0.0
+  displayName: 光储充 EMS 参考交付
+  platformVersion: ">=0.4.77,<0.5.0"
+parameters:
+  - id: pcs.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 8
+    description: PCS 稳定设备键及来源目录键
+  - id: bms.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 8
+    description: BMS 稳定设备键及来源目录键
+  - id: pv.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 16
+    description: 光伏逆变器稳定设备键及来源目录键
+  - id: evse.instances
+    type: device_instances
+    required: true
+    minimumItems: 1
+    maximumItems: 32
+    description: 充电桩稳定设备键及来源目录键
+  - id: meter.instance_key
+    type: string
+    required: true
+    description: 关口电表稳定实例键
+  - id: meter.device_key
+    type: string
+    required: true
+    description: 关口电表来源目录键
+  - id: gateway.credentials
+    type: secret
+    required: true
+    description: 已受控保存的网关认证 Secret 引用
+assets:
+  - {id: pcs.active_power, kind: entity_definition, path: entities/pcs-active-power.yaml}
+  - {id: pcs.setpoint, kind: entity_definition, path: entities/pcs-setpoint.yaml}
+  - {id: pcs.readback, kind: entity_definition, path: entities/pcs-readback.yaml}
+  - {id: bms.soc, kind: entity_definition, path: entities/bms-soc.yaml}
+  - {id: bms.ready, kind: entity_definition, path: entities/bms-ready.yaml}
+  - {id: pv.active_power, kind: entity_definition, path: entities/pv-active-power.yaml}
+  - {id: evse.active_power, kind: entity_definition, path: entities/evse-active-power.yaml}
+  - {id: grid.active_power, kind: entity_definition, path: entities/grid-active-power.yaml}
+  - {id: slot.pcs, kind: entity_instance_slot, path: slots/pcs.yaml}
+  - {id: slot.bms, kind: entity_instance_slot, path: slots/bms.yaml}
+  - {id: slot.pv, kind: entity_instance_slot, path: slots/pv.yaml}
+  - {id: slot.evse, kind: entity_instance_slot, path: slots/evse.yaml}
+  - {id: slot.meter, kind: entity_instance_slot, path: slots/meter.yaml}
+  - {id: alarm.grid-import-high, kind: alarm_definition, path: alarms/grid-import-high.yaml}
+  - {id: alarm.grid-import-warning, kind: alarm_definition, path: alarms/grid-import-warning.yaml}
+  - {id: alarm.grid-import-critical, kind: alarm_definition, path: alarms/grid-import-critical.yaml}
+  - {id: workbench.ems, kind: ems_workbench, path: workbench/ems.yaml}
+  - {id: policy.grid-import-cap, kind: ems_policy, path: policies/grid-import-cap.yaml}
+  - {id: acceptance.platform-liveness, kind: acceptance, path: acceptance/platform-liveness.yaml}
+  - {id: acceptance.neuron-gateway, kind: acceptance, path: acceptance/neuron-gateway.yaml}
+  - {id: acceptance.pcs, kind: acceptance, path: acceptance/pcs-readiness.yaml}
+  - {id: acceptance.bms, kind: acceptance, path: acceptance/bms-readiness.yaml}
+  - {id: acceptance.pv, kind: acceptance, path: acceptance/pv-readiness.yaml}
+  - {id: acceptance.evse, kind: acceptance, path: acceptance/evse-readiness.yaml}
+  - {id: acceptance.meter, kind: acceptance, path: acceptance/meter-readiness.yaml}
+  - {id: acceptance.meter-history, kind: acceptance, path: acceptance/meter-history.yaml}
+  - {id: acceptance.operation-audit, kind: acceptance, path: acceptance/operation-audit.yaml}
+  - {id: acceptance.operator-configuration-denied, kind: acceptance, path: acceptance/operator-configuration-denied.yaml}
+  - {id: acceptance.manual-pcs-setpoint, kind: acceptance, path: acceptance/manual-pcs-setpoint.yaml}
+  - {id: acceptance.grid-import-lifecycle, kind: acceptance, path: acceptance/grid-import-lifecycle.yaml}
+  - {id: acceptance.policy-grid-import-cap, kind: acceptance, path: acceptance/policy-grid-import-cap.yaml}
+  - {id: acceptance.release-lock, kind: acceptance, path: acceptance/release-lock.yaml}
+acceptance:
+  - acceptance.platform-liveness
+  - acceptance.neuron-gateway
+  - acceptance.pcs
+  - acceptance.bms
+  - acceptance.pv
+  - acceptance.evse
+  - acceptance.meter
+  - acceptance.meter-history
+  - acceptance.operation-audit
+  - acceptance.operator-configuration-denied
+  - acceptance.manual-pcs-setpoint
+  - acceptance.grid-import-lifecycle
+  - acceptance.policy-grid-import-cap
+  - acceptance.release-lock

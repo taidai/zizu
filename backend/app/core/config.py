@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import ipaddress
+import warnings
 from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     public_api_base_url: str | None = None
     deployment_mode: Literal["production", "development"] = "production"
     allow_insecure_dev_secrets: bool = False
+    allow_insecure_anonymous_access: bool = False
 
     @property
     def insecure_development_mode(self) -> bool:
@@ -154,6 +156,17 @@ class Settings(BaseSettings):
             self.deployment_mode,
             self.allow_insecure_dev_secrets,
         )
+        if self.allow_insecure_anonymous_access and self.deployment_mode != "development":
+            raise ValueError(
+                "ALLOW_INSECURE_ANONYMOUS_ACCESS requires DEPLOYMENT_MODE=development"
+            )
+        if self.allow_insecure_anonymous_access:
+            warnings.warn(
+                "INSECURE DEVELOPMENT MODE: anonymous access is enabled; "
+                "never expose this process to a network.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         if self.deployment_mode == "production" and not self.auth_require_https:
             raise ValueError("production requires AUTH_REQUIRE_HTTPS=true")
         if self.auth_trust_proxy_headers and not self.auth_trusted_proxy_cidrs:

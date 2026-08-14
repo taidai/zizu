@@ -1,0 +1,38 @@
+schemaVersion: zizu.ems-workbench/v1alpha1
+id: workbench.ems
+kind: ems_workbench
+navigation:
+  - {id: overview, label: 场站概览}
+  - {id: trends, label: 运行趋势}
+  - {id: alarms, label: 告警}
+  - {id: controls, label: 控制}
+groups:
+  - id: grid
+    label: 关口与光伏
+    entities:
+      - {slot: slot.meter, definition: grid.active_power}
+      - {slot: slot.pv, definition: pv.active_power}
+  - id: storage
+    label: 储能
+    entities:
+      - {slot: slot.pcs, definition: pcs.active_power}
+      - {slot: slot.bms, definition: bms.soc}
+  - id: charging
+    label: 充电
+    entities:
+      - {slot: slot.evse, definition: evse.active_power}
+kpis:
+  - {id: grid-power, label: 关口功率, entity: {slot: slot.meter, definition: grid.active_power}}
+  - {id: pcs-power, label: PCS 功率, entity: {slot: slot.pcs, definition: pcs.active_power}}
+  - {id: bms-soc, label: BMS SOC, entity: {slot: slot.bms, definition: bms.soc}}
+trends:
+  - id: energy-flow
+    label: 能量流趋势
+    defaultRange: 24h
+    entities:
+      - {slot: slot.meter, definition: grid.active_power}
+      - {slot: slot.pv, definition: pv.active_power}
+      - {slot: slot.pcs, definition: pcs.active_power}
+      - {slot: slot.evse, definition: evse.active_power}
+alarms: {visible: true}
+controls: {visible: true}

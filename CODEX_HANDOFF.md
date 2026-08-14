@@ -1,5 +1,510 @@
 ---
 
+## Session 2026-08-14 — 交付操作台与候选制品收口（进行中）
+
+### 当前已完成
+
+- 候选版本为 `0.4.78`。本地已提交的高风险策略只允许隔离演练中的固定 **10 kW** 上限；
+  需要工程师显式启用，人工高风险控制仍必须二次确认。绝不将该值视为现场默认值或部署到 1 号机。
+- EMS 工作台的手动高风险控制已改为“请求确认 → 显示目标 → 显式确认 → 回读收敛”，
+  不会因刷新而重复下发设备写入。
+- 新增前端“解决方案交付”页：管理员可上传 ZIP、按公开参数契约填写参数/Secret 引用、
+  审查计划、确认安装并运行机器验收；页面只走公开认证 API，Secret 不写入浏览器状态或页面。
+- `README.md` 已记录此界面及其安全边界；前端 `npm run build` 已通过（仅既有大 chunk 警告）。
+- 发布工作流会从版本化源构建参考 EMS ZIP，计算 SHA-256，并与 `release.json` 作为同一个
+  GitHub Actions artifact 上传；本地工作流契约与 ZIP 构建验证通过。
+- 参考包新增必需 `manual_control_execution` 验收：报告只验证既有的 operator 手动命令，要求
+  该命令属于本次安装的 `pcs.setpoint`、值为 5 kW、已二次确认、已协议侧回读并拥有审计证据；
+  缺少命令引用会生成 failed 报告，验收不会自行写设备。交付页已支持填入该命令映射。
+- 参考包新增必需 `gateway_readiness` 验收：生产实现以受控 Neuron API 的版本探针证明网关
+  可认证连接，报告只保留 `neuron/connected` 等机器状态；它与实体实时/历史验收共同证明协议
+  数据路径，不能用缓存观测替代网关状态。
+- 参考包关口购电告警扩为 WARNING、MAJOR、CRITICAL；隔离演练实际由 550 kW 输入触发并通过
+  公共告警事件 API 验证 WARNING/MAJOR，CRITICAL 保持为独立已安装等级资产。
+- 参考包新增必需 `authorization_rejection` 验收：operator 对 `configuration.write` 发起真实受保护
+  请求并得到 403；服务端生成不透明审计 UUID，报告只在内部核对不可变拒绝事件的能力、角色与结果。
+  缺失或伪造 UUID 会 failed，不能用客户端自报代替权限证据。
+- 告警确认现把同事务生成的 `audit_event_id` 返回给调用方，并写入事件 timeline；`alarm_lifecycle`
+  验收要求 `ALARM_ACKNOWLEDGED` transition 真实携带该 ID，因而报告能证明确认不是仅改了事件状态。
+- 参考包公开演练、身份交付与控制/网关回归 38/38 通过（含网关不可用、缺少手动命令/权限拒绝证据
+  时报告失败）；本地 ZIP 可重复构建与发布工作流静态测试通过。前端生产构建通过。完整 `pytest tests -q` 本次运行
+  超过 120 秒工具时限而被终止，终止前未输出失败；不得把它记为已通过，需在后续长时 CI 环境复跑。
+- 当前分支的 `cf5cd7b`/`36b2754` 已推送至 PR #26；最新 `ba773ea`（告警确认审计）因两次
+  GitHub 连接失败尚未推送。GitHub Actions 仍未实际生成镜像摘要或发布资产，不能把分支推送
+  等同发布。
+- #18 的本地发布门禁已实跑 19/19：拒绝 `latest`/单架构/HTTP/Schema 不匹配/运行容器 image ID
+  不匹配，要求目标架构与 digest、TLS 代理、站点配置和回滚锁精确一致。GitHub 默认分支尚无
+  `release-images.yml`（PR 未合并），因此目前没有真实 workflow run、Registry 摘要或发布资产。
+
+### 仍不可声明为可生产交付
+
+1. 参考包已具备网关在线、operator 手动控制+回读+审计、告警确认审计与授权拒绝证据，但全局
+   `operation_audit` 仍只检查安装审计；后续需把手动/策略控制的 audit event 内容也回查并绑定报告。
+2. 包清单只允许管理员读取，工程师虽有安装/验收 API 权限，却没有可分派的“安装工作单”来取得
+   包记录和参数契约；当前 UI 已明确该边界，下一产品对象应补该工作单而非放宽包读取。
+3. GitHub Actions 仍需在可信 Registry 环境实际生成 amd64/arm64 摘要，发布 ZIP+SHA 也需作为
+   release artifact 上传；本机没有真实摘要、TLS、发布锁或独立交付试验。
+4. 1 号机仍是旧 HTTP/匿名版本，禁止部署。只有固定 digest、TLS、owner migration、发布锁和
+   隔离演练全部通过后，才可规划维护窗。
+
+### 下一步
+
+1. 提交并推送本轮 `authorization_rejection` 验收；然后补齐交付报告中的完整控制/告警/策略审计绑定。
+2. 设计安装工作单，使工程师能在不开放包目录的前提下完成参数、绑定与验收。
+3. 由人工审核运行真实多架构构建，再取得参考 ZIP+SHA、TLS 与发布锁证据。
+
+---
+
+## Session 2026-08-14 — 光储充 EMS 公开参考包首版（已提交，待推送）
+
+### 本轮已实现
+
+- 新增 `reference-deliveries/pv-storage-charging-ems/`：公开、无客户拓扑与凭据的光储充
+  EMS 参考包源，声明 PCS、BMS、PV、EVSE、关口电表的稳定实体实例槽位、绑定规范点位名、
+  运行工作台、关口高购电告警、基础限购电策略及 liveness/实体/历史/告警/策略/发布锁验收项。
+- 新增 `scripts/build_reference_delivery.py`，从已审查的 YAML 资产生成带 SHA-256 清单和
+  固定 ZIP 时间戳的可重复 `.zizu.zip`。实施工程师下载发布 ZIP，不编辑本目录源码。
+- 新增导入回归，证明同一公开资产每次生成字节完全一致，且通过包校验后拥有 5 个实体槽位、
+  1 个告警资产、1 个策略资产和完整验收引用。
+- 新增受限 `operation_audit` 验收：它只验证该安装的 `solution.install` 已进入不可变审计流；
+  新公开只读接口 `GET /solution-installations/{installation_id}/audit-events` 仅返回该安装的
+  事件类型、结果、服务端主体和时间，不返回请求体、Secret 或全站审计数据。
+
+### 当前验证
+
+- 参考包导入 + 交付公开 API + 实体交付公开 API：42/42 通过；其中协议模拟主缝验证两条
+  实体样本、实时最新值和 `history_readiness` 的 24 小时 GOOD 样本计数。`compileall` 与
+  diff check 通过。
+- 含审计接口、鉴权 OpenAPI 覆盖、实体交付与参考包的相关回归：54/54 通过。完整后端
+  `pytest tests -q`：199 passed、1 skipped，只有两个既有 `tests/test_aggregator.py` SQL
+  断言失败（生产实现读取 `t_telemetry_latest`，测试仍断言旧 `DISTINCT ON`/时间排序 SQL）；
+  本切片未触及该模块。
+- 本地提交：`c4dcd2e feat(reference): add pv storage charging ems package`、
+  `a9c1fbc feat(delivery): verify historical telemetry`。GitHub push 已多次因连接重置失败；
+  当前分支尚有本地提交待网络恢复后推送，不能把它视为已发布制品。
+
+### 真实边界 / Next
+
+1. 参考包不携带客户设备 IP、驱动或密码。实施工程师须在受保护界面接入已支持协议节点，设置
+   stable `source_catalog_key` 并创建包说明的规范点位名；这一步当前是配置工作，不是包资产。
+2. 当前机器验收已覆盖实体历史样本和安装审计；“网关数据通路”由各设备的确认实体实时新鲜度与
+   历史样本间接证明，尚未提供独立网关运行态证据。参考包仍未在隔离 PostgreSQL + 协议模拟环境
+   完成完整包→安装→告警→控制回读→策略→报告主缝，因此不能证明八项交付就绪或作为四小时试验结果。
+3. 下一实现切片：为完整参考包搭建隔离交付演练 fixture，形成八项逐项报告证据；仅在有真实多架构
+   制品、TLS 和迁移验证之后，才可进入 1 号机维护窗。
+4. 维护者已授权隔离环境验证小功率策略：参考包策略固定为 **10 kW**，并且仅在工程师显式
+   `enable`、当前站点配置版本匹配、BMS 联锁合格时例外通过高风险命令门禁；`disable` 停止
+   后续调度。该值不是现场通用安全值，绝不直接部署或写入 1 号机；生产值仍须由实施工程师
+   依据设备铭牌、并网约束和现场联锁重新评审。
+
+---
+
+## Session 2026-08-14 — 参考 EMS 小功率自动策略与全包隔离演练（安全加固中，未提交）
+
+### 已实现
+
+- 高风险目标的自动策略默认仍被拒绝；唯一例外必须由包声明有限的
+  `highRiskAuthorization.maximumAbsoluteValue`，动作值不能超出上限。新 ADR-0008 规定只有
+  engineer 可启停；统一控制运行时在分派前从当前已安装策略和激活状态重新核对 revision、动作、
+  目标、值及上限，不能信任命令证据字典。
+- 参考包 `policy.grid-import-cap` 固定为 **10 kW**，工程师在实时输入新鲜且质量合格后显式
+  `enable`，才可自动创建统一控制命令；新增 `disable`，立即停止当前站点配置版本后续调度。
+  已分派命令仍只能由回读、超时或失败收敛。
+- 新增全包公开交付试验：构建发布 ZIP、导入、计划、安装、协议模拟器数据通路、工作台、
+  24 小时历史、手动高风险确认/回读、10 kW 策略/回读、关口告警触发/确认/恢复、安装审计、
+  发布锁和不可变验收报告均经公开 HTTP 验证；没有直写业务数据库表。
+
+### 验证与安全边界
+
+- 初始演练通过后，独立审查发现 ADR 边界、非有限数值和停用并发的安全缺口；现已补 ADR-0008、
+  服务端授权复核、有限数值拒绝和 activation 锁，并新增“仅 engineer”“NaN/Infinity 拒绝”及
+  停用等待活动评估边界的回归。
+- 公开控制/参考包/业务权限/交付主缝：83 项通过；参考 ZIP 可重复构建。完整后端
+  `pytest tests -q`：230 passed、2 skipped。此前 Aggregator 的 LAST 分支确有遗漏 `ORDER BY ts
+  DESC LIMIT 1`；现已修复并以 `t_telemetry_latest` 的当前契约覆盖，完整套件不再留已知失败。
+- 隔离 PostgreSQL `zizu_ticket01_test` 已实跑 migration_031 与激活锁回归：停用等待已进入的
+  评估边界释放，再删除激活记录；返回后无残留激活。既有 PostgreSQL 公共主缝也已实跑，证明
+  migration_020–032、身份、交付、实体、告警、控制和重启持久化。
+- 同一隔离库还从 v0.4.77 兼容基线（`001-schema.sql` 加历史节点分类结构）实跑 owner 迁移作业与
+  临时非 owner 应用角色：应用角色可读 `t_alarms`，但不能在 `public` 建表或写旧告警，并通过
+  `verify_legacy_alarm_history_gate()`。测试角色只存在于 `*_test` 数据库环境。
+- 仍没有真实 amd64/arm64 摘要制品、TLS、发布锁及维护窗证据；因此不能合并为可部署声明，更不能
+  部署至 1 号机。
+- 2026-08-14 复查 `docker buildx build --check --platform linux/amd64 -f backend/Dockerfile .` 仍在
+  Docker Hub 匿名令牌端点超时，无法拉取 `python:3.12-slim` 元数据；因此当前构建机不能生成
+  多架构摘要制品。待可访问 Registry 的构建环境恢复后，必须从 `release_preflight` 开始继续，
+  不能用 latest、源码挂载或 1 号机现网镜像替代。
+- 新增 `scripts/build_release_images.py`：构建机完成可信 Registry 登录后，该脚本逐个 push
+  `linux/amd64` 与 `linux/arm64`，只从 Buildx metadata 接收不可变 digest 并原子生成
+  `release.json`；仓库标签、缺失 digest 或不合格 TLS 入口摘要都会拒绝，不能手填制品摘要。
+  定向发布契约测试 9/9 通过，但当前网络仍不能执行真实 buildx push。
+- 新增手动 GitHub Actions 工作流 `Build immutable release images`：使用仓库临时
+  `GITHUB_TOKEN` 写入 GHCR，调用同一构建脚本并保存 `release.json` artifact；它不部署、不写
+  发布锁、不触及现场。该工作流已随提交 `7e9f077` 推送到
+  `ticket/07-multi-device-instance-consumers`；仍须在 GitHub Actions 确认 Packages 写权限并提供
+  已审核的 TLS 入口摘要，才能在云端生成真实多架构摘要制品。
+- 候选制品版本已从现场基线 `0.4.77` 提升为 `0.4.78`，避免同一版本号指向两套不同内容；平台
+  liveness、解决方案验收和参考 EMS 发布锁测试同步验证该版本。完整后端回归为 230 passed、2
+  skipped；前端 `npm run build` 通过（仅保留既有大 chunk 警告）。网络恢复后，候选提交已推送；
+  已创建 [PR #26](https://github.com/taidai/zizu/pull/26)，当前 GitHub 合并状态为 `CLEAN`，但没有
+  自动检查或审查结论。必须完成审查并合并到默认分支后，Actions 才能手动生成真实多架构摘要制品。
+- `build_release_images.py` 现会在任何 Buildx push 前核对传入的 `--platform-version` 与源码根
+  `VERSION` 完全一致，并把该值传入镜像 OCI version label，拒绝用旧版本号构建新内容；该发布
+  门禁及工作流相关测试 19/19 通过。
+- 新增 `docs/delivery-trial-protocol.md`：将独立实施工程师的四小时试验固定为发布前门禁、九个
+  计时阶段、八项能力证据、90% 配置覆盖率算法和无现场私有数据的记录模板。实际试验仍须在
+  固定制品/TLS/发布锁具备后，由未参与开发者执行；文档不能替代该人工证据。
+- 10 kW 只是协议模拟和公开参考包中的保守演练值，不是任何现场的安全许可。不得因此绕过
+  TLS、固定制品、凭据轮换、隔离 PostgreSQL 迁移/角色 smoke、发布锁与 1 号机维护窗门禁。
+
+---
+
+## Session 2026-08-14 — Ticket #18 发布锁与回滚门禁（待提交）
+
+### 本轮已实现
+
+- 新增 `migration_032_release_locks.sql`：owner 才能追加写入的发布锁同时保存平台/边缘镜像
+  digest、容器实际 image ID、目标架构、Schema、站点配置版本和解决方案包摘要；表拒绝更新、
+  删除和截断，web 应用只有 SELECT 权限。
+- `record_release_lock.py` 不再只比较版本号：它在目标主机比对运行中的 backend/edge 容器 image
+  ID 与 release.json 的 digest 解析结果、镜像架构、公开 HTTPS liveness、Schema 与当前站点配置；
+  成功输出可供回滚使用的不可变 lock ID。
+- 已认证 `/api/v1/health` 回显经脱敏的发布锁摘要；解决方案包可声明 `release_lock` 验收项，只有
+  锁与该安装的版本、架构、包 ID/版本/摘要、站点配置版本精确匹配才会 passed。缺失、不可读或
+  不一致均生成失败的不可变交付报告。
+- 新增 `validate_release_rollback.py`：回滚前必须显式选择已有锁，拒绝跨 Schema、错误架构/摘要、
+  不兼容站点配置或无效 Secret 引用；它只作 owner 预检，不会自行重启容器。
+
+### 当前验证
+
+- 发布预检/Compose/镜像定义、owner 锁记录、回滚预检和角色脚本：16/16 通过。
+- 发布锁健康公开缝 + 完整交付公开 HTTP 回归：25/25 通过；新增覆盖“锁缺失失败、精确锁通过”。
+- `compileall` 与 `git diff --check` 通过。
+- PostgreSQL migration_032 已纳入公开主缝的迁移清单，但当前无明确隔离 `*_test` 数据库配置，
+  尚未执行；绝不使用 1 号机数据库替代。
+
+### 未完成 / Next
+
+1. 提供可访问 Docker Registry 的构建环境，产出并验证真实 amd64/arm64 digest；当前环境仍不能
+   连接 Docker Hub 认证端点，因此不能生成 release.json 或部署。
+2. 在隔离 PostgreSQL 执行 fresh/upgrade migration_032、owner/app 权限与发布锁写读 smoke；随后
+   才能让 Ticket #18 进入现场维护窗候选。
+3. 制作公开、无现场 Secret 的完整 EMS 解决方案包，并以 `release_lock`、实体、告警、策略和
+   工作台验收证明干净环境交付。
+
+---
+
+## Session 2026-08-14 — Ticket #18 不可变发布首个切片（已提交并推送）
+
+### 本轮已实现
+
+- 新增公开 `scripts/release_preflight.py`：发布清单必须同时含 amd64/arm64 平台摘要镜像、
+  TLS 入口摘要镜像、平台版本和 Schema 版本；可在不连接目标环境的前提下验证迁移版本，
+  并渲染架构专属的 digest-only `release.env`。
+- 新增两份独立生产 Compose：常规主机仅让 Caddy 暴露 `80/443`，backend 不发布 `9000`；
+  e606 host-network 版本把 backend 固定绑定到 `127.0.0.1:9000`，TLS 入口是唯一公网服务。
+  两者均不启动 DB/MQTT、不包含 `latest`、`build` 或后端/前端/迁移源码覆盖。
+- 统一镜像入口脚本支持显式 `APP_BIND_HOST`，并补齐认证运行依赖。旧根目录
+  `deploy.sh` 已退役为只报错的安全边界，保证不再连接目标或绕过发布门禁。
+- README 已记录 release.json 格式、预检、owner migration、常规/e606 启动方式，以及 TLS/DNS/
+  防火墙前置条件。真实摘要制品尚未生成，不能据此部署。
+
+### 当前验证
+
+- 发布预检、常规/e606 Compose 渲染与入口绑定：8/8 通过。
+- `deploy.sh` 退役边界验证通过（稳定退出 64，不发起连接）；Bash 语法与 `git diff --check` 通过。
+- 完整后端 pytest：195 passed、1 skipped；仅 Aggregator 的 SUM/LAST 两项既有 SQL 断言失败，本票未触及。
+- Docker Buildx 定义检查暴露构建环境外部阻断：旧镜像源返回 401，改用 Docker Official Images 后当前构建机仍无法连接 Docker Hub 的认证端点。因此尚未生成/验证任何真实多架构 digest。
+- 本地提交并已推送：`50857ed feat(release): add immutable deployment gate`。
+
+### 未完成 / Next
+
+1. 为部署成功写入并读取不可变发布锁（镜像摘要、Schema、包和站点版本），并将其纳入机器验收。
+2. 建立可验证的多架构制品构建/加载流程；当前不应构建或部署到 1 号机。
+3. 编制公开、无现场私密数据的 PCS/BMS/PV/EVSE/关口电表完整 EMS 解决方案包，证明配置覆盖率。
+4. 在隔离 PostgreSQL 完成 fresh/upgrade migration 与回滚兼容验证，最后才计划维护窗口和独立交付试验。
+
+---
+
+## Session 2026-08-14 — Ticket #17 三方升级保留站点覆盖（已本地提交，待推送）
+
+### 本轮已实现
+
+- 安装计划现在只在同一稳定解决方案包 ID 的旧版/当前站点/新版之间执行三方升级比较；切换到另一解决方案包不会错误继承旧包的安全差异。
+- 当新包默认值与已有 `engineer_input` 站点覆盖都改变时，计划返回参数级 `conflict` 和稳定 blocker `UPGRADE_PARAMETER_CONFLICT`；工程师在新计划中显式提交该参数，即可逐项解决并生成新的不可变站点配置版本。参数冲突不能用风险确认绕过。
+- 以下升级一律在计划阶段阻断，执行返回 `INSTALL_PLAN_BLOCKED`，不会生成部分站点版本：运行实体定义的量纲/读写方向变化、移除运行实体引用、放宽控制权限、告警恢复条件变化、移除已使用的 Secret 引用。
+- 非参数高风险项不再是永久死锁：计划给出稳定 `risk_key`，工程师必须在 `upgrade_risk_resolutions` 提交该键和非空处理说明；系统把说明、工程师主体和风险项固化在不可变计划中，才允许执行。未知键和空说明稳定返回 422。控制仅在放宽上下限、缩短冷却、取消高风险确认或移除既有联锁时阻断；收紧限制可自动升级。
+- 包内 acceptance、EMS policy 和 alarm definition 现在按稳定资产 ID 与内容摘要展示 `add`、`update`、`preserve` 或 `delete_candidate`；升级安全项单独以 `upgrade_safety` item 展示 `block` 或已审查的 `update`。
+- README 已同步三方升级、`conflict` item 与上述高风险 blocker 的公开契约。
+
+### 当前验证
+
+- 相关公开 HTTP 回归 `test_delivery_public_api.py + test_entity_delivery_public_api.py`：40 passed，26 subtests passed；覆盖参数冲突、工程师解决、风险确认、未知风险键、实体语义、运行引用删除、告警恢复、控制权限放宽与 Secret 引用删除。
+- 本机隔离 PostgreSQL/Uvicorn 主缝 1 passed：覆盖 v1 安装、进程重启、v2 三方冲突阻断、零写读取和显式参数解决后的新不可变配置版本。夹具原有超时根因是 Uvicorn 的 Loguru 输出写入未消费 PIPE 后阻塞；已改为 `DEVNULL`，不影响生产运行。
+- 完整后端 `pytest tests -q`：195 passed、1 skipped；仅 `tests/test_aggregator.py::test_compute_sum` 与 `::test_compute_last` 两项既有 SQL 断言失败，本票未触及 Aggregator。`compileall` 和 `git diff --check` 通过（后者仅 Windows CRLF 提示）。
+
+### 未完成 / Next
+
+1. 网络可用后推送本地提交 `0904f0b`；Issue #17 在公共 PG 主缝和发布锁交付前保持开放。
+2. 后续可把 PostgreSQL 三方升级断言从既有长交付主缝拆出独立夹具，并把不同 blocker 字典收敛为显式值对象；这不是当前交付阻断。
+3. 当前主线已进入 Ticket #18；禁止部署到 1 号机，直到制品、TLS、凭据轮换、迁移演练和发布锁全部闭合。
+
+---
+
+## Session 2026-08-14 — Ticket #14 规则告警迁移与旧告警写门禁（待本地提交）
+
+### 已实现
+- 规则只提交带现场观测时间、质量和连续性窗口的 `RuleAlarmObservation`；`AlarmRuntime` 独占 pending、激活、确认与恢复状态。规则输入映射可实际解析 YAML 中的变量，数据空洞不能跨越触发或恢复时长。
+- 所有来源的旧 `t_alarms` 写入器、旧人工创建/恢复 API 和前端恢复按钮均已移除；`/alarms` 仅保留旧历史只读兼容面，新工作台仅使用 `alarm-events`。
+- 新事件列表/汇总不把已清除的 `normal` pending 候选当作活动告警；只有活动未确认事件显示确认操作。
+- 新增 migration_030 与受控 owner 角色作业：web 使用非 owner 应用账号，旧告警表仅 SELECT，撤销 schema CREATE；生产启动会对未迁移、owner 身份、旧表写权限或可建 schema 直接 fail-closed。
+- 为升级数据库加入 `scripts/provision_database_roles.py`。它能正确读取 dotenv 行内注释，支持 `DB_OWNER_HOST`/`DB_OWNER_PORT` 指向宿主可达的 PostgreSQL；README 与 `.env.example` 已给出 Compose 宿主示例。
+
+### 验证证据
+- 规则/事件/实体交付/旧表门禁定向回归：18/18 通过；角色引导与 owner 作业脚本：9/9 通过；`compileall`、shell 语法与 `git diff --check` 通过。
+- 完整后端 pytest：182 passed、1 skipped；仅保留既有 Aggregator SUM/LAST 两项 SQL 断言失败，本票未触及该模块。
+- 前端 `npm run build` 通过（仅既有大 chunk 警告）。
+- Ticket #14 Spec 与 Standards 双轴复审均 PASS；真实 PostgreSQL 角色 smoke 尚未在隔离库执行，绝不使用 1 号机替代。
+
+### 部署边界 / Next
+- **禁止直接执行当前 `deploy.sh` 或旧 e606 文档**：它仍有固定现场 SSH 参数、关闭 host-key 校验和非制品化同步方式，不满足安全发布门禁。
+- 1 号机当前仍是旧明文匿名 v0.4.77。进入现场前必须合入/验证安全部署链、构建锁定 ARM64 制品、配置 TLS 与固定主机指纹，并在隔离 PostgreSQL 完成 migration_030 与非 owner 角色 smoke；随后才可维护窗口部署与回滚验证。
+
+---
+
+## Session 2026-08-14 — Ticket #13 标签与 MQTT 告警来源迁移（已本地提交并复审）
+
+### 已实现
+- 新增标签/MQTT 来源 Adapter：它们只构造 `AlarmObservation` 并提交给 `AlarmRuntime`，不再保存、计数、恢复事件或创建通知。
+- 管道在遥测成功写入最新值后才提交标签观测；专用 MQTT 告警 topic 及普通遥测中的 error 分组通过同一 Adapter 进入状态机。标签批次严格按观测时间提交；同批已由标签覆盖的实体实例不会再由“最新值”路径重复提交。
+- 只接受已确认实体实例的活动物理来源；MQTT 外部 ID 必须在这些来源中唯一，重名或无映射时不猜测路由、不新写旧 `t_alarms`。
+- 三来源的同一条件已证明同样经历 pending、active、acknowledged、recovered；高频采样仍只有一个事件和一个状态转换通知。MQTT 必须提供顶层整数 `quality=192`；缺失、布尔或非法质量码按坏质量处理，不能触发或恢复。
+- 将“当前/历史不可变定义”分派从实体 Adapter 提取为共享模块，标签/MQTT 也不会在包升级时拆分连续故障。
+
+### 验证证据
+- 标签/MQTT/实体辅助状态机、逆序批次与实体排除门禁、旧写库调用静态门禁、实体告警与公开交付回归：19/19 通过。
+- 完整后端 `pytest tests -q`：174 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` 的 SUM/LAST 两项 SQL 断言失败，本票未触及该模块。完整公开交付回归亦为 21/21 通过；`compileall` 与 `git diff --check` 通过。
+- Spec / Standards 双轴最终 PASS，阻断为 0。
+- 未执行真实 PostgreSQL 迁移/运行主缝：本机没有隔离 `*_test` 数据库，绝不使用现场库。
+
+### 当前边界 / Next
+- 旧 `alarm_processor.py`、`tag_alarm_engine.py` 仍保留为未调用的历史实现；Ticket #14 将迁移规则来源、删除旧手工恢复/API，并撤销旧表应用写权限。
+- 仍未满足生产发布门禁：TLS、固定 ARM64 制品、凭据轮换、迁移演练和真实目标环境交付试验均未完成，禁止部署到 1 号机。
+
+---
+
+## Session 2026-08-14 — Ticket #12 统一告警状态机：实体来源切片（已本地提交）
+
+### 已实现
+- 新增 `AlarmRuntime`，外部命令仅 `submit(observation)` 与 `acknowledge(command)`；状态严格经过 `normal`、`pending`、`active_unacknowledged`、`active_acknowledged` 与 `recovered`，确认绝不伪造恢复。
+- 解决方案包可声明版本化 `alarm_definition` 与 `alarm_lifecycle` 验收资产。安装计划将定义绑定到已确认实体实例；定义、事件、追加式转换审计和通知 outbox 由 migration_029 持久化，旧 `t_alarms` 不回填、不重写。
+- 实体协议观测经解析/归一化/确认实体来源后提交状态机；数据管道停止调用旧实体告警引擎。坏质量或陈旧观测会作为不可恢复样本打断恢复计时，不能跨越数据空洞关闭活动事件。
+- 新包升级后，仍活动的旧事件继续使用其不可变历史定义接收观测并自然恢复；同资产的当前定义被抑制，连续故障不会被升级拆成两条事件。定义在数据库层拒绝更新、删除或截断。
+- 实体告警恢复还会校验相邻观测间隔不超过声明的新鲜度窗口，数据静默后到达的“恢复值”只能重新开始恢复计时，不能跨越空洞关闭事件。
+- 新事件 API 提供列表、详情、转换时间线和仅确认命令；所有端点进入 Bearer/OpenAPI 权限台账。operator 主体由认证上下文写入确认记录。
+
+### 验证证据
+- 告警运行时、事件 HTTP、实体 Adapter、协议模拟的包→安装→触发→确认→坏质量/静默空洞打断恢复→现场恢复→机器验收：最新定向 16/16 通过。
+- 机器验收同时证明必须存在 `ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、`ALARM_RECOVERED` 三段转换；遗漏确认会稳定失败为 `ALARM_LIFECYCLE_INCOMPLETE`。
+- 完整 `pytest tests -q`：170 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` 的 SUM/LAST 两项 SQL 断言失败，本票未触及该模块。此前 `unittest discover` 的 2 个导入错误来自项目虚拟环境未安装 pytest，已改用现有 pytest 运行时配合项目 site-packages 完整执行。
+- `compileall` 与 `git diff --check` 通过；Spec/Standards 双轴复审均 PASS。真实 PostgreSQL 主缝已扩展至 migration_029，但本机没有隔离 `*_test` 数据库，未运行且绝不使用现场库。
+
+### 当前边界 / Next
+- Ticket #12 仅迁移实体来源；标签、MQTT 和规则告警仍由 Ticket #13/#14 收口。旧 `/alarms` 是只读兼容历史面，不能与新事件数混用。
+- 仍未满足生产发布门禁：TLS、固定 ARM64 制品、凭据轮换、迁移演练和真实目标环境交付试验均未完成，禁止部署到 1 号机。
+- 基础提交：`a7bd834 feat(alarm): unify entity alarm lifecycle`；连续性与验收收口补丁已随本次会话本地提交。下一步进入 Ticket #13：将标签、MQTT 告警迁入同一状态机；随后推进完整 EMS 解决方案包与实施工作台。
+
+---
+
+## Session 2026-08-14 — Ticket #11 关闭剩余设备写旁路（已本地提交，待推送）
+
+### 已实现
+- 旧 `POST /api/v1/entities/{entity_id}/write` 不再同步写入设备，现为受认证的兼容入口：只有旧实体能唯一映射到同一已确认、活动且来源为 Neuron 的实体实例时，才创建可回查的统一控制命令；未映射请求也持久化为拒绝证据。
+- 兼容响应始终返回命令查询链接；高风险确认绑定主体、实体实例、值与策略快照，而不绑定 HTTP 路径，因此新命令入口申请的确认可安全用于同语义旧入口，变更值或策略则会拒绝。
+- 删除 `entity_resolver.write_entity_value` 直接 Neuron 写入器；静态回归同时限制 `NeuronClient` 直接导入与 `write_tag` 调用只能存在于 `ControlCommandRuntime` 的执行 Adapter。
+- 关闭 `/api/v1/nanomq/publish` 和前端“发布测试”：任意 MQTT topic/payload 不能再成为绕过统一命令、审计与回读的设备写路径。NanoMQ 状态、订阅、ACL、配置和重启仍由系统管理能力保护。
+- README、ADR-0007、Ticket #11 清单、OpenAPI/路由计数与公开回归均已同步。
+
+### 验证证据
+- 控制运行时、兼容 HTTP、控制/WS 权限、实体交付、业务授权：51/51 通过；覆盖旧实体写入转换、拒绝命令回查、高风险确认跨入口复用、旁路静态检查与任意 MQTT 发布路由不存在。
+- Python `compileall`、`git diff --check` 通过；前端 `npm run build` 通过（仅既有大 chunk 警告）。
+- 完整后端 pytest：161 passed、1 skipped；仅既有 `tests/test_aggregator.py` 的 SUM/LAST SQL 断言失败，本票未触及该聚合模块。
+- Spec / Standards 双轴最终 PASS，阻断为 0。真实 PostgreSQL 兼容映射仍需在隔离测试库补主缝证明，不能使用现场库代替。
+
+### 当前边界 / Next
+- 本票完成了公开 HTTP 与前端可触达的剩余直接设备写旁路；后台/部署生产可用性仍受 TLS、固定 ARM64 制品、凭据轮换、迁移演练及发布锁约束，禁止部署到 1 号机。
+- 本地提交：`f403a3a feat(control): close legacy write bypasses`。GitHub HTTPS 在本次会话中无法连接，分支相对 `origin/ticket/07-multi-device-instance-consumers` 为 `ahead 1`；网络恢复后执行 `git push origin HEAD:ticket/07-multi-device-instance-consumers`。
+- Issue #11 仍保持开放，直至隔离 PostgreSQL 主缝完成。下一主线为告警状态机与 EMS 运行工作台，均只能以实体实例和统一命令为基础。
+
+---
+
+## Session 2026-08-14 — Ticket #10 规则自动控制迁移（已提交并推送，待 PostgreSQL 主缝）
+
+### 已实现
+- 规则命中不再直接调用 Neuron、MQTT 或全局实体写入；新增 `AutomatedControlCommands`，只向既有 `ControlCommandRuntime` 创建 `source_type=rule` 的统一命令。
+- 规则动作只允许稳定且唯一的 `id + entity_instance_id + value`；控制规则必须声明实体实例输入，不能使用物理节点、点位、MQTT 字段或本地冷却。旧物理动作保持只读兼容并在运行时跳过。
+- 命令持久化 `origin_evidence`：规则/策略主体与版本、动作 ID、实体实例观测和求值输出；证据会剥离 Neuron/MQTT/点位等物理路由字段。
+- 新 `migration_028_rule_control_commands.sql` 为命令增加证据列，并在数据库层拒绝新写入的旧控制配置、缺失稳定动作 ID、缺失实例输入和重复动作 ID。
+- 规则编辑器只展示实体实例目标；测试下发创建统一命令而非宣称现场成功。遗留物理动作明确提示需要重新配置，避免保存时静默删除。
+
+### 验证证据
+- Ticket #10 控制运行时、公开 HTTP、实体交付主缝：26/26 通过；覆盖规则触发→命令幂等重放→协议模拟回读确认、持久冷却、联锁和物理字段净化。
+- 关键后端回归：97/97 通过；Python `compileall` 与 `git diff --check` 通过。
+- 前端 `npm run build` 通过（8176 modules；仅既有大 chunk 警告）。
+- 完整 pytest：157 passed、1 skipped；仅保留既有 Aggregator SUM/LAST 两项断言失败，与本票无关。
+- 双轴审查最终 PASS：Spec/Standards 阻断为 0；未新增依赖、凭据、客户参数或现场拓扑。
+
+### 当前边界 / Next
+- 真实 PostgreSQL/Uvicorn 升级缝已纳入 migration_028，但当前未提供安全隔离的 `*_test` 数据库，尚未执行；禁止使用现场库替代。
+- Ticket #10 只迁移规则自动控制；`/entities/{id}/write` 及剩余业务写旁路仍是 Ticket #11，不能宣称所有设备写入已统一。
+- 1号机仍是旧明文匿名版本；TLS、固定 ARM64 制品、凭据轮换、迁移演练和发布锁未闭合，禁止部署本分支。
+- 本票已提交并推送：`5a7bbd9 feat(control): route rules through commands`（分支
+  `ticket/07-multi-device-instance-consumers`）。Issue #10 保持开放，直到隔离 PostgreSQL 主缝补验完成；随后进入 Ticket #11 删除最后的设备写旁路。
+
+## Session 2026-08-14 — Ticket #9 Neuron / MQTT RPC 兼容控制迁移（本地完成，待提交）
+
+### 已实现
+- 旧 `POST /api/v1/neuron/write` 已改为受认证的 `control.write` 兼容入口：只有能唯一映射到已确认、活动且来源为 Neuron 的实体实例时，才创建统一控制命令；不再由 API 直接调用 Neuron。
+- `POST /api/v1/devices/{node_id}/rpc` 已注册并完全移除 MQTT publish。新形态使用 `entity_instance_id + value`；旧形态只能用同节点已确认实体实例的定义 ID `command` 和 `payload.value`，`topic/qos` 从不参与路由或执行。
+- 两种入口共享 `ControlCommandRuntime` 的类型/限值/联锁/确认/幂等/冷却/持久状态/审计/回读语义；响应的 `201` 是命令资源而非设备成功，包含 `migration` 提示和 `links.command` 查询地址。
+- Neuron 403、网络不可达或下游异常均形成 `failed / CONTROL_DISPATCH_FAILED` 命令；无映射和旧命令不匹配形成持久 `rejected / CONTROL_COMPATIBILITY_TARGET_UNRESOLVED` 证据，不会合成 UUID 或下发设备写入。
+- migration_027 将被拒绝兼容请求的 `entity_instance_id` 显式设为可空，以保留真实拒绝证据且不伪造实体身份。
+
+### 验证证据
+- 控制公开 HTTP + 兼容路径测试 6/6 通过；涵盖 Neuron/RPC 新旧形态、映射失败、命令查询链接、幂等复用、下游不可达和“只创建命令”语义。
+- 控制/权限/OpenAPI/交付定向回归 47/47 通过；Python `compileall` 与 `git diff --check` 通过。
+- 完整 unittest 集合中可由项目 `.venv` 运行的 72 项已执行；两组既有 pytest 测试因该 venv 未安装 pytest 而无法由 unittest 导入，改用现有 pytest 运行时单独执行并通过 44/44。此为既有测试基础设施分裂，未新增依赖。
+- 真实 PostgreSQL/Uvicorn 主缝已更新为 migration_020~027 并覆盖两条兼容入口；本次机器没有安全隔离的 `*_test` 数据库，故未运行，未触碰现场库。
+- 双轴审查最终 PASS：Spec/Standards 阻断均为 0；未新增依赖、凭据、客户参数或现场拓扑。
+
+### 当前边界 / Next
+- Ticket #9 仅迁移 Neuron 和 MQTT RPC。遗留 `/entities/{id}/write` 以及规则/策略输出仍是 Ticket #10/#11 的控制旁路，不能宣称全站控制已经统一。
+- 1号机仍为旧 v0.4.77 明文匿名版本；TLS、固定 ARM64 digest 制品、现场凭据轮换、数据库迁移演练与发布锁定未闭合，禁止部署本分支。
+- 本地提交为 `df5e8d9`（其前置 Ticket #8 为 `a8ab63c`）。已尝试推送到 GitHub，但 HTTPS 连接在接收阶段被重置；尚未推送、未建 PR、未关闭 Issue #9。网络恢复后先推送该分支，再关闭对应 Issue。
+- 下步：继续 Ticket #10，把规则与策略动作迁入统一命令，并保留同一回读验收缝。
+
+---
+
+## Session 2026-08-14 — Ticket #8 统一控制命令（已本地提交 a8ab63c）
+
+### 已实现
+- 新 ADR-0007 固化可配置 EMS 控制语义：命令只指向已确认的实体实例，不接受页面、规则或调用方传来的物理地址。
+- 解决方案包的 `entity_definition.control` 支持受限声明：类型、数值限值、同设备实例回读、精确联锁、持久冷却及高风险二次确认；导入时完整校验并随实体实例安装持久化。
+- 新 `ControlCommandRuntime` 统一处理人工控制命令。状态单调经过 `accepted`、`validated`、`dispatched`、`readback_confirmed`，并明确落入 `rejected`、`timeout`、`failed` 或 `mismatch`；下游写入成功只代表 `dispatched`。
+- PostgreSQL migration_026 持久化命令、状态事件、每个状态的统一审计关联、主体幂等、冷却和一次性确认；恢复只回读或安全终止，绝不重发设备写入。
+- 新公开 API：控制确认、提交、读取、回读检查，均声明 `control.write` + Bearer。生产 Adapter 只凭已经确认的 tag ID 读取点位目录并调用 Neuron，响应不泄露下游地址或错误。
+
+### 验证证据
+- 控制运行时 + 公开 HTTP/协议模拟主缝 20/20 通过，覆盖限值、联锁、幂等、冷却、分派失败、超时、不一致、高风险确认、回读确认与 OpenAPI 权限声明。
+- 既有交付/认证/业务权限/控制安全/设置回归 66 项测试本体均通过（59.947 秒；外层 60 秒命令时限在输出 `OK` 后终止）。
+- 隔离真实 PostgreSQL 主缝 1/1（23.665 秒）通过，覆盖 migration_020~026、控制包安装、协议模拟观测与安全分派失败；临时 `zizu_test` 数据库及测试账户均已删除。
+- `py_compile` 与 `git diff --check` 通过；未新增依赖、未读取/写入现场或部署 1号机。
+
+### 当前边界 / Next
+- Ticket #8 只增加新的统一命令入口；旧 `/entities/{id}/write`、`/neuron/write`、MQTT RPC 与规则直接写仍是明确兼容旁路，由 Ticket #9、#10、#11 逐一迁入。因此当前不得宣称“所有控制已统一”。
+- 1号机仍为旧 v0.4.77 明文匿名版本。TLS、固定 ARM64 制品、现场凭据轮换和发布锁未闭合，禁止部署本分支。
+- 下一步：先对 Ticket #8 作 Spec/Standards 审查、提交；随后迁移 Neuron/MQTT 兼容写入口（Ticket #9）。
+
+---
+
+## Session 2026-08-14 — Ticket #7 多设备实例消费者与显式主备（双轴通过）
+
+### 目标与结果
+- `device_instances` 强类型参数一次声明多台同类 PCS/BMS；同一实体定义按 `instance_key` 生成互不混淆的稳定实体实例，显示名升级不改变引用。
+- 新增消费者实例目录与只读旧实体迁移预览；预览以主、备来源预留判定 unique/missing/ambiguous，不随当前活动角色漂移，也不自动写入。
+- 新规则输入只接受 `sourceEntityInstanceIds` 和实例 UUID `inputMappings`；旧 `sourceEntityIds` 只读兼容并带迁移警告。规则 tick/dry-run 复用 Registry.resolve + Runtime.read 的同一确认来源、新鲜度和 GOOD 质量边界。
+- 显式 `manual` 主备策略独立为 `EntityFailoverPolicy`；不存在自动切换。切换要求预期角色、目标角色和原因，原子更新并追加不可变审计；standby 状态禁止静默更换/移除策略，切回 primary 后才允许清理。
+- migration_025 持久化规则实例引用、主备策略、来源预留和切换审计，并阻止新写旧规则实体引用。
+
+### 验证证据
+- Ticket #7 + 交付/认证/权限/控制公开回归 78/78 通过。
+- 隔离真实 PostgreSQL 公开主缝 1/1 通过，覆盖 migration_020~025 重放、多设备安装、显式切换、规则引用、持久化与进程重启。
+- 前端 `npm run build` 通过（8176 modules；仅既有大 chunk warning）；Python 编译与 `git diff --check` 通过。
+- Standards / Spec 复审最终均 PASS，阻断 0；未新增依赖、未连接或部署 1号机。
+
+### 当前边界 / Next
+- 本票迁移规则输入；告警状态机、统一控制命令与 EMS 工作台在后续票据继续使用实体实例 ID。旧规则输出/控制旁路仍是兼容边界。
+- 1号机仍是旧 v0.4.77；TLS、固定 ARM64 digest 制品、现场凭据轮换和发布锁未闭合，当前分支禁止直接上线。
+- 下一步按依赖合并 PR 后进入 Ticket #8：定义统一控制命令契约，并以实例 ID 实现限值、联锁、幂等、回读和审计。
+
+---
+
+## Session 2026-08-14 — Ticket #6 设备/实体实例与确定性绑定（双轴通过）
+
+### 目标与结果
+- 在 Ticket #5 的解决方案安装主缝中加入单设备实体实例切片：包声明实体定义、设备槽位、匹配器与实体验收，实施工程师不改源码/SQL即可计划和确认现场数据源。
+- 新 `EntityInstanceRegistry` 只暴露 `plan/apply/resolve`；运行期仅使用确认的唯一主绑定，不继承旧 `t_entity_bindings` 的优先级/创建顺序回退。
+- 设备实例、实体实例、活动主绑定、追加式确认审计和站点配置以 migration_024 持久化；一个实体一个活动主来源、一个物理点位不能被两个实体实例隐式复用。
+- 节点新增站点内稳定 `source_catalog_key`；唯一旧名称可安全回填，重名节点要求实施工程师明确设置。
+- 实体实例 ID 跨包升级保持稳定；显示名和来源查询顺序不影响身份。不同绑定选择产生不同安装 ID，但共享同一实体身份命名空间。
+- 实体实时 API 不暴露物理 tag/binding 内部标识；交付报告检查确认绑定、包声明的新鲜度和 OPC GOOD(192) 质量码。
+
+### 关键可靠性修复
+- 安装 ID 延后到最终参数+绑定配置摘要生成，避免不同绑定选择撞 ID。
+- 绑定关系 ID 与确认事件 ID 分离，换绑不会破坏历史确认外键；每个配置版本留下独立确认事件。
+- Postgres 安装回调复用已持有事务连接，闭合同事务原子性并消除连接池耗尽死锁。
+- `resolve` 每次复核当前来源仍启用且类型/单位/方向未漂移；计划批准后站点版本或来源目录变化均零写失败。
+- Apply 只从持久化的 ready 安装计划加载实体子计划，并联结核对当前包摘要；调用者不能注入重建计划绕过批准事实。
+- 重名节点且未显式设置 `source_catalog_key` 时不进入候选目录；陈旧/坏质量实时读取稳定返回 409 机器码。
+
+### 验证证据
+- Registry + 公开实体交付 + 既有交付 + 业务权限定向回归：42/42 通过。
+- 隔离真实 PostgreSQL 公开主缝：1/1 通过，覆盖 migration_020~024、迁移重放、协议模拟消息经解析/归一化/持久化进入实体实时与报告、进程重启和幂等。
+- 认证/控制/安全回归 33/33，Secret 引导脚本 15/15，F0 纯函数 29/29；基础 pytest 62 项中 60 通过，仅保留既有 Aggregator SUM/LAST 两项失败。
+- Spec 与 Standards 最终复审均 PASS，阻断 0；`git diff --check` 与定向敏感信息扫描通过。
+- `git diff --check` 通过；未新增依赖、未连接或部署 1号机。
+
+### 当前边界 / Next
+- Ticket #6 只建立读实体实例主缝；规则、告警、控制和工作台迁移到实例 ID 属 Ticket #7。
+- 1号机仍是旧 v0.4.77，TLS、固定 ARM64 digest 制品、凭据轮换和发布锁仍是部署硬门禁，当前分支不得直接上线。
+- 下一步：合并叠加到 Ticket #5 的 PR 后进入 Ticket #7，迁移规则、告警、控制和工作台消费者。
+
+---
+
+## Session 2026-08-14 — Ticket #5 强类型站点参数与 Secret 安装计划（双轴通过）
+
+### 已实现
+- 解决方案清单参数契约支持 string、integer、number、boolean、enum、address、port、duration、secret；统一深模块校验类型、单位、必填、默认值、范围、模式与枚举。
+- 包列表与公开安装计划都返回可生成向导的参数契约；计划接收站点参数与 `secret://` 引用并生成确定性 blocker，明文 Secret 被拒绝且不进入响应、计划、安装或审计。
+- 计划以包摘要、规范参数和 Secret 引用计算配置摘要；相同配置 preserve，参数变化 update；安装事务生成追加式不可变站点配置版本。
+- 安装计划提供参数级 before/after/source 动作；preserve 只比较当前配置，A→B→A 形成新版本；未显式重填的 engineer_input 站点覆盖会保留，不被包默认值静默覆盖。
+- 新增受保护的站点配置版本读接口和 migration_023；operator 不能读取站点参数/Secret 引用。
+
+### 验证
+- TDD 逐条完成必填参数阻断、完整类型、Secret 脱敏、站点配置读回和参数更新版本链。
+- 交付/认证/路由公开回归 47/47；128 个 REST 操作全部有明确票据归属。
+- 独立临时 TimescaleDB 真实运行旧记录升级、migration_023 重放、带参数/Secret 引用的公开安装、并发/幂等、进程重启与计划/配置持久读回主缝 1/1 通过；临时容器已删除，未连接现场。
+
+### 当前边界 / Next
+- Ticket #5 Standards/Spec 均 PASS；完整回归为 126 passed、1 skipped，仅 2 个既有 Aggregator baseline 失败；真实 PostgreSQL 最终主缝 1/1 通过。
+- Ticket #4 本地提交为 `12e7327`，两次 GitHub push 因 DNS 正常但 443 不通而安全失败；Ticket #5 暂叠在其上，网络恢复后按依赖顺序发布。
+- 1号机仍禁止部署；TLS、固定 ARM64 制品、现场凭据轮换与发布锁定尚未闭合。
+
+---
+
+## Session 2026-08-14 — Ticket #4 控制/管理 REST 与 WebSocket 安全收口（双轴通过）
+
+### 已实现
+- 31 个控制/管理 REST 操作收口为三个集中能力：`system.manage`（admin）、`gateway.manage`（admin/engineer）、`control.write`（三角色）；拒绝与已授权高权限操作进入不可变审计。
+- WebSocket 不再匿名订阅：Bearer 会话通过 `POST /api/v1/auth/ws-ticket` 换取 30 秒一次性票据；数据库仅存 SHA-256 摘要；WSS 首帧消费票据后，每次订阅再次检查 `telemetry.subscribe`，未订阅前不推送数据。
+- 新增 migration_022_websocket_tickets.sql；统一镜像携带 init-db；生产关闭 docs/redoc/openapi；明文 WS 拒绝且不消费票据。
+- 新增独立 `ALLOW_INSECURE_ANONYMOUS_ACCESS=false`。生产开启会拒绝启动；development 显式开启时响应带不安全标记、日志警告、前端红色横幅。
+- 前端实时订阅已改用一次性票据，长期 Bearer 不进 URL/query。
+
+### 验证
+- Ticket #4 + Ticket #3 定向 21/21；身份/交付/设置相关 61/61。
+- 完整后端 120 passed / 1 skipped；仅两个既有 Aggregator SUM/LAST 基线失败。
+- 前端 `tsc -b` 通过；Vite 生产构建 8176 modules 通过（既有大 chunk warning）。
+- 显式 PostgreSQL 主缝因未提供 `*_test` 隔离库安全停止，未触碰现场库。
+- 双轴审查最终 PASS：Standards 硬违反 0；Spec 阻断、缺失、scope creep 与表面实现错误均为 0。复审期间补齐已连接 WebSocket 在会话注销后的即时订阅拒绝。
+
+### 当前边界 / Next
+- Ticket #4 代码尚未提交、推送或部署；双轴审查已经通过，可进入提交与 PR。
+- 1号机仍是明文匿名 v0.4.77，不满足本票的 TLS/WSS、固定制品和迁移门禁，禁止直接覆盖部署。
+- `control.write` 当前仅解决认证授权；限值、联锁、幂等、回读和命令状态机属于后续统一控制命令票据。
+
+---
+
 ## Session 2026-08-13 — Ticket #2 身份认证交付缝
 
 - 分支：`ticket/02-authentication-in-delivery-seam`，基线 `main@7a4818f`。
@@ -3018,3 +3523,151 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 ### 当前边界 / Next
 - Ticket #3 不保护控制、Neuron、NanoMQ、SQL/清表及 WebSocket；这些属于 Ticket #4。1号机仍运行旧 v0.4.77 明文匿名版本，本票未部署。
 - 下一实施前沿：Ticket #4“收口控制、管理与 WebSocket 安全默认”；完成后才可把全站安全边界作为成立证据。TLS、固定 ARM64 制品、现场凭据轮换仍是生产发布门禁。
+
+---
+
+## Session 2026-08-14 — Ticket #15 固定 EMS 运行工作台
+
+### 已完成
+
+- 新增 `ems_workbench` 解决方案资产：只允许固定 Schema、内置导航、分组、KPI、趋势和告警/控制入口；导入阶段拒绝未知实体槽位、重复引用和任意前端代码。
+- `GET /api/v1/ems-workbench` 仅向认证运行角色返回已安装包、已确认实体实例的实时投影；安装缺失、配置缺失或失活引用均以稳定机器码失败。
+- `GET /api/v1/ems-workbench/trends/{trend_id}` 仅返回包中声明趋势的同一确认实体实例历史，不接受任意标签查询。
+- 前端新增固定 EMS 工作台页：包配置驱动内部导航、KPI、分组和趋势；告警跳转至统一告警中心，控制仍进入统一控制命令。
+
+### 验证
+
+- 工作台公开 HTTP + 完整路由权限覆盖：22 passed（含导入拒绝、匿名 401、协议模拟数据到实时与历史趋势）。
+- 前端 `npm run build` 通过；仅保留既有大 chunk 警告。
+
+### 部署门禁
+
+- 不能直接部署到 1 号机：ARM64 构建基础镜像源不可用、现有部署入口不满足固定制品/TLS/受控主机密钥要求。须先完成 Ticket 18 发布制品与 TLS 门禁，再进行现场升级。
+
+---
+
+## Session 2026-08-14 — Ticket #16 基础 EMS 策略与仿真验收（待本地提交）
+
+### 已完成
+
+- 新增严格的 `ems_policy` 包资产。首版只允许一个数值输入、阈值判断、固定数值动作和固定仿真；不接受脚本、表达式、设备地址、MQTT 或 Neuron 内容。
+- 导入期校验实体槽位、数值类型、单位、可写方向、控制策略和仿真期望；只读实体不能被伪装成策略控制目标。
+- 安装计划明确展示策略资产与 revision。策略须由工程师通过公开 `enable` 接口显式启用；启用前平台读取确认实体实例，缺失、陈旧或坏质量输入都会拒绝。启用记录按站点配置版本持久化，升级不会静默继承自动控制。
+- 工程师通过公开 `simulate → enable → evaluate → reconcile` 和协议侧回读完成闭环；命中后仅创建 `source_type=policy` 的统一控制命令。高风险策略仍被 `CONTROL_CONFIRMATION_REQUIRED` 拒绝，策略没有旁路。
+- `policy_execution` 验收不再自行驱动内部策略对象。它显式验证前述公开工作流产生的命令 ID、策略主体/版本/动作、目标和 `readback_confirmed` 状态，并把输入、固定仿真、命令和回读证据写入不可变交付报告。
+- 新增 migration_031 保存策略启用状态；PostgreSQL 主缝迁移列表已纳入 030/031。
+
+### 验证与边界
+
+- 策略/控制/实体/权限定向回归：41 passed（100 subtests）；策略控制文件：17 passed。`compileall` 与 `git diff --check` 通过。
+- 完整后端 pytest：189 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` SUM/LAST 两项 SQL 断言失败，本票未触及该模块。
+- Spec 与 Standards 双轴复审无阻断；非阻断建议是后续在隔离 PostgreSQL 补“启用后进程重启仍保持状态”的主缝。
+- Ticket #17、#18 和干净环境交付试验仍未开始；不得声称产品已可生产交付或直接部署到 1 号机。
+
+---
+
+## Session 2026-08-15 — 高风险策略授权收紧与参考试验修复（已推送）
+
+- 参考 EMS 策略保持 **10 kW** 隔离动作；仅作协议模拟与交付演练，不是现场默认值。
+- 高风险策略例外新增进程内、不可持久化的服务端授权证明。`origin_evidence` 只保留审计用途；
+  即使未来内部调用方伪造同样的策略字段，也不能绕过人工二次确认。
+- 例外仍要求当前安装版本、engineer 显式启用、有限数值、小于等于包内上限，以及原有目标限值、
+  联锁、冷却与回读。ADR-0008 和 README 已同步该边界。
+- 修复参考交付试验对三等级告警返回顺序的错误假设：550 kW 时 WARNING/MAJOR pending、
+  CRITICAL normal；测试不再依赖目录排序。
+
+### 验证
+
+- `tests.test_control_command_public_api tests.test_reference_ems_package`：47 passed。
+- `scripts.test_build_release_images scripts.test_release_image_build`：5 passed。
+- `git diff --check` 通过。
+
+### 未完成门禁
+
+- 未部署到 1 号机；仍缺固定 ARM64 发布制品、TLS、真实 release lock 和独立四小时交付试验。
+- 本地提交 `ba773ea` 与 `18187c4` 仍因 GitHub 网络失败未推送；本会话变更同样尚未提交。
+
+### 后续更新
+
+- 网络恢复后，`ba773ea`、`18187c4` 与 `86907ab` 已一并推送至
+  `ticket/07-multi-device-instance-consumers`；没有推送到 `main` 或执行现场部署。
+- 已新增 Proposed ADR-0009，定义不等同于工单的“交付分配”最小授权边界；它尚未实现，不能
+  作为工程师包可见性或计划/安装范围的现有保证。
+
+---
+
+## Session 2026-08-15 — 工程师从产品界面开始交付（已推送）
+
+- 基于单站实例与已验证包不含现场 Secret 的约束，拒绝引入交付分配/工单子系统：engineer 现在可只读
+  已验证解决方案包，直接从“解决方案交付”页面填写参数、创建计划、安装并运行验收；admin 仍独占包
+  导入和生命周期管理，operator 仍无包读取权限。
+- 前端不再因非 admin 而清空包列表，ADR-0009 已记录为 Rejected，避免把未实现的对象当成产品保证。
+- 参考试验的告警恢复阶段同样改为按多等级状态集合断言，不依赖目录返回顺序。
+
+### 验证
+
+- `tests.test_authenticated_delivery_public_api tests.test_reference_ems_package`：38 passed。
+- `tests.test_business_rest_authorization tests.test_authenticated_delivery_public_api`：25 passed。
+- 前端 `npm run build`：通过（仅既有大 bundle warning）。
+- `git diff --check`：通过。
+
+### 文档校正
+
+- README 已同步工程师可以在产品页选择已验证包的实际权限，避免仍把旧的“仅管理员读包”描述
+  当作当前产品约束。
+
+---
+
+## Session 2026-08-15 — 交付报告操作审计覆盖（已推送）
+
+- `operation_audit` 支持可选 `requiredEvidence`：`installation`、`manual_control`、
+  `policy_control`、`alarm_acknowledgement`、`authorization_denial`。它在其他验收项完成后汇总
+  同一份报告中实际验证过的审计 ID；不读写控制设备、不重放命令。
+- 光储充参考包把以上五类证据设为 required，因此任一控制、告警确认或权限拒绝证据缺失都会使
+  机器交付报告失败；README 与包文档已给出公开格式。
+
+### 验证
+
+- 参考 EMS 完整公开试验：1 passed。
+- 旧 `operation_audit` 安装审计兼容缝：1 passed。
+- `tests.test_delivery_public_api tests.test_reference_ems_package` 完整运行显示 49 passed；外层
+  60 秒命令时限在输出完成后返回超时，故不把它记作完整套件成功证据。
+
+---
+
+## Session 2026-08-15 — 产品界面补齐权限拒绝验收证据（已推送）
+
+- “解决方案交付”页面现在可填写 `authorization_denials` 映射，并随验收请求发送服务端生成的
+  `X-ZiZu-Audit-Event-ID`。这让参考 EMS 包要求的权限拒绝证据可以通过产品界面提供，而不必改用
+  临时脚本；服务端仍自行核验审计事件的角色、能力与拒绝结果。
+
+### 验证
+
+- 前端 `npm run build`：通过（仅既有大 bundle warning）。
+- `git diff --check`：通过。
+
+---
+
+## Session 2026-08-15 — 参考试验与发布门禁复核（本地提交待推送）
+
+- 参考 EMS 的公开主缝已以 180 秒上限完整跑完：导入、安装、协议模拟、分级告警、手动/策略
+  控制回读、权限拒绝、网关失败与最终交付报告均通过。
+- 发布门禁 19 项通过：多架构摘要清单、TLS Compose、运行镜像/架构核验、发布锁和回滚拒绝
+  跨 Schema 均受测试保护。
+- README 修正为根据实际目标选择常规或 e606 的 release Compose，再查询同一编排实际启动的
+  backend/edge 容器写发布锁；避免常规 Docker 目标误用 e606 查询命令。
+- 仍没有真实 `release.json`、ARM64 镜像、TLS 域名、目标 release lock 或独立四小时试验。
+  这些外部证据缺失时不得部署或宣称交付就绪。
+
+### 验证
+
+- `tests.test_reference_ems_package tests.test_delivery_public_api`：49 passed（64.114s）。
+- 发布门禁 unittest：19 passed（1.768s）。
+- `git diff --check`：通过。
+
+### 外部阻断
+
+- 发布文档提交 `930e0a4` 尚未推送：连续 GitHub HTTPS push 分别出现连接重置与 443 无法连接；
+  不得在未推送的分支上合并或触发发布。
+- 即使网络恢复，仍需运维提供隔离目标的 DNS/TLS、ACME 邮箱、已审核 TLS 代理 digest 与维护窗；
+  然后才可构建真实 `release.json`、写 release lock 并开始四小时独立交付试验。

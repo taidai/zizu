@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError
@@ -158,3 +159,39 @@ async def logout(
                 "message": "Authentication service is unavailable",
             },
         ) from exc
+
+
+@router.post("/auth/ws-ticket", status_code=status.HTTP_201_CREATED)
+async def issue_websocket_ticket(
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(current_principal),
+    identity: Identity = Depends(get_identity),
+) -> dict:
+    """Issue a 30-second, single-use telemetry WebSocket ticket."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    if principal.username == "insecure-development-anonymous":
+        response_expires = datetime.now(timezone.utc) + timedelta(seconds=30)
+        return {
+            "ticket": "insecure-development",
+            "expires_at": response_expires.isoformat(),
+        }
+    try:
+        issued = await run_in_threadpool(
+            identity.issue_ws_ticket,
+            principal,
+            request_id=request.headers.get("X-Request-ID"),
+            client_ip=_client_ip(request),
+        )
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "AUTH_UNAVAILABLE",
+                "message": "Authentication service is unavailable",
+            },
+        ) from exc
+    return {"ticket": issued.ticket, "expires_at": issued.expires_at.isoformat()}

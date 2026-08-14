@@ -1,0 +1,6 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.neuron-gateway
+kind: gateway_readiness
+required: true
+gateway: neuron
+timeout: 10s

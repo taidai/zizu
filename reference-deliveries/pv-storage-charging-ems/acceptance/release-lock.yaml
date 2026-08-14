@@ -1,0 +1,5 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.release-lock
+kind: release_lock
+required: true
+timeout: 5s

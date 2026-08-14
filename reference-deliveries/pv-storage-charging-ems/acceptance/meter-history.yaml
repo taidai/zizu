@@ -1,0 +1,9 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.meter-history
+kind: history_readiness
+required: true
+slot: slot.meter
+definition: grid.active_power
+range: 24h
+minimumSamples: 2
+timeout: 5s

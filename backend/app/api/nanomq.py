@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import SYSTEM_MANAGE, protected
 from app.services.nanomq_client import NanoMQAPIError, get_nanomq_client
 
 router = APIRouter()
@@ -20,13 +21,6 @@ router = APIRouter()
 # ══════════════════════════════════════
 # 请求/响应模型
 # ══════════════════════════════════════
-
-class NanoMQPublishRequest(BaseModel):
-    topic: str = Field(..., description="发布主题")
-    payload: str = Field(..., description="消息内容")
-    qos: int = Field(0, ge=0, le=2, description="QoS 等级")
-    retain: bool = Field(False, description="是否 Retain")
-
 
 class NanoMQSubscribeRequest(BaseModel):
     topic: str = Field(..., description="订阅主题")
@@ -74,7 +68,7 @@ def _proxy_nanomq(method: str, path: str, data: Any | None = None) -> Any:
 # 状态与监控
 # ══════════════════════════════════════
 
-@router.get("/nanomq/status")
+@router.get("/nanomq/status", **protected(SYSTEM_MANAGE))
 async def nanomq_status() -> dict:
     """获取 nanoMQ 运行状态（brokers/nodes/metrics）。"""
     client = get_nanomq_client()
@@ -89,39 +83,29 @@ async def nanomq_status() -> dict:
         }
 
 
-@router.get("/nanomq/clients")
+@router.get("/nanomq/clients", **protected(SYSTEM_MANAGE))
 async def nanomq_clients() -> dict:
     """获取已连接客户端列表。"""
     return _proxy_nanomq("GET", "/api/v4/clients")
 
 
-@router.get("/nanomq/subscriptions")
+@router.get("/nanomq/subscriptions", **protected(SYSTEM_MANAGE))
 async def nanomq_subscriptions() -> dict:
     """获取订阅列表。"""
     return _proxy_nanomq("GET", "/api/v4/subscriptions")
 
 
-@router.get("/nanomq/routes")
+@router.get("/nanomq/routes", **protected(SYSTEM_MANAGE))
 async def nanomq_routes() -> dict:
     """获取路由列表。"""
     return _proxy_nanomq("GET", "/api/v4/routes")
 
 
 # ══════════════════════════════════════
-# 消息发布/订阅
+# 订阅管理
 # ══════════════════════════════════════
 
-@router.post("/nanomq/publish")
-async def nanomq_publish(req: NanoMQPublishRequest) -> dict:
-    """通过 nanoMQ REST API 发布一条消息。"""
-    client = get_nanomq_client()
-    try:
-        return client.publish(req.topic, req.payload, req.qos, req.retain)
-    except NanoMQAPIError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
-
-
-@router.post("/nanomq/subscribe")
+@router.post("/nanomq/subscribe", **protected(SYSTEM_MANAGE))
 async def nanomq_subscribe(req: NanoMQSubscribeRequest) -> dict:
     """通过 nanoMQ REST API 订阅一个主题。"""
     client = get_nanomq_client()
@@ -135,13 +119,13 @@ async def nanomq_subscribe(req: NanoMQSubscribeRequest) -> dict:
 # ACL 管理
 # ══════════════════════════════════════
 
-@router.get("/nanomq/acl")
+@router.get("/nanomq/acl", **protected(SYSTEM_MANAGE))
 async def nanomq_acl() -> dict:
     """获取 ACL 规则。"""
     return _proxy_nanomq("GET", "/api/v4/acl")
 
 
-@router.post("/nanomq/acl")
+@router.post("/nanomq/acl", **protected(SYSTEM_MANAGE))
 async def nanomq_acl_update(req: NanoMQACLUpdate) -> dict:
     """覆盖写入 ACL 规则。"""
     client = get_nanomq_client()
@@ -156,7 +140,7 @@ async def nanomq_acl_update(req: NanoMQACLUpdate) -> dict:
 # 配置文件管理
 # ══════════════════════════════════════
 
-@router.get("/nanomq/config")
+@router.get("/nanomq/config", **protected(SYSTEM_MANAGE))
 async def nanomq_config() -> dict:
     """读取当前 nanoMQ 配置文件内容。"""
     client = get_nanomq_client()
@@ -164,7 +148,7 @@ async def nanomq_config() -> dict:
     return {"content": content, "path": client.config.conf_path}
 
 
-@router.put("/nanomq/config")
+@router.put("/nanomq/config", **protected(SYSTEM_MANAGE))
 async def nanomq_config_update(req: NanoMQConfigUpdate) -> dict:
     """写入 nanoMQ 配置文件（写前自动备份）。"""
     client = get_nanomq_client()
@@ -180,7 +164,11 @@ async def nanomq_config_update(req: NanoMQConfigUpdate) -> dict:
 # 容器重启
 # ══════════════════════════════════════
 
-@router.post("/nanomq/restart", response_model=NanoMQRestartResponse)
+@router.post(
+    "/nanomq/restart",
+    response_model=NanoMQRestartResponse,
+    **protected(SYSTEM_MANAGE),
+)
 async def nanomq_restart() -> NanoMQRestartResponse:
     """
     重启 nanoMQ 容器使配置生效。

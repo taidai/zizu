@@ -35,10 +35,16 @@ from app.models.schemas import (
 from app.services.mqtt_client import MqttClient
 from app.services.normalizer import TagNormalizationRule, normalize
 from app.services.parser import parse_neuron_json
-from app.services.alarm_processor import process_alarm_message, ERROR_LEVELS
+from app.services.alarm_runtime import AlarmRuntime
 from app.services.telemetry_store import batch_insert_telemetry, upsert_telemetry_latest, TelemetryRecord
-from app.services.tag_alarm_engine import process_tag_alarms
-from app.services.entity_alarm_engine import process_entity_alarms
+from app.services.tag_mqtt_alarm_adapter import (
+    ERROR_LEVELS,
+    InMemoryTagAlarmSourceResolver,
+    MqttAlarmAdapter,
+    TagAlarmAdapter,
+    TagAlarmSample,
+    TagAlarmSource,
+)
 
 
 class DataPipeline:
@@ -58,9 +64,11 @@ class DataPipeline:
         self._rules: dict[str, TagNormalizationRule] = {}  # {tag_name: rule}
         self._node_id_map: dict[str, UUID] = {}            # {node_name: node_id}
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
-        self._alarm_tag_map: dict[str, dict] = {}          # {tag_id(str): alarm meta}
-        self._alarm_name_map: dict[str, dict] = {}         # {tag_name(str): alarm meta} for MQTT path
-        self._entity_alarm_index: dict[str, list[dict]] = {} # {tag_id(str): [entity alarm bindings]}
+        self._tag_alarm_sources = InMemoryTagAlarmSourceResolver()
+        self._mqtt_alarm_tag_ids: dict[str, UUID] = {}
+        self._tag_alarm_adapter: TagAlarmAdapter | None = None
+        self._mqtt_alarm_adapter: MqttAlarmAdapter | None = None
+        self._entity_alarm_adapter = None
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
 
@@ -175,13 +183,18 @@ class DataPipeline:
         self.metrics.messages_received += 1
         self.metrics.last_message_at = datetime.now(timezone.utc)
 
-        # 路由：告警 topic 直接走告警处理器
+        # 告警 topic 只构造统一观测；生命周期由 AlarmRuntime 独占。
         if self._mqtt is not None and self._mqtt.is_alarm_topic(mqtt_msg.topic):
             try:
-                result = await asyncio.to_thread(process_alarm_message, mqtt_msg.topic, mqtt_msg.payload, self._alarm_name_map)
-                logger.debug("[Pipeline] Alarm message processed: {}", result)
+                outcomes = await asyncio.to_thread(
+                    self._submit_mqtt_alarm_observations,
+                    mqtt_msg.topic,
+                    mqtt_msg.payload,
+                    datetime.now(timezone.utc),
+                )
+                logger.debug("[Pipeline] MQTT alarm observations submitted: {}", len(outcomes))
             except Exception as e:
-                logger.error("[Pipeline] Alarm processing failed: {}", e)
+                logger.error("[Pipeline] MQTT alarm adaptation failed: {}", e)
             return
 
         raw = RawMessage(
@@ -206,10 +219,19 @@ class DataPipeline:
         if self._mqtt is not None and not self._mqtt.is_alarm_topic(raw.topic):
             if any(k in ERROR_LEVELS for k in parsed.tags):
                 try:
-                    result = await asyncio.to_thread(process_alarm_message, raw.topic, raw.payload, self._alarm_name_map)
-                    logger.debug('[Pipeline] Extracted alarms from telemetry topic {}: {}', raw.topic, result)
+                    outcomes = await asyncio.to_thread(
+                        self._submit_mqtt_alarm_observations,
+                        raw.topic,
+                        raw.payload,
+                        parsed.ts,
+                    )
+                    logger.debug(
+                        "[Pipeline] MQTT observations extracted from {}: {}",
+                        raw.topic,
+                        len(outcomes),
+                    )
                 except Exception as e:
-                    logger.error('[Pipeline] Alarm extraction failed: {}', e)
+                    logger.error("[Pipeline] MQTT alarm extraction failed: {}", e)
 
         # ── Hook 2: 归一化 (CPU 密集型，放到线程池避免阻塞事件循环) ──
         # 复制 rules 引用避免 reload 期间的竞态；dict 引用替换是原子的。
@@ -223,30 +245,6 @@ class DataPipeline:
 
         # ── Hook 3: 持久化 (缓冲写入) (~30 行) ──
         records = self._to_records(normalized)
-        should_flush = False
-        if records and self._alarm_tag_map:
-            try:
-                alarm_result = await asyncio.to_thread(
-                    process_tag_alarms,
-                    [r.model_dump() for r in records],
-                    self._alarm_tag_map,
-                )
-                logger.debug("[Pipeline] Tag alarms processed: {}", alarm_result)
-            except Exception as e:
-                logger.error("[Pipeline] Tag alarm processing failed: {}", e)
-        
-
-        if records and self._entity_alarm_index:
-            try:
-                entity_alarm_result = await asyncio.to_thread(
-                    process_entity_alarms,
-                    [r.model_dump() for r in records],
-                    self._entity_alarm_index,
-                )
-                logger.debug("[Pipeline] Entity alarms processed: {}", entity_alarm_result)
-            except Exception as e:
-                logger.error("[Pipeline] Entity alarm processing failed: {}", e)
-
         async with self._buffer_lock:
             self._buffer.extend(records)
             if len(self._buffer) >= settings.pipeline_batch_size:
@@ -398,94 +396,53 @@ class DataPipeline:
             self._tag_id_map = new_tag_id_map
             self._neuron_tag_map = new_neuron_tag_map
 
-            # 加载告警分级配置（alarm_level + fault_map entries）
-            def _fetch_alarm_meta() -> dict[str, dict]:
+            # 仅加载已确认实体实例的活动物理来源。重名 MQTT 外部 ID 不猜测
+            # 映射，必须先通过解决方案绑定/命名消歧后才进入统一告警。
+            def _fetch_alarm_sources() -> tuple[dict[UUID, TagAlarmSource], dict[str, UUID]]:
                 with get_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            SELECT t.id AS tag_id, t.name AS tag_name, t.alarm_level,
-                                   t.alarm_type, t.alarm_threshold, t.fault_map_id, fm.entries,
-                                   n.node_type
-                            FROM t_tags t
-                            JOIN t_nodes n ON t.node_id = n.id
-                            LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
-                            WHERE t.alarm_level IN ('error1', 'error2', 'error3')
-                              AND t.enabled = TRUE
+                            SELECT binding.tag_id, binding.entity_instance_id,
+                                   tag.name, instance.freshness_seconds
+                            FROM t_entity_instance_bindings binding
+                            JOIN t_entity_instances instance
+                              ON instance.id = binding.entity_instance_id
+                            JOIN t_device_instances device
+                              ON device.id = instance.device_instance_id
+                            JOIN t_tags tag ON tag.id = binding.tag_id
+                            WHERE binding.active = TRUE
+                              AND instance.active = TRUE
+                              AND device.active = TRUE
+                              AND tag.enabled = TRUE
                         """)
-                        meta: dict[str, dict] = {}
+                        sources: dict[UUID, TagAlarmSource] = {}
+                        by_name: dict[str, list[UUID]] = {}
                         for row in cur.fetchall():
-                            tag_id, tag_name, alarm_level, alarm_type, alarm_threshold, fault_map_id, entries, node_type = row
-                            meta[str(tag_id)] = {
-                                "tag_name": tag_name,
-                                "alarm_level": alarm_level,
-                                "fault_map_id": fault_map_id,
-                                "fault_map_entries": entries or [],
-                            }
-                        return meta
+                            tag_id, entity_instance_id, tag_name, freshness_seconds = row
+                            sources[tag_id] = TagAlarmSource(
+                                tag_id=tag_id,
+                                entity_instance_id=entity_instance_id,
+                                tag_name=tag_name,
+                                max_observation_gap_seconds=freshness_seconds,
+                            )
+                            by_name.setdefault(tag_name, []).append(tag_id)
+                return (
+                    sources,
+                    {
+                        tag_name: tag_ids[0]
+                        for tag_name, tag_ids in by_name.items()
+                        if len(tag_ids) == 1
+                    },
+                )
 
-            self._alarm_tag_map = _fetch_alarm_meta()
-            self._alarm_name_map = {m["tag_name"]: m for m in self._alarm_tag_map.values()}
-            # 加载实体-告警等级绑定索引（tag_id -> [binding...]）
-            def _fetch_entity_alarm_index() -> dict[str, list[dict]]:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT
-                                b.id AS binding_id,
-                                b.entity_id,
-                                e.name AS entity_name,
-                                e.display_name AS entity_display_name,
-                                b.alarm_level_id,
-                                l.code AS alarm_level_code,
-                                l.name AS alarm_level_name,
-                                l.severity AS alarm_level_severity,
-                                COALESCE(b.trigger_rules, l.trigger_rules) AS trigger_rules,
-                                t.id AS tag_id,
-                                t.node_id,
-                                n.name AS node_name,
-                                COALESCE(fm_b.entries, fm_t.entries) AS fault_map_entries
-                            FROM t_entity_alarm_bindings b
-                            JOIN t_entities e ON e.id = b.entity_id
-                            JOIN t_alarm_levels l ON l.id = b.alarm_level_id
-                            JOIN t_entity_bindings eb ON eb.entity_id = e.id
-                            JOIN t_tags t ON t.id = eb.tag_id
-                            JOIN t_nodes n ON n.id = t.node_id
-                            LEFT JOIN t_fault_maps fm_b ON fm_b.id = b.fault_map_id
-                            LEFT JOIN t_fault_maps fm_t ON fm_t.id = t.fault_map_id
-                            WHERE b.enabled = TRUE
-                              AND l.enabled = TRUE
-                              AND e.enabled = TRUE
-                              AND t.enabled = TRUE
-                              AND n.enabled = TRUE
-                              AND eb.enabled = TRUE
-                        """)
-                        index: dict[str, list[dict]] = {}
-                        columns = [desc[0] for desc in cur.description]
-                        for row in cur.fetchall():
-                            rec = dict(zip(columns, row))
-                            tag_id = str(rec["tag_id"])
-                            index.setdefault(tag_id, []).append({
-                                "binding_id": str(rec["binding_id"]),
-                                "entity_id": str(rec["entity_id"]),
-                                "entity_name": rec["entity_name"],
-                                "entity_display_name": rec["entity_display_name"],
-                                "alarm_level_id": str(rec["alarm_level_id"]),
-                                "alarm_level_code": rec["alarm_level_code"],
-                                "alarm_level_name": rec["alarm_level_name"],
-                                "alarm_level_severity": rec["alarm_level_severity"],
-                                "trigger_rules": rec["trigger_rules"] or [],
-                                "node_id": str(rec["node_id"]),
-                                "node_name": rec["node_name"],
-                                "fault_map_entries": rec["fault_map_entries"] or [],
-                            })
-                        return index
-
-            self._entity_alarm_index = _fetch_entity_alarm_index()
-
-
+            alarm_sources, mqtt_tag_ids = await asyncio.to_thread(_fetch_alarm_sources)
+            self._tag_alarm_sources.replace(alarm_sources)
+            self._mqtt_alarm_tag_ids = mqtt_tag_ids
+            if self._mqtt_alarm_adapter is not None:
+                self._mqtt_alarm_adapter.replace_tag_ids(mqtt_tag_ids)
             logger.info(
-                "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} alarm tags, {} entity alarm bindings",
-                len(self._rules), len(self._neuron_tag_map), len(self._alarm_tag_map), sum(len(v) for v in self._entity_alarm_index.values())
+                "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} unified alarm sources",
+                len(self._rules), len(self._neuron_tag_map), len(alarm_sources),
             )
 
         except Exception as e:
@@ -498,6 +455,16 @@ class DataPipeline:
             logger.info("[Pipeline] Rules reloaded on demand")
         except Exception as e:
             logger.warning("[Pipeline] On-demand reload failed: {}", e)
+
+    async def flush_now(self) -> None:
+        """Flush buffered protocol observations through the production store.
+
+        Besides controlled shutdown, this is the public seam used by protocol
+        simulator acceptance tests: they publish a real Neuron MQTT-shaped
+        message through ``on_message`` and then wait for durable visibility.
+        """
+        async with self._flush_lock:
+            await self._do_flush()
 
     async def _periodic_reload_rules(self) -> None:
         """定时重载 tag 规则，让新导入点位无需重启即可生效。"""
@@ -539,9 +506,111 @@ class DataPipeline:
             self.metrics.db_write_errors += 1
             logger.error("[Pipeline] DB write error ({} records): {}",
                         len(batch), e)
+            return
+        try:
+            if batch:
+                await asyncio.to_thread(self._submit_unified_tag_alarms, batch)
+                await asyncio.to_thread(
+                    self._submit_installed_entity_alarms,
+                    self._entity_instances_covered_by_tag_batch(batch),
+                )
+        except Exception as e:
+            logger.error("[Pipeline] Unified alarm processing failed: {}", e)
+
+    def _entity_instances_covered_by_tag_batch(
+        self,
+        batch: list[TelemetryRecord],
+    ) -> set[UUID]:
+        """Keep each confirmed physical source on exactly one lifecycle path per flush."""
+        return {
+            source.entity_instance_id
+            for record in batch
+            if _telemetry_value(record) is not None
+            and (source := self._tag_alarm_sources.resolve(record.tag_id)) is not None
+        }
+
+    def _submit_installed_entity_alarms(
+        self,
+        excluded_entity_instance_ids: set[UUID],
+    ) -> None:
+        """Keep entity freshness and quality for installed sources absent from this batch."""
+        if self._entity_alarm_adapter is None:
+            from app.services.entity_alarm_adapter import (
+                build_postgres_entity_alarm_adapter,
+            )
+
+            self._entity_alarm_adapter = build_postgres_entity_alarm_adapter()
+        outcomes = self._entity_alarm_adapter.submit_all(
+            exclude_entity_instance_ids=excluded_entity_instance_ids,
+        )
+        if outcomes:
+            logger.debug(
+                "[Pipeline] Installed entity observations submitted: {}",
+                len(outcomes),
+            )
+
+    def _tag_alarm_adapter_for_runtime(self) -> TagAlarmAdapter:
+        if self._tag_alarm_adapter is None:
+            from app.services.alarm_postgres import (
+                PostgresAlarmDefinitionCatalog,
+                PostgresAlarmRepository,
+            )
+
+            definitions = PostgresAlarmDefinitionCatalog()
+            self._tag_alarm_adapter = TagAlarmAdapter(
+                definitions,
+                AlarmRuntime(definitions, PostgresAlarmRepository()),
+                self._tag_alarm_sources,
+            )
+        return self._tag_alarm_adapter
+
+    def _submit_unified_tag_alarms(self, batch: list[TelemetryRecord]) -> None:
+        """Submit only durable, uniquely confirmed tag observations to ADR-0004."""
+        adapter = self._tag_alarm_adapter_for_runtime()
+        outcomes = []
+        for record in sorted(batch, key=lambda item: item.ts):
+            value = _telemetry_value(record)
+            if value is None:
+                continue
+            outcomes.extend(
+                adapter.submit(
+                    TagAlarmSample(
+                        record.tag_id,
+                        record.ts,
+                        value,
+                        record.quality,
+                    )
+                )
+            )
+        if outcomes:
+            logger.debug(
+                "[Pipeline] Unified tag observations submitted: {}",
+                len(outcomes),
+            )
+
+    def _submit_mqtt_alarm_observations(
+        self,
+        topic: str,
+        payload: bytes,
+        observed_at: datetime,
+    ) -> tuple:
+        if self._mqtt_alarm_adapter is None:
+            self._mqtt_alarm_adapter = MqttAlarmAdapter(
+                self._tag_alarm_adapter_for_runtime(),
+                self._mqtt_alarm_tag_ids,
+            )
+        return self._mqtt_alarm_adapter.submit(topic, payload, observed_at)
 
     @property
     def uptime_seconds(self) -> float:
         if self._started_at:
             return (datetime.now(timezone.utc) - self._started_at).total_seconds()
         return 0.0
+
+
+def _telemetry_value(record: TelemetryRecord):
+    for name in ("value_str", "value_bool", "value_int", "value_float"):
+        value = getattr(record, name)
+        if value is not None:
+            return value
+    return None

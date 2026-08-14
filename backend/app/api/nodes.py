@@ -44,6 +44,7 @@ class NodeUpdateRequest(BaseModel):
     sort_order: int | None = None
     enabled: bool | None = None
     config: dict | None = None
+    source_catalog_key: str | None = Field(None, min_length=1, max_length=128)
 
 
 def _serialize_node(row: dict) -> dict:
@@ -63,6 +64,7 @@ def _runtime_node(row: dict, principal: Principal) -> dict:
     serialized = _serialize_node(row)
     if principal.role == "operator":
         serialized.pop("config", None)
+        serialized.pop("source_catalog_key", None)
     return serialized
 
 
@@ -103,12 +105,14 @@ async def list_nodes(
         n.sort_order,
         n.enabled,
         n.config,
+        n.source_catalog_key,
         n.created_at,
         COUNT(t.id) AS tag_count
     FROM t_nodes n
     LEFT JOIN t_tags t ON t.node_id = n.id AND t.enabled = TRUE
     {where}
-    GROUP BY n.id, n.name, n.parent_id, n.layer, n.node_type, n.sort_order, n.enabled, n.config, n.created_at
+    GROUP BY n.id, n.name, n.parent_id, n.layer, n.node_type, n.sort_order,
+             n.enabled, n.config, n.source_catalog_key, n.created_at
     ORDER BY n.layer, n.sort_order, n.name
     """
 
@@ -147,7 +151,8 @@ async def export_nodes() -> Response:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, name, parent_id, layer, node_type, config, sort_order, enabled
+                    SELECT id, name, parent_id, layer, node_type, config,
+                           source_catalog_key, sort_order, enabled
                     FROM t_nodes WHERE enabled = TRUE
                     ORDER BY layer, sort_order, name
                     """
@@ -184,6 +189,8 @@ async def export_nodes() -> Response:
                 out["node_type"] = n["node_type"]
             if n["config"]:
                 out["config"] = n["config"]
+            if n.get("source_catalog_key"):
+                out["source_catalog_key"] = n["source_catalog_key"]
             if tags_by_node.get(nid):
                 out["tags"] = tags_by_node[nid]
             kids = [_node_yaml(c) for c in children_map.get(nid, [])]
@@ -219,7 +226,8 @@ async def get_node(
         with conn.cursor() as cur:
             # Node info
             cur.execute(
-                "SELECT id, name, parent_id, layer, node_type, sort_order, enabled, config, created_at "
+                "SELECT id, name, parent_id, layer, node_type, sort_order, enabled, "
+                "config, source_catalog_key, created_at "
                 "FROM t_nodes WHERE id = %s",
                 (node_id,),
             )
@@ -230,7 +238,7 @@ async def get_node(
             node = _runtime_node(
                 dict(
                     zip(
-                        ["id", "name", "parent_id", "layer", "node_type", "sort_order", "enabled", "config", "created_at"],
+                        ["id", "name", "parent_id", "layer", "node_type", "sort_order", "enabled", "config", "source_catalog_key", "created_at"],
                         row,
                     )
                 ),
@@ -350,7 +358,8 @@ async def update_node(
 
             query = (
                 f"UPDATE t_nodes SET {', '.join(updates)} WHERE id = %s "
-                "RETURNING id, name, parent_id, layer, node_type, sort_order, enabled, config, created_at, updated_at"
+                "RETURNING id, name, parent_id, layer, node_type, sort_order, "
+                "enabled, config, source_catalog_key, created_at, updated_at"
             )
             cur.execute(query, params)
             row = cur.fetchone()
@@ -388,9 +397,12 @@ async def create_node(req: NodeCreate) -> dict:
 
             cur.execute(
                 """
-                INSERT INTO t_nodes (name, parent_id, layer, node_type, config, sort_order, enabled, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, name, parent_id, layer, node_type, sort_order, enabled, config, created_at, updated_at
+                INSERT INTO t_nodes
+                  (name, parent_id, layer, node_type, config, source_catalog_key,
+                   sort_order, enabled, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, parent_id, layer, node_type, sort_order, enabled,
+                          config, source_catalog_key, created_at, updated_at
                 """,
                 (
                     req.name,
@@ -398,6 +410,7 @@ async def create_node(req: NodeCreate) -> dict:
                     layer,
                     req.node_type or "",
                     Json(req.config or {}),
+                    req.source_catalog_key,
                     req.sort_order or 0,
                     req.enabled,
                     datetime.now(timezone.utc),
@@ -460,7 +473,7 @@ async def get_node_tree(node_id: UUID) -> dict:
 
 @router.delete("/nodes/{node_id}", **protected(CONFIGURATION_WRITE))
 async def delete_node(node_id: UUID) -> dict:
-    """删除节点及其所有子孙节点（级联删除挂载的 tags、快照、遥测、告警）。"""
+    """删除节点及其所有子孙节点，并保留不可变的旧告警历史。"""
     from app.services.telemetry_store import get_connection
 
     with get_connection() as conn:
@@ -483,21 +496,10 @@ async def delete_node(node_id: UUID) -> dict:
             if not rows:
                 raise HTTPException(status_code=404, detail="Node not found")
             node_ids = [r[0] for r in rows]
-
-            # 2) 先删除关联告警：t_alarms 对 t_nodes/t_tags 无外键级联，
-            #    必须先清掉，否则删除节点时会触发外键约束 500 错误。
             node_placeholders = ",".join(["%s"] * len(node_ids))
-            cur.execute(
-                f"""
-                DELETE FROM t_alarms
-                WHERE node_id IN ({node_placeholders})
-                   OR tag_id IN (
-                       SELECT id FROM t_tags WHERE node_id IN ({node_placeholders})
-                   )
-                """,
-                node_ids + node_ids,
-            )
-            alarms_deleted = cur.rowcount
+
+            # 2) t_alarms 是只读历史。migration_030 移除了其级联外键，
+            #    因此删除节点不会抹掉或改写旧告警证据。
 
             # 3) 删除节点：t_tags/t_telemetry/t_telemetry_latest
             #    均已设置 ON DELETE CASCADE（t_node_snapshot 已移除）
@@ -509,9 +511,12 @@ async def delete_node(node_id: UUID) -> dict:
             conn.commit()
 
     logger.info(
-        "[API/nodes] deleted node {} and {} descendants, {} alarms",
+        "[API/nodes] deleted node {} and {} descendants; legacy alarms preserved",
         node_id,
         deleted_count - 1,
-        alarms_deleted,
     )
-    return {"deleted": str(node_id), "cascade_nodes": deleted_count, "alarms_deleted": alarms_deleted}
+    return {
+        "deleted": str(node_id),
+        "cascade_nodes": deleted_count,
+        "legacy_alarms_preserved": True,
+    }

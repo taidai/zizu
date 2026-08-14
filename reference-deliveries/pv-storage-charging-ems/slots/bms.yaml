@@ -1,0 +1,9 @@
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.bms
+kind: entity_instance_slot
+deviceCategory: bms
+instancesParameter: bms.instances
+displayName: BMS
+freshness: 30s
+requiredEntities:
+  - {definition: bms.soc, matcher: {id: bms-soc, tagName: StateOfCharge}}

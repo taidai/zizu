@@ -1,0 +1,66 @@
+# Immutable production release. Generate release.env with:
+# python scripts/release_preflight.py render-env --release release.json --architecture linux/arm64 > release.env
+# Then run Docker Compose with --env-file release.env.  Do not merge this file
+# with the development Compose files: it intentionally has no source overlays,
+# no database/broker services, and no mutable image tags.
+name: zizu-release
+
+services:
+  edge:
+    image: ${ZIZU_EDGE_PROXY_IMAGE:?render release.env from a verified release manifest}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ZIZU_PUBLIC_HOST: ${ZIZU_PUBLIC_HOST:?set the public DNS name}
+      ZIZU_ACME_EMAIL: ${ZIZU_ACME_EMAIL:?set the certificate contact email}
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      release:
+        ipv4_address: 172.31.0.2
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  backend:
+    image: ${ZIZU_PLATFORM_IMAGE:?render release.env from a verified release manifest}
+    restart: unless-stopped
+    env_file:
+      - ${ZIZU_RUNTIME_ENV:?set to the secured runtime .env path}
+    environment:
+      APP_BIND_HOST: 0.0.0.0
+      DB_OWNER_USER: ""
+      DB_OWNER_PASSWORD: ""
+      AUTH_REQUIRE_HTTPS: "true"
+      AUTH_TRUST_PROXY_HEADERS: "true"
+      AUTH_TRUSTED_PROXY_CIDRS: '["172.31.0.2/32"]'
+      FRONTEND_DIST: /app/frontend/dist
+    expose:
+      - "9000"
+    volumes:
+      - zizu-data:/app/data
+    networks:
+      release:
+        ipv4_address: 172.31.0.3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  release:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/29
+
+volumes:
+  caddy-data:
+  caddy-config:
+  zizu-data:

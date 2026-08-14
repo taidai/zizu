@@ -193,8 +193,9 @@ def _extract_triggered(outputs: Any) -> bool:
             return bool(outputs["triggered"])
         if outputs.get("result") is not None:
             return bool(outputs["result"])
-        # 控制命令 / 动作标记也视为触发
-        if outputs.get("command") or outputs.get("neuron_write") or outputs.get("action_type"):
+        # 声明式控制命令 / 动作标记也视为触发。旧 neuron_write
+        # 仅为已保存规则的只读兼容标记，永远不会变成可执行动作。
+        if outputs.get("command") or outputs.get("action_type"):
             return True
         # 决策表输出可能包含 level/message 等字符串，只看布尔/数字字段
         return any(
@@ -212,20 +213,9 @@ def _extract_actions(outputs: Any, jdm_content: dict) -> list[dict]:
     # 1. 顶层显式 actions（向后兼容）
     actions.extend(list(jdm_content.get("actions", [])))
 
-    # 2. 决策图/表输出里携带的动作字段
+    # 决策图只能输出值；控制目标和稳定动作标识必须由保存的
+    # _config.actions 声明，不能让运行时输出携带物理路由细节。
     if isinstance(outputs, dict):
-        cmd = outputs.get("command") or outputs.get("neuron_write")
-        if isinstance(cmd, dict) and cmd.get("node") and cmd.get("group") and cmd.get("tag"):
-            actions.append({"type": "neuron_write", **cmd})
-
-        if any(k.startswith("command.") for k in outputs):
-            action: dict[str, Any] = {"type": "neuron_write"}
-            for k, v in outputs.items():
-                if k.startswith("command."):
-                    action[k.split(".", 1)[1]] = v
-            if action.get("node") and action.get("group") and action.get("tag"):
-                actions.append(action)
-
         action_type = outputs.get("action_type")
         level = outputs.get("level")
         message = outputs.get("message")
@@ -247,12 +237,6 @@ def _extract_actions(outputs: Any, jdm_content: dict) -> list[dict]:
                     "level": alarm.get("level", "WARNING"),
                     "message": alarm.get("message", "rule triggered"),
                 })
-            if isinstance(result.get("control"), dict):
-                control = result["control"]
-                action: dict[str, Any] = {"type": "control"}
-                action.update(control)
-                actions.append(action)
-
     # 3. _config 中配置的动作（前端控制动作面板）
     for a in jdm_content.get("_config", {}).get("actions", []):
         actions.append(dict(a))

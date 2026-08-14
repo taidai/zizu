@@ -1,0 +1,11 @@
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.meter
+kind: entity_instance_slot
+deviceCategory: meter
+count: 1
+instanceKeyParameter: meter.instance_key
+displayName: 关口电表
+freshness: 30s
+requiredEntities:
+  - definition: grid.active_power
+    matcher: {id: grid-active-power, deviceKeyParameter: meter.device_key, tagName: ActivePower}

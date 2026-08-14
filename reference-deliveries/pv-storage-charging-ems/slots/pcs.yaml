@@ -1,0 +1,12 @@
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.pcs
+kind: entity_instance_slot
+deviceCategory: pcs
+instancesParameter: pcs.instances
+displayName: PCS
+freshness: 30s
+requiredEntities:
+  - {definition: pcs.active_power, matcher: {id: pcs-active-power, tagName: ActivePower}}
+  - {definition: pcs.setpoint, matcher: {id: pcs-setpoint, tagName: ActivePowerSetpoint}}
+  - {definition: pcs.readback, matcher: {id: pcs-readback, tagName: ActivePowerReadback}}
+  - {definition: bms.ready, matcher: {id: pcs-bms-ready, tagName: BmsReady}}

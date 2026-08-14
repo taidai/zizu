@@ -1,0 +1,5 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.platform-liveness
+kind: platform_liveness
+required: true
+timeout: 5s

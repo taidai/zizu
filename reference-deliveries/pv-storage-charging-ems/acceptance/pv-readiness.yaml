@@ -1,0 +1,8 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.pv
+kind: entity_readiness
+required: true
+slot: slot.pv
+definition: pv.active_power
+freshness: 30s
+timeout: 5s

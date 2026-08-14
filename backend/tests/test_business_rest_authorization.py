@@ -20,6 +20,7 @@ from fastapi import APIRouter, FastAPI
 
 from app.api.admin import router as admin_router
 from app.api.alarm_levels import router as alarm_levels_router
+from app.api.alarm_events import router as alarm_event_router
 from app.api.alarms import router as alarms_router
 from app.api.auth import router as auth_router
 from app.api.categories import router as categories_router
@@ -34,6 +35,11 @@ from app.api.rule_templates import router as rule_templates_router
 from app.api.rules import router as rules_router
 from app.api.security import get_identity
 from app.api.solution_delivery import router as solution_delivery_router
+from app.api.entity_instances import router as entity_instances_router
+from app.api.ems_workbench import router as ems_workbench_router
+from app.api.ems_policies import router as ems_policy_router
+from app.api.control_commands import router as control_commands_router
+from app.api.rpc import router as rpc_router
 from app.api.tags import router as tags_router
 from app.api.telemetry import router as telemetry_router
 from app.services.identity import (
@@ -158,24 +164,10 @@ CONFIGURATION_WRITE = {
     ),
 }
 
-ALARM_ACKNOWLEDGE = _operations(
-    "PUT",
-    "/api/v1/alarms/{alarm_id}/acknowledge",
-)
-
-# ADR-0004 removes these two compatibility writes in Ticket #14.  Until then
-# they are never operator capabilities and remain independently visible here.
-LEGACY_ALARM_WRITE = {
-    ("POST", "/api/v1/alarms"),
-    ("PUT", "/api/v1/alarms/{alarm_id}/resolve"),
-}
-
 TICKET_03_CAPABILITIES: dict[Operation, str] = {
     **{operation: "runtime.read" for operation in RUNTIME_READ},
     **{operation: "configuration.read" for operation in CONFIGURATION_READ},
     **{operation: "configuration.write" for operation in CONFIGURATION_WRITE},
-    **{operation: "alarm.acknowledge" for operation in ALARM_ACKNOWLEDGE},
-    **{operation: "legacy_alarm.write" for operation in LEGACY_ALARM_WRITE},
 }
 
 # Ticket #4 owns the control/system-management REST surface below, plus the
@@ -211,9 +203,7 @@ ISSUE_04_REST = {
         "/api/v1/neuron/nodes/{name}/stop",
         "/api/v1/neuron/groups",
         "/api/v1/neuron/tags",
-        "/api/v1/neuron/write",
         "/api/v1/entities/{entity_id}/write",
-        "/api/v1/nanomq/publish",
         "/api/v1/nanomq/subscribe",
         "/api/v1/nanomq/acl",
         "/api/v1/nanomq/restart",
@@ -230,6 +220,7 @@ AUTH_OPERATIONS = {
     ("POST", "/api/v1/auth/login"),
     ("GET", "/api/v1/auth/me"),
     ("POST", "/api/v1/auth/logout"),
+    ("POST", "/api/v1/auth/ws-ticket"),
 }
 
 DELIVERY_OPERATIONS = {
@@ -239,11 +230,49 @@ DELIVERY_OPERATIONS = {
     ("GET", "/api/v1/install-plans/{plan_id}"),
     ("POST", "/api/v1/install-plans/{plan_id}/apply"),
     ("GET", "/api/v1/solution-installations"),
+    ("GET", "/api/v1/solution-installations/{installation_id}/audit-events"),
+    ("GET", "/api/v1/site-configuration-versions/{version}"),
     (
         "POST",
         "/api/v1/solution-installations/{installation_id}/acceptance-runs",
     ),
     ("GET", "/api/v1/delivery-reports/{report_id}"),
+    ("GET", "/api/v1/entity-instances/{entity_instance_id}/realtime"),
+}
+
+TICKET_07_CAPABILITIES = {
+    ("GET", "/api/v1/entity-instances"): "runtime.read",
+    ("GET", "/api/v1/entity-instances/legacy-migration-preview"): "configuration.read",
+    ("GET", "/api/v1/entity-instances/{entity_instance_id}/source-failover"): "configuration.read",
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/source-failover"): "configuration.write",
+}
+
+TICKET_08_09_CAPABILITIES = {
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/control-confirmations"): "control.write",
+    ("POST", "/api/v1/entity-instances/{entity_instance_id}/control-commands"): "control.write",
+    ("GET", "/api/v1/control-commands/{command_id}"): "control.write",
+    ("POST", "/api/v1/control-commands/{command_id}/reconcile"): "control.write",
+    ("POST", "/api/v1/neuron/write"): "control.write",
+    ("POST", "/api/v1/devices/{node_id}/rpc"): "control.write",
+}
+
+TICKET_12_CAPABILITIES = {
+    ("GET", "/api/v1/alarm-events"): "runtime.read",
+    ("GET", "/api/v1/alarm-events/{event_id}"): "runtime.read",
+    ("GET", "/api/v1/alarm-events/{event_id}/transitions"): "runtime.read",
+    ("POST", "/api/v1/alarm-events/{event_id}/acknowledgements"): "alarm.acknowledge",
+}
+
+TICKET_15_CAPABILITIES = {
+    ("GET", "/api/v1/ems-workbench"): "runtime.read",
+    ("GET", "/api/v1/ems-workbench/trends/{trend_id}"): "runtime.read",
+}
+
+TICKET_16_CAPABILITIES = {
+    ("POST", "/api/v1/ems-policies/{policy_id}/simulate"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/enable"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/disable"): "configuration.write",
+    ("POST", "/api/v1/ems-policies/{policy_id}/evaluate"): "configuration.write",
 }
 
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
@@ -260,6 +289,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     categories_router,
     rules_router,
     alarms_router,
+    alarm_event_router,
     rule_templates_router,
     entities_router,
     fault_maps_router,
@@ -267,6 +297,11 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     device_templates_router,
     nanomq_router,
     solution_delivery_router,
+    ems_workbench_router,
+    ems_policy_router,
+    entity_instances_router,
+    control_commands_router,
+    rpc_router,
 )
 
 
@@ -343,6 +378,7 @@ class FakeCursor:
                     "sort_order",
                     "enabled",
                     "config",
+                    "source_catalog_key",
                     "created_at",
                     "tag_count",
                 )
@@ -358,6 +394,7 @@ class FakeCursor:
                         0,
                         True,
                         self.state.node_config,
+                        "stable-device-key-should-not-leak",
                         datetime(2026, 8, 13, tzinfo=timezone.utc),
                         3,
                     )
@@ -461,7 +498,7 @@ class FakeCursor:
             self._one = (ALARM_ID,)
             return
 
-        if "GROUP BY node_id" in normalized and "FROM t_alarms" in normalized:
+        if "FROM t_alarm_events event" in normalized and "GROUP BY tag.node_id" in normalized:
             self._all = [(NODE_ID, 3)]
             return
 
@@ -577,9 +614,9 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=app)
 
         expected_statuses = {
-            "admin": (200, 200, 200, 200, 200),
-            "engineer": (200, 200, 200, 200, 200),
-            "operator": (200, 403, 403, 200, 403),
+            "admin": (200, 200, 200),
+            "engineer": (200, 200, 200),
+            "operator": (200, 403, 403),
         }
         with mock.patch(
             "app.services.telemetry_store.get_connection",
@@ -606,15 +643,6 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
                                 headers=headers[role],
                                 json={"name": "Energy", "node_type": "ENERGY"},
                             ),
-                            await client.put(
-                                f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                                headers=headers[role],
-                                json={},
-                            ),
-                            await client.put(
-                                f"/api/v1/alarms/{ALARM_ID}/resolve",
-                                headers=headers[role],
-                            ),
                         )
                         self.assertEqual(
                             tuple(response.status_code for response in responses),
@@ -631,7 +659,7 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             operator_denials,
-            {"configuration.read", "configuration.write", "legacy_alarm.write"},
+            {"configuration.read", "configuration.write"},
         )
 
     async def test_configuration_write_fails_closed_before_business_when_audit_is_unavailable(
@@ -789,45 +817,6 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event.outcome for event in changes], ["requested"])
         self.assertEqual(database.commits, 0)
 
-    async def test_alarm_acknowledgement_actor_cannot_be_forged_by_request_body(
-        self,
-    ) -> None:
-        app, _ = self.build_representative_app()
-        database = FakeDatabaseState()
-        transport = httpx.ASGITransport(app=app)
-
-        with mock.patch(
-            "app.services.telemetry_store.get_connection",
-            database.connection,
-        ):
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url="https://testserver",
-            ) as client:
-                headers = await self.login(client, "operator")
-                forged = await client.put(
-                    f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                    headers=headers,
-                    json={"ack_user": "forged-admin"},
-                )
-                response = await client.put(
-                    f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                    headers=headers,
-                    json={},
-                )
-
-        actor = "user:00000000-0000-0000-0000-000000000003"
-        self.assertEqual(forged.status_code, 422, forged.text)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["ack_user"], actor)
-        acknowledgement_params = next(
-            params
-            for query, params in database.executions
-            if "SET acknowledged = TRUE" in query
-        )
-        self.assertEqual(acknowledgement_params[0], actor)
-        self.assertNotIn("forged-admin", repr(database.executions))
-
     async def test_operator_runtime_node_representation_does_not_leak_secrets(
         self,
     ) -> None:
@@ -855,6 +844,7 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("node-password-should-not-leak", response.text)
         self.assertNotIn("token-should-not-leak", response.text)
+        self.assertNotIn("stable-device-key-should-not-leak", response.text)
 
     async def test_operator_runtime_tag_representation_omits_configuration_fields(
         self,
@@ -1011,20 +1001,26 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             app.include_router(router, prefix="/api/v1")
         return app
 
-    def test_all_83_ticket_operations_are_classified_and_secured(self) -> None:
+    def test_all_registered_operations_are_classified_and_secured(self) -> None:
         self.assertEqual(len(RUNTIME_READ), 17)
         self.assertEqual(len(CONFIGURATION_READ), 20)
         self.assertEqual(len(CONFIGURATION_WRITE), 43)
-        self.assertEqual(len(ALARM_ACKNOWLEDGE), 1)
-        self.assertEqual(len(LEGACY_ALARM_WRITE), 2)
-        self.assertEqual(len(TICKET_03_CAPABILITIES), 83)
-        self.assertEqual(len(ISSUE_04_REST), 31)
+        self.assertEqual(len(TICKET_03_CAPABILITIES), 80)
+        self.assertEqual(len(ISSUE_04_REST), 29)
+        self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
+        self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
+        self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
             ISSUE_04_REST,
             AUTH_OPERATIONS,
             DELIVERY_OPERATIONS,
+            set(TICKET_07_CAPABILITIES),
+            set(TICKET_08_09_CAPABILITIES),
+            set(TICKET_12_CAPABILITIES),
+            set(TICKET_15_CAPABILITIES),
+            set(TICKET_16_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1047,7 +1043,12 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 126)
+        self.assertEqual(len(registered), 145)
+
+        for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
         for (method, path), capability in sorted(TICKET_03_CAPABILITIES.items()):
             with self.subTest(method=method, path=path):
@@ -1058,6 +1059,28 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                     "Every Ticket #3 route must publish its server-side policy",
                 )
                 self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_08_09_CAPABILITIES.items()):
+            with self.subTest(method=method, path=path):
+                operation = schema["paths"][path][method.lower()]
+                self.assertEqual(operation.get("x-zizu-capability"), capability)
+                self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_12_CAPABILITIES.items()):
+            with self.subTest(method=method, path=path):
+                operation = schema["paths"][path][method.lower()]
+                self.assertEqual(operation.get("x-zizu-capability"), capability)
+                self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_15_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_16_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
     def test_alarm_counts_route_is_wired_to_its_own_operation(self) -> None:
         schema = self.build_full_api().openapi()

@@ -656,34 +656,41 @@ export function connectTelemetryWS(
   onMessage: TelemetryCallback,
   tagIds?: string[],
 ): () => void {
-  // Ticket #4 will add the server-side WebSocket authentication handshake.
-  // Never put the opaque session token in the URL/query string: it would leak
-  // through browser history, proxies and access logs.
-  const ws = new WebSocket(WS_URL)
+  let ws: WebSocket | null = null
+  let cancelled = false
 
-  ws.onopen = () => {
-    if (tagIds && tagIds.length > 0) {
-      ws.send(JSON.stringify({ subscribe: tagIds }))
+  void (async () => {
+    const issued = await apiFetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST' })
+    if (!issued.ok || cancelled) return
+    const { ticket } = await issued.json() as { ticket: string }
+    if (cancelled) return
+    ws = new WebSocket(WS_URL)
+
+    ws.onopen = () => {
+      ws?.send(JSON.stringify({ authenticate: { ticket } }))
     }
-  }
 
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      if (data.tags && Array.isArray(data.tags)) {
-        onMessage(data.tags)
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'authenticated') {
+          ws?.send(JSON.stringify({ subscribe: tagIds || [] }))
+        } else if (data.tags && Array.isArray(data.tags)) {
+          onMessage(data.tags)
+        }
+      } catch {
+        // ignore parse errors
       }
-    } catch {
-      // ignore parse errors
     }
-  }
 
-  ws.onerror = (err) => {
-    console.error('[WS] Error:', err)
-  }
+    ws.onerror = (err) => {
+      console.error('[WS] Error:', err)
+    }
+  })().catch((err) => console.error('[WS] Ticket failed:', err))
 
   return () => {
-    ws.close()
+    cancelled = true
+    ws?.close()
   }
 }
 
@@ -911,6 +918,7 @@ export interface Alarm {
   alarm_source?: string | null
   alarm_count?: number | null
   alarm_code?: string | null
+  state?: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
 }
 
 export interface AlarmListResponse {
@@ -919,6 +927,25 @@ export interface AlarmListResponse {
   page: number
   page_size: number
   total_pages: number
+  summary: {
+    total: number
+    unacknowledged: number
+    by_severity: Record<AlarmLevel, number>
+  }
+}
+
+interface AlarmEventWire {
+  id: string
+  definition_id: string
+  entity_instance_id: string
+  state: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
+  severity: AlarmLevel
+  pending_at: string
+  active_at: string | null
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+  recovered_at: string | null
+  last_observation: { evidence?: { alarm_definition?: string } } | null
 }
 
 export async function fetchAlarms(
@@ -931,16 +958,46 @@ export async function fetchAlarms(
   nodeId?: string,
   entityId?: string,
 ): Promise<AlarmListResponse> {
+  void sourceKey
+  void nodeId
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
-  if (level) params.set('level', level)
-  if (sourceKey) params.set('source_key', sourceKey)
-  if (acknowledged !== undefined) params.set('acknowledged', String(acknowledged))
-  if (resolved !== undefined) params.set('resolved', String(resolved))
-  if (nodeId) params.set('node_id', nodeId)
-  if (entityId) params.set('entity_id', entityId)
-  const res = await apiFetch(`${API_BASE}/alarms?${params}`)
-  if (!res.ok) throw new Error(`Fetch alarms failed: ${res.status}`)
-  return res.json()
+  if (level) params.set('severity', level)
+  if (entityId) params.set('entity_instance_id', entityId)
+  if (resolved === true) params.set('state', 'recovered')
+  else if (acknowledged === true) params.set('state', 'active_acknowledged')
+  else if (acknowledged === false && resolved === false) params.set('state', 'open')
+  const res = await apiFetch(`${API_BASE}/alarm-events?${params}`)
+  if (!res.ok) throw new Error(`Fetch alarm events failed: ${res.status}`)
+  const data: {
+    items: AlarmEventWire[]
+    total: number
+    page: number
+    page_size: number
+    total_pages: number
+    summary: AlarmListResponse['summary']
+  } = await res.json()
+  return {
+    alarms: data.items.map((item): Alarm => ({
+      id: item.id,
+      rule_id: null,
+      node_id: null,
+      entity_id: item.entity_instance_id,
+      entity_name: `实体实例 ${item.entity_instance_id}`,
+      level: item.severity,
+      message: item.last_observation?.evidence?.alarm_definition || `告警定义 ${item.definition_id}`,
+      acknowledged: item.state === 'active_acknowledged',
+      ack_user: item.acknowledged_by,
+      ack_at: item.acknowledged_at,
+      created_at: item.active_at || item.pending_at,
+      resolved_at: item.recovered_at,
+      state: item.state,
+    })),
+    total: data.total,
+    page: data.page,
+    page_size: data.page_size,
+    total_pages: data.total_pages,
+    summary: data.summary,
+  }
 }
 
 
@@ -967,19 +1024,12 @@ export async function fetchAlarmCounts(nodeIds?: string[]): Promise<Record<strin
 }
 
 export async function acknowledgeAlarm(alarmId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/acknowledge`, {
-    method: 'PUT',
+  const res = await apiFetch(`${API_BASE}/alarm-events/${alarmId}/acknowledgements`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   })
   if (!res.ok) throw new Error(`Acknowledge alarm failed: ${res.status}`)
-}
-
-export async function resolveAlarm(alarmId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/resolve`, {
-    method: 'PUT',
-  })
-  if (!res.ok) throw new Error(`Resolve alarm failed: ${res.status}`)
 }
 // ── Alarm Types & Config ──
 
@@ -1011,6 +1061,247 @@ export async function fetchAlarmConfig(): Promise<{ tags: AlarmConfigTag[]; tota
 }
 
 // ── Global Entities ──
+
+export interface EntityInstance {
+  id: string
+  device_instance_id: string
+  slot_id: string
+  instance_key: string
+  device_category: string
+  device_display_name: string
+  definition_id: string
+  display_name: string
+  data_type: string
+  unit: string | null
+  direction: 'R' | 'W' | 'RW'
+  freshness_seconds: number
+}
+
+export interface ControlCommand {
+  id: string
+  status: string
+  code: string
+  source_type: string
+}
+
+export interface ControlConfirmation {
+  id: string
+  expires_at: string
+}
+
+export interface WorkbenchEntity {
+  entity_instance_id: string
+  slot_id: string
+  instance_key: string
+  definition_id: string
+  display_name: string
+  data_type: 'float' | 'int' | 'bool' | 'string' | string
+  unit: string | null
+  direction: 'R' | 'W' | 'RW'
+  status?: 'available' | 'unavailable'
+  code?: string
+  value?: unknown
+  observed_at?: string
+  quality?: number
+}
+
+export interface EmsWorkbench {
+  workbench_id: string
+  site_configuration_version: number
+  navigation: { id: 'overview' | 'trends' | 'alarms' | 'controls'; label: string }[]
+  groups: { id: string; label: string; entities: WorkbenchEntity[] }[]
+  kpis: { id: string; label: string; entities: WorkbenchEntity[] }[]
+  trends: { id: string; label: string; default_range: '1h' | '24h' | '7d' | '30d'; entities: WorkbenchEntity[] }[]
+  alarms: { visible: boolean }
+  controls: { visible: boolean; entities: WorkbenchEntity[] }
+}
+
+export interface EmsWorkbenchTrend {
+  id: string
+  label: string
+  range: '1h' | '24h' | '7d' | '30d'
+  series: (WorkbenchEntity & { points: { ts: string; value: unknown; quality: number }[] })[]
+}
+
+export async function fetchEmsWorkbench(): Promise<EmsWorkbench> {
+  const response = await apiFetch(`${API_BASE}/ems-workbench`)
+  if (!response.ok) throw await authError(response, `Fetch EMS workbench failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchEmsWorkbenchTrend(
+  trendId: string,
+  range: EmsWorkbenchTrend['range'],
+): Promise<EmsWorkbenchTrend> {
+  const response = await apiFetch(`${API_BASE}/ems-workbench/trends/${encodeURIComponent(trendId)}?range=${range}`)
+  if (!response.ok) throw await authError(response, `Fetch EMS trend failed: ${response.status}`)
+  return response.json()
+}
+
+export async function requestControlConfirmation(
+  entityInstanceId: string,
+  value: unknown,
+): Promise<ControlConfirmation> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-confirmations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ value }),
+  })
+  if (!response.ok) throw await authError(response, `Control confirmation failed: ${response.status}`)
+  return response.json()
+}
+
+export async function submitControlCommand(
+  entityInstanceId: string,
+  value: unknown,
+  confirmationId?: string,
+): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ value, ...(confirmationId ? { confirmation_id: confirmationId } : {}) }),
+  })
+  if (!response.ok) throw await authError(response, `Control command failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchControlCommand(commandId: string): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/control-commands/${encodeURIComponent(commandId)}`)
+  if (!response.ok) throw await authError(response, `Fetch control command failed: ${response.status}`)
+  return response.json()
+}
+
+export async function reconcileControlCommand(commandId: string): Promise<ControlCommand> {
+  const response = await apiFetch(`${API_BASE}/control-commands/${encodeURIComponent(commandId)}/reconcile`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await authError(response, `Reconcile control command failed: ${response.status}`)
+  return response.json()
+}
+
+export interface SolutionPackage {
+  id: string
+  package_id: string
+  version: string
+  display_name: string
+  digest: string
+  status: string
+  parameter_contracts: { id: string; type: string; required?: boolean; description?: string; values?: string[] }[]
+}
+
+export interface InstallationPlan {
+  id: string
+  package_record_id: string
+  status: string
+  digest: string
+  blockers: { code: string; message: string }[]
+  items: Record<string, unknown>[]
+}
+
+export interface SolutionInstallation {
+  id: string
+  package_record_id: string
+  site_configuration_version: number
+  status: string
+}
+
+export interface DeliveryReport {
+  id: string
+  installation_id: string
+  status: string
+  items: { acceptance_id: string; status: string; code: string }[]
+}
+
+export async function fetchSolutionPackages(): Promise<SolutionPackage[]> {
+  const response = await apiFetch(`${API_BASE}/solution-packages`)
+  if (!response.ok) throw await authError(response, `Fetch solution packages failed: ${response.status}`)
+  return (await response.json() as { items: SolutionPackage[] }).items
+}
+
+export async function importSolutionPackage(archive: File): Promise<SolutionPackage> {
+  const data = new FormData()
+  data.append('archive', archive)
+  const response = await apiFetch(`${API_BASE}/solution-packages/import`, { method: 'POST', body: data })
+  if (!response.ok) throw await authError(response, `Import solution package failed: ${response.status}`)
+  return response.json()
+}
+
+export async function createInstallationPlan(
+  packageRecordId: string,
+  request: { parameters: Record<string, unknown>; secret_references: Record<string, string> },
+): Promise<InstallationPlan> {
+  const response = await apiFetch(`${API_BASE}/solution-packages/${encodeURIComponent(packageRecordId)}/install-plans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!response.ok) throw await authError(response, `Create installation plan failed: ${response.status}`)
+  return response.json()
+}
+
+export async function applyInstallationPlan(plan: InstallationPlan): Promise<SolutionInstallation> {
+  const response = await apiFetch(`${API_BASE}/install-plans/${encodeURIComponent(plan.id)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({ plan_digest: plan.digest }),
+  })
+  if (!response.ok) throw await authError(response, `Apply installation plan failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchSolutionInstallations(): Promise<SolutionInstallation[]> {
+  const response = await apiFetch(`${API_BASE}/solution-installations`)
+  if (!response.ok) throw await authError(response, `Fetch solution installations failed: ${response.status}`)
+  return (await response.json() as { items: SolutionInstallation[] }).items
+}
+
+export interface DeliveryAcceptanceInput {
+  manual_commands?: Record<string, string>
+  policy_commands?: Record<string, string>
+  authorization_denials?: Record<string, string>
+}
+
+export async function runDeliveryAcceptance(
+  installationId: string,
+  input: DeliveryAcceptanceInput = {},
+): Promise<DeliveryReport> {
+  const response = await apiFetch(`${API_BASE}/solution-installations/${encodeURIComponent(installationId)}/acceptance-runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await authError(response, `Run delivery acceptance failed: ${response.status}`)
+  return response.json()
+}
+
+export interface LegacyEntityMigrationItem {
+  legacy_entity_id: string
+  legacy_entity_name: string
+  classification: 'unique' | 'missing' | 'ambiguous'
+  candidate_entity_instance_ids: string[]
+}
+
+export async function fetchEntityInstances(): Promise<{ items: EntityInstance[]; total: number }> {
+  const res = await apiFetch(`${API_BASE}/entity-instances`)
+  if (!res.ok) throw new Error(`Fetch entity instances failed: ${res.status}`)
+  return res.json()
+}
+
+export async function previewLegacyEntityMigration(): Promise<{
+  items: LegacyEntityMigrationItem[]
+  counts: Record<'unique' | 'missing' | 'ambiguous', number>
+  writes_applied: 0
+}> {
+  const res = await apiFetch(`${API_BASE}/entity-instances/legacy-migration-preview`)
+  if (!res.ok) throw new Error(`Preview legacy entity migration failed: ${res.status}`)
+  return res.json()
+}
 
 export interface Entity {
   id: string
@@ -1189,16 +1480,6 @@ export async function batchUnbindEntityBindings(bindingIds: string[]): Promise<{
 export async function fetchEntityHistory(entityId: string, range = '1h', page = 1, pageSize = 500): Promise<{ points: { ts: string; value: number | string | boolean | null; quality: number }[]; total: number; page: number; page_size: number }> {
   const res = await apiFetch(`${API_BASE}/entities/${entityId}/history?range=${range}&page=${page}&page_size=${pageSize}`)
   if (!res.ok) throw new Error(`Fetch entity history failed: ${res.status}`)
-  return res.json()
-}
-
-export async function writeEntityValue(entityId: string, value: any): Promise<{ status: string }> {
-  const res = await apiFetch(`${API_BASE}/entities/${entityId}/write`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ value }),
-  })
-  if (!res.ok) throw new Error(`Write entity failed: ${res.status}`)
   return res.json()
 }
 
@@ -1423,16 +1704,6 @@ export async function updateNanoMQACL(rules: NanoMQACLRule[]): Promise<{ [k: str
     body: JSON.stringify({ rules }),
   })
   if (!res.ok) throw new Error(`Update ACL failed: ${res.status}`)
-  return res.json()
-}
-
-export async function publishNanoMQMessage(topic: string, payload: string, qos = 0, retain = false): Promise<{ [k: string]: any }> {
-  const res = await apiFetch(`${API_BASE}/nanomq/publish`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, payload, qos, retain }),
-  })
-  if (!res.ok) throw new Error(`Publish failed: ${res.status}`)
   return res.json()
 }
 

@@ -226,6 +226,10 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
             package = imported.json()
+            assigned_public_package = await client.get(
+                "/api/v1/solution-packages",
+                headers=engineer_headers,
+            )
             plan_response = await client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
                 headers=engineer_headers,
@@ -261,6 +265,16 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 f"/api/v1/delivery-reports/{report['id']}",
                 headers=operator_headers,
             )
+            engineer_configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installation['site_configuration_version']}",
+                headers=engineer_headers,
+            )
+            operator_configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installation['site_configuration_version']}",
+                headers=operator_headers,
+            )
             operator_plan = await client.post(
                 f"/api/v1/solution-packages/{package['id']}/install-plans",
                 headers=operator_headers,
@@ -278,11 +292,10 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan_response.status_code, 201, plan_response.text)
         self.assertEqual(installed.status_code, 201, installed.text)
         self.assertEqual(repeated_install.json(), installation)
-        self.assertEqual(engineer_packages.status_code, 403, engineer_packages.text)
-        self.assertEqual(
-            engineer_packages.json()["detail"]["code"],
-            "PERMISSION_DENIED",
-        )
+        self.assertEqual(engineer_packages.status_code, 200, engineer_packages.text)
+        self.assertEqual([], engineer_packages.json()["items"])
+        self.assertEqual(assigned_public_package.status_code, 200, assigned_public_package.text)
+        self.assertEqual([package["id"]], [item["id"] for item in assigned_public_package.json()["items"]])
         self.assertEqual(operator_packages.status_code, 403, operator_packages.text)
         self.assertEqual(acceptance.status_code, 201, acceptance.text)
         self.assertEqual(
@@ -291,6 +304,8 @@ class AuthenticatedDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(operator_read.status_code, 200, operator_read.text)
         self.assertEqual(operator_read.json(), report)
+        self.assertEqual(engineer_configuration.status_code, 200)
+        self.assertEqual(operator_configuration.status_code, 403)
         self.assertEqual(operator_plan.status_code, 403, operator_plan.text)
         self.assertEqual(
             operator_plan.json()["detail"]["code"],

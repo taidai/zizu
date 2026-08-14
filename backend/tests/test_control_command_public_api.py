@@ -1,0 +1,1257 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+import ast
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from threading import Event, Thread
+import unittest
+from unittest.mock import patch
+from uuid import UUID
+
+from fastapi import FastAPI
+
+from tests.test_delivery_public_api import AuthenticatedDeliveryClient
+from tests import test_entity_delivery_public_api as entity_delivery_test
+
+
+class ConnectedGateway:
+    async def check(self):
+        from app.services.gateway_readiness import GatewayReadinessResult
+
+        return GatewayReadinessResult("neuron", "connected", "GATEWAY_CONNECTED")
+
+
+class RecordingDispatcher:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def dispatch(self, request: object) -> None:
+        self.requests.append(request)
+
+
+class FailingDispatcher(RecordingDispatcher):
+    def dispatch(self, request: object) -> None:
+        super().dispatch(request)
+        raise RuntimeError("simulated Neuron 403")
+
+
+class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def build_app(
+        *,
+        high_risk: bool = False,
+        dispatcher_fails: bool = False,
+        sources: tuple | None = None,
+        release_lock_reader=None,
+    ) -> tuple[FastAPI, RecordingDispatcher]:
+        from app.api.control_commands import (
+            get_default_control_commands,
+            get_control_compatibility,
+            router as control_router,
+        )
+        from app.api.neuron import router as neuron_router
+        from app.api.rpc import router as rpc_router
+        from app.api.entities import router as entities_router
+        from app.api.ems_policies import router as ems_policy_router
+        from app.api.solution_delivery import get_default_ems_policy_runtime
+        from app.services.control_commands import (
+            ControlCommandCompatibility,
+            ControlCommandRuntime,
+            InMemoryControlTargetResolver,
+            InMemoryControlCommandRepository,
+        )
+        from app.services.entity_instance_registry import SourceDescriptor
+        from app.services.automated_control_commands import AutomatedControlCommands
+        from app.services.ems_policy_runtime import EmsPolicyRuntime
+
+        default_sources = (
+            SourceDescriptor(entity_delivery_test.TAG_ID, "PCS-01", "PCS-01", "Setpoint", "FLOAT", "kW", "RW", True),
+            SourceDescriptor(entity_delivery_test.OTHER_TAG_ID, "PCS-01", "PCS-01", "Readback", "FLOAT", "kW", "R", True),
+            SourceDescriptor(entity_delivery_test.BACKUP_TAG_ID, "PCS-01", "PCS-01", "Ready", "BOOL", None, "R", True),
+            SourceDescriptor(entity_delivery_test.GRID_TAG_ID, "PCS-01", "PCS-01", "GridPower", "FLOAT", "kW", "R", True),
+        )
+        app = entity_delivery_test.EntityDeliveryPublicApiTest.build_app(
+            sources=sources or default_sources,
+            release_lock_reader=release_lock_reader,
+        )
+        dispatcher = FailingDispatcher() if dispatcher_fails else RecordingDispatcher()
+        runtime = ControlCommandRuntime(
+            registry=app.state.entity_instance_registry,
+            policies=app.state.entity_instance_repository,
+            readback=app.state.entity_instance_runtime,
+            dispatcher=dispatcher,
+            repository=InMemoryControlCommandRepository(),
+        )
+        compatibility_targets = InMemoryControlTargetResolver()
+        compatibility = ControlCommandCompatibility(runtime, compatibility_targets)
+        app.include_router(control_router, prefix="/api/v1")
+        app.include_router(neuron_router, prefix="/api/v1")
+        app.include_router(rpc_router, prefix="/api/v1")
+        app.include_router(entities_router, prefix="/api/v1")
+        app.include_router(ems_policy_router, prefix="/api/v1")
+        app.dependency_overrides[get_default_control_commands] = lambda: runtime
+        app.dependency_overrides[get_control_compatibility] = lambda: compatibility
+        policy_runtime = EmsPolicyRuntime(
+            app.state.delivery_repository,
+            app.state.entity_instance_catalog,
+            app.state.entity_instance_runtime,
+            AutomatedControlCommands(runtime),
+        )
+        runtime.set_policy_high_risk_authorizer(
+            policy_runtime.authorizes_high_risk_command
+        )
+        app.state.solution_delivery.set_policy_runtime(policy_runtime)
+        app.state.solution_delivery.set_control_command_runtime(runtime)
+        app.state.solution_delivery.set_gateway_readiness(ConnectedGateway())
+        app.state.policy_runtime = policy_runtime
+        app.dependency_overrides[get_default_ems_policy_runtime] = lambda: policy_runtime
+        app.state.control_compatibility_targets = compatibility_targets
+        return app, dispatcher
+
+    @staticmethod
+    async def install(
+        client: AuthenticatedDeliveryClient,
+        *,
+        high_risk: bool = False,
+    ) -> dict[str, str]:
+        imported = await client.post(
+            "/api/v1/solution-packages/import",
+            files={"archive": ("control-pcs.zizu.zip", entity_delivery_test.build_control_entity_package(high_risk=high_risk), "application/zip")},
+        )
+        if imported.status_code != 201:
+            raise AssertionError(imported.text)
+        planned = await client.post(
+            f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+            json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+        )
+        if planned.status_code != 201:
+            raise AssertionError(planned.text)
+        applied = await client.post(
+            f"/api/v1/install-plans/{planned.json()['id']}/apply",
+            json={"plan_digest": planned.json()["digest"]},
+            headers={"Idempotency-Key": "install-controllable-pcs"},
+        )
+        if applied.status_code != 201:
+            raise AssertionError(applied.text)
+        return {
+            item["definition_id"]: item["entity_instance_id"]
+            for item in planned.json()["items"]
+            if item["kind"] == "entity_binding"
+        }
+
+    @staticmethod
+    async def publish(client: AuthenticatedDeliveryClient, **values: object) -> None:
+        response = await client._client.post(
+            "/protocol-simulator/neuron",
+            json={
+                "message": {
+                    "node": "PCS-01",
+                    "timestamp": round(datetime.now(timezone.utc).timestamp() * 1000),
+                    "values": values,
+                }
+            },
+        )
+        if response.status_code != 200:
+            raise AssertionError(response.text)
+
+    async def test_operator_control_moves_from_dispatch_to_readback_confirmation(self) -> None:
+        app, dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            await self.publish(client, Ready=True, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "operator-setpoint-20",
+            }
+            submitted = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            repeated = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            await self.publish(client, Readback=20.05)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{submitted.json()['id']}/reconcile",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(201, submitted.status_code, submitted.text)
+        self.assertEqual("dispatched", submitted.json()["status"])
+        self.assertEqual(201, repeated.status_code, repeated.text)
+        self.assertEqual(submitted.json()["id"], repeated.json()["id"])
+        self.assertEqual(1, len(dispatcher.requests))
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual("readback_confirmed", reconciled.json()["status"])
+
+    async def test_engineer_simulates_then_evaluates_installed_policy_through_unified_command(self) -> None:
+        """A package policy has deterministic simulation evidence and no control bypass."""
+        app, dispatcher = self.build_app()
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "policy-pcs.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(),
+                    ),
+                    "application/zip",
+                )},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            self.assertEqual(201, plan.status_code, plan.text)
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-policy-pcs"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            headers = {"Authorization": await client._bearer("engineer")}
+            simulated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/simulate",
+                headers=headers,
+            )
+            unavailable = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(409, unavailable.status_code, unavailable.text)
+            self.assertEqual("ENTITY_DATA_MISSING", unavailable.json()["detail"]["code"])
+            scheduler = app.state.policy_runtime
+            self.assertEqual({"evaluated": 0, "commands": 0, "errors": 0}, scheduler.tick())
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            self.assertEqual("enabled", enabled.json()["status"])
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers=headers,
+            )
+            self.assertEqual(200, simulated.status_code, simulated.text)
+            self.assertTrue(simulated.json()["result"]["triggered"])
+            self.assertEqual(200, evaluated.status_code, evaluated.text)
+            command = evaluated.json()["command"]
+            self.assertEqual("policy", command["source_type"])
+            self.assertEqual("dispatched", command["status"])
+            self.assertEqual("policy.grid-import-cap", command["origin_evidence"]["trigger"]["policy_id"])
+            self.assertEqual(1, len(dispatcher.requests))
+            await self.publish(client, Readback=50.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{command['id']}/reconcile",
+                headers=headers,
+            )
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual("readback_confirmed", reconciled.json()["status"])
+
+    async def test_high_risk_policy_cannot_bypass_the_manual_confirmation_gate(self) -> None:
+        app, dispatcher = self.build_app(high_risk=True)
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "high-risk-policy.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                    ),
+                    "application/zip",
+                )},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            applied = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-high-risk-policy"},
+            )
+            self.assertEqual(201, applied.status_code, applied.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            rejected = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+        self.assertEqual(200, rejected.status_code, rejected.text)
+        self.assertEqual("rejected", rejected.json()["command"]["status"])
+        self.assertEqual("CONTROL_CONFIRMATION_REQUIRED", rejected.json()["command"]["code"])
+        self.assertEqual([], dispatcher.requests)
+
+    async def test_engineer_enabled_high_risk_policy_is_limited_to_its_declared_small_power_envelope(self) -> None:
+        """A reviewed 10 kW policy is the only automated exception to manual confirmation."""
+        app, dispatcher = self.build_app(high_risk=True)
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n"
+            "    definition: pcs.setpoint\n  value: 10\n  unit: kW\n"
+            "  highRiskAuthorization:\n    maximumAbsoluteValue: 10\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n"
+            "  expected:\n    triggered: true\n    actionValue: 10\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "safe-high-risk-policy.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                    ),
+                    "application/zip",
+                )},
+            )
+            self.assertEqual(201, imported.status_code, imported.text)
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-safe-high-risk-policy"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            headers = {"Authorization": await client._bearer("engineer")}
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers=headers,
+            )
+            self.assertEqual(200, evaluated.status_code, evaluated.text)
+            command = evaluated.json()["command"]
+            self.assertEqual("dispatched", command["status"])
+            self.assertEqual(10, command["expected_value"])
+            self.assertEqual(
+                {
+                    "maximum_absolute_value": 10,
+                    "policy_id": "policy.grid-import-cap",
+                    "revision": 1,
+                    "action_key": "cap-import",
+                },
+                command["origin_evidence"]["trigger"]["high_risk_authorization"],
+            )
+            self.assertEqual(1, len(dispatcher.requests))
+
+            # A future internal caller can know every public policy field, but
+            # it cannot turn that evidence into authority.  Only the policy
+            # runtime signs the ephemeral proof used by the high-risk gate.
+            from app.api.control_commands import get_default_control_commands
+            from app.services.automated_control_commands import (
+                AutomatedControlCommandRequest,
+                AutomatedControlCommands,
+            )
+            from uuid import NAMESPACE_URL, UUID, uuid5
+
+            forged = AutomatedControlCommands(
+                app.dependency_overrides[get_default_control_commands]()
+            ).submit(
+                AutomatedControlCommandRequest(
+                    source_type="policy",
+                    subject_id=uuid5(
+                        NAMESPACE_URL, "zizu/ems-policy/policy.grid-import-cap"
+                    ),
+                    subject_version=1,
+                    action_key="cap-import",
+                    entity_instance_id=UUID(command["entity_instance_id"]),
+                    value=10,
+                    trigger_evidence={
+                        "policy_id": "policy.grid-import-cap",
+                        "revision": 1,
+                        "high_risk_authorization": {
+                            "maximum_absolute_value": 10,
+                            "policy_id": "policy.grid-import-cap",
+                            "revision": 1,
+                            "action_key": "cap-import",
+                        },
+                    },
+                )
+            )
+            self.assertEqual("rejected", forged.status)
+            self.assertEqual("CONTROL_CONFIRMATION_REQUIRED", forged.code)
+            self.assertEqual(1, len(dispatcher.requests))
+            await self.publish(client, Readback=10.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{command['id']}/reconcile",
+                headers=headers,
+            )
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual("readback_confirmed", reconciled.json()["status"])
+
+    async def test_engineer_can_revoke_an_enabled_high_risk_policy_before_its_next_evaluation(self) -> None:
+        app, dispatcher = self.build_app(high_risk=True)
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n"
+            "    definition: pcs.setpoint\n  value: 10\n  unit: kW\n"
+            "  highRiskAuthorization:\n    maximumAbsoluteValue: 10\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n"
+            "  expected:\n    triggered: true\n    actionValue: 10\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "revocable-high-risk-policy.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                    ),
+                    "application/zip",
+                )},
+            )
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            applied = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-revocable-high-risk-policy"},
+            )
+            self.assertEqual(201, applied.status_code, applied.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            headers = {"Authorization": await client._bearer("engineer")}
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable", headers=headers
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            disabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/disable", headers=headers
+            )
+            self.assertEqual(200, disabled.status_code, disabled.text)
+            self.assertEqual("disabled", disabled.json()["status"])
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate", headers=headers
+            )
+        self.assertEqual(409, evaluated.status_code, evaluated.text)
+        self.assertEqual("POLICY_NOT_ENABLED", evaluated.json()["detail"]["code"])
+        self.assertEqual([], dispatcher.requests)
+
+    async def test_only_engineer_can_change_policy_activation(self) -> None:
+        """Activation is an implementation-engineer act, not a generic config write."""
+        app, _dispatcher = self.build_app(high_risk=True)
+        async with AuthenticatedDeliveryClient(app) as client:
+            for role, code in (("admin", "POLICY_ENGINEER_REQUIRED"), ("operator", "PERMISSION_DENIED")):
+                headers = {"Authorization": await client._bearer(role)}
+                for operation in ("enable", "disable"):
+                    response = await client._client.post(
+                        f"/api/v1/ems-policies/policy.grid-import-cap/{operation}",
+                        headers=headers,
+                    )
+                    self.assertEqual(403, response.status_code, response.text)
+                    self.assertEqual(code, response.json()["detail"]["code"])
+            engineer = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+        self.assertEqual(409, engineer.status_code, engineer.text)
+        self.assertEqual("POLICY_NOT_INSTALLED", engineer.json()["detail"]["code"])
+
+    async def test_high_risk_policy_cannot_declare_an_action_above_its_small_power_envelope(self) -> None:
+        app, _dispatcher = self.build_app(high_risk=True)
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n"
+            "    definition: pcs.setpoint\n  value: 11\n  unit: kW\n"
+            "  highRiskAuthorization:\n    maximumAbsoluteValue: 10\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n"
+            "  expected:\n    triggered: true\n    actionValue: 11\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "unsafe-high-risk-policy.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                    ),
+                    "application/zip",
+                )},
+            )
+        self.assertEqual(422, imported.status_code, imported.text)
+        self.assertEqual(
+            "POLICY_HIGH_RISK_AUTHORIZATION_INVALID",
+            imported.json()["detail"]["code"],
+        )
+
+    async def test_policy_import_rejects_non_finite_safety_values(self) -> None:
+        app, _dispatcher = self.build_app(high_risk=True)
+        template = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: {threshold}\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n"
+            "    definition: pcs.setpoint\n  value: {value}\n  unit: kW\n"
+            "  highRiskAuthorization:\n    maximumAbsoluteValue: {maximum}\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n"
+            "  expected:\n    triggered: true\n    actionValue: {expected}\n"
+        )
+        invalid_cases = (
+            (".inf", "10", "10", "10", "POLICY_CONDITION_INVALID"),
+            ("100", ".nan", "10", ".nan", "POLICY_ACTION_INVALID"),
+            ("100", "10", ".inf", "10", "POLICY_HIGH_RISK_AUTHORIZATION_INVALID"),
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            for index, (threshold, value, maximum, expected, code) in enumerate(invalid_cases):
+                policy = template.format(
+                    threshold=threshold, value=value, maximum=maximum, expected=expected
+                )
+                imported = await client.post(
+                    "/api/v1/solution-packages/import",
+                    files={"archive": (
+                        f"non-finite-policy-{index}.zizu.zip",
+                        entity_delivery_test.build_policy_package(
+                            policy,
+                            base_archive=entity_delivery_test.build_control_entity_package(high_risk=True),
+                        ),
+                        "application/zip",
+                    )},
+                )
+                self.assertEqual(422, imported.status_code, imported.text)
+                self.assertEqual(code, imported.json()["detail"]["code"])
+
+    async def test_delivery_report_keeps_policy_simulation_command_and_readback_evidence(self) -> None:
+        app, dispatcher = self.build_app()
+        policy = (
+            "schemaVersion: zizu.ems-policy/v1alpha1\n"
+            "id: policy.grid-import-cap\nkind: ems_policy\nrevision: 1\n"
+            "input:\n  slot: slot.pcs-primary\n  definition: grid.activePower\n  unit: kW\n"
+            "condition:\n  operator: gt\n  threshold: 100\n"
+            "action:\n  id: cap-import\n  target:\n    slot: slot.pcs-primary\n    definition: pcs.setpoint\n  value: 50\n  unit: kW\n"
+            "simulation:\n  input:\n    value: 120\n    unit: kW\n  expected:\n    triggered: true\n    actionValue: 50\n"
+        )
+        acceptance = (
+            "schemaVersion: zizu.acceptance/v1alpha1\n"
+            "id: acceptance.policy-grid-import-cap\n"
+            "kind: policy_execution\n"
+            "required: true\n"
+            "policy: policy.grid-import-cap\n"
+            "expectedAction: cap-import\n"
+            "timeout: 5s\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={"archive": (
+                    "policy-acceptance.zizu.zip",
+                    entity_delivery_test.build_policy_package(
+                        policy,
+                        base_archive=entity_delivery_test.build_control_entity_package(),
+                        acceptance_definition=acceptance,
+                    ),
+                    "application/zip",
+                )},
+            )
+            plan = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {"pcs.instance_key": "PCS-01", "pcs.device_key": "PCS-01"}},
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan.json()['id']}/apply",
+                json={"plan_digest": plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-policy-acceptance"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            headers = {"Authorization": await client._bearer("engineer")}
+            simulated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/simulate",
+                headers=headers,
+            )
+            self.assertEqual(200, simulated.status_code, simulated.text)
+            await self.publish(client, GridPower=120.0, Ready=True)
+            enabled = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/enable",
+                headers=headers,
+            )
+            self.assertEqual(200, enabled.status_code, enabled.text)
+            evaluated = await client._client.post(
+                "/api/v1/ems-policies/policy.grid-import-cap/evaluate",
+                headers=headers,
+            )
+            self.assertEqual(200, evaluated.status_code, evaluated.text)
+            command_id = evaluated.json()["command"]["id"]
+            await self.publish(client, Readback=50.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{command_id}/reconcile",
+                headers=headers,
+            )
+            self.assertEqual(200, reconciled.status_code, reconciled.text)
+            self.assertEqual("readback_confirmed", reconciled.json()["status"])
+            report = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                json={"policy_commands": {"acceptance.policy-grid-import-cap": command_id}},
+                headers={"Idempotency-Key": "accept-policy-evidence"},
+            )
+        self.assertEqual(201, report.status_code, report.text)
+        item = next(item for item in report.json()["items"] if item["acceptance_id"] == "acceptance.policy-grid-import-cap")
+        self.assertEqual("passed", item["status"], item)
+        self.assertEqual("POLICY_EXECUTION_CONFIRMED", item["code"])
+        self.assertEqual("policy.grid-import-cap", item["evidence"]["simulation"]["policy_id"])
+        self.assertEqual("readback_confirmed", item["evidence"]["command"]["status"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_operator_cannot_bypass_interlock_or_limit(self) -> None:
+        app, dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            await self.publish(client, Ready=False, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "blocked-interlock",
+            }
+            blocked = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            too_high = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers={**headers, "Idempotency-Key": "blocked-limit"},
+                json={"value": 101.0},
+            )
+
+        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertEqual("CONTROL_INTERLOCK_UNSATISFIED", blocked.json()["detail"]["code"])
+        self.assertEqual(409, too_high.status_code, too_high.text)
+        self.assertEqual("CONTROL_VALUE_OUT_OF_RANGE", too_high.json()["detail"]["code"])
+        self.assertEqual([], dispatcher.requests)
+
+    async def test_high_risk_confirmation_is_content_bound_and_single_use(self) -> None:
+        app, dispatcher = self.build_app(high_risk=True)
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client, high_risk=True)
+            await self.publish(client, Ready=True, Readback=20.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "high-risk-setpoint-20",
+            }
+            missing = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            confirmation = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-confirmations",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            changed = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers={**headers, "Idempotency-Key": "high-risk-setpoint-21"},
+                json={"value": 21.0, "confirmation_id": confirmation.json()["id"]},
+            )
+            confirmed = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-commands",
+                headers=headers,
+                json={"value": 20.0, "confirmation_id": confirmation.json()["id"]},
+            )
+            await self.publish(client, Readback=20.0)
+            reconciled = await client._client.post(
+                f"/api/v1/control-commands/{confirmed.json()['id']}/reconcile",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(409, missing.status_code, missing.text)
+        self.assertEqual("CONTROL_CONFIRMATION_REQUIRED", missing.json()["detail"]["code"])
+        self.assertEqual(201, confirmation.status_code, confirmation.text)
+        self.assertEqual(409, changed.status_code, changed.text)
+        self.assertEqual("CONTROL_CONFIRMATION_INVALID", changed.json()["detail"]["code"])
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        self.assertEqual("dispatched", confirmed.json()["status"])
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual("readback_confirmed", reconciled.json()["status"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_neuron_and_rpc_compatibility_routes_create_commands_not_direct_writes(self) -> None:
+        app, dispatcher = self.build_app()
+        node_id = UUID("30000000-0000-0000-0000-000000000001")
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_neuron(
+                node="PCS-01",
+                group="default",
+                tag="Setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            targets.register_rpc(node_id, UUID(ids["pcs.setpoint"]))
+            targets.register_legacy_rpc(
+                node_id=node_id,
+                command="pcs.setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "legacy-neuron-setpoint-20",
+            }
+            neuron = await client._client.post(
+                "/api/v1/neuron/write",
+                headers=headers,
+                json={"node": "PCS-01", "group": "default", "tag": "Setpoint", "value": 20.0},
+            )
+            unknown_neuron = await client._client.post(
+                "/api/v1/neuron/write",
+                headers={**headers, "Idempotency-Key": "legacy-neuron-unknown"},
+                json={"node": "PCS-01", "group": "default", "tag": "Unknown", "value": 20.0},
+            )
+            legacy_rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers=headers,
+                json={
+                    "command": "pcs.setpoint",
+                    "payload": {"value": 20.0},
+                    "topic": "ignored/arbitrary/topic",
+                },
+            )
+            unknown_rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers={**headers, "Idempotency-Key": "legacy-rpc-unknown"},
+                json={"command": "unknown.command", "payload": {"value": 20.0}},
+            )
+            rpc = await client._client.post(
+                f"/api/v1/devices/{node_id}/rpc",
+                headers={**headers, "Idempotency-Key": "legacy-neuron-setpoint-20"},
+                json={"entity_instance_id": ids["pcs.setpoint"], "value": 20.0},
+            )
+            queried = await client._client.get(
+                neuron.json()["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(201, neuron.status_code, neuron.text)
+        self.assertEqual("compatibility", neuron.json()["source_type"])
+        self.assertEqual("dispatched", neuron.json()["status"])
+        self.assertEqual("/api/v1/entity-instances/{id}/control-commands", neuron.json()["migration"]["replacement"])
+        self.assertEqual(409, unknown_neuron.status_code, unknown_neuron.text)
+        self.assertEqual("CONTROL_COMPATIBILITY_TARGET_UNRESOLVED", unknown_neuron.json()["detail"]["code"])
+        self.assertIsNone(
+            unknown_neuron.json()["detail"]["command"]["entity_instance_id"],
+        )
+        self.assertEqual(201, legacy_rpc.status_code, legacy_rpc.text)
+        self.assertEqual(neuron.json()["id"], legacy_rpc.json()["id"])
+        self.assertEqual(409, unknown_rpc.status_code, unknown_rpc.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            unknown_rpc.json()["detail"]["code"],
+        )
+        self.assertEqual(201, rpc.status_code, rpc.text)
+        self.assertEqual("compatibility", rpc.json()["source_type"])
+        self.assertEqual(neuron.json()["id"], rpc.json()["id"])
+        self.assertEqual(
+            f"/api/v1/control-commands/{neuron.json()['id']}",
+            neuron.json()["links"]["command"],
+        )
+        self.assertEqual(200, queried.status_code, queried.text)
+        self.assertEqual(neuron.json()["id"], queried.json()["id"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_compatibility_neuron_failure_is_a_failed_command_not_device_success(self) -> None:
+        app, dispatcher = self.build_app(dispatcher_fails=True)
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_neuron(
+                node="PCS-01",
+                group="default",
+                tag="Setpoint",
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            failed = await client._client.post(
+                "/api/v1/neuron/write",
+                headers={
+                    "Authorization": await client._bearer("operator"),
+                    "Idempotency-Key": "legacy-neuron-unavailable",
+                },
+                json={"node": "PCS-01", "group": "default", "tag": "Setpoint", "value": 20.0},
+            )
+
+        self.assertEqual(201, failed.status_code, failed.text)
+        self.assertEqual("failed", failed.json()["status"])
+        self.assertEqual("CONTROL_DISPATCH_FAILED", failed.json()["code"])
+        self.assertEqual("compatibility", failed.json()["source_type"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_legacy_entity_write_becomes_a_queryable_command_not_a_sync_write(self) -> None:
+        """The last global-entity write route has the same compatibility contract as RPC."""
+        app, dispatcher = self.build_app()
+        legacy_entity_id = "70000000-0000-0000-0000-000000000001"
+        unknown_entity_id = "70000000-0000-0000-0000-000000000002"
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            targets = app.state.control_compatibility_targets
+            targets.register_legacy_entity(
+                entity_id=UUID(legacy_entity_id),
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=0.0)
+            headers = {
+                "Authorization": await client._bearer("operator"),
+                "Idempotency-Key": "legacy-entity-setpoint-20",
+            }
+            accepted = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            replayed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers=headers,
+                json={"value": 20.0},
+            )
+            rejected = await client._client.post(
+                f"/api/v1/entities/{unknown_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-entity-unknown"},
+                json={"value": 20.0},
+            )
+            queried = await client._client.get(
+                accepted.json()["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            rejected_query = await client._client.get(
+                rejected.json()["detail"]["command"]["links"]["command"],
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(201, accepted.status_code, accepted.text)
+        self.assertEqual("compatibility", accepted.json()["source_type"])
+        self.assertEqual("dispatched", accepted.json()["status"])
+        self.assertEqual(
+            legacy_entity_id,
+            accepted.json()["origin_evidence"]["compatibility"]["legacy_entity_id"],
+        )
+        self.assertEqual(
+            "/api/v1/entity-instances/{id}/control-commands",
+            accepted.json()["migration"]["replacement"],
+        )
+        self.assertEqual(201, replayed.status_code, replayed.text)
+        self.assertEqual(accepted.json()["id"], replayed.json()["id"])
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            rejected.json()["detail"]["code"],
+        )
+        self.assertIsNone(rejected.json()["detail"]["command"]["entity_instance_id"])
+        self.assertEqual(
+            unknown_entity_id,
+            rejected.json()["detail"]["command"]["origin_evidence"]["compatibility"]["legacy_entity_id"],
+        )
+        self.assertEqual(200, rejected_query.status_code, rejected_query.text)
+        self.assertEqual(
+            "CONTROL_COMPATIBILITY_TARGET_UNRESOLVED",
+            rejected_query.json()["code"],
+        )
+        self.assertEqual(200, queried.status_code, queried.text)
+        self.assertEqual(accepted.json()["id"], queried.json()["id"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    async def test_legacy_entity_high_risk_confirmation_binds_target_value_not_route_shape(self) -> None:
+        """Compatibility preserves one high-risk confirmation contract with the new endpoint."""
+        app, dispatcher = self.build_app(high_risk=True)
+        legacy_entity_id = "70000000-0000-0000-0000-000000000011"
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client, high_risk=True)
+            app.state.control_compatibility_targets.register_legacy_entity(
+                entity_id=UUID(legacy_entity_id),
+                entity_instance_id=UUID(ids["pcs.setpoint"]),
+            )
+            await self.publish(client, Ready=True, Readback=20.0)
+            headers = {"Authorization": await client._bearer("operator")}
+            confirmation = await client._client.post(
+                f"/api/v1/entity-instances/{ids['pcs.setpoint']}/control-confirmations",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-confirm"},
+                json={"value": 20.0},
+            )
+            changed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-changed"},
+                json={"value": 21.0, "confirmation_id": confirmation.json()["id"]},
+            )
+            confirmed = await client._client.post(
+                f"/api/v1/entities/{legacy_entity_id}/write",
+                headers={**headers, "Idempotency-Key": "legacy-high-risk-accepted"},
+                json={"value": 20.0, "confirmation_id": confirmation.json()["id"]},
+            )
+
+        self.assertEqual(201, confirmation.status_code, confirmation.text)
+        self.assertEqual(409, changed.status_code, changed.text)
+        self.assertEqual("CONTROL_CONFIRMATION_INVALID", changed.json()["detail"]["code"])
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        self.assertEqual("dispatched", confirmed.json()["status"])
+        self.assertEqual(1, len(dispatcher.requests))
+
+    def test_only_control_runtime_calls_the_neuron_write_adapter(self) -> None:
+        """No legacy HTTP or resolver module may retain a device write call site."""
+        repository_root = Path(__file__).resolve().parents[2]
+        write_call_sites: list[str] = []
+        client_import_sites: list[str] = []
+        for source in (repository_root / "backend" / "app").rglob("*.py"):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            if any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write_tag"
+                for node in ast.walk(tree)
+            ):
+                write_call_sites.append(source.relative_to(repository_root).as_posix())
+            if any(
+                isinstance(node, ast.ImportFrom)
+                and node.module == "app.services.neuron_client"
+                and any(alias.name == "NeuronClient" for alias in node.names)
+                for node in ast.walk(tree)
+            ):
+                client_import_sites.append(source.relative_to(repository_root).as_posix())
+
+        self.assertEqual(
+            ["backend/app/services/control_commands.py"],
+            sorted(write_call_sites),
+        )
+        self.assertEqual(
+            ["backend/app/services/control_commands.py"],
+            sorted(client_import_sites),
+        )
+
+    def test_no_public_http_route_can_publish_an_arbitrary_mqtt_payload(self) -> None:
+        """MQTT administration must not become a second, untracked control channel."""
+        from app.main import create_app
+
+        paths = {route.path for route in create_app().routes if hasattr(route, "path")}
+        self.assertNotIn("/api/v1/nanomq/publish", paths)
+
+    async def test_rule_trigger_replays_as_one_command_then_confirms_via_protocol_readback(self) -> None:
+        """The rule execution seam shares command audit, cooldown, and readback semantics."""
+        from app.api.control_commands import get_default_control_commands
+        from app.services.automated_control_commands import AutomatedControlCommands
+        from app.services.rule_engine import run_rule_tick
+
+        app, dispatcher = self.build_app()
+        rule_id = UUID("80000000-0000-0000-0000-000000000001")
+        async with AuthenticatedDeliveryClient(app) as client:
+            ids = await self.install(client)
+            await self.publish(client, Ready=1)
+            rule_content = {
+                "when": "ready == 1",
+                "_config": {
+                    "sourceEntityInstanceIds": [ids["bms.ready"]],
+                    "inputMappings": {"ready": ids["bms.ready"]},
+                    "actions": [{
+                        "id": "setpoint-from-ready",
+                        "type": "control",
+                        "entity_instance_id": ids["pcs.setpoint"],
+                        "value": 20.0,
+                    }],
+                },
+            }
+
+            class RuleCursor:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def execute(self, query, params=()):
+                    self.query = query
+                    self.params = params
+
+                def fetchall(self):
+                    return [
+                        (
+                            rule_id,
+                            "control",
+                            json.dumps(rule_content),
+                            True,
+                            4,
+                        )
+                    ]
+
+            class RuleConnection:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def cursor(self):
+                    return RuleCursor()
+
+                def commit(self):
+                    return None
+
+            @contextmanager
+            def rule_connection():
+                yield RuleConnection()
+
+            commands = app.dependency_overrides[get_default_control_commands]()
+            with patch("app.services.telemetry_store.get_connection", rule_connection), patch(
+                "app.api.solution_delivery.get_default_entity_instance_registry",
+                return_value=app.state.entity_instance_registry,
+            ), patch(
+                "app.api.solution_delivery.get_default_entity_instance_runtime",
+                return_value=app.state.entity_instance_runtime,
+            ), patch(
+                "app.api.solution_delivery.get_default_automated_control_commands",
+                return_value=AutomatedControlCommands(commands),
+            ):
+                first_tick = run_rule_tick()
+                replay_tick = run_rule_tick()
+
+            self.assertEqual({"evaluated": 1, "alarms": 0, "controls": 1, "errors": 0}, first_tick)
+            self.assertEqual({"evaluated": 1, "alarms": 0, "controls": 1, "errors": 0}, replay_tick)
+            command_id = dispatcher.requests[0].command_id
+            first_read = await client._client.get(
+                f"/api/v1/control-commands/{command_id}",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+            await self.publish(client, Readback=20.05)
+            confirmed = await client._client.post(
+                f"/api/v1/control-commands/{command_id}/reconcile",
+                headers={"Authorization": await client._bearer("operator")},
+            )
+
+        self.assertEqual(1, len(dispatcher.requests))
+        self.assertEqual(200, first_read.status_code, first_read.text)
+        self.assertEqual("rule", first_read.json()["source_type"])
+        self.assertEqual(f"rule:{rule_id}", first_read.json()["actor"])
+        self.assertEqual(str(rule_id), first_read.json()["origin_evidence"]["subject"]["id"])
+        self.assertEqual(4, first_read.json()["origin_evidence"]["subject"]["version"])
+        self.assertEqual("setpoint-from-ready", first_read.json()["origin_evidence"]["action_key"])
+        self.assertEqual(200, confirmed.status_code, confirmed.text)
+        self.assertEqual("readback_confirmed", confirmed.json()["status"])
+
+    async def test_rule_api_rejects_legacy_physical_control_addresses_before_write(self) -> None:
+        app, _dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            legacy_neuron = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy physical action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "neuron_write",
+                                "node": "any-node",
+                                "group": "any-group",
+                                "tag": "any-tag",
+                                "value": 1,
+                            }]
+                        }
+                    },
+                },
+            )
+            legacy_mqtt = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy MQTT action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "control",
+                                "command": {"topic": "arbitrary/unsafe", "payload": {"value": 1}},
+                                "value": 1,
+                            }]
+                        }
+                    },
+                },
+            )
+
+            missing_action_id = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Unstable automatic action",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "sourceEntityInstanceIds": ["90000000-0000-0000-0000-000000000010"],
+                            "actions": [{
+                                "type": "control",
+                                "entity_instance_id": "90000000-0000-0000-0000-000000000011",
+                                "value": 1,
+                            }],
+                        },
+                    },
+                },
+            )
+            missing_inputs = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Automatic action without input evidence",
+                    "rule_type": "control",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "id": "stable-action",
+                                "type": "control",
+                                "entity_instance_id": "90000000-0000-0000-0000-000000000011",
+                                "value": 1,
+                            }],
+                        },
+                    },
+                },
+            )
+
+        self.assertEqual(409, legacy_neuron.status_code, legacy_neuron.text)
+        self.assertEqual("RULE_CONTROL_LEGACY_FORBIDDEN", legacy_neuron.json()["detail"]["code"])
+        self.assertEqual(409, legacy_mqtt.status_code, legacy_mqtt.text)
+        self.assertEqual("RULE_CONTROL_LEGACY_FORBIDDEN", legacy_mqtt.json()["detail"]["code"])
+        self.assertEqual(409, missing_action_id.status_code, missing_action_id.text)
+        self.assertEqual("RULE_CONTROL_ACTION_INVALID", missing_action_id.json()["detail"]["code"])
+        self.assertEqual(409, missing_inputs.status_code, missing_inputs.text)
+        self.assertEqual("RULE_CONTROL_INPUTS_REQUIRED", missing_inputs.json()["detail"]["code"])
+
+    async def test_rule_api_rejects_legacy_alarm_lifecycle_actions_before_write(self) -> None:
+        app, _dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            response = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy alarm writer",
+                    "rule_type": "alarm",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "alarm",
+                                "level": "MAJOR",
+                                "message": "legacy manually-created alarm",
+                            }]
+                        }
+                    },
+                },
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual(
+            "RULE_ALARM_ACTION_INVALID",
+            response.json()["detail"]["code"],
+        )
+
+    def test_gorules_control_outputs_cannot_define_runtime_control_targets(self) -> None:
+        from app.services.gorules_adapter import _extract_actions
+
+        actions = _extract_actions(
+            {
+                "command": {
+                    "node": "arbitrary-node",
+                    "group": "arbitrary-group",
+                    "tag": "arbitrary-tag",
+                    "value": 1,
+                },
+                "command.entity_instance_id": "90000000-0000-0000-0000-000000000001",
+                "command.value": 20.0,
+            },
+            {},
+        )
+
+        self.assertEqual([], actions)
+
+    def test_every_control_route_declares_bearer_and_control_capability(self) -> None:
+        from app.main import create_app
+
+        schema = create_app().openapi()
+        expected = {
+            ("post", "/api/v1/entity-instances/{entity_instance_id}/control-confirmations"),
+            ("post", "/api/v1/entity-instances/{entity_instance_id}/control-commands"),
+            ("get", "/api/v1/control-commands/{command_id}"),
+            ("post", "/api/v1/control-commands/{command_id}/reconcile"),
+            ("post", "/api/v1/neuron/write"),
+            ("post", "/api/v1/devices/{node_id}/rpc"),
+            ("post", "/api/v1/entities/{entity_id}/write"),
+        }
+        for method, path in expected:
+            with self.subTest(method=method, path=path):
+                operation = schema["paths"][path][method]
+                self.assertEqual(operation.get("x-zizu-capability"), "control.write")
+                self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+class PolicyActivationConcurrencyTest(unittest.TestCase):
+    def test_disable_waits_for_an_active_evaluation_boundary(self) -> None:
+        """Once disable returns, the activation cannot still be entering dispatch."""
+        from app.services.ems_policy_runtime import InMemoryPolicyActivationRepository
+
+        repository = InMemoryPolicyActivationRepository()
+        repository.enable(7, "policy.grid-import-cap", "user:engineer")
+        evaluation_entered = Event()
+        release_evaluation = Event()
+        disable_returned = Event()
+
+        def evaluate() -> None:
+            with repository.active(7, "policy.grid-import-cap") as active:
+                self.assertTrue(active)
+                evaluation_entered.set()
+                self.assertTrue(release_evaluation.wait(timeout=2))
+
+        def disable() -> None:
+            repository.disable(7, "policy.grid-import-cap", "user:engineer")
+            disable_returned.set()
+
+        evaluator = Thread(target=evaluate)
+        evaluator.start()
+        self.assertTrue(evaluation_entered.wait(timeout=2))
+        disabler = Thread(target=disable)
+        disabler.start()
+        self.assertFalse(disable_returned.wait(timeout=0.05))
+        release_evaluation.set()
+        evaluator.join(timeout=2)
+        disabler.join(timeout=2)
+        self.assertFalse(evaluator.is_alive())
+        self.assertFalse(disabler.is_alive())
+        self.assertTrue(disable_returned.is_set())
+        self.assertFalse(repository.enabled(7, "policy.grid-import-cap"))
+
+
+if __name__ == "__main__":
+    unittest.main()

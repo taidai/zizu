@@ -38,7 +38,7 @@ _scheduler_tasks = []
 AGGREGATION_INTERVAL_SEC = 60
 # F1 公式 tick 间隔 (秒)，比聚合更频繁，保证虚拟点先产出
 FORMULA_INTERVAL_SEC = 30
-# F2 规则 tick 间隔 (秒)
+# F2 规则与固定 EMS 策略 tick 间隔 (秒)
 RULE_INTERVAL_SEC = 60
 
 
@@ -70,7 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from app.core.config import settings
         from app.services.config_store import init_config_table, load_mqtt_topics
-        from app.services.telemetry_store import init_db_pool
+        from app.services.telemetry_store import (
+            init_db_pool,
+            verify_legacy_alarm_history_gate,
+        )
         from app.core.migrations import run_migrations
 
         # DB pool must be initialized before reading t_system_config
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if settings.deployment_mode == "production":
                 raise RuntimeError(message)
             logger.warning("[Main] {} (development mode)", message)
+        if settings.deployment_mode == "production":
+            verify_legacy_alarm_history_gate()
         try:
             from app.services.identity import verify_identity_schema
 
@@ -99,6 +104,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 identity_schema_error,
             )
         init_config_table()
+        try:
+            from app.api.solution_delivery import get_default_control_commands
+
+            recovered_commands = get_default_control_commands().recover()
+            if recovered_commands:
+                logger.info(
+                    "[Main] Recovered {} in-flight control commands without redispatch",
+                    len(recovered_commands),
+                )
+        except Exception as control_recovery_error:
+            if settings.deployment_mode == "production":
+                raise RuntimeError("Control command recovery failed") from control_recovery_error
+            logger.warning(
+                "[Main] Control command recovery unavailable (development mode): {}",
+                control_recovery_error,
+            )
         # 幂等播种标准全局实体目录（单一数据源）
         try:
             from app.core.standard_entities import seed_standard_entities
@@ -176,6 +197,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.aggregator import run_aggregation_tick
         from app.services.formula_engine import run_formula_tick
         from app.services.rule_engine import run_rule_tick
+        from app.api.solution_delivery import get_default_ems_policy_runtime
 
         async def _periodic_task(name: str, interval: int, fn) -> None:
             while True:
@@ -203,6 +225,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 name="f2_rules",
             )
         )
+        _scheduler_tasks.append(
+            asyncio.create_task(
+                _periodic_task("ems-policies", RULE_INTERVAL_SEC, get_default_ems_policy_runtime().tick),
+                name="ems_policies",
+            )
+        )
         logger.success(
             "[Main] F1/F2/F3 schedulers started (formula={}s, rules={}s, agg={}s) ✅",
             FORMULA_INTERVAL_SEC, RULE_INTERVAL_SEC, AGGREGATION_INTERVAL_SEC,
@@ -227,18 +255,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """Application factory."""
+    from app.core.config import settings
+
+    expose_development_docs = settings.deployment_mode == "development"
     app = FastAPI(
         title="ZiZu API",
         description="ZiZu IoT Platform - 替代 ThingsBoard 的工业 IoT 开发平台",
         version=APP_VERSION,
         lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if expose_development_docs else None,
+        redoc_url="/api/redoc" if expose_development_docs else None,
+        openapi_url="/api/openapi.json" if expose_development_docs else None,
     )
 
     # CORS middleware
-    from app.core.config import settings
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -309,6 +339,40 @@ def create_app() -> FastAPI:
         tags=["Solution Delivery"],
     )
 
+    from app.api.ems_workbench import router as ems_workbench_router
+    app.include_router(
+        ems_workbench_router,
+        prefix="/api/v1",
+        tags=["EMS Workbench"],
+    )
+
+    from app.api.ems_policies import router as ems_policy_router
+    app.include_router(ems_policy_router, prefix="/api/v1", tags=["EMS Policies"])
+
+    from app.api.entity_instances import router as entity_instances_router
+    app.include_router(
+        entity_instances_router,
+        prefix="/api/v1",
+        tags=["Entity Instances"],
+    )
+
+    from app.api.alarm_events import router as alarm_events_router
+    app.include_router(
+        alarm_events_router,
+        prefix="/api/v1",
+        tags=["Alarm Events"],
+    )
+
+    from app.api.control_commands import router as control_commands_router
+    app.include_router(
+        control_commands_router,
+        prefix="/api/v1",
+        tags=["Control Commands"],
+    )
+
+    from app.api.rpc import router as rpc_router
+    app.include_router(rpc_router, prefix="/api/v1", tags=["Control Commands"])
+
      # ---- Static Frontend (F0 可视化 V1) ----
     # 后端直接托管前端 dist，无需独立 nginx 容器
     import os
@@ -347,7 +411,9 @@ def create_app() -> FastAPI:
 
         @app.get("/", include_in_schema=False)
         async def root() -> RedirectResponse:
-            return RedirectResponse(url="/api/docs")
+            return RedirectResponse(
+                url="/api/docs" if expose_development_docs else "/api/v1/health/live"
+            )
 
     # TODO Phase 1 S4: app.include_router(telemetry_router, prefix="/api/v1")
     # TODO Phase 2:     app.include_router(virtual_points_router, prefix="/api/v1")

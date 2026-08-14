@@ -152,6 +152,7 @@ def build_minimal_package(
     platform_range: str = ">=0.4.77,<0.5.0",
     package_version: str = "1.0.0",
     acceptance_override: bytes | None = None,
+    parameters_yaml: str = "",
 ) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -168,6 +169,7 @@ def build_minimal_package(
         "displayName: Minimal liveness\n"
         "platform:\n"
         f"  version: \"{platform_range}\"\n"
+        f"{parameters_yaml}"
         "assets:\n"
         "  - id: acceptance.platform-liveness\n"
         "    kind: acceptance\n"
@@ -180,6 +182,37 @@ def build_minimal_package(
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr("solution.yaml", manifest)
         package.writestr("acceptance/liveness.yaml", acceptance)
+    return archive.getvalue()
+
+
+def build_operation_audit_package() -> bytes:
+    acceptance = (
+        "schemaVersion: zizu.acceptance/v1alpha1\n"
+        "id: acceptance.operation-audit\n"
+        "kind: operation_audit\n"
+        "required: true\n"
+        "timeout: 5s\n"
+    ).encode()
+    asset_digest = hashlib.sha256(acceptance).hexdigest()
+    manifest = (
+        "schemaVersion: zizu.solution/v1alpha1\n"
+        "id: org.zizu.operation-audit\n"
+        "version: 1.0.0\n"
+        "displayName: Operation audit\n"
+        "platform:\n"
+        "  version: \">=0.4.77,<0.5.0\"\n"
+        "assets:\n"
+        "  - id: acceptance.operation-audit\n"
+        "    kind: acceptance\n"
+        "    path: acceptance/operation-audit.yaml\n"
+        f"    sha256: \"{asset_digest}\"\n"
+        "acceptance:\n"
+        "  - acceptance.operation-audit\n"
+    ).encode()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("solution.yaml", manifest)
+        package.writestr("acceptance/operation-audit.yaml", acceptance)
     return archive.getvalue()
 
 
@@ -263,14 +296,20 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             base_url="http://testserver",
         ) as client:
             liveness = await client.get("/api/v1/health/live")
-            openapi = await client.get("/api/openapi.json")
 
         self.assertEqual(liveness.status_code, 200)
-        self.assertEqual(openapi.status_code, 200)
-        paths = openapi.json()["paths"]
+        # Production does not publish interactive API documentation. Inspect the
+        # application's generated schema directly to prove route registration.
+        paths = app.openapi()["paths"]
         self.assertIn("/api/v1/solution-packages/import", paths)
         self.assertIn("/api/v1/solution-installations", paths)
+        self.assertIn(
+            "/api/v1/solution-installations/{installation_id}/audit-events",
+            paths,
+        )
         self.assertIn("/api/v1/delivery-reports/{report_id}", paths)
+        self.assertIn("/api/v1/alarm-events", paths)
+        self.assertIn("/api/v1/alarm-events/{event_id}/acknowledgements", paths)
 
     async def test_anonymous_liveness_exposes_only_stable_public_contract(self) -> None:
         app = FastAPI()
@@ -286,7 +325,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"status": "alive", "version": "0.4.77"},
+            {"status": "alive", "version": "0.4.78"},
         )
 
     async def test_production_self_probe_ignores_environment_proxy(self) -> None:
@@ -626,6 +665,25 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             "incompatible-platform": build_minimal_package(
                 platform_range=">=0.5.0,<0.6.0",
             ),
+            "invalid-parameter-type-shape": build_minimal_package(
+                parameters_yaml=(
+                    "parameters:\n"
+                    "  - id: site.code\n"
+                    "    type: [string]\n"
+                    "    required: true\n"
+                    "    description: Stable site code\n"
+                ),
+            ),
+            "unsafe-parameter-pattern": build_minimal_package(
+                parameters_yaml=(
+                    "parameters:\n"
+                    "  - id: site.code\n"
+                    "    type: string\n"
+                    "    required: true\n"
+                    "    pattern: '^(a+)+$'\n"
+                    "    description: Stable site code\n"
+                ),
+            ),
             **{
                 f"acceptance-{name}": build_minimal_package(acceptance_override=content)
                 for name, content in invalid_acceptance.items()
@@ -701,6 +759,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queried.status_code, 200, queried.text)
         self.assertEqual(queried.json(), planned.json())
         plan = planned.json()
+        self.assertEqual(plan["configuration_digest"], package["digest"])
         self.assertEqual(plan["status"], "ready")
         self.assertEqual(plan["package_record_id"], package["id"])
         self.assertEqual(plan["package_digest"], package["digest"])
@@ -722,6 +781,852 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(len(plan["digest"]), 64)
+
+    async def test_missing_required_site_parameter_blocks_install_without_writes(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        package_archive = build_minimal_package(
+            package_id="org.zizu.ems-parameter-tracer",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.code\n"
+                "    type: string\n"
+                "    required: true\n"
+                "    description: Stable site code\n"
+            ),
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-parameter-tracer.zizu.zip",
+                        package_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(imported.status_code, 201, imported.text)
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={"parameters": {}, "secret_references": {}},
+            )
+
+            self.assertEqual(planned.status_code, 201, planned.text)
+            plan = planned.json()
+            self.assertEqual(plan["status"], "blocked")
+            self.assertEqual(
+                plan["blockers"],
+                [
+                    {
+                        "code": "PARAMETER_REQUIRED",
+                        "parameter_id": "site.code",
+                        "message": "Required site parameter is missing",
+                    }
+                ],
+            )
+            rejected = await client.post(
+                f"/api/v1/install-plans/{plan['id']}/apply",
+                json={"plan_digest": plan["digest"]},
+                headers={"Idempotency-Key": "blocked-parameter-plan"},
+            )
+            installations = await client.get("/api/v1/solution-installations")
+
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(
+            rejected.json()["detail"]["code"],
+            "INSTALL_PLAN_BLOCKED",
+        )
+        self.assertEqual(installations.json(), {"items": [], "total": 0})
+
+    async def test_typed_site_parameters_are_normalized_in_the_reviewable_plan(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        package_archive = build_minimal_package(
+            package_id="org.zizu.ems-typed-parameters",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.code\n"
+                "    type: string\n"
+                "    required: true\n"
+                "    pattern: '^[A-Z0-9-]{2,16}$'\n"
+                "    description: Stable site code\n"
+                "  - id: pcs.count\n"
+                "    type: integer\n"
+                "    required: true\n"
+                "    minimum: 1\n"
+                "    maximum: 8\n"
+                "    description: PCS device count\n"
+                "  - id: nominal.power\n"
+                "    type: number\n"
+                "    unit: kW\n"
+                "    required: true\n"
+                "    minimum: 0\n"
+                "    maximum: 10000\n"
+                "    description: Site nominal power\n"
+                "  - id: dispatch.enabled\n"
+                "    type: boolean\n"
+                "    required: true\n"
+                "    description: Enable dispatch\n"
+                "  - id: dispatch.mode\n"
+                "    type: enum\n"
+                "    required: true\n"
+                "    values: [self_consumption, peak_shaving]\n"
+                "    description: Dispatch strategy\n"
+                "  - id: controller.address\n"
+                "    type: address\n"
+                "    required: true\n"
+                "    description: Controller address\n"
+                "  - id: controller.port\n"
+                "    type: port\n"
+                "    required: true\n"
+                "    description: Modbus TCP port\n"
+                "  - id: poll.interval\n"
+                "    type: duration\n"
+                "    required: false\n"
+                "    default: 5s\n"
+                "    description: Poll interval\n"
+                "  - id: neuron.credentials\n"
+                "    type: secret\n"
+                "    required: true\n"
+                "    description: Neuron credential reference\n"
+            ),
+        )
+        submitted_parameters = {
+            "site.code": "EMS-01",
+            "pcs.count": 2,
+            "nominal.power": 250.5,
+            "dispatch.enabled": True,
+            "dispatch.mode": "self_consumption",
+            "controller.address": "192.0.2.10",
+            "controller.port": 502,
+        }
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-typed-parameters.zizu.zip",
+                        package_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(imported.status_code, 201, imported.text)
+            self.assertEqual(
+                [
+                    contract["id"]
+                    for contract in imported.json()["parameter_contracts"]
+                ],
+                [
+                    "site.code",
+                    "pcs.count",
+                    "nominal.power",
+                    "dispatch.enabled",
+                    "dispatch.mode",
+                    "controller.address",
+                    "controller.port",
+                    "poll.interval",
+                    "neuron.credentials",
+                ],
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": submitted_parameters,
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    },
+                },
+            )
+
+        self.assertEqual(planned.status_code, 201, planned.text)
+        plan = planned.json()
+        self.assertEqual(plan["status"], "ready")
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual(
+            [contract["id"] for contract in plan["parameter_contracts"]],
+            [
+                "site.code",
+                "pcs.count",
+                "nominal.power",
+                "dispatch.enabled",
+                "dispatch.mode",
+                "controller.address",
+                "controller.port",
+                "poll.interval",
+                "neuron.credentials",
+            ],
+        )
+        self.assertEqual(
+            next(
+                contract
+                for contract in plan["parameter_contracts"]
+                if contract["id"] == "nominal.power"
+            ),
+            {
+                "id": "nominal.power",
+                "type": "number",
+                "unit": "kW",
+                "required": True,
+                "minimum": 0,
+                "maximum": 10000,
+                "description": "Site nominal power",
+            },
+        )
+        self.assertEqual(
+            plan["parameters"],
+            {**submitted_parameters, "poll.interval": "5s"},
+        )
+        self.assertEqual(
+            plan["secret_references"],
+            {"neuron.credentials": "secret://site/neuron/credentials"},
+        )
+        self.assertNotIn("credentials", str(plan["parameters"]))
+
+    async def test_install_persists_an_immutable_site_configuration_version(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        package_archive = build_minimal_package(
+            package_id="org.zizu.ems-site-configuration",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.code\n"
+                "    type: string\n"
+                "    required: true\n"
+                "    description: Stable site code\n"
+                "  - id: neuron.credentials\n"
+                "    type: secret\n"
+                "    required: true\n"
+                "    description: Neuron credential reference\n"
+            ),
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-site-configuration.zizu.zip",
+                        package_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {"site.code": "EMS-01"},
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    },
+                },
+            )
+            plan = planned.json()
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan['id']}/apply",
+                json={"plan_digest": plan["digest"]},
+                headers={"Idempotency-Key": "install-site-configuration"},
+            )
+            configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{installed.json()['site_configuration_version']}"
+            )
+
+        self.assertEqual(installed.status_code, 201, installed.text)
+        self.assertEqual(configuration.status_code, 200, configuration.text)
+        snapshot = configuration.json()
+        self.assertEqual(snapshot["version"], 1)
+        self.assertEqual(snapshot["previous_version"], 0)
+        self.assertEqual(snapshot["parameters"], {"site.code": "EMS-01"})
+        self.assertEqual(
+            snapshot["secret_references"],
+            {"neuron.credentials": "secret://site/neuron/credentials"},
+        )
+        self.assertEqual(snapshot["digest"], plan["configuration_digest"])
+        self.assertNotIn("password", str(snapshot).lower())
+
+    async def test_changed_site_parameters_create_an_update_plan_and_new_version(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        package_archive = build_minimal_package(
+            package_id="org.zizu.ems-parameter-update",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: pcs.count\n"
+                "    type: integer\n"
+                "    required: true\n"
+                "    minimum: 1\n"
+                "    maximum: 8\n"
+                "    description: PCS count\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-default\n"
+                "    description: Site display name\n"
+            ),
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-parameter-update.zizu.zip",
+                        package_archive,
+                        "application/zip",
+                    )
+                },
+            )
+
+            async def plan_and_apply(
+                count: int,
+                key: str,
+                *,
+                site_name: str | None = None,
+            ) -> tuple[dict, dict]:
+                values: dict[str, object] = {"pcs.count": count}
+                if site_name is not None:
+                    values["site.name"] = site_name
+                planned = await client.post(
+                    f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                    json={"parameters": values},
+                )
+                plan = planned.json()
+                installed = await client.post(
+                    f"/api/v1/install-plans/{plan['id']}/apply",
+                    json={"plan_digest": plan["digest"]},
+                    headers={"Idempotency-Key": key},
+                )
+                self.assertEqual(installed.status_code, 201, installed.text)
+                return plan, installed.json()
+
+            first_plan, first = await plan_and_apply(
+                1,
+                "install-one-pcs",
+                site_name="customer-override",
+            )
+            update_plan, updated = await plan_and_apply(2, "install-two-pcs")
+            second_configuration = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{updated['site_configuration_version']}"
+            )
+            rollback_plan, rolled_back = await plan_and_apply(
+                1,
+                "install-one-pcs-as-new-version",
+            )
+            latest = await client.get(
+                f"/api/v1/site-configuration-versions/"
+                f"{rolled_back['site_configuration_version']}"
+            )
+
+        self.assertEqual(
+            {
+                item["action"]
+                for item in first_plan["items"]
+                if item["kind"] == "site_parameter"
+            },
+            {"add"},
+        )
+        self.assertEqual(
+            {
+                item["action"]
+                for item in update_plan["items"]
+                if item["asset_id"] == "pcs.count"
+            },
+            {"update"},
+        )
+        self.assertEqual(
+            {
+                item["action"]
+                for item in rollback_plan["items"]
+                if item["asset_id"] == "pcs.count"
+            },
+            {"update"},
+        )
+        parameter_change = next(
+            item
+            for item in update_plan["items"]
+            if item["kind"] == "site_parameter"
+        )
+        self.assertEqual(
+            parameter_change,
+            {
+                "asset_id": "pcs.count",
+                "kind": "site_parameter",
+                "action": "update",
+                "before": 1,
+                "after": 2,
+                "source": "engineer_input",
+                "unit": None,
+            },
+        )
+        site_name_change = next(
+            item
+            for item in update_plan["items"]
+            if item["asset_id"] == "site.name"
+        )
+        self.assertEqual(site_name_change["action"], "preserve")
+        self.assertEqual(site_name_change["before"], "customer-override")
+        self.assertEqual(site_name_change["after"], "customer-override")
+        self.assertEqual(site_name_change["source"], "engineer_input")
+        self.assertEqual(first["site_configuration_version"], 1)
+        self.assertEqual(updated["site_configuration_version"], 2)
+        self.assertEqual(rolled_back["site_configuration_version"], 3)
+        self.assertEqual(latest.json()["previous_version"], 2)
+        self.assertEqual(
+            latest.json()["parameters"],
+            {"pcs.count": 1, "site.name": "customer-override"},
+        )
+        self.assertEqual(
+            latest.json()["parameter_metadata"]["pcs.count"]["source"],
+            "engineer_input",
+        )
+        self.assertTrue(
+            latest.json()["parameter_metadata"]["pcs.count"]["modified_at"].endswith(
+                "+00:00"
+            )
+        )
+        self.assertEqual(
+            second_configuration.json()["parameter_metadata"]["site.name"],
+            latest.json()["parameter_metadata"]["site.name"],
+        )
+
+    async def test_package_and_site_parameter_changes_create_a_blocked_upgrade_plan(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        v1_archive = build_minimal_package(
+            package_id="org.zizu.ems-three-way-upgrade",
+            package_version="1.0.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v1\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v1\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+        v2_archive = build_minimal_package(
+            package_id="org.zizu.ems-three-way-upgrade",
+            package_version="1.1.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v2\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v2\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-three-way-v1.zizu.zip",
+                        v1_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            initial_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                json={"parameters": {"site.name": "customer-override"}},
+            )
+            initial_installation = await client.post(
+                f"/api/v1/install-plans/{initial_plan.json()['id']}/apply",
+                json={"plan_digest": initial_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-three-way-v2.zizu.zip",
+                        v2_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            upgrade_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{upgrade_plan.json()['id']}/apply",
+                json={"plan_digest": upgrade_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v2"},
+            )
+            invalid_conflict_review = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "upgrade_risk_resolutions": {
+                        "UPGRADE_PARAMETER_CONFLICT:site.name": "not a resolution"
+                    }
+                },
+            )
+            original_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{initial_installation.json()['site_configuration_version']}"
+            )
+            resolved_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={"parameters": {"site.name": "engineer-resolved-v2"}},
+            )
+            resolved_installation = await client.post(
+                f"/api/v1/install-plans/{resolved_plan.json()['id']}/apply",
+                json={"plan_digest": resolved_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v2-resolved"},
+            )
+            resolved_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{resolved_installation.json()['site_configuration_version']}"
+            )
+
+        self.assertEqual(imported_v1.status_code, 201, imported_v1.text)
+        self.assertEqual(initial_plan.status_code, 201, initial_plan.text)
+        self.assertEqual(initial_installation.status_code, 201, initial_installation.text)
+        self.assertEqual(imported_v2.status_code, 201, imported_v2.text)
+        self.assertEqual(upgrade_plan.status_code, 201, upgrade_plan.text)
+        self.assertEqual(upgrade_plan.json()["status"], "blocked")
+        self.assertIn(
+            {
+                "code": "UPGRADE_PARAMETER_CONFLICT",
+                "parameter_id": "site.name",
+                "message": "Package and site override both changed this parameter",
+            },
+            upgrade_plan.json()["blockers"],
+        )
+        conflict_item = next(
+            item
+            for item in upgrade_plan.json()["items"]
+            if item["kind"] == "site_parameter" and item["asset_id"] == "site.name"
+        )
+        self.assertEqual(conflict_item["action"], "conflict")
+        self.assertEqual(conflict_item["before"], "customer-override")
+        self.assertEqual(conflict_item["after"], "customer-override")
+        package_change = next(
+            item
+            for item in upgrade_plan.json()["items"]
+            if item["kind"] == "site_parameter" and item["asset_id"] == "site.mode"
+        )
+        self.assertEqual(package_change["action"], "update")
+        self.assertEqual(package_change["before"], "package-mode-v1")
+        self.assertEqual(package_change["after"], "package-mode-v2")
+        self.assertEqual(package_change["source"], "package_default")
+        self.assertEqual(blocked_apply.status_code, 409, blocked_apply.text)
+        self.assertEqual(
+            blocked_apply.json()["detail"]["code"], "INSTALL_PLAN_BLOCKED"
+        )
+        self.assertEqual(422, invalid_conflict_review.status_code)
+        self.assertEqual(
+            "UPGRADE_RISK_RESOLUTION_INVALID",
+            invalid_conflict_review.json()["detail"]["code"],
+        )
+        self.assertEqual(original_configuration.status_code, 200, original_configuration.text)
+        self.assertEqual(
+            original_configuration.json()["parameters"],
+            {"site.name": "customer-override", "site.mode": "package-mode-v1"},
+        )
+        self.assertEqual(resolved_plan.status_code, 201, resolved_plan.text)
+        self.assertEqual(resolved_plan.json()["status"], "ready")
+        self.assertEqual(resolved_installation.status_code, 201, resolved_installation.text)
+        self.assertEqual(resolved_configuration.status_code, 200, resolved_configuration.text)
+        self.assertEqual(resolved_configuration.json()["version"], 2)
+        self.assertEqual(
+            resolved_configuration.json()["parameters"],
+            {
+                "site.name": "engineer-resolved-v2",
+                "site.mode": "package-mode-v2",
+            },
+        )
+
+    async def test_removing_an_in_use_secret_reference_blocks_an_upgrade(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        v1_archive = build_minimal_package(
+            package_id="org.zizu.secret-removal-upgrade",
+            package_version="1.0.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: neuron.credentials\n"
+                "    type: secret\n"
+                "    required: true\n"
+                "    description: Runtime Neuron credentials\n"
+            ),
+        )
+        v2_archive = build_minimal_package(
+            package_id="org.zizu.secret-removal-upgrade",
+            package_version="1.1.0",
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "secret-removal-v1.zizu.zip",
+                        v1_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v1 = await client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                json={
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    }
+                },
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-secret-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "secret-removal-v2.zizu.zip",
+                        v2_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-secret-v2"},
+            )
+
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_SECRET_REFERENCE_REMOVAL",
+                "asset_id": "neuron.credentials",
+                "message": "Upgrade removes an in-use Secret reference",
+            },
+            plan_v2.json()["blockers"],
+        )
+        secret_block = next(
+            item
+            for item in plan_v2.json()["items"]
+            if item.get("kind") == "upgrade_safety"
+        )
+        self.assertEqual("block", secret_block["action"])
+        self.assertEqual(
+            "UPGRADE_SECRET_REFERENCE_REMOVAL:neuron.credentials",
+            secret_block["risk_key"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
+        )
+
+    async def test_invalid_values_and_raw_secrets_only_create_redacted_blockers(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        package_archive = build_minimal_package(
+            package_id="org.zizu.ems-invalid-parameters",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: pcs.count\n"
+                "    type: integer\n"
+                "    required: true\n"
+                "    minimum: 1\n"
+                "    maximum: 8\n"
+                "    description: PCS count\n"
+                "  - id: neuron.credentials\n"
+                "    type: secret\n"
+                "    required: true\n"
+                "    description: Neuron credentials\n"
+            ),
+        )
+        raw_secret = "raw-secret-must-never-be-persisted-or-reflected"
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-invalid-parameters.zizu.zip",
+                        package_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.count": 99,
+                        "neuron.credentials": raw_secret,
+                    },
+                    "secret_references": {},
+                },
+            )
+            malformed = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": [raw_secret],
+                    "secret_references": {},
+                },
+            )
+            installations = await client.get("/api/v1/solution-installations")
+
+        self.assertEqual(planned.status_code, 201, planned.text)
+        response_text = planned.text
+        self.assertNotIn(raw_secret, response_text)
+        self.assertEqual(planned.json()["parameters"], {})
+        self.assertEqual(planned.json()["secret_references"], {})
+        self.assertEqual(malformed.status_code, 422, malformed.text)
+        self.assertEqual(
+            malformed.json()["detail"]["code"],
+            "INSTALL_PLAN_REQUEST_INVALID",
+        )
+        self.assertNotIn(raw_secret, malformed.text)
+        self.assertEqual(
+            {blocker["code"] for blocker in planned.json()["blockers"]},
+            {
+                "PARAMETER_RANGE_INVALID",
+                "SECRET_REFERENCE_REQUIRED",
+                "SECRET_VALUE_FORBIDDEN",
+            },
+        )
+        self.assertEqual(installations.json(), {"items": [], "total": 0})
 
     async def test_repeating_the_same_install_command_returns_the_same_installation(self) -> None:
         from app.api.solution_delivery import (
@@ -945,7 +1850,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         repository = InMemoryDeliveryRepository()
         delivery = SolutionDelivery(
             repository,
-            platform_version="0.4.77",
+            platform_version="0.4.78",
             public_api_probe=AsgiPublicApiProbe(app),
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
@@ -1004,7 +1909,7 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.json(), run.json())
         body = report.json()
         self.assertEqual(body["status"], "passed")
-        self.assertEqual(body["platform_version"], "0.4.77")
+        self.assertEqual(body["platform_version"], "0.4.78")
         self.assertEqual(body["package_id"], "org.zizu.minimal-liveness")
         self.assertEqual(body["package_version"], "1.0.0")
         self.assertEqual(body["site_configuration_version"], 1)
@@ -1018,9 +1923,146 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     "code": "PLATFORM_LIVE",
                     "required": True,
                     "duration_ms": body["items"][0]["duration_ms"],
-                    "evidence": {"status": "alive", "version": "0.4.77"},
+                    "evidence": {"status": "alive", "version": "0.4.78"},
                 }
             ],
+        )
+
+    async def test_installation_audit_is_readable_and_verifiable_in_a_delivery_report(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "operation-audit.zizu.zip",
+                        build_operation_audit_package(),
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={},
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-operation-audit"},
+            )
+            installation_id = installed.json()["id"]
+            audit = await client.get(
+                f"/api/v1/solution-installations/{installation_id}/audit-events"
+            )
+            report = await client.post(
+                f"/api/v1/solution-installations/{installation_id}/acceptance-runs",
+                headers={"Idempotency-Key": "accept-operation-audit"},
+            )
+
+        self.assertEqual(installed.status_code, 201, installed.text)
+        self.assertEqual(audit.status_code, 200, audit.text)
+        self.assertEqual(audit.json()["total"], 1)
+        self.assertEqual(audit.json()["items"][0]["event"], "solution.install")
+        self.assertEqual(audit.json()["items"][0]["outcome"], "allowed")
+        self.assertEqual(audit.json()["items"][0]["actor"], "user:00000000-0000-0000-0000-000000000002")
+        self.assertEqual(report.status_code, 201, report.text)
+        self.assertEqual(report.json()["status"], "passed")
+        self.assertEqual(
+            report.json()["items"][0]["code"],
+            "OPERATION_AUDIT_AVAILABLE",
+        )
+
+    async def test_release_lock_acceptance_requires_the_exact_installed_package_lock(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        release_lock = {"status": "missing"}
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        repository = InMemoryDeliveryRepository()
+        delivery = SolutionDelivery(
+            repository,
+            platform_version="0.4.77",
+            release_lock_reader=lambda: release_lock,
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        acceptance = (
+            "schemaVersion: zizu.acceptance/v1alpha1\n"
+            "id: acceptance.platform-liveness\n"
+            "kind: release_lock\n"
+            "required: true\n"
+            "timeout: 5s\n"
+        ).encode()
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "release-lock.zizu.zip",
+                        build_minimal_package(acceptance_override=acceptance),
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={},
+            )
+            plan = planned.json()
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan['id']}/apply",
+                json={"plan_digest": plan["digest"]},
+                headers={"Idempotency-Key": "install-release-lock-acceptance"},
+            )
+            installation = installed.json()
+            missing = await client.post(
+                f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "missing-release-lock"},
+            )
+            release_lock.update(
+                {
+                    "status": "locked",
+                    "id": "00000000-0000-0000-0000-000000000004",
+                    "platform_version": "0.4.77",
+                    "architecture": "linux/arm64",
+                    "site_configuration_version": installation["site_configuration_version"],
+                    "package": {
+                        "id": imported.json()["package_id"],
+                        "version": imported.json()["version"],
+                        "digest": imported.json()["digest"],
+                    },
+                }
+            )
+            consistent = await client.post(
+                f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "consistent-release-lock"},
+            )
+
+        self.assertEqual(missing.status_code, 201, missing.text)
+        self.assertEqual(missing.json()["status"], "failed")
+        self.assertEqual(missing.json()["items"][0]["code"], "RELEASE_LOCK_MISSING")
+        self.assertEqual(consistent.status_code, 201, consistent.text)
+        self.assertEqual(consistent.json()["status"], "passed")
+        self.assertEqual(
+            consistent.json()["items"][0]["code"], "RELEASE_LOCK_CONSISTENT"
         )
 
     async def test_liveness_failures_are_saved_as_redacted_machine_reports(self) -> None:

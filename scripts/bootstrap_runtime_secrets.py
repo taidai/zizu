@@ -144,6 +144,7 @@ def bootstrap(
     env = parse_env(env_text)
     current_nanomq = env.get("NANOMQ_API_PASSWORD", "")
     current_db = env.get("DB_PASSWORD", "")
+    current_db_owner = env.get("DB_OWNER_PASSWORD", "")
     current_neuron = env.get("NEURON_PASSWORD", "")
     current_jwt = env.get("JWT_SECRET", "")
 
@@ -167,6 +168,8 @@ def bootstrap(
         try:
             current_db = validate_secret("database", current_db)
             current_jwt = validate_secret("jwt", current_jwt)
+            if current_db_owner.strip():
+                current_db_owner = validate_secret("database", current_db_owner)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
     if existing and neuron_password is None and (
@@ -202,6 +205,7 @@ def bootstrap(
         )
 
     db_password = secrets.token_urlsafe(32) if not existing else current_db
+    db_owner_password = secrets.token_urlsafe(32) if not existing else current_db_owner
     jwt_secret = secrets.token_urlsafe(48) if not existing else current_jwt
     resolved_neuron = neuron_password or current_neuron
     password = (
@@ -211,6 +215,7 @@ def bootstrap(
     )
     username = env.get("NANOMQ_API_USERNAME", "admin") or "admin"
     env_text = replace_env_value(env_text, "DB_PASSWORD", db_password)
+    env_text = replace_env_value(env_text, "DB_OWNER_PASSWORD", db_owner_password)
     env_text = replace_env_value(env_text, "NEURON_PASSWORD", resolved_neuron)
     env_text = replace_env_value(env_text, "NANOMQ_API_USERNAME", username)
     env_text = replace_env_value(env_text, "NANOMQ_API_PASSWORD", password)

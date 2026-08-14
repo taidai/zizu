@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 import csv
 import io
@@ -21,7 +21,6 @@ from app.services.entity_resolver import (
     get_entity_history,
     get_entity_realtime,
     resolve_entity_binding,
-    write_entity_value,
 )
 from app.core.standard_entities import STANDARD_ENTITIES, seed_standard_entities
 from app.services.entity_binder import auto_bind_standard_entities
@@ -29,12 +28,19 @@ from app.api.health import _VERSION as APP_VERSION
 from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
+    CONTROL_WRITE,
     RUNTIME_READ,
     capability_metadata,
     principal_for,
     protected,
 )
 from app.services.identity import Principal
+from app.api.control_commands import (
+    compatibility_error,
+    compatibility_response,
+    get_control_compatibility,
+)
+from app.services.control_commands import ControlCommandCompatibility
 
 router = APIRouter()
 
@@ -71,6 +77,13 @@ class EntityBindingRequest(BaseModel):
     brand: str | None = None
     priority: int = Field(1, ge=1, description="绑定优先级，数字越小越优先")
     enabled: bool = True
+
+
+class LegacyEntityWriteRequest(BaseModel):
+    """Compatibility-only write shape; new callers use an entity instance command."""
+
+    value: object
+    confirmation_id: UUID | None = None
 
 
 class EntityResponse(BaseModel):
@@ -962,18 +975,27 @@ async def entity_history(
     return _runtime_entity(data, principal)
 
 
-@router.post("/entities/{entity_id}/write")
-async def entity_write(entity_id: str, req: dict) -> dict:
-    """向实体写入控制值。"""
-    value = req.get("value")
-    if value is None:
-        raise HTTPException(status_code=400, detail="value is required")
-    try:
-        result = write_entity_value(entity_id, value)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("[API/entities] write failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post(
+    "/entities/{entity_id}/write",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONTROL_WRITE),
+)
+async def entity_write(
+    entity_id: UUID,
+    req: LegacyEntityWriteRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200),
+    principal: Principal = Depends(principal_for(CONTROL_WRITE)),
+    compatibility: ControlCommandCompatibility = Depends(get_control_compatibility),
+) -> dict:
+    """旧全局实体写入兼容入口：只能映射唯一确认实体实例，绝不直接下发设备。"""
+    command = compatibility.submit_legacy_entity(
+        actor=principal.actor,
+        entity_id=entity_id,
+        value=req.value,
+        idempotency_key=idempotency_key,
+        confirmation_id=req.confirmation_id,
+    )
+    if command.status == "rejected":
+        raise compatibility_error(command)
+    return compatibility_response(command)
 

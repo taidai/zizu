@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import ipaddress
+from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.concurrency import run_in_threadpool
 
@@ -22,6 +23,13 @@ _bearer = HTTPBearer(auto_error=False)
 _identity = Identity(
     PostgresIdentityRepository(),
     session_minutes=settings.auth_session_minutes,
+)
+
+_INSECURE_DEVELOPMENT_PRINCIPAL = Principal(
+    user_id=UUID("00000000-0000-0000-0000-000000000000"),
+    username="insecure-development-anonymous",
+    role="admin",
+    session_id=UUID("00000000-0000-0000-0000-000000000000"),
 )
 
 
@@ -88,7 +96,10 @@ def _request_scheme(request: Request) -> str:
         # never use them to upgrade an HTTP peer to HTTPS.
         if len(forwarded_values) == 1 and forwarded_values[0] in {"http", "https"}:
             return forwarded_values[0]
-    return request.url.scheme.lower()
+    return {"ws": "http", "wss": "https"}.get(
+        request.url.scheme.lower(),
+        request.url.scheme.lower(),
+    )
 
 
 async def require_secure_auth_transport(
@@ -131,6 +142,10 @@ def identity_http_error(exc: IdentityError) -> HTTPException:
         headers["WWW-Authenticate"] = "Bearer"
     if exc.retry_after_seconds is not None:
         headers["Retry-After"] = str(exc.retry_after_seconds)
+    if exc.audit_event_id is not None:
+        # Opaque ID only: it lets a delivery acceptance prove a real denial
+        # without exposing the global audit stream or request contents.
+        headers["X-ZiZu-Audit-Event-ID"] = str(exc.audit_event_id)
     return HTTPException(
         status_code=exc.status_code,
         detail={"code": exc.code, "message": str(exc)},
@@ -140,11 +155,19 @@ def identity_http_error(exc: IdentityError) -> HTTPException:
 
 async def current_principal(
     request: Request,
+    response: Response,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     identity: Identity = Depends(get_identity),
 ) -> Principal:
     request_id = request.headers.get("X-Request-ID")
     client_ip = _client_ip(request)
+    if (
+        settings.deployment_mode == "development"
+        and settings.allow_insecure_anonymous_access
+        and credentials is None
+    ):
+        response.headers["X-ZiZu-Security-Mode"] = "insecure-development"
+        return _INSECURE_DEVELOPMENT_PRINCIPAL
     await require_secure_auth_transport(request, identity)
     if credentials is None or credentials.scheme.lower() != "bearer":
         try:

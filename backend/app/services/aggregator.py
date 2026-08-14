@@ -133,6 +133,8 @@ def _compute_aggregate(cur, agg_fn: str, sources: list[UUID]) -> float | None:
             SELECT COALESCE(value_float, value_int::float) AS value
             FROM t_telemetry_latest
             WHERE tag_id = ANY(%s)
+            ORDER BY ts DESC
+            LIMIT 1
             """,
             (sources,),
         )

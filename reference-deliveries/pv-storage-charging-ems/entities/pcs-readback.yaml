@@ -1,0 +1,8 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: pcs.readback
+kind: entity_definition
+displayName: PCS 功率回读
+deviceCategory: pcs
+dataType: FLOAT
+unit: kW
+direction: R

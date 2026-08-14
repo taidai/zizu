@@ -14,6 +14,8 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.business_security import SYSTEM_MANAGE, protected
+
 router = APIRouter()
 
 
@@ -26,7 +28,7 @@ class PipelineConfig(BaseModel):
     flush_interval_sec: float = Field(..., ge=0.1, le=60.0, description="定时 flush 间隔 (秒)")
 
 
-@router.get("/pipeline/config")
+@router.get("/pipeline/config", **protected(SYSTEM_MANAGE))
 async def get_pipeline_config() -> dict:
     """获取当前管道配置。"""
     from app.core.config import settings
@@ -36,7 +38,7 @@ async def get_pipeline_config() -> dict:
     }
 
 
-@router.put("/pipeline/config")
+@router.put("/pipeline/config", **protected(SYSTEM_MANAGE))
 async def update_pipeline_config(req: PipelineConfig) -> dict:
     """更新入库节拍配置 (运行时生效, 不重启服务)。"""
     from app.core.config import settings
@@ -62,7 +64,7 @@ class MqttConfigRequest(BaseModel):
     mqtt_telemetry_topic: str = Field(..., description="MQTT 遥测主题，支持逗号分隔与 +/# 通配符")
 
 
-@router.get("/mqtt-config")
+@router.get("/mqtt-config", **protected(SYSTEM_MANAGE))
 async def get_mqtt_config() -> dict:
     """获取当前 MQTT 遥测主题配置（.env 与 DB 合并后的实际生效值）。"""
     from app.core.config import settings
@@ -76,7 +78,7 @@ async def get_mqtt_config() -> dict:
     }
 
 
-@router.put("/mqtt-config")
+@router.put("/mqtt-config", **protected(SYSTEM_MANAGE))
 async def update_mqtt_config(req: MqttConfigRequest) -> dict:
     """更新 MQTT 遥测主题并实时重订阅。"""
     from app.core.config import settings
@@ -123,7 +125,7 @@ class SqlQueryRequest(BaseModel):
     limit: int = Field(500, ge=1, le=5000, description="最大返回行数")
 
 
-@router.post("/query")
+@router.post("/query", **protected(SYSTEM_MANAGE))
 async def execute_sql(req: SqlQueryRequest) -> dict:
     """
     执行 SELECT SQL 查询 (只允许 SELECT, 禁止写操作)。
@@ -186,7 +188,7 @@ class TruncateRequest(BaseModel):
     confirm: str = Field(..., description="确认字符串, 必须输入 'yes' 才执行")
 
 
-@router.post("/admin/truncate")
+@router.post("/admin/truncate", **protected(SYSTEM_MANAGE))
 async def truncate_table(req: TruncateRequest) -> dict:
     """
     清空指定表 (白名单 + 确认机制)。

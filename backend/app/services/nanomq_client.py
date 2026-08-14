@@ -122,15 +122,8 @@ class NanoMQClient:
         return self._request("GET", "/api/v4/routes")
 
     # ══════════════════════════════════════════
-    # 消息发布/订阅代理
+    # 订阅代理
     # ══════════════════════════════════════════
-
-    def publish(self, topic: str, payload: str, qos: int = 0, retain: bool = False) -> dict:
-        return self._request(
-            "POST",
-            "/api/v4/mqtt/publish",
-            data={"topic": topic, "payload": payload, "qos": qos, "retain": retain},
-        )
 
     def subscribe(self, topic: str, qos: int = 0) -> dict:
         return self._request(

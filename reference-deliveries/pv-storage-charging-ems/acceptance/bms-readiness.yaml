@@ -1,0 +1,8 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.bms
+kind: entity_readiness
+required: true
+slot: slot.bms
+definition: bms.soc
+freshness: 30s
+timeout: 5s

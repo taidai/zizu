@@ -44,6 +44,8 @@ class BootstrapRuntimeSecretsTest(unittest.TestCase):
             env = parse_env(env_file.read_text(encoding="utf-8"))
             secret = parse_nanomq_http_credentials(secret_file.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(env["DB_PASSWORD"]), 32)
+            self.assertGreaterEqual(len(env["DB_OWNER_PASSWORD"]), 32)
+            self.assertNotEqual(env["DB_OWNER_PASSWORD"], env["DB_PASSWORD"])
             self.assertGreaterEqual(len(env["JWT_SECRET"]), 32)
             self.assertGreaterEqual(len(env["NANOMQ_API_PASSWORD"]), 32)
             self.assertEqual(env["NEURON_PASSWORD"], "rotated-neuron-test-value")

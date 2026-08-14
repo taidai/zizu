@@ -1,0 +1,8 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.evse
+kind: entity_readiness
+required: true
+slot: slot.evse
+definition: evse.active_power
+freshness: 30s
+timeout: 5s

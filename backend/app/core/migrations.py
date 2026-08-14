@@ -88,10 +88,30 @@ def run_migrations() -> dict:
 
     result = {"applied": [], "skipped": [], "errors": 0}
 
+    production = os.environ.get("DEPLOYMENT_MODE", "production") == "production"
     with get_connection() as conn:
         with conn.cursor() as cur:
-            _ensure_migrations_table(cur)
+            if production:
+                cur.execute("SELECT to_regclass('public.schema_migrations')")
+                if cur.fetchone()[0] is None:
+                    logger.error(
+                        "[Migrations] production requires schema_migrations; run the owner migration job first"
+                    )
+                    return {"applied": [], "skipped": [], "errors": 1}
+            else:
+                _ensure_migrations_table(cur)
             applied = _applied_versions(cur)
+
+            if production:
+                pending = [version for version, _filename, _path in files if version not in applied]
+                if pending:
+                    logger.error(
+                        "[Migrations] production application role cannot apply pending migrations: {}",
+                        pending,
+                    )
+                    return {"applied": [], "skipped": sorted(applied), "errors": len(pending)}
+                result["skipped"] = [version for version, _filename, _path in files]
+                return result
 
             for version, filename, path in files:
                 if version in applied:

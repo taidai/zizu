@@ -11,6 +11,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 
 from fastapi import APIRouter
 from loguru import logger
@@ -24,6 +25,7 @@ _start_time: float = time.monotonic()
 
 # Global reference to the pipeline (set by main.py lifespan)
 _pipeline = None
+_release_lock_summary_provider: Callable[[], dict] | None = None
 
 def _load_version() -> str:
     """从当前目录向上查找 VERSION 文件；失败时返回 0.0.0。"""
@@ -50,6 +52,20 @@ def set_pipeline(pipeline) -> None:
 def get_pipeline():
     """获取当前 pipeline 实例（供其他 API 模块使用）。"""
     return _pipeline
+
+
+def set_release_lock_summary_provider(provider: Callable[[], dict] | None) -> None:
+    """Test seam for the deployment-owned release lock reader."""
+    global _release_lock_summary_provider
+    _release_lock_summary_provider = provider
+
+
+def _release_lock_summary() -> dict:
+    if _release_lock_summary_provider is not None:
+        return _release_lock_summary_provider()
+    from app.services.release_lock import current_release_lock_summary
+
+    return current_release_lock_summary()
 
 
 @router.get("/health/live")
@@ -162,6 +178,7 @@ async def health_check() -> dict:
         },
         "pipeline": pipe_metrics,
         "validation": validation_points,
+        "release_lock": _release_lock_summary(),
     }
 
 

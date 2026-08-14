@@ -5,7 +5,6 @@ Entity Resolver — 全局实体解析服务
   - 实时数据查询
   - 历史数据查询
   - 规则引擎输入/输出
-  - RW/W 实体控制下发
 """
 from __future__ import annotations
 
@@ -244,79 +243,6 @@ def resolve_entity_binding_by_name(entity_name: str) -> dict | None:
     except Exception as e:
         logger.error('[EntityResolver] resolve by name failed: {}', e)
         return None
-
-
-def write_entity_value(entity_id_or_name: str | UUID, value: float | int | bool | str) -> dict:
-    """
-    向实体写入控制值。
-    规则：
-      1. 仅 entity_type 为 W 或 RW 的实体可写。
-      2. 优先绑定 binding_type='PHYSICAL' 的 tag（可直接下发）。
-      3. 通过 Neuron REST API 下发到 source_path 或 tag 对应 node。
-    """
-    from app.services.neuron_client import NeuronClient, NeuronConfig
-    from app.core.config import settings
-
-    binding = resolve_entity_binding(entity_id_or_name)
-    if not binding:
-        binding = resolve_entity_binding_by_name(str(entity_id_or_name))
-    if not binding:
-        raise ValueError(f'Entity not found: {entity_id_or_name}')
-    if not binding:
-        raise ValueError("Entity has no active binding")
-
-    if binding["entity_type"] not in ("W", "RW"):
-        raise ValueError(f"Entity {binding['entity_name']} is not writable")
-
-    if binding["binding_type"] != "PHYSICAL":
-        raise ValueError("Only PHYSICAL binding supports write-back in MVP")
-
-    tag_id = binding["tag_id"]
-    node_name = binding["node_name"]
-    tag_name = binding["tag_name"]
-    source_path = binding.get("source_path") or tag_name
-    source_type = binding.get("source_type") or "neuron"
-
-    # MVP 通过 Neuron REST API 写 tag。
-    # Neuron source_path 标准格式: neuron_node/group/tag (如 en9_pcs/cmd/心跳信号)
-    group_name = "group0"
-    neuron_tag_name = tag_name
-    if source_type.lower() == "neuron" and "/" in source_path:
-        parts = source_path.split("/")
-        if len(parts) >= 3:
-            node_name = parts[0]          # Neuron 节点名
-            group_name = parts[1]
-            neuron_tag_name = "/".join(parts[2:])
-        elif len(parts) == 2:
-            group_name, neuron_tag_name = parts
-    elif "/" in source_path:
-        group_name, neuron_tag_name = source_path.split("/", 1)
-
-    config = NeuronConfig(
-        url=settings.neuron_api_url,
-        username=settings.neuron_username,
-        password=settings.neuron_password,
-        deployment_mode=settings.deployment_mode,
-        allow_insecure_dev_secrets=settings.allow_insecure_dev_secrets,
-    )
-    client = NeuronClient(config)
-    try:
-        result = client.write_tag(node_name, group_name, neuron_tag_name, value)
-        logger.info("[EntityResolver] write entity={} tag={}/{} value={} result={}",
-                    binding["entity_name"], node_name, tag_name, value, result)
-        return {
-            "status": "ok",
-            "entity_id": str(binding["entity_id"]),
-            "entity_name": binding["entity_name"],
-            "tag_id": str(tag_id),
-            "tag_name": tag_name,
-            "node_name": node_name,
-            "value": value,
-            "neuron_result": result,
-        }
-    except Exception as e:
-        logger.error("[EntityResolver] write failed: {}", e)
-        raise ValueError(f"Write failed: {e}") from e
 
 
 def refresh_entity_latest(tag_id: str | UUID, node_id: str | UUID, ts, **values) -> None:
