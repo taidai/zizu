@@ -3,13 +3,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from app.services.alarm_definition_dispatch import AlarmDefinitionDispatcher
 from app.services.alarm_runtime import (
-    AlarmDefinition,
     AlarmDefinitionCatalog,
     AlarmObservation,
     AlarmOutcome,
     AlarmRuntime,
-    OPEN_STATES,
 )
 from app.services.entity_instance_registry import EntityInstanceError
 from app.services.entity_instance_runtime import EntityInstanceRuntime
@@ -27,6 +26,10 @@ class EntityAlarmAdapter:
         self._definitions = definitions
         self._entity_runtime = entity_runtime
         self._alarm_runtime = alarm_runtime
+        self._definition_dispatcher = AlarmDefinitionDispatcher(
+            definitions,
+            alarm_runtime,
+        )
 
     def submit_entity(self, entity_instance_id: UUID) -> tuple[AlarmOutcome, ...]:
         observation = self._entity_runtime.read_for_alarm(entity_instance_id)
@@ -36,7 +39,7 @@ class EntityAlarmAdapter:
             else 0
         )
         outcomes: list[AlarmOutcome] = []
-        for definition in self._definitions_for_entity(entity_instance_id):
+        for definition in self._definition_dispatcher.for_entity(entity_instance_id):
             outcomes.append(
                 self._alarm_runtime.submit(
                     AlarmObservation(
@@ -62,37 +65,6 @@ class EntityAlarmAdapter:
                 )
             )
         return tuple(outcomes)
-
-    def _definitions_for_entity(
-        self,
-        entity_instance_id: UUID,
-    ) -> tuple[AlarmDefinition, ...]:
-        """Dispatch the current definition and any still-open immutable version.
-
-        Package upgrades move the mutable current projection forward.  An event
-        already opened under the prior definition must nevertheless continue to
-        receive confirmed observations until its own recovery condition closes
-        it; otherwise an active alarm can become permanently stranded.
-        """
-        current = self._definitions.for_entity(entity_instance_id)
-        historical: dict[UUID, AlarmDefinition] = {}
-        assets_with_open_events: set[str] = set()
-        for event in self._alarm_runtime.list():
-            if (
-                event.entity_instance_id == entity_instance_id
-                and event.state in OPEN_STATES
-            ):
-                definition = self._definitions.get(event.definition_id)
-                if definition is not None:
-                    historical[definition.id] = definition
-                    assets_with_open_events.add(definition.asset_id)
-        definitions = {
-            definition.id: definition
-            for definition in current
-            if definition.asset_id not in assets_with_open_events
-        }
-        definitions.update(historical)
-        return tuple(definitions[key] for key in sorted(definitions, key=str))
 
     def submit_all(self) -> tuple[AlarmOutcome, ...]:
         """Test/protocol boundary helper; unavailable instances contribute nothing."""
