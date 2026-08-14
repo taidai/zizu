@@ -90,6 +90,7 @@ class TagAlarmAdapter:
                 "mqtt_topic": topic,
                 "source_key": source_key,
                 "external_id": external_id,
+                "source_quality": sample.quality,
             },
         )
 
@@ -156,6 +157,9 @@ class MqttAlarmAdapter:
             return ()
         if not isinstance(decoded, dict):
             return ()
+        quality = decoded.get("quality")
+        if not isinstance(quality, int) or isinstance(quality, bool):
+            quality = 0
         outcomes: list[AlarmOutcome] = []
         for source_key, external_id, value in _error_items(decoded):
             tag_id = self._tag_ids_by_external_id.get(external_id)
@@ -163,7 +167,7 @@ class MqttAlarmAdapter:
                 continue
             outcomes.extend(
                 self._tag_adapter.submit_mqtt(
-                    TagAlarmSample(tag_id, observed_at, value, 192),
+                    TagAlarmSample(tag_id, observed_at, value, quality),
                     topic=topic,
                     source_key=source_key,
                     external_id=external_id,

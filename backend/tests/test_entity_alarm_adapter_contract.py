@@ -44,6 +44,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
         }
         self.assertNotIn("process_entity_alarms", imported)
         self.assertNotIn("process_entity_alarms", called)
+        self.assertIn("_submit_installed_entity_alarms", source)
         self.assertIn("_submit_unified_tag_alarms", source)
 
     def test_open_event_keeps_its_immutable_definition_after_an_upgrade(self) -> None:

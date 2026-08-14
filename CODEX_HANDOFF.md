@@ -1,17 +1,18 @@
 ---
 
-## Session 2026-08-14 — Ticket #13 标签与 MQTT 告警来源迁移（已本地提交，待双轴复审）
+## Session 2026-08-14 — Ticket #13 标签与 MQTT 告警来源迁移（已本地提交并复审）
 
 ### 已实现
 - 新增标签/MQTT 来源 Adapter：它们只构造 `AlarmObservation` 并提交给 `AlarmRuntime`，不再保存、计数、恢复事件或创建通知。
-- 管道在遥测成功写入最新值后才提交标签观测；专用 MQTT 告警 topic 及普通遥测中的 error 分组通过同一 Adapter 进入状态机。
+- 管道在遥测成功写入最新值后才提交标签观测；专用 MQTT 告警 topic 及普通遥测中的 error 分组通过同一 Adapter 进入状态机。标签批次严格按观测时间提交；同批已由标签覆盖的实体实例不会再由“最新值”路径重复提交。
 - 只接受已确认实体实例的活动物理来源；MQTT 外部 ID 必须在这些来源中唯一，重名或无映射时不猜测路由、不新写旧 `t_alarms`。
-- 三来源的同一条件已证明同样经历 pending、active、acknowledged、recovered；高频采样仍只有一个事件和一个状态转换通知。
+- 三来源的同一条件已证明同样经历 pending、active、acknowledged、recovered；高频采样仍只有一个事件和一个状态转换通知。MQTT 必须提供顶层整数 `quality=192`；缺失、布尔或非法质量码按坏质量处理，不能触发或恢复。
 - 将“当前/历史不可变定义”分派从实体 Adapter 提取为共享模块，标签/MQTT 也不会在包升级时拆分连续故障。
 
 ### 验证证据
-- 标签/MQTT/实体辅助状态机、旧写库调用静态门禁、实体告警与公开交付回归：18/18 通过。
-- 完整公开交付回归：21/21 通过（53.971 秒）；`compileall` 与 `git diff --check` 通过。
+- 标签/MQTT/实体辅助状态机、逆序批次与实体排除门禁、旧写库调用静态门禁、实体告警与公开交付回归：19/19 通过。
+- 完整后端 `pytest tests -q`：174 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` 的 SUM/LAST 两项 SQL 断言失败，本票未触及该模块。完整公开交付回归亦为 21/21 通过；`compileall` 与 `git diff --check` 通过。
+- Spec / Standards 双轴最终 PASS，阻断为 0。
 - 未执行真实 PostgreSQL 迁移/运行主缝：本机没有隔离 `*_test` 数据库，绝不使用现场库。
 
 ### 当前边界 / Next

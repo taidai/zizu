@@ -66,13 +66,18 @@ class EntityAlarmAdapter:
             )
         return tuple(outcomes)
 
-    def submit_all(self) -> tuple[AlarmOutcome, ...]:
-        """Test/protocol boundary helper; unavailable instances contribute nothing."""
+    def submit_all(
+        self,
+        *,
+        exclude_entity_instance_ids: set[UUID] | None = None,
+    ) -> tuple[AlarmOutcome, ...]:
+        """Submit only instances not already represented by this flush's tag samples."""
         outcomes: list[AlarmOutcome] = []
         entity_ids = {
             definition.entity_instance_id
             for definition in self._definitions.all_definitions()
         }
+        entity_ids.difference_update(exclude_entity_instance_ids or set())
         for entity_instance_id in entity_ids:
             try:
                 outcomes.extend(self.submit_entity(entity_instance_id))

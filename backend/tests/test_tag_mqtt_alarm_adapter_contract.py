@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 
@@ -14,7 +16,7 @@ STARTED_AT = datetime(2026, 8, 14, 10, tzinfo=timezone.utc)
 
 
 class TagMqttAlarmAdapterContractTest(unittest.TestCase):
-    def _runtime(self):
+    def _runtime(self, trigger_duration_seconds: float = 1):
         from app.services.alarm_runtime import (
             AlarmDefinition,
             AlarmRuntime,
@@ -29,7 +31,7 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
             entity_instance_id=ENTITY_INSTANCE_ID,
             entity_definition_id="pcs.faultCode",
             trigger={"op": "gt", "value": 0},
-            trigger_duration_seconds=1,
+            trigger_duration_seconds=trigger_duration_seconds,
             recovery={"op": "lte", "value": 0},
             recovery_duration_seconds=1,
             severity="MAJOR",
@@ -39,7 +41,7 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         repository = InMemoryAlarmRepository()
         return definitions, AlarmRuntime(definitions, repository), repository
 
-    def _tag_adapter(self, definitions, runtime):
+    def _tag_adapter(self, definitions, runtime, sources=None):
         from app.services.tag_mqtt_alarm_adapter import (
             InMemoryTagAlarmSourceResolver,
             TagAlarmAdapter,
@@ -49,7 +51,7 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         return TagAlarmAdapter(
             definitions,
             runtime,
-            InMemoryTagAlarmSourceResolver(
+            sources or InMemoryTagAlarmSourceResolver(
                 {
                     TAG_ID: TagAlarmSource(
                         tag_id=TAG_ID,
@@ -103,10 +105,10 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         adapter = MqttAlarmAdapter(tag_adapter, {"faultCode": TAG_ID})
         topic = "/alarm/pcs-01"
         outcomes = [
-            *adapter.submit(topic, b'{"error1":{"faultCode":1}}', STARTED_AT),
+            *adapter.submit(topic, b'{"quality":192,"error1":{"faultCode":1}}', STARTED_AT),
             *adapter.submit(
                 topic,
-                b'{"error1":{"faultCode":1}}',
+                b'{"quality":192,"error1":{"faultCode":1}}',
                 STARTED_AT + timedelta(seconds=1),
             ),
             runtime.acknowledge(
@@ -118,12 +120,12 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
             ),
             *adapter.submit(
                 topic,
-                b'{"error1":{"faultCode":0}}',
+                b'{"quality":192,"error1":{"faultCode":0}}',
                 STARTED_AT + timedelta(seconds=2),
             ),
             *adapter.submit(
                 topic,
-                b'{"error1":{"faultCode":0}}',
+                b'{"quality":192,"error1":{"faultCode":0}}',
                 STARTED_AT + timedelta(seconds=3),
             ),
         ]
@@ -232,6 +234,138 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         self.assertNotIn("process_alarm_message", source)
         self.assertNotIn("process_tag_alarms", source)
         self.assertIn("_submit_unified_tag_alarms", source)
+
+    def test_pipeline_submits_only_persisted_confirmed_tag_and_mqtt_observations(self) -> None:
+        from app.models.schemas import TelemetryRecord
+        from app.services.pipeline import DataPipeline
+        from app.services.tag_mqtt_alarm_adapter import MqttAlarmAdapter
+
+        definitions, runtime, repository = self._runtime(trigger_duration_seconds=1)
+        pipeline = DataPipeline()
+        class RecordingEntityAdapter:
+            def __init__(self) -> None:
+                self.excluded_entity_instance_ids: set[UUID] | None = None
+
+            def submit_all(self, *, exclude_entity_instance_ids: set[UUID]):
+                self.excluded_entity_instance_ids = exclude_entity_instance_ids
+                return ()
+
+        entity_adapter = RecordingEntityAdapter()
+        pipeline._entity_alarm_adapter = entity_adapter
+        from app.services.tag_mqtt_alarm_adapter import TagAlarmSource
+
+        pipeline._tag_alarm_sources.replace(
+            {
+                TAG_ID: TagAlarmSource(
+                    tag_id=TAG_ID,
+                    entity_instance_id=ENTITY_INSTANCE_ID,
+                    tag_name="faultCode",
+                    max_observation_gap_seconds=30,
+                )
+            }
+        )
+        pipeline._tag_alarm_adapter = self._tag_adapter(
+            definitions,
+            runtime,
+            pipeline._tag_alarm_sources,
+        )
+        pipeline._mqtt_alarm_adapter = MqttAlarmAdapter(
+            pipeline._tag_alarm_adapter,
+            {"faultCode": TAG_ID},
+        )
+        pipeline._mqtt = SimpleNamespace(is_alarm_topic=lambda topic: topic.startswith("/alarm/"))
+        pipeline._buffer.append(
+            TelemetryRecord(
+                ts=STARTED_AT + timedelta(seconds=1),
+                node_id=UUID("72000000-0000-0000-0000-000000000004"),
+                tag_id=TAG_ID,
+                value_int=1,
+                quality=192,
+            )
+        )
+        pipeline._buffer.append(
+            TelemetryRecord(
+                ts=STARTED_AT,
+                node_id=UUID("72000000-0000-0000-0000-000000000004"),
+                tag_id=TAG_ID,
+                value_int=1,
+                quality=192,
+            )
+        )
+
+        with patch(
+            "app.services.pipeline.batch_insert_telemetry",
+            AsyncMock(return_value=1),
+        ) as persisted, patch(
+            "app.services.pipeline.upsert_telemetry_latest",
+            AsyncMock(),
+        ) as latest:
+            import asyncio
+
+            asyncio.run(pipeline.flush_now())
+
+        self.assertEqual(1, len(repository.list_events()))
+        self.assertEqual("active_unacknowledged", repository.list_events()[0].state)
+        self.assertEqual({ENTITY_INSTANCE_ID}, entity_adapter.excluded_entity_instance_ids)
+        persisted.assert_awaited_once()
+        latest.assert_awaited_once()
+
+        import asyncio
+
+        asyncio.run(
+            pipeline.on_message(
+                SimpleNamespace(
+                    topic="/alarm/pcs-01",
+                    payload=b'{"quality":192,"error1":{"faultCode":1}}',
+                    qos=0,
+                )
+            )
+        )
+        self.assertEqual(
+            "mqtt",
+            repository.list_events()[0].last_observation["source_kind"],
+        )
+
+        unmapped_definitions, unmapped_runtime, unmapped_repository = self._runtime(
+            trigger_duration_seconds=0
+        )
+        unmapped_pipeline = DataPipeline()
+        unmapped_pipeline._tag_alarm_adapter = self._tag_adapter(
+            unmapped_definitions,
+            unmapped_runtime,
+        )
+        unmapped_pipeline._mqtt_alarm_adapter = MqttAlarmAdapter(
+            unmapped_pipeline._tag_alarm_adapter,
+            {},
+        )
+        unmapped_pipeline._mqtt = pipeline._mqtt
+        asyncio.run(
+            unmapped_pipeline.on_message(
+                SimpleNamespace(
+                    topic="/alarm/ambiguous",
+                    payload=b'{"quality":192,"error1":{"faultCode":1}}',
+                    qos=0,
+                )
+            )
+        )
+        self.assertEqual((), unmapped_repository.list_events())
+
+    def test_mqtt_without_good_quality_cannot_recover_an_active_event(self) -> None:
+        from app.services.tag_mqtt_alarm_adapter import MqttAlarmAdapter, TagAlarmSample
+
+        definitions, runtime, repository = self._runtime(trigger_duration_seconds=0)
+        tag_adapter = self._tag_adapter(definitions, runtime)
+        tag_adapter.submit(TagAlarmSample(TAG_ID, STARTED_AT, 1, 192))
+        adapter = MqttAlarmAdapter(tag_adapter, {"faultCode": TAG_ID})
+
+        outcomes = adapter.submit(
+            "/alarm/pcs-01",
+            b'{"error1":{"faultCode":0}}',
+            STARTED_AT + timedelta(seconds=1),
+        )
+
+        self.assertEqual(["ALARM_STILL_ACTIVE"], [item.code for item in outcomes])
+        self.assertEqual("active_unacknowledged", repository.list_events()[0].state)
 
 
 if __name__ == "__main__":

@@ -68,6 +68,7 @@ class DataPipeline:
         self._mqtt_alarm_tag_ids: dict[str, UUID] = {}
         self._tag_alarm_adapter: TagAlarmAdapter | None = None
         self._mqtt_alarm_adapter: MqttAlarmAdapter | None = None
+        self._entity_alarm_adapter = None
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
 
@@ -509,8 +510,44 @@ class DataPipeline:
         try:
             if batch:
                 await asyncio.to_thread(self._submit_unified_tag_alarms, batch)
+                await asyncio.to_thread(
+                    self._submit_installed_entity_alarms,
+                    self._entity_instances_covered_by_tag_batch(batch),
+                )
         except Exception as e:
-            logger.error("[Pipeline] Unified tag alarm processing failed: {}", e)
+            logger.error("[Pipeline] Unified alarm processing failed: {}", e)
+
+    def _entity_instances_covered_by_tag_batch(
+        self,
+        batch: list[TelemetryRecord],
+    ) -> set[UUID]:
+        """Keep each confirmed physical source on exactly one lifecycle path per flush."""
+        return {
+            source.entity_instance_id
+            for record in batch
+            if _telemetry_value(record) is not None
+            and (source := self._tag_alarm_sources.resolve(record.tag_id)) is not None
+        }
+
+    def _submit_installed_entity_alarms(
+        self,
+        excluded_entity_instance_ids: set[UUID],
+    ) -> None:
+        """Keep entity freshness and quality for installed sources absent from this batch."""
+        if self._entity_alarm_adapter is None:
+            from app.services.entity_alarm_adapter import (
+                build_postgres_entity_alarm_adapter,
+            )
+
+            self._entity_alarm_adapter = build_postgres_entity_alarm_adapter()
+        outcomes = self._entity_alarm_adapter.submit_all(
+            exclude_entity_instance_ids=excluded_entity_instance_ids,
+        )
+        if outcomes:
+            logger.debug(
+                "[Pipeline] Installed entity observations submitted: {}",
+                len(outcomes),
+            )
 
     def _tag_alarm_adapter_for_runtime(self) -> TagAlarmAdapter:
         if self._tag_alarm_adapter is None:
@@ -531,7 +568,7 @@ class DataPipeline:
         """Submit only durable, uniquely confirmed tag observations to ADR-0004."""
         adapter = self._tag_alarm_adapter_for_runtime()
         outcomes = []
-        for record in batch:
+        for record in sorted(batch, key=lambda item: item.ts):
             value = _telemetry_value(record)
             if value is None:
                 continue
