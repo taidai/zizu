@@ -1,0 +1,9 @@
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.evse
+kind: entity_instance_slot
+deviceCategory: evse
+instancesParameter: evse.instances
+displayName: 充电桩
+freshness: 30s
+requiredEntities:
+  - {definition: evse.active_power, matcher: {id: evse-active-power, tagName: ActivePower}}

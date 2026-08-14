@@ -383,6 +383,11 @@ docker compose --env-file release.env -f deploy/docker-compose.release.e606.yml 
 或 `init-db/` 源码。Caddy 自动签发证书前，DNS 必须已指向目标主机，且防火墙只能对外放行
 `80/443`。反向代理以固定地址传递 `X-Forwarded-*`，应用只信任该地址。
 
+首个公开参考交付位于
+[`reference-deliveries/pv-storage-charging-ems`](reference-deliveries/pv-storage-charging-ems/README.md)。
+发布流水线用 `scripts/build_reference_delivery.py` 生成并签出 ZIP；实施工程师只使用发布的
+ZIP、本文档和产品界面完成设备接入、参数填写与确定性绑定，绝不修改源码或直接操作数据库。
+
 旧 `docker-compose*.yml`、`deploy.sh` 和旧 e606 说明属于 v0.4.77 维护遗留，**不得**用于
 认证版本或新的生产发布；不得在 e606 现场构建镜像、使用 `latest` 或覆盖镜像内源码。
 

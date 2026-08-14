@@ -1,0 +1,9 @@
+schemaVersion: zizu.entity-instance-slot/v1alpha1
+id: slot.pv
+kind: entity_instance_slot
+deviceCategory: pv
+instancesParameter: pv.instances
+displayName: 光伏逆变器
+freshness: 30s
+requiredEntities:
+  - {definition: pv.active_power, matcher: {id: pv-active-power, tagName: ActivePower}}

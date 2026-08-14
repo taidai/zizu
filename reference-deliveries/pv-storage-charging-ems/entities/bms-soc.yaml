@@ -1,0 +1,8 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: bms.soc
+kind: entity_definition
+displayName: BMS 荷电状态
+deviceCategory: bms
+dataType: FLOAT
+unit: "%"
+direction: R

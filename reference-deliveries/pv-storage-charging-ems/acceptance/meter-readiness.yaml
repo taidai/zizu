@@ -1,0 +1,8 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.meter
+kind: entity_readiness
+required: true
+slot: slot.meter
+definition: grid.active_power
+freshness: 30s
+timeout: 5s

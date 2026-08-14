@@ -1,0 +1,8 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: grid.active_power
+kind: entity_definition
+displayName: 关口有功功率
+deviceCategory: meter
+dataType: FLOAT
+unit: kW
+direction: R

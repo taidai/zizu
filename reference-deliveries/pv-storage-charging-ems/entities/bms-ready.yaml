@@ -1,0 +1,8 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: bms.ready
+kind: entity_definition
+displayName: BMS 就绪
+deviceCategory: pcs
+dataType: BOOL
+unit: null
+direction: R

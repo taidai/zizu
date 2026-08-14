@@ -1,0 +1,7 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.grid-import-lifecycle
+kind: alarm_lifecycle
+required: true
+alarmDefinition: alarm.grid-import-high
+expectedState: recovered
+timeout: 30s

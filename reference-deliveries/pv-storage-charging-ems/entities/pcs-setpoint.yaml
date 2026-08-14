@@ -1,0 +1,16 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: pcs.setpoint
+kind: entity_definition
+displayName: PCS 功率设定值
+deviceCategory: pcs
+dataType: FLOAT
+unit: kW
+direction: RW
+control:
+  minimum: -5000
+  maximum: 5000
+  cooldown: 5s
+  readback: {definition: pcs.readback, tolerance: 1, timeout: 30s}
+  interlocks:
+    - {definition: bms.ready, equals: true}
+  highRisk: true

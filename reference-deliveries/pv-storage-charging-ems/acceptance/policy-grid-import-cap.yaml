@@ -1,0 +1,7 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.policy-grid-import-cap
+kind: policy_execution
+required: true
+policy: policy.grid-import-cap
+expectedAction: limit-grid-import
+timeout: 30s
