@@ -27,6 +27,7 @@ def build_entity_package(
     package_version: str = "1.0.0",
     multiple_devices: bool = False,
     manual_failover: bool = False,
+    workbench_definition: str | None = None,
 ) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -93,6 +94,8 @@ def build_entity_package(
     definition_digest = hashlib.sha256(entity_definition).hexdigest()
     entity_digest = hashlib.sha256(entity_slot).hexdigest()
     entity_acceptance_digest = hashlib.sha256(entity_acceptance).hexdigest()
+    workbench = workbench_definition.encode() if workbench_definition is not None else None
+    workbench_digest = hashlib.sha256(workbench).hexdigest() if workbench else None
     manifest = (
         "schemaVersion: zizu.solution/v1alpha1\n"
         "id: org.zizu.single-pcs\n"
@@ -138,6 +141,15 @@ def build_entity_package(
         "    kind: acceptance\n"
         "    path: acceptance/pcs-active-power.yaml\n"
         f"    sha256: \"{entity_acceptance_digest}\"\n"
+        + (
+            "  - id: workbench.ems\n"
+            "    kind: ems_workbench\n"
+            "    path: workbench/ems.yaml\n"
+            f"    sha256: \"{workbench_digest}\"\n"
+            if workbench is not None
+            else ""
+        )
+        +
         "acceptance:\n"
         "  - acceptance.platform-liveness\n"
         "  - acceptance.pcs-active-power\n"
@@ -149,6 +161,8 @@ def build_entity_package(
         package.writestr("entities/pcs-primary.yaml", entity_slot)
         package.writestr("entities/pcs-active-power.yaml", entity_definition)
         package.writestr("acceptance/pcs-active-power.yaml", entity_acceptance)
+        if workbench is not None:
+            package.writestr("workbench/ems.yaml", workbench)
     return archive.getvalue()
 
 
@@ -305,9 +319,11 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             router as entity_instance_router,
         )
         from app.api.solution_delivery import (
+            get_default_ems_workbench,
             get_solution_delivery,
             router as delivery_router,
         )
+        from app.api.ems_workbench import router as ems_workbench_router
         from app.api.alarm_events import get_alarm_runtime, router as alarm_event_router
         from app.api.health import router as health_router
         from app.api.rules import (
@@ -338,6 +354,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             InMemoryDeliveryRepository,
             SolutionDelivery,
         )
+        from app.services.ems_workbench import EmsWorkbench
 
         delivery_repository = InMemoryDeliveryRepository()
         source_catalog = InMemorySourceCatalog(sources)
@@ -376,6 +393,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
 
         app.include_router(health_router, prefix="/api/v1")
         app.include_router(delivery_router, prefix="/api/v1")
+        app.include_router(ems_workbench_router, prefix="/api/v1")
         app.include_router(entity_instance_router, prefix="/api/v1")
         app.include_router(alarm_event_router, prefix="/api/v1")
         app.include_router(rules_router, prefix="/api/v1")
@@ -389,6 +407,11 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_runtime=alarm_runtime,
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        app.dependency_overrides[get_default_ems_workbench] = lambda: EmsWorkbench(
+            delivery_repository,
+            catalog,
+            runtime,
+        )
         app.dependency_overrides[get_entity_instance_runtime] = lambda: runtime
         app.dependency_overrides[get_entity_instance_catalog] = lambda: catalog
         app.dependency_overrides[get_entity_instance_failover] = lambda: failover
@@ -448,6 +471,129 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         return imported, planned
+
+    async def test_import_rejects_workbench_reference_outside_declared_entity_slots(self) -> None:
+        """A package must fail before persistence when its operator UI cannot resolve an entity."""
+        app = self.build_app(sources=(self.source(),))
+        invalid_workbench = (
+            "schemaVersion: zizu.ems-workbench/v1alpha1\n"
+            "id: workbench.ems\n"
+            "kind: ems_workbench\n"
+            "navigation:\n"
+            "  - id: overview\n"
+            "    label: 概览\n"
+            "groups:\n"
+            "  - id: pcs\n"
+            "    label: PCS\n"
+            "    entities:\n"
+            "      - slot: slot.pcs-primary\n"
+            "        definition: pcs.unknown\n"
+            "kpis: []\n"
+            "trends: []\n"
+            "alarms:\n"
+            "  visible: true\n"
+            "controls:\n"
+            "  visible: true\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            rejected = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "invalid-workbench.zizu.zip",
+                        build_entity_package(workbench_definition=invalid_workbench),
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(422, rejected.status_code, rejected.text)
+            self.assertEqual("ASSET_REFERENCE_INVALID", rejected.json()["detail"]["code"])
+            packages = await client.get("/api/v1/solution-packages")
+            self.assertEqual(0, packages.json()["total"])
+
+    async def test_operator_reads_package_configured_workbench_from_confirmed_entity_instances(self) -> None:
+        app = self.build_app(sources=(self.source(),))
+        workbench = (
+            "schemaVersion: zizu.ems-workbench/v1alpha1\n"
+            "id: workbench.ems\n"
+            "kind: ems_workbench\n"
+            "navigation:\n"
+            "  - id: overview\n"
+            "    label: 场站概览\n"
+            "  - id: trends\n"
+            "    label: 运行趋势\n"
+            "  - id: alarms\n"
+            "    label: 告警\n"
+            "groups:\n"
+            "  - id: pcs\n"
+            "    label: PCS\n"
+            "    entities:\n"
+            "      - slot: slot.pcs-primary\n"
+            "        definition: pcs.activePower\n"
+            "kpis:\n"
+            "  - id: pcs-power\n"
+            "    label: PCS 功率\n"
+            "    entity:\n"
+            "      slot: slot.pcs-primary\n"
+            "      definition: pcs.activePower\n"
+            "trends:\n"
+            "  - id: pcs-power-trend\n"
+            "    label: PCS 功率趋势\n"
+            "    defaultRange: 24h\n"
+            "    entities:\n"
+            "      - slot: slot.pcs-primary\n"
+            "        definition: pcs.activePower\n"
+            "alarms:\n"
+            "  visible: true\n"
+            "controls:\n"
+            "  visible: true\n"
+        )
+        async with AuthenticatedDeliveryClient(app) as client:
+            anonymous = await client._client.get("/api/v1/ems-workbench")
+            self.assertEqual(401, anonymous.status_code, anonymous.text)
+            _, planned = await self.import_and_plan(
+                client,
+                archive=build_entity_package(workbench_definition=workbench),
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-workbench"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            now = datetime.now(timezone.utc)
+            published = await client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "message": {
+                        "node": "PCS-01",
+                        "timestamp": round(now.timestamp() * 1000),
+                        "values": {"ActivePower": 42.5},
+                    }
+                },
+            )
+            self.assertEqual(200, published.status_code, published.text)
+            operator_headers = {"Authorization": await client._bearer("operator")}
+            response = await client._client.get(
+                "/api/v1/ems-workbench",
+                headers=operator_headers,
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            payload = response.json()
+            self.assertEqual("workbench.ems", payload["workbench_id"])
+            self.assertEqual("场站概览", payload["navigation"][0]["label"])
+            self.assertEqual("PCS", payload["groups"][0]["label"])
+            self.assertEqual(42.5, payload["kpis"][0]["entities"][0]["value"])
+            self.assertEqual("available", payload["kpis"][0]["entities"][0]["status"])
+            self.assertEqual("24h", payload["trends"][0]["default_range"])
+            trend = await client._client.get(
+                "/api/v1/ems-workbench/trends/pcs-power-trend?range=24h",
+                headers=operator_headers,
+            )
+            self.assertEqual(200, trend.status_code, trend.text)
+            self.assertEqual("pcs-power-trend", trend.json()["id"])
+            self.assertEqual(42.5, trend.json()["series"][0]["points"][0]["value"])
 
     async def test_protocol_observation_drives_auditable_entity_alarm_lifecycle(self) -> None:
         app = self.build_app(sources=(self.source(),))

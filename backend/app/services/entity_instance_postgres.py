@@ -589,3 +589,28 @@ class PostgresObservationCatalog:
             return None
         value = next((candidate for candidate in row[2:6] if candidate is not None), None)
         return SourceObservation(row[0], row[1], value, row[6])
+
+    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]:
+        interval = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}.get(range_key)
+        if interval is None:
+            raise ValueError("Unsupported history range")
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT tag_id, ts, value_float, value_int, value_bool,
+                           value_str, quality
+                    FROM t_telemetry
+                    WHERE tag_id = %s AND ts > NOW() - %s::interval
+                    ORDER BY ts ASC
+                    LIMIT 2000
+                    """,
+                    (tag_id, interval),
+                )
+                rows = cur.fetchall()
+        return [
+            SourceObservation(
+                row[0], row[1], next((candidate for candidate in row[2:6] if candidate is not None), None), row[6]
+            )
+            for row in rows
+        ]

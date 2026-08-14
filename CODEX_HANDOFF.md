@@ -3272,3 +3272,23 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 ### 当前边界 / Next
 - Ticket #3 不保护控制、Neuron、NanoMQ、SQL/清表及 WebSocket；这些属于 Ticket #4。1号机仍运行旧 v0.4.77 明文匿名版本，本票未部署。
 - 下一实施前沿：Ticket #4“收口控制、管理与 WebSocket 安全默认”；完成后才可把全站安全边界作为成立证据。TLS、固定 ARM64 制品、现场凭据轮换仍是生产发布门禁。
+
+---
+
+## Session 2026-08-14 — Ticket #15 固定 EMS 运行工作台
+
+### 已完成
+
+- 新增 `ems_workbench` 解决方案资产：只允许固定 Schema、内置导航、分组、KPI、趋势和告警/控制入口；导入阶段拒绝未知实体槽位、重复引用和任意前端代码。
+- `GET /api/v1/ems-workbench` 仅向认证运行角色返回已安装包、已确认实体实例的实时投影；安装缺失、配置缺失或失活引用均以稳定机器码失败。
+- `GET /api/v1/ems-workbench/trends/{trend_id}` 仅返回包中声明趋势的同一确认实体实例历史，不接受任意标签查询。
+- 前端新增固定 EMS 工作台页：包配置驱动内部导航、KPI、分组和趋势；告警跳转至统一告警中心，控制仍进入统一控制命令。
+
+### 验证
+
+- 工作台公开 HTTP + 完整路由权限覆盖：22 passed（含导入拒绝、匿名 401、协议模拟数据到实时与历史趋势）。
+- 前端 `npm run build` 通过；仅保留既有大 chunk 警告。
+
+### 部署门禁
+
+- 不能直接部署到 1 号机：ARM64 构建基础镜像源不可用、现有部署入口不满足固定制品/TLS/受控主机密钥要求。须先完成 Ticket 18 发布制品与 TLS 门禁，再进行现场升级。

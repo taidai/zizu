@@ -45,6 +45,11 @@ class PackageImport:
             for item in self.manifest.get("assets", [])
             if item.get("kind") == "entity_instance_slot"
         ]
+        value["workbench_asset_ids"] = [
+            item["id"]
+            for item in self.manifest.get("assets", [])
+            if item.get("kind") == "ems_workbench"
+        ]
         value.pop("manifest")
         value.pop("assets")
         return value

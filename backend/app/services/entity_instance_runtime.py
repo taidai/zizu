@@ -27,18 +27,27 @@ class SourceObservation:
 class ObservationCatalog(Protocol):
     def latest(self, tag_id: UUID) -> SourceObservation | None: ...
 
+    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]: ...
+
 
 class InMemoryObservationCatalog:
     def __init__(self) -> None:
         self._observations: dict[UUID, SourceObservation] = {}
+        self._history: dict[UUID, list[SourceObservation]] = {}
 
     def publish(self, observation: SourceObservation) -> None:
+        self._history.setdefault(observation.tag_id, []).append(observation)
         current = self._observations.get(observation.tag_id)
         if current is None or observation.observed_at >= current.observed_at:
             self._observations[observation.tag_id] = observation
 
     def latest(self, tag_id: UUID) -> SourceObservation | None:
         return self._observations.get(tag_id)
+
+    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]:
+        # The in-memory adapter intentionally keeps the public test seam small:
+        # the caller still validates the range grammar at its HTTP boundary.
+        return sorted(self._history.get(tag_id, []), key=lambda item: item.observed_at)
 
 
 class InMemoryNeuronProtocolSimulator:
@@ -172,3 +181,24 @@ class EntityInstanceRuntime:
             quality_good=observation.quality == 192,
             max_observation_gap_seconds=resolved.freshness_seconds,
         )
+
+    def history(self, entity_instance_id: UUID, range_key: str) -> list[EntityInstanceObservation]:
+        """Return engineering observations from the one confirmed source only."""
+        resolved = self._registry.resolve(entity_instance_id)
+        return [
+            EntityInstanceObservation(
+                entity_instance_id=resolved.entity_instance_id,
+                definition_id=resolved.definition_id,
+                instance_key=resolved.instance_key,
+                value=item.value,
+                data_type=resolved.data_type,
+                unit=resolved.unit,
+                observed_at=item.observed_at,
+                quality=item.quality,
+                age_ms=0,
+                fresh=True,
+                quality_good=item.quality == 192,
+                max_observation_gap_seconds=resolved.freshness_seconds,
+            )
+            for item in self._observations.history(resolved.tag_id, range_key)
+        ]

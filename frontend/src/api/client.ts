@@ -1084,6 +1084,55 @@ export interface ControlCommand {
   source_type: string
 }
 
+export interface WorkbenchEntity {
+  entity_instance_id: string
+  slot_id: string
+  instance_key: string
+  definition_id: string
+  display_name: string
+  data_type: 'float' | 'int' | 'bool' | 'string' | string
+  unit: string | null
+  direction: 'R' | 'W' | 'RW'
+  status?: 'available' | 'unavailable'
+  code?: string
+  value?: unknown
+  observed_at?: string
+  quality?: number
+}
+
+export interface EmsWorkbench {
+  workbench_id: string
+  site_configuration_version: number
+  navigation: { id: 'overview' | 'trends' | 'alarms' | 'controls'; label: string }[]
+  groups: { id: string; label: string; entities: WorkbenchEntity[] }[]
+  kpis: { id: string; label: string; entities: WorkbenchEntity[] }[]
+  trends: { id: string; label: string; default_range: '1h' | '24h' | '7d' | '30d'; entities: WorkbenchEntity[] }[]
+  alarms: { visible: boolean }
+  controls: { visible: boolean; entities: WorkbenchEntity[] }
+}
+
+export interface EmsWorkbenchTrend {
+  id: string
+  label: string
+  range: '1h' | '24h' | '7d' | '30d'
+  series: (WorkbenchEntity & { points: { ts: string; value: unknown; quality: number }[] })[]
+}
+
+export async function fetchEmsWorkbench(): Promise<EmsWorkbench> {
+  const response = await apiFetch(`${API_BASE}/ems-workbench`)
+  if (!response.ok) throw await authError(response, `Fetch EMS workbench failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchEmsWorkbenchTrend(
+  trendId: string,
+  range: EmsWorkbenchTrend['range'],
+): Promise<EmsWorkbenchTrend> {
+  const response = await apiFetch(`${API_BASE}/ems-workbench/trends/${encodeURIComponent(trendId)}?range=${range}`)
+  if (!response.ok) throw await authError(response, `Fetch EMS trend failed: ${response.status}`)
+  return response.json()
+}
+
 export async function submitControlCommand(entityInstanceId: string, value: unknown): Promise<ControlCommand> {
   const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
     method: 'POST',

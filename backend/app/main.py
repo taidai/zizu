@@ -332,6 +332,13 @@ def create_app() -> FastAPI:
         tags=["Solution Delivery"],
     )
 
+    from app.api.ems_workbench import router as ems_workbench_router
+    app.include_router(
+        ems_workbench_router,
+        prefix="/api/v1",
+        tags=["EMS Workbench"],
+    )
+
     from app.api.entity_instances import router as entity_instances_router
     app.include_router(
         entity_instances_router,

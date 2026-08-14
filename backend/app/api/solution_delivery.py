@@ -40,6 +40,7 @@ from app.services.solution_delivery import (
     PostgresDeliveryRepository,
     SolutionDelivery,
 )
+from app.services.ems_workbench import EmsWorkbench
 
 
 router = APIRouter()
@@ -79,10 +80,19 @@ _delivery = SolutionDelivery(
     alarm_definitions=_alarm_definition_catalog,
     alarm_runtime=_alarm_runtime,
 )
+_ems_workbench = EmsWorkbench(
+    _repository,
+    _entity_instance_catalog,
+    _entity_instance_runtime,
+)
 
 
 def get_solution_delivery() -> SolutionDelivery:
     return _delivery
+
+
+def get_default_ems_workbench() -> EmsWorkbench:
+    return _ems_workbench
 
 
 def get_default_entity_instance_runtime() -> EntityInstanceRuntime:

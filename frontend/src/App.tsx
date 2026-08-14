@@ -8,7 +8,7 @@ import {
   type AuthSession,
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
-import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle } from 'lucide-react'
+import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
@@ -17,6 +17,7 @@ const EntityManagerPage = lazy(() => import('./pages/EntityManagerPage'))
 const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
 const AlarmLevelManagerPage = lazy(() => import('./pages/AlarmLevelManagerPage'))
 const AlarmConfigPage = lazy(() => import('./pages/AlarmConfigPage'))
+const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
 
 function PageLoader() {
   return (
@@ -54,7 +55,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
+type PageKey = 'workbench' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -74,6 +75,7 @@ const ALL_ROLES: AuthRole[] = ['admin', 'engineer', 'operator']
 const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
 
 const NAV_ITEMS: NavigationItem[] = [
+  { key: 'workbench', label: 'EMS 工作台', icon: <LayoutDashboard size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
@@ -155,7 +157,7 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession
 }
 
 function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLoggedOut: () => void }) {
-  const [activePage, setActivePage] = useState<PageKey>('tree')
+  const [activePage, setActivePage] = useState<PageKey>('workbench')
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
@@ -271,6 +273,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <PipelineBar health={health} />
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
+            {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}

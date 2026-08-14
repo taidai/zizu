@@ -397,6 +397,8 @@ zizu/
 | GET | `/api/v1/site-configuration-versions/{version}` | 查询不可变站点配置版本 |
 | GET | `/api/v1/entity-instances/{id}/realtime` | 从实体实例唯一确认主来源读取实时工程值 |
 | GET | `/api/v1/entity-instances` | 查询规则/工作台可引用的稳定实体实例目录 |
+| GET | `/api/v1/ems-workbench` | 读取当前安装包声明的固定 EMS 工作台（导航、分组、KPI、趋势及入口） |
+| GET | `/api/v1/ems-workbench/trends/{trend_id}` | 读取工作台已声明趋势的确认实体实例历史，不接受任意点位查询 |
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
 | POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
@@ -595,6 +597,56 @@ assets:
     sha256: "<sha256>"
 acceptance: [acceptance.pcs-active-power]
 ```
+
+### 固定 EMS 运行工作台
+
+解决方案包只能声明**数据配置**，不能携带任意前端代码、URL、样式或脚本。平台维护固定
+页面组件；工作台引用的 `slot + definition` 在安装后解析为当前站点的确认实体实例。引用
+不存在的槽位或实体定义会在导入阶段拒绝，安装后缺失/失活的引用会让
+`GET /api/v1/ems-workbench` 返回 `WORKBENCH_REFERENCE_UNRESOLVED`，不会猜测其他来源。
+趋势数据只能通过 `GET /api/v1/ems-workbench/trends/{trend_id}?range=1h|24h|7d|30d`
+读取清单中已声明的实体实例；平台不会接受任意标签或物理来源作为图表输入。
+
+```yaml
+# solution.yaml 的 assets 增量
+assets:
+  - id: workbench.ems
+    kind: ems_workbench
+    path: workbench/ems.yaml
+    sha256: "<sha256>"
+```
+
+```yaml
+# workbench/ems.yaml
+schemaVersion: zizu.ems-workbench/v1alpha1
+id: workbench.ems
+kind: ems_workbench
+navigation:
+  - {id: overview, label: 场站概览}
+  - {id: trends, label: 运行趋势}
+  - {id: alarms, label: 告警}
+  - {id: controls, label: 控制}
+groups:
+  - id: pcs
+    label: PCS
+    entities:
+      - {slot: slot.pcs, definition: pcs.activePower}
+kpis:
+  - id: pcs-power
+    label: PCS 功率
+    entity: {slot: slot.pcs, definition: pcs.activePower}
+trends:
+  - id: pcs-power-trend
+    label: PCS 功率趋势
+    defaultRange: 24h # 仅允许 1h、24h、7d、30d
+    entities:
+      - {slot: slot.pcs, definition: pcs.activePower}
+alarms: {visible: true}
+controls: {visible: true}
+```
+
+`overview`、`trends`、`alarms` 与 `controls` 是仅有的内置导航 ID。`controls` 只展示已确认且
+可写的实体实例；真正下发仍必须经过统一控制命令权限、限值、联锁和回读，工作台配置不能扩权。
 
 ```yaml
 # entities/pcs-active-power.yaml

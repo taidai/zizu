@@ -36,6 +36,7 @@ from app.api.rules import router as rules_router
 from app.api.security import get_identity
 from app.api.solution_delivery import router as solution_delivery_router
 from app.api.entity_instances import router as entity_instances_router
+from app.api.ems_workbench import router as ems_workbench_router
 from app.api.control_commands import router as control_commands_router
 from app.api.rpc import router as rpc_router
 from app.api.tags import router as tags_router
@@ -260,6 +261,11 @@ TICKET_12_CAPABILITIES = {
     ("POST", "/api/v1/alarm-events/{event_id}/acknowledgements"): "alarm.acknowledge",
 }
 
+TICKET_15_CAPABILITIES = {
+    ("GET", "/api/v1/ems-workbench"): "runtime.read",
+    ("GET", "/api/v1/ems-workbench/trends/{trend_id}"): "runtime.read",
+}
+
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
 
 
@@ -282,6 +288,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     device_templates_router,
     nanomq_router,
     solution_delivery_router,
+    ems_workbench_router,
     entity_instances_router,
     control_commands_router,
     rpc_router,
@@ -984,13 +991,14 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             app.include_router(router, prefix="/api/v1")
         return app
 
-    def test_all_83_ticket_operations_are_classified_and_secured(self) -> None:
+    def test_all_registered_operations_are_classified_and_secured(self) -> None:
         self.assertEqual(len(RUNTIME_READ), 17)
         self.assertEqual(len(CONFIGURATION_READ), 20)
         self.assertEqual(len(CONFIGURATION_WRITE), 43)
         self.assertEqual(len(TICKET_03_CAPABILITIES), 80)
         self.assertEqual(len(ISSUE_04_REST), 29)
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
+        self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1000,6 +1008,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             set(TICKET_07_CAPABILITIES),
             set(TICKET_08_09_CAPABILITIES),
             set(TICKET_12_CAPABILITIES),
+            set(TICKET_15_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1022,7 +1031,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 138)
+        self.assertEqual(len(registered), 140)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
@@ -1050,6 +1059,11 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 operation = schema["paths"][path][method.lower()]
                 self.assertEqual(operation.get("x-zizu-capability"), capability)
                 self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(TICKET_15_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
     def test_alarm_counts_route_is_wired_to_its_own_operation(self) -> None:
         schema = self.build_full_api().openapi()

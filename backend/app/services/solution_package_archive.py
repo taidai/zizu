@@ -176,6 +176,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "entity_definition",
             "entity_instance_slot",
             "alarm_definition",
+            "ems_workbench",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")

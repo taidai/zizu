@@ -55,6 +55,7 @@ from app.services.entity_instance_registry import (
     PlanEntityInstances,
 )
 from app.services.entity_instance_runtime import EntityInstanceRuntime
+from app.services.solution_workbench import validate_ems_workbench_assets
 
 __all__ = [
     "DeliveryError",
@@ -170,6 +171,14 @@ class SolutionDelivery:
         )
         if normalized_alarm_assets:
             manifest["_alarm_assets"] = list(normalized_alarm_assets)
+        normalized_workbenches = validate_ems_workbench_assets(
+            manifest,
+            declared_assets,
+            normalized_slots,
+            _load_mapping,
+        )
+        if normalized_workbenches:
+            manifest["_workbench_assets"] = list(normalized_workbenches)
         _validate_alarm_lifecycle_acceptances(
             manifest,
             declared_assets,
