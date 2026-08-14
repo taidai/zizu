@@ -151,6 +151,7 @@ class CreateInstallationPlanRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     secret_references: dict[str, str] = Field(default_factory=dict)
     binding_selections: dict[str, UUID] = Field(default_factory=dict)
+    upgrade_risk_resolutions: dict[str, str] = Field(default_factory=dict)
 
 
 class RunAcceptanceRequest(BaseModel):
@@ -196,11 +197,16 @@ async def create_installation_plan(
             parameters=plan_request.parameters,
             secret_references=plan_request.secret_references,
             binding_selections=plan_request.binding_selections,
+            upgrade_risk_resolutions=plan_request.upgrade_risk_resolutions,
             actor=principal.actor,
         ).public_dict()
     except DeliveryError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(
+                status.HTTP_422_UNPROCESSABLE_CONTENT
+                if exc.code == "UPGRADE_RISK_RESOLUTION_INVALID"
+                else status.HTTP_404_NOT_FOUND
+            ),
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
 

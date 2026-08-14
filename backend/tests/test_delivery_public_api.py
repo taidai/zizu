@@ -1223,6 +1223,288 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             latest.json()["parameter_metadata"]["site.name"],
         )
 
+    async def test_package_and_site_parameter_changes_create_a_blocked_upgrade_plan(
+        self,
+    ) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        v1_archive = build_minimal_package(
+            package_id="org.zizu.ems-three-way-upgrade",
+            package_version="1.0.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v1\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v1\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+        v2_archive = build_minimal_package(
+            package_id="org.zizu.ems-three-way-upgrade",
+            package_version="1.1.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v2\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v2\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-three-way-v1.zizu.zip",
+                        v1_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            initial_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                json={"parameters": {"site.name": "customer-override"}},
+            )
+            initial_installation = await client.post(
+                f"/api/v1/install-plans/{initial_plan.json()['id']}/apply",
+                json={"plan_digest": initial_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "ems-three-way-v2.zizu.zip",
+                        v2_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            upgrade_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{upgrade_plan.json()['id']}/apply",
+                json={"plan_digest": upgrade_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v2"},
+            )
+            invalid_conflict_review = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "upgrade_risk_resolutions": {
+                        "UPGRADE_PARAMETER_CONFLICT:site.name": "not a resolution"
+                    }
+                },
+            )
+            original_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{initial_installation.json()['site_configuration_version']}"
+            )
+            resolved_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={"parameters": {"site.name": "engineer-resolved-v2"}},
+            )
+            resolved_installation = await client.post(
+                f"/api/v1/install-plans/{resolved_plan.json()['id']}/apply",
+                json={"plan_digest": resolved_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-three-way-v2-resolved"},
+            )
+            resolved_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{resolved_installation.json()['site_configuration_version']}"
+            )
+
+        self.assertEqual(imported_v1.status_code, 201, imported_v1.text)
+        self.assertEqual(initial_plan.status_code, 201, initial_plan.text)
+        self.assertEqual(initial_installation.status_code, 201, initial_installation.text)
+        self.assertEqual(imported_v2.status_code, 201, imported_v2.text)
+        self.assertEqual(upgrade_plan.status_code, 201, upgrade_plan.text)
+        self.assertEqual(upgrade_plan.json()["status"], "blocked")
+        self.assertIn(
+            {
+                "code": "UPGRADE_PARAMETER_CONFLICT",
+                "parameter_id": "site.name",
+                "message": "Package and site override both changed this parameter",
+            },
+            upgrade_plan.json()["blockers"],
+        )
+        conflict_item = next(
+            item
+            for item in upgrade_plan.json()["items"]
+            if item["kind"] == "site_parameter" and item["asset_id"] == "site.name"
+        )
+        self.assertEqual(conflict_item["action"], "conflict")
+        self.assertEqual(conflict_item["before"], "customer-override")
+        self.assertEqual(conflict_item["after"], "customer-override")
+        package_change = next(
+            item
+            for item in upgrade_plan.json()["items"]
+            if item["kind"] == "site_parameter" and item["asset_id"] == "site.mode"
+        )
+        self.assertEqual(package_change["action"], "update")
+        self.assertEqual(package_change["before"], "package-mode-v1")
+        self.assertEqual(package_change["after"], "package-mode-v2")
+        self.assertEqual(package_change["source"], "package_default")
+        self.assertEqual(blocked_apply.status_code, 409, blocked_apply.text)
+        self.assertEqual(
+            blocked_apply.json()["detail"]["code"], "INSTALL_PLAN_BLOCKED"
+        )
+        self.assertEqual(422, invalid_conflict_review.status_code)
+        self.assertEqual(
+            "UPGRADE_RISK_RESOLUTION_INVALID",
+            invalid_conflict_review.json()["detail"]["code"],
+        )
+        self.assertEqual(original_configuration.status_code, 200, original_configuration.text)
+        self.assertEqual(
+            original_configuration.json()["parameters"],
+            {"site.name": "customer-override", "site.mode": "package-mode-v1"},
+        )
+        self.assertEqual(resolved_plan.status_code, 201, resolved_plan.text)
+        self.assertEqual(resolved_plan.json()["status"], "ready")
+        self.assertEqual(resolved_installation.status_code, 201, resolved_installation.text)
+        self.assertEqual(resolved_configuration.status_code, 200, resolved_configuration.text)
+        self.assertEqual(resolved_configuration.json()["version"], 2)
+        self.assertEqual(
+            resolved_configuration.json()["parameters"],
+            {
+                "site.name": "engineer-resolved-v2",
+                "site.mode": "package-mode-v2",
+            },
+        )
+
+    async def test_removing_an_in_use_secret_reference_blocks_an_upgrade(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        v1_archive = build_minimal_package(
+            package_id="org.zizu.secret-removal-upgrade",
+            package_version="1.0.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: neuron.credentials\n"
+                "    type: secret\n"
+                "    required: true\n"
+                "    description: Runtime Neuron credentials\n"
+            ),
+        )
+        v2_archive = build_minimal_package(
+            package_id="org.zizu.secret-removal-upgrade",
+            package_version="1.1.0",
+        )
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "secret-removal-v1.zizu.zip",
+                        v1_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v1 = await client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                json={
+                    "secret_references": {
+                        "neuron.credentials": "secret://site/neuron/credentials"
+                    }
+                },
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-secret-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "secret-removal-v2.zizu.zip",
+                        v2_archive,
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-secret-v2"},
+            )
+
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_SECRET_REFERENCE_REMOVAL",
+                "asset_id": "neuron.credentials",
+                "message": "Upgrade removes an in-use Secret reference",
+            },
+            plan_v2.json()["blockers"],
+        )
+        secret_block = next(
+            item
+            for item in plan_v2.json()["items"]
+            if item.get("kind") == "upgrade_safety"
+        )
+        self.assertEqual("block", secret_block["action"])
+        self.assertEqual(
+            "UPGRADE_SECRET_REFERENCE_REMOVAL:neuron.credentials",
+            secret_block["risk_key"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
+        )
+
     async def test_invalid_values_and_raw_secrets_only_create_redacted_blockers(
         self,
     ) -> None:

@@ -242,6 +242,50 @@ def resolve_site_parameters(
     return normalized, references, sources, tuple(blockers)
 
 
+def upgrade_parameter_conflicts(
+    previous_contracts: tuple[dict[str, Any], ...],
+    next_contracts: tuple[dict[str, Any], ...],
+    *,
+    current_parameters: dict[str, Any],
+    current_metadata: dict[str, dict[str, str]],
+    submitted: dict[str, Any],
+    secret_references: dict[str, str],
+) -> tuple[dict[str, str], ...]:
+    """Return explicit three-way conflicts for inherited site overrides.
+
+    An explicit value in the upgrade request is the engineer's individual
+    resolution. Otherwise, preserve an existing override only when the package
+    did not also change the previous default beneath it.
+    """
+    previous_by_id = {contract["id"]: contract for contract in previous_contracts}
+    conflicts: list[dict[str, str]] = []
+    for contract in next_contracts:
+        parameter_id = contract["id"]
+        if parameter_id in submitted or parameter_id in secret_references:
+            continue
+        previous = previous_by_id.get(parameter_id)
+        if (
+            previous is None
+            or previous.get("type") == "secret"
+            or contract.get("type") == "secret"
+            or "default" not in previous
+            or "default" not in contract
+            or previous["default"] == contract["default"]
+            or current_metadata.get(parameter_id, {}).get("source")
+            != "engineer_input"
+            or current_parameters.get(parameter_id) == previous["default"]
+        ):
+            continue
+        conflicts.append(
+            _blocker(
+                "UPGRADE_PARAMETER_CONFLICT",
+                parameter_id,
+                "Package and site override both changed this parameter",
+            )
+        )
+    return tuple(conflicts)
+
+
 def _normalize_value(contract: dict[str, Any], value: Any) -> Any:
     parameter_type = contract["type"]
     if parameter_type == "string":

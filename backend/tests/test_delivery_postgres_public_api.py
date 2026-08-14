@@ -48,6 +48,7 @@ MIGRATIONS = (
 def build_minimal_package(
     *,
     package_id: str = "org.zizu.postgres-liveness",
+    package_version: str = "1.0.0",
     parameters_yaml: str = "",
 ) -> bytes:
     acceptance = (
@@ -60,7 +61,7 @@ def build_minimal_package(
     manifest = (
         "schemaVersion: zizu.solution/v1alpha1\n"
         f"id: {package_id}\n"
-        "version: 1.0.0\n"
+        f"version: {package_version}\n"
         "displayName: Postgres liveness\n"
         "platform:\n"
         "  version: \">=0.4.77,<0.5.0\"\n"
@@ -169,6 +170,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 id UUID PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE
+            );
+            CREATE TABLE IF NOT EXISTS t_alarms (
+                id UUID PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS t_entity_bindings (
                 id UUID PRIMARY KEY,
@@ -362,7 +366,11 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                            ('40000000-0000-0000-0000-000000000009',
                             '40000000-0000-0000-0000-000000000001',
                             'Ready', 'BOOL', NULL, 'R', TRUE,
-                            'neuron', 'PCS-01/default/Ready');
+                            'neuron', 'PCS-01/default/Ready'),
+                           ('40000000-0000-0000-0000-000000000010',
+                            '40000000-0000-0000-0000-000000000001',
+                            'GridPower', 'FLOAT', 'kW', 'R', TRUE,
+                            'neuron', 'PCS-01/default/GridPower');
                     """
                 )
                 # Exercise the controlled legacy-viewer migration path instead
@@ -495,7 +503,10 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             ],
             cwd=BACKEND_ROOT,
             env=cls.server_env,
-            stdout=subprocess.PIPE,
+            # This long public seam makes many Loguru writes.  An unread PIPE
+            # can fill and block Uvicorn even though the request itself
+            # completed, turning test logging into a false HTTP timeout.
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
             text=True,
         )
@@ -1077,6 +1088,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             )
             self.assertEqual(control_plan_response.status_code, 201, control_plan_response.text)
             control_plan = control_plan_response.json()
+            self.assertEqual("ready", control_plan["status"], control_plan)
             control_install = client.post(
                 f"/api/v1/install-plans/{control_plan['id']}/apply",
                 headers={
@@ -1230,6 +1242,148 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertNotIn(admin_token, serialized_audits)
         self.assertNotIn(engineer_token, serialized_audits)
         self.assertNotIn(operator_token, serialized_audits)
+
+        v1_upgrade_package = build_minimal_package(
+            package_id="org.zizu.postgres-three-way-upgrade",
+            package_version="1.0.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v1\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v1\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+        v2_upgrade_package = build_minimal_package(
+            package_id="org.zizu.postgres-three-way-upgrade",
+            package_version="1.1.0",
+            parameters_yaml=(
+                "parameters:\n"
+                "  - id: site.name\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-name-v2\n"
+                "    description: Site display name\n"
+                "  - id: site.mode\n"
+                "    type: string\n"
+                "    required: false\n"
+                "    default: package-mode-v2\n"
+                "    description: Package-owned mode\n"
+            ),
+        )
+        with httpx.Client(base_url=self.base_url, timeout=10, trust_env=False) as client:
+            imported_v1 = client.post(
+                "/api/v1/solution-packages/import",
+                headers=admin_auth,
+                files={
+                    "archive": (
+                        "postgres-three-way-v1.zizu.zip",
+                        v1_upgrade_package,
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(imported_v1.status_code, 201, imported_v1.text)
+            planned_v1 = client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={"parameters": {"site.name": "customer-override"}},
+            )
+            self.assertEqual(planned_v1.status_code, 201, planned_v1.text)
+            installed_v1 = client.post(
+                f"/api/v1/install-plans/{planned_v1.json()['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-three-way-v1",
+                },
+                json={"plan_digest": planned_v1.json()["digest"]},
+            )
+            self.assertEqual(installed_v1.status_code, 201, installed_v1.text)
+
+        self._stop_server()
+        self._start_server()
+
+        with httpx.Client(base_url=self.base_url, timeout=10, trust_env=False) as client:
+            imported_v2 = client.post(
+                "/api/v1/solution-packages/import",
+                headers=admin_auth,
+                files={
+                    "archive": (
+                        "postgres-three-way-v2.zizu.zip",
+                        v2_upgrade_package,
+                        "application/zip",
+                    )
+                },
+            )
+            self.assertEqual(imported_v2.status_code, 201, imported_v2.text)
+            blocked_plan = client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={},
+            )
+            self.assertEqual(blocked_plan.status_code, 201, blocked_plan.text)
+            self.assertEqual("blocked", blocked_plan.json()["status"])
+            self.assertIn(
+                {
+                    "code": "UPGRADE_PARAMETER_CONFLICT",
+                    "parameter_id": "site.name",
+                    "message": "Package and site override both changed this parameter",
+                },
+                blocked_plan.json()["blockers"],
+            )
+            blocked_apply = client.post(
+                f"/api/v1/install-plans/{blocked_plan.json()['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-three-way-v2-blocked",
+                },
+                json={"plan_digest": blocked_plan.json()["digest"]},
+            )
+            self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+            self.assertEqual(
+                "INSTALL_PLAN_BLOCKED", blocked_apply.json()["detail"]["code"]
+            )
+            retained = client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{installed_v1.json()['site_configuration_version']}",
+                headers=engineer_auth,
+            )
+            self.assertEqual(retained.status_code, 200, retained.text)
+            self.assertEqual(
+                {"site.name": "customer-override", "site.mode": "package-mode-v1"},
+                retained.json()["parameters"],
+            )
+            resolved_plan = client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={"parameters": {"site.name": "engineer-resolved-v2"}},
+            )
+            self.assertEqual("ready", resolved_plan.json()["status"])
+            installed_v2 = client.post(
+                f"/api/v1/install-plans/{resolved_plan.json()['id']}/apply",
+                headers={
+                    **engineer_auth,
+                    "Idempotency-Key": "postgres-three-way-v2-resolved",
+                },
+                json={"plan_digest": resolved_plan.json()["digest"]},
+            )
+            self.assertEqual(installed_v2.status_code, 201, installed_v2.text)
+            resolved_configuration = client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{installed_v2.json()['site_configuration_version']}",
+                headers=engineer_auth,
+            )
+            self.assertEqual(resolved_configuration.status_code, 200)
+            self.assertEqual(
+                {"site.name": "engineer-resolved-v2", "site.mode": "package-mode-v2"},
+                resolved_configuration.json()["parameters"],
+            )
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ from app.services.solution_package_archive import (
 )
 from app.services.solution_parameters import (
     resolve_site_parameters,
+    upgrade_parameter_conflicts,
     validate_parameter_contracts,
 )
 from app.services.alarm_definitions import (
@@ -242,6 +243,7 @@ class SolutionDelivery:
         parameters: dict[str, Any] | None = None,
         secret_references: dict[str, str] | None = None,
         binding_selections: dict[str, UUID] | None = None,
+        upgrade_risk_resolutions: dict[str, str] | None = None,
         actor: str = "system:delivery-plan",
     ) -> InstallationPlan:
         package = self._repository.get_package(package_record_id)
@@ -256,6 +258,8 @@ class SolutionDelivery:
             if base_version > 0
             else None
         )
+        previous_package: PackageImport | None = None
+        previous_parameter_contracts: tuple[dict[str, Any], ...] = ()
         parameter_values, secret_values, parameter_sources, blockers = resolve_site_parameters(
             parameter_contracts,
             parameters or {},
@@ -274,6 +278,38 @@ class SolutionDelivery:
                 else None
             ),
         )
+        if current_configuration is not None:
+            current_package = self._repository.get_package(
+                current_configuration.package_record_id
+            )
+            if current_package is None:
+                raise DeliveryError(
+                    "PACKAGE_NOT_FOUND",
+                    "Current site configuration package was not found",
+                )
+            if current_package.package_id != package.package_id:
+                current_package = None
+            previous_package = current_package
+        if previous_package is not None:
+            previous_parameter_contracts = validate_parameter_contracts(
+                previous_package.manifest.get("parameters")
+            )
+            blockers = (
+                *blockers,
+                *upgrade_parameter_conflicts(
+                    previous_parameter_contracts,
+                    parameter_contracts,
+                    current_parameters=current_configuration.parameters,
+                    current_metadata=current_configuration.parameter_metadata,
+                    submitted=parameters or {},
+                    secret_references=secret_references or {},
+                ),
+                *_secret_reference_removal_blockers(
+                    previous_parameter_contracts,
+                    parameter_contracts,
+                    current_configuration.secret_references,
+                ),
+            )
         parameter_configuration_content = {
             "package_digest": package.digest,
             "parameters": parameter_values,
@@ -302,6 +338,17 @@ class SolutionDelivery:
             blockers,
             current_configuration,
         )
+        if previous_package is not None:
+            blockers = (
+                *blockers,
+                *_entity_semantic_upgrade_blockers(previous_package, package),
+                *_alarm_recovery_upgrade_blockers(previous_package, package),
+            )
+        upgrade_risk_resolutions = upgrade_risk_resolutions or {}
+        upgrade_risks, blockers = _review_upgrade_risks(
+            blockers,
+            upgrade_risk_resolutions,
+        )
         prospective_entity_identity = uuid5(
             NAMESPACE_URL,
             (
@@ -321,11 +368,17 @@ class SolutionDelivery:
         alarm_items: tuple[dict[str, Any], ...] = ()
         alarm_assets = tuple(package.manifest.get("_alarm_assets", ()))
         policy_assets = tuple(package.manifest.get("_policy_assets", ()))
+        asset_actions = _manifest_asset_actions(previous_package, package)
+        acceptance_items = _manifest_asset_items(
+            package,
+            asset_actions,
+            "acceptance",
+        )
         policy_items = tuple(
             {
                 "asset_id": item["id"],
                 "kind": "ems_policy",
-                "action": "add" if base_version == 0 else "update",
+                "action": asset_actions[("ems_policy", item["id"])],
                 "revision": item["revision"],
             }
             for item in policy_assets
@@ -430,7 +483,7 @@ class SolutionDelivery:
                 {
                     "asset_id": definition.asset_id,
                     "kind": "alarm_definition",
-                    "action": "add" if base_version == 0 else "update",
+                    "action": asset_actions[("alarm_definition", definition.asset_id)],
                     "entity_instance_id": str(definition.entity_instance_id),
                     "entity_definition_id": definition.entity_definition_id,
                     "severity": definition.severity,
@@ -438,6 +491,11 @@ class SolutionDelivery:
                 }
                 for definition in alarm_plan.definitions
             )
+        upgrade_safety_items = _upgrade_blocker_plan_items(
+            upgrade_risks,
+            upgrade_risk_resolutions,
+            actor,
+        )
         action = (
             "preserve"
             if current_configuration is not None
@@ -454,18 +512,13 @@ class SolutionDelivery:
                 "kind": "solution_package",
                 "action": action,
             },
-            *(
-                {
-                    "asset_id": acceptance_id,
-                    "kind": "acceptance",
-                    "action": action,
-                }
-                for acceptance_id in package.acceptance_ids
-            ),
+            *acceptance_items,
             *parameter_items,
             *entity_items,
             *alarm_items,
             *policy_items,
+            *_removed_manifest_asset_items(asset_actions),
+            *upgrade_safety_items,
         )
         plan_content = {
             "package_record_id": str(package.id),
@@ -473,6 +526,7 @@ class SolutionDelivery:
             "base_site_configuration_version": base_version,
             "items": items,
             "blockers": blockers,
+            "upgrade_risk_resolutions": upgrade_risk_resolutions,
             "parameter_contracts": parameter_contracts,
             "parameters": parameter_values,
             "secret_references": secret_values,
@@ -1080,7 +1134,18 @@ def _parameter_plan_items(
 ) -> tuple[dict[str, Any], ...]:
     current_parameters = current.parameters if current else {}
     current_secrets = current.secret_references if current else {}
-    blocked_ids = {blocker["parameter_id"] for blocker in blockers}
+    blocked_ids = {
+        blocker["parameter_id"]
+        if "parameter_id" in blocker
+        else blocker.get("asset_id")
+        for blocker in blockers
+    }
+    blocked_ids.discard(None)
+    conflict_ids = {
+        blocker["parameter_id"]
+        for blocker in blockers
+        if blocker["code"] == "UPGRADE_PARAMETER_CONFLICT"
+    }
     items: list[dict[str, Any]] = []
     declared_ids: set[str] = set()
     for contract in contracts:
@@ -1091,7 +1156,9 @@ def _parameter_plan_items(
         next_values = secret_references if is_secret else parameters
         previous = previous_values.get(parameter_id)
         next_value = next_values.get(parameter_id)
-        if parameter_id in blocked_ids:
+        if parameter_id in conflict_ids:
+            action = "conflict"
+        elif parameter_id in blocked_ids:
             action = "block"
         elif parameter_id not in next_values and parameter_id in previous_values:
             action = "delete_candidate"
@@ -1130,6 +1197,265 @@ def _parameter_plan_items(
             }
         )
     return tuple(items)
+
+
+def _manifest_asset_actions(
+    previous_package: PackageImport | None,
+    next_package: PackageImport,
+) -> dict[tuple[str, str], str]:
+    """Classify declared assets by stable ID and content digest for one upgrade."""
+    previous_assets = {
+        (asset["kind"], asset["id"]): asset
+        for asset in (previous_package.manifest.get("assets", ()) if previous_package else ())
+    }
+    next_assets = {
+        (asset["kind"], asset["id"]): asset
+        for asset in next_package.manifest.get("assets", ())
+    }
+    actions: dict[tuple[str, str], str] = {}
+    for key in previous_assets.keys() | next_assets.keys():
+        previous = previous_assets.get(key)
+        next_asset = next_assets.get(key)
+        actions[key] = (
+            "add"
+            if previous is None
+            else "delete_candidate"
+            if next_asset is None
+            else "preserve"
+            if previous["sha256"] == next_asset["sha256"]
+            else "update"
+        )
+    return actions
+
+
+def _manifest_asset_items(
+    package: PackageImport,
+    actions: dict[tuple[str, str], str],
+    kind: str,
+) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "asset_id": asset["id"],
+            "kind": kind,
+            "action": actions[(kind, asset["id"])],
+        }
+        for asset in package.manifest.get("assets", ())
+        if asset["kind"] == kind
+    )
+
+
+def _removed_manifest_asset_items(
+    actions: dict[tuple[str, str], str],
+) -> tuple[dict[str, str], ...]:
+    """Keep removed configurable assets visible even when no new object exists."""
+    visible_kinds = {"alarm_definition", "ems_policy"}
+    return tuple(
+        {"asset_id": asset_id, "kind": kind, "action": action}
+        for (kind, asset_id), action in sorted(actions.items())
+        if action == "delete_candidate" and kind in visible_kinds
+    )
+
+
+def _review_upgrade_risks(
+    blockers: tuple[dict[str, str], ...],
+    resolutions: dict[str, str],
+) -> tuple[tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
+    """Require a named engineering resolution before a safety risk can execute."""
+    risks = tuple(
+        blocker
+        for blocker in blockers
+        if blocker["code"].startswith("UPGRADE_")
+        and blocker["code"] != "UPGRADE_PARAMETER_CONFLICT"
+        and "asset_id" in blocker
+    )
+    risk_keys = {_upgrade_risk_key(risk) for risk in risks}
+    unknown_keys = set(resolutions) - risk_keys
+    invalid_notes = {
+        key
+        for key, note in resolutions.items()
+        if not isinstance(note, str) or not note.strip()
+    }
+    if unknown_keys or invalid_notes:
+        raise DeliveryError(
+            "UPGRADE_RISK_RESOLUTION_INVALID",
+            "Upgrade risk resolutions must target a listed risk and include a note",
+        )
+    return (
+        risks,
+        tuple(
+            blocker
+            for blocker in blockers
+            if blocker not in risks or _upgrade_risk_key(blocker) not in resolutions
+        ),
+    )
+
+
+def _upgrade_risk_key(blocker: dict[str, str]) -> str:
+    return f"{blocker['code']}:{blocker['asset_id']}"
+
+
+def _upgrade_blocker_plan_items(
+    risks: tuple[dict[str, str], ...],
+    resolutions: dict[str, str],
+    actor: str,
+) -> tuple[dict[str, str], ...]:
+    """Expose upgrade safety items and their explicit engineering decisions."""
+    return tuple(
+        {
+            "asset_id": blocker["asset_id"],
+            "kind": "upgrade_safety",
+            "action": (
+                "update" if _upgrade_risk_key(blocker) in resolutions else "block"
+            ),
+            "code": blocker["code"],
+            "message": blocker["message"],
+            "risk_key": _upgrade_risk_key(blocker),
+            "resolution": resolutions.get(_upgrade_risk_key(blocker)),
+            "reviewed_by": (
+                actor if _upgrade_risk_key(blocker) in resolutions else None
+            ),
+        }
+        for blocker in risks
+    )
+
+
+def _entity_semantic_upgrade_blockers(
+    previous_package: PackageImport,
+    next_package: PackageImport,
+) -> tuple[dict[str, str], ...]:
+    """Block automatic changes to already-installed entity semantics."""
+    previous_definitions = {
+        definition["id"]: definition
+        for slot in previous_package.manifest.get("_entity_slots", ())
+        for definition in slot["definitions"]
+    }
+    next_definitions = {
+        definition["id"]: definition
+        for slot in next_package.manifest.get("_entity_slots", ())
+        for definition in slot["definitions"]
+    }
+    blockers: list[dict[str, str]] = []
+    for definition_id in sorted(set(previous_definitions) - set(next_definitions)):
+        blockers.append(
+            {
+                "code": "UPGRADE_RUNNING_REFERENCE_REMOVAL",
+                "asset_id": definition_id,
+                "message": "Upgrade removes a running entity definition",
+            }
+        )
+    for definition_id in sorted(set(previous_definitions) & set(next_definitions)):
+        previous = previous_definitions[definition_id]
+        next_definition = next_definitions[definition_id]
+        if (
+            previous.get("unit") != next_definition.get("unit")
+            or previous["direction"] != next_definition["direction"]
+        ):
+            blockers.append(
+                {
+                    "code": "UPGRADE_ENTITY_SEMANTICS_CHANGED",
+                    "asset_id": definition_id,
+                    "message": "Entity unit or direction changed",
+                }
+            )
+        if _control_permission_broadened(
+            previous.get("control"),
+            next_definition.get("control"),
+        ):
+            blockers.append(
+                {
+                    "code": "UPGRADE_CONTROL_POLICY_CHANGED",
+                    "asset_id": definition_id,
+                    "message": "Upgrade broadens control permissions and requires review",
+                }
+            )
+    return tuple(blockers)
+
+
+def _control_permission_broadened(
+    previous: dict[str, Any] | None,
+    next_control: dict[str, Any] | None,
+) -> bool:
+    """Identify changes that let an existing control act more freely.
+
+    Tightening a limit or adding an interlock is safe to stage automatically;
+    relaxing a limit, cooldown, high-risk confirmation or existing interlock is
+    an engineering decision rather than a package-default update.
+    """
+    if previous is None:
+        return next_control is not None
+    if next_control is None:
+        return False
+    if float(next_control["minimum"]) < float(previous["minimum"]):
+        return True
+    if float(next_control["maximum"]) > float(previous["maximum"]):
+        return True
+    if float(next_control["cooldown_seconds"]) < float(previous["cooldown_seconds"]):
+        return True
+    if previous.get("high_risk") and not next_control.get("high_risk"):
+        return True
+    previous_interlocks = {
+        json.dumps(item, sort_keys=True, separators=(",", ":"))
+        for item in previous.get("interlocks", ())
+    }
+    next_interlocks = {
+        json.dumps(item, sort_keys=True, separators=(",", ":"))
+        for item in next_control.get("interlocks", ())
+    }
+    return not previous_interlocks.issubset(next_interlocks)
+
+
+def _secret_reference_removal_blockers(
+    previous_contracts: tuple[dict[str, Any], ...],
+    next_contracts: tuple[dict[str, Any], ...],
+    current_secret_references: dict[str, str],
+) -> tuple[dict[str, str], ...]:
+    """Protect runtime Secret references from being dropped by a package update."""
+    next_secret_ids = {
+        contract["id"] for contract in next_contracts if contract["type"] == "secret"
+    }
+    return tuple(
+        {
+            "code": "UPGRADE_SECRET_REFERENCE_REMOVAL",
+            "asset_id": contract["id"],
+            "message": "Upgrade removes an in-use Secret reference",
+        }
+        for contract in previous_contracts
+        if contract["type"] == "secret"
+        and contract["id"] in current_secret_references
+        and contract["id"] not in next_secret_ids
+    )
+
+
+def _alarm_recovery_upgrade_blockers(
+    previous_package: PackageImport,
+    next_package: PackageImport,
+) -> tuple[dict[str, str], ...]:
+    """Block automatic changes to recovery conditions of installed alarms."""
+    previous_alarms = {
+        alarm["id"]: alarm
+        for alarm in previous_package.manifest.get("_alarm_assets", ())
+    }
+    next_alarms = {
+        alarm["id"]: alarm
+        for alarm in next_package.manifest.get("_alarm_assets", ())
+    }
+    blockers: list[dict[str, str]] = []
+    for alarm_id in sorted(set(previous_alarms) & set(next_alarms)):
+        previous = previous_alarms[alarm_id]
+        next_alarm = next_alarms[alarm_id]
+        if (
+            previous["recovery"] != next_alarm["recovery"]
+            or previous["recovery_duration_seconds"]
+            != next_alarm["recovery_duration_seconds"]
+        ):
+            blockers.append(
+                {
+                    "code": "UPGRADE_ALARM_RECOVERY_CHANGED",
+                    "asset_id": alarm_id,
+                    "message": "Alarm recovery behavior changed",
+                }
+            )
+    return tuple(blockers)
 
 
 def _resolve_entity_slots(

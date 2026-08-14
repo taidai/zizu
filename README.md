@@ -445,10 +445,22 @@ zizu/
 包导入结果和安装计划都会返回 `parameter_contracts`，实施端可据此生成配置表单；计划
 只返回规范化后的非敏感参数和 Secret 引用，不返回提交过的 Secret 明文或非法原值。
 计划与安装以规范化参数、Secret 引用和包摘要共同计算配置摘要；相同配置重复安装为
-`preserve`，参数变化为 `update` 并生成新的追加式站点配置版本。计划的参数级 items
-展示 before/after、unit、来源和 add/update/preserve/delete_candidate/block 动作；工程师
-输入和包默认值分别标记为 `engineer_input`、`package_default`，安装版本记录来源与 UTC
-修改时间。回到历史参数不是 preserve，而是创建新的版本，避免界面与当前运行配置不一致。
+`preserve`，参数变化为 `update` 并生成新的追加式站点配置版本。升级计划以旧包、当前
+站点和新包作三方比较：未覆盖参数跟随新默认值；未变的站点覆盖默认 `preserve`；包默认
+值和既有站点覆盖同时改变时，参数 item 为 `conflict`，并附带
+`UPGRADE_PARAMETER_CONFLICT` blocker。实施工程师必须在新计划请求中明确提交该参数值，
+才表示逐项解决冲突。
+
+计划的参数级 items 展示 before/after、unit、来源和
+`add`/`update`/`preserve`/`delete_candidate`/`conflict`/`block` 动作；工程师输入和包默认值
+分别标记为 `engineer_input`、`package_default`，安装版本记录来源与 UTC 修改时间。现有
+实体的量纲或读写方向变化、移除运行实体引用、放宽控制权限或告警恢复语义变化，以及移除
+已使用的 Secret 引用，都会产生稳定升级 blocker，不能自动执行。工程师必须用计划返回的
+`risk_key` 在 `upgrade_risk_resolutions` 中逐项给出非空处理说明；该说明、审查主体和风险项
+会写入不可变计划，风险 item 才从 `block` 转为 `update`。例如：
+`{"upgrade_risk_resolutions":{"UPGRADE_ENTITY_SEMANTICS_CHANGED:pcs.activePower":"已验证来源与下游单位换算"}}`。
+未知风险键、空说明和参数冲突确认均会被拒绝；参数冲突仍只能通过显式参数值解决。回到历史
+参数不是 preserve，而是创建新的版本，避免界面与当前运行配置不一致。
 
 参数契约声明在 `solution.yaml` 顶层。每项都必须有稳定 `id`、`type`、布尔
 `required` 和非空 `description`；非 Secret 项可声明与类型一致的 `default`。类型专属字段

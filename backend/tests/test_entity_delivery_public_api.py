@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from tests.test_delivery_public_api import (
     AsgiPublicApiProbe,
     AuthenticatedDeliveryClient,
+    build_minimal_package,
 )
 
 
@@ -29,6 +30,7 @@ def build_entity_package(
     multiple_devices: bool = False,
     manual_failover: bool = False,
     workbench_definition: str | None = None,
+    entity_direction: str = "R",
 ) -> bytes:
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -45,7 +47,7 @@ def build_entity_package(
         "deviceCategory: pcs\n"
         "dataType: FLOAT\n"
         "unit: kW\n"
-        "direction: R\n"
+        f"direction: {entity_direction}\n"
     ).encode()
     entity_slot = (
         (
@@ -216,6 +218,7 @@ def build_alarm_entity_package(
     package_version: str = "1.0.0",
     multiple_devices: bool = False,
     manual_failover: bool = False,
+    recovery_value: int = 90,
 ) -> bytes:
     """为最小 PCS 包增加一个只引用实体实例的告警定义。"""
     alarm_definition = (
@@ -227,7 +230,7 @@ def build_alarm_entity_package(
         "entityDefinition: pcs.activePower\n"
         "trigger:\n  op: gt\n  value: 100\n"
         "triggerDuration: 1s\n"
-        "recovery:\n  op: lte\n  value: 90\n"
+        f"recovery:\n  op: lte\n  value: {recovery_value}\n"
         "recoveryDuration: 1s\n"
         "severity: MAJOR\n"
         "notificationThrottle: 60s\n"
@@ -281,7 +284,12 @@ def build_alarm_entity_package(
     return archive.getvalue()
 
 
-def build_control_entity_package(*, high_risk: bool = False) -> bytes:
+def build_control_entity_package(
+    *,
+    package_version: str = "1.0.0",
+    high_risk: bool = False,
+    maximum: int = 100,
+) -> bytes:
     """一个可配置控制、回读和联锁的最小 EMS 解决方案资产。"""
     acceptance = (
         "schemaVersion: zizu.acceptance/v1alpha1\n"
@@ -295,7 +303,7 @@ def build_control_entity_package(*, high_risk: bool = False) -> bytes:
             "schemaVersion: zizu.entity-definition/v1alpha1\n"
             "id: pcs.setpoint\nkind: entity_definition\ndisplayName: Setpoint\n"
             "deviceCategory: pcs\ndataType: FLOAT\nunit: kW\ndirection: RW\n"
-            "control:\n  minimum: -100\n  maximum: 100\n  cooldown: 5s\n"
+            f"control:\n  minimum: -100\n  maximum: {maximum}\n  cooldown: 5s\n"
             "  readback:\n    definition: pcs.readback\n    tolerance: 0.1\n    timeout: 10s\n"
             "  interlocks:\n    - definition: bms.ready\n      equals: true\n"
             f"  highRisk: {'true' if high_risk else 'false'}\n"
@@ -339,7 +347,8 @@ def build_control_entity_package(*, high_risk: bool = False) -> bytes:
         ),
     ]
     manifest = (
-        "schemaVersion: zizu.solution/v1alpha1\nid: org.zizu.control-pcs\nversion: 1.0.0\n"
+        "schemaVersion: zizu.solution/v1alpha1\nid: org.zizu.control-pcs\n"
+        f"version: {package_version}\n"
         "displayName: Controllable PCS EMS\nplatform:\n  version: \">=0.4.77,<0.5.0\"\n"
         "parameters:\n"
         "  - id: pcs.instance_key\n    type: string\n    required: true\n"
@@ -483,7 +492,12 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         return app
 
     @staticmethod
-    def source(tag_id: UUID = TAG_ID, *, device_key: str = "PCS-01"):
+    def source(
+        tag_id: UUID = TAG_ID,
+        *,
+        device_key: str = "PCS-01",
+        direction: str = "R",
+    ):
         from app.services.entity_instance_registry import SourceDescriptor
 
         return SourceDescriptor(
@@ -493,7 +507,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             tag_name="ActivePower",
             data_type="FLOAT",
             unit="kW",
-            direction="R",
+            direction=direction,
             enabled=True,
         )
 
@@ -878,6 +892,367 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["ALARM_ACKNOWLEDGED"],
             lifecycle_item["evidence"]["events"][0]["missing_transition_codes"],
+        )
+
+    async def test_entity_direction_change_blocks_an_automatic_upgrade(self) -> None:
+        """A source compatible with both versions cannot hide a direction change."""
+        app = self.build_app(sources=(self.source(direction="RW"),))
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1, plan_v1 = await self.import_and_plan(
+                client,
+                archive=build_entity_package(package_version="1.0.0"),
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-direction-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "single-pcs-direction-v2.zizu.zip",
+                        build_entity_package(
+                            package_version="1.1.0",
+                            entity_direction="RW",
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    }
+                },
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-direction-v2"},
+            )
+            reviewed_plan = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    },
+                    "upgrade_risk_resolutions": {
+                        "UPGRADE_ENTITY_SEMANTICS_CHANGED:pcs.activePower": (
+                            "Verified the source and downstream unit conversion"
+                        )
+                    },
+                },
+            )
+            reviewed_install = await client.post(
+                f"/api/v1/install-plans/{reviewed_plan.json()['id']}/apply",
+                json={"plan_digest": reviewed_plan.json()["digest"]},
+                headers={"Idempotency-Key": "install-direction-v2-reviewed"},
+            )
+            invalid_review = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    },
+                    "upgrade_risk_resolutions": {"unknown:risk": "not accepted"},
+                },
+            )
+            original_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{installed_v1.json()['site_configuration_version']}"
+            )
+
+        self.assertEqual(201, imported_v1.status_code, imported_v1.text)
+        self.assertEqual(201, plan_v1.status_code, plan_v1.text)
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_ENTITY_SEMANTICS_CHANGED",
+                "asset_id": "pcs.activePower",
+                "message": "Entity unit or direction changed",
+            },
+            plan_v2.json()["blockers"],
+        )
+        blocked_item = next(
+            item
+            for item in plan_v2.json()["items"]
+            if item.get("kind") == "upgrade_safety"
+        )
+        self.assertEqual("block", blocked_item["action"])
+        self.assertEqual(
+            "UPGRADE_ENTITY_SEMANTICS_CHANGED:pcs.activePower",
+            blocked_item["risk_key"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
+        )
+        self.assertEqual(201, reviewed_plan.status_code, reviewed_plan.text)
+        self.assertEqual("ready", reviewed_plan.json()["status"])
+        self.assertEqual(201, reviewed_install.status_code, reviewed_install.text)
+        self.assertEqual(422, invalid_review.status_code, invalid_review.text)
+        self.assertEqual(
+            "UPGRADE_RISK_RESOLUTION_INVALID",
+            invalid_review.json()["detail"]["code"],
+        )
+        self.assertIn(
+            {
+                "asset_id": "pcs.activePower",
+                "kind": "upgrade_safety",
+                "action": "update",
+                "code": "UPGRADE_ENTITY_SEMANTICS_CHANGED",
+                "message": "Entity unit or direction changed",
+                "risk_key": "UPGRADE_ENTITY_SEMANTICS_CHANGED:pcs.activePower",
+                "resolution": "Verified the source and downstream unit conversion",
+                "reviewed_by": "user:00000000-0000-0000-0000-000000000002",
+            },
+            reviewed_plan.json()["items"],
+        )
+        self.assertEqual(200, original_configuration.status_code, original_configuration.text)
+        self.assertEqual(1, original_configuration.json()["version"])
+
+    async def test_removing_a_running_entity_reference_blocks_an_automatic_upgrade(
+        self,
+    ) -> None:
+        app = self.build_app(sources=(self.source(),))
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            _, plan_v1 = await self.import_and_plan(
+                client,
+                archive=build_entity_package(package_version="1.0.0"),
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-removal-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "single-pcs-removal-v2.zizu.zip",
+                        build_minimal_package(
+                            package_id="org.zizu.single-pcs",
+                            package_version="1.1.0",
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-removal-v2"},
+            )
+            original_configuration = await client.get(
+                "/api/v1/site-configuration-versions/"
+                f"{installed_v1.json()['site_configuration_version']}"
+            )
+
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_RUNNING_REFERENCE_REMOVAL",
+                "asset_id": "pcs.activePower",
+                "message": "Upgrade removes a running entity definition",
+            },
+            plan_v2.json()["blockers"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
+        )
+        self.assertEqual(200, original_configuration.status_code, original_configuration.text)
+        self.assertEqual(1, original_configuration.json()["version"])
+
+    async def test_alarm_recovery_change_blocks_an_automatic_upgrade(self) -> None:
+        app = self.build_app(sources=(self.source(),))
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            _, plan_v1 = await self.import_and_plan(
+                client,
+                archive=build_alarm_entity_package(package_version="1.0.0"),
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-alarm-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "single-pcs-alarm-v2.zizu.zip",
+                        build_alarm_entity_package(
+                            package_version="1.1.0",
+                            recovery_value=80,
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    }
+                },
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-alarm-v2"},
+            )
+
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_ALARM_RECOVERY_CHANGED",
+                "asset_id": "alarm.pcs.overpower",
+                "message": "Alarm recovery behavior changed",
+            },
+            plan_v2.json()["blockers"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
+        )
+
+    async def test_control_policy_change_blocks_an_automatic_upgrade(self) -> None:
+        from app.services.entity_instance_registry import SourceDescriptor
+
+        sources = (
+            SourceDescriptor(
+                tag_id=UUID("20000000-0000-0000-0000-000000000010"),
+                device_key="PCS-01",
+                device_name="PCS-01",
+                tag_name="Setpoint",
+                data_type="FLOAT",
+                unit="kW",
+                direction="RW",
+                enabled=True,
+            ),
+            SourceDescriptor(
+                tag_id=UUID("20000000-0000-0000-0000-000000000011"),
+                device_key="PCS-01",
+                device_name="PCS-01",
+                tag_name="Readback",
+                data_type="FLOAT",
+                unit="kW",
+                direction="R",
+                enabled=True,
+            ),
+            SourceDescriptor(
+                tag_id=UUID("20000000-0000-0000-0000-000000000012"),
+                device_key="PCS-01",
+                device_name="PCS-01",
+                tag_name="Ready",
+                data_type="BOOL",
+                unit=None,
+                direction="R",
+                enabled=True,
+            ),
+            SourceDescriptor(
+                tag_id=UUID("20000000-0000-0000-0000-000000000013"),
+                device_key="PCS-01",
+                device_name="PCS-01",
+                tag_name="GridPower",
+                data_type="FLOAT",
+                unit="kW",
+                direction="R",
+                enabled=True,
+            ),
+        )
+        app = self.build_app(sources=sources)
+        parameters = {
+            "pcs.instance_key": "PCS-01",
+            "pcs.device_key": "PCS-01",
+        }
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported_v1 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "control-pcs-v1.zizu.zip",
+                        build_control_entity_package(package_version="1.0.0"),
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v1 = await client.post(
+                f"/api/v1/solution-packages/{imported_v1.json()['id']}/install-plans",
+                json={"parameters": parameters},
+            )
+            installed_v1 = await client.post(
+                f"/api/v1/install-plans/{plan_v1.json()['id']}/apply",
+                json={"plan_digest": plan_v1.json()["digest"]},
+                headers={"Idempotency-Key": "install-control-v1"},
+            )
+            imported_v2 = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "control-pcs-v2.zizu.zip",
+                        build_control_entity_package(
+                            package_version="1.1.0",
+                            maximum=200,
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+            plan_v2 = await client.post(
+                f"/api/v1/solution-packages/{imported_v2.json()['id']}/install-plans",
+                json={"parameters": parameters},
+            )
+            blocked_apply = await client.post(
+                f"/api/v1/install-plans/{plan_v2.json()['id']}/apply",
+                json={"plan_digest": plan_v2.json()["digest"]},
+                headers={"Idempotency-Key": "install-control-v2"},
+            )
+
+        self.assertEqual(201, installed_v1.status_code, installed_v1.text)
+        self.assertEqual(201, imported_v2.status_code, imported_v2.text)
+        self.assertEqual(201, plan_v2.status_code, plan_v2.text)
+        self.assertEqual("blocked", plan_v2.json()["status"])
+        self.assertIn(
+            {
+                "code": "UPGRADE_CONTROL_POLICY_CHANGED",
+                "asset_id": "pcs.setpoint",
+                "message": "Upgrade broadens control permissions and requires review",
+            },
+            plan_v2.json()["blockers"],
+        )
+        self.assertEqual(409, blocked_apply.status_code, blocked_apply.text)
+        self.assertEqual(
+            "INSTALL_PLAN_BLOCKED",
+            blocked_apply.json()["detail"]["code"],
         )
 
     async def test_package_to_confirmed_fresh_entity_delivery_report(self) -> None:

@@ -1,5 +1,30 @@
 ---
 
+## Session 2026-08-14 — Ticket #17 三方升级保留站点覆盖（进行中，未提交）
+
+### 本轮已实现
+
+- 安装计划现在只在同一稳定解决方案包 ID 的旧版/当前站点/新版之间执行三方升级比较；切换到另一解决方案包不会错误继承旧包的安全差异。
+- 当新包默认值与已有 `engineer_input` 站点覆盖都改变时，计划返回参数级 `conflict` 和稳定 blocker `UPGRADE_PARAMETER_CONFLICT`；工程师在新计划中显式提交该参数，即可逐项解决并生成新的不可变站点配置版本。参数冲突不能用风险确认绕过。
+- 以下升级一律在计划阶段阻断，执行返回 `INSTALL_PLAN_BLOCKED`，不会生成部分站点版本：运行实体定义的量纲/读写方向变化、移除运行实体引用、放宽控制权限、告警恢复条件变化、移除已使用的 Secret 引用。
+- 非参数高风险项不再是永久死锁：计划给出稳定 `risk_key`，工程师必须在 `upgrade_risk_resolutions` 提交该键和非空处理说明；系统把说明、工程师主体和风险项固化在不可变计划中，才允许执行。未知键和空说明稳定返回 422。控制仅在放宽上下限、缩短冷却、取消高风险确认或移除既有联锁时阻断；收紧限制可自动升级。
+- 包内 acceptance、EMS policy 和 alarm definition 现在按稳定资产 ID 与内容摘要展示 `add`、`update`、`preserve` 或 `delete_candidate`；升级安全项单独以 `upgrade_safety` item 展示 `block` 或已审查的 `update`。
+- README 已同步三方升级、`conflict` item 与上述高风险 blocker 的公开契约。
+
+### 当前验证
+
+- 相关公开 HTTP 回归 `test_delivery_public_api.py + test_entity_delivery_public_api.py`：40 passed，26 subtests passed；覆盖参数冲突、工程师解决、风险确认、未知风险键、实体语义、运行引用删除、告警恢复、控制权限放宽与 Secret 引用删除。
+- 本机隔离 PostgreSQL/Uvicorn 主缝 1 passed：覆盖 v1 安装、进程重启、v2 三方冲突阻断、零写读取和显式参数解决后的新不可变配置版本。夹具原有超时根因是 Uvicorn 的 Loguru 输出写入未消费 PIPE 后阻塞；已改为 `DEVNULL`，不影响生产运行。
+- 完整后端 `pytest tests -q`：195 passed、1 skipped；仅 `tests/test_aggregator.py::test_compute_sum` 与 `::test_compute_last` 两项既有 SQL 断言失败，本票未触及 Aggregator。`compileall` 和 `git diff --check` 通过（后者仅 Windows CRLF 提示）。
+
+### 未完成 / Next
+
+1. 复核最终 diff，提交 Ticket #17；Spec / Standards 双轴复审已无阻断。
+2. 后续可把 PostgreSQL 三方升级断言从既有长交付主缝拆出独立夹具，并把不同 blocker 字典收敛为显式值对象；这不是当前交付阻断。
+3. 只有 Ticket #17 本地提交后，才进入 Ticket #18 不可变 ARM64 制品、TLS 和目标环境交付试验；禁止部署到 1 号机。
+
+---
+
 ## Session 2026-08-14 — Ticket #14 规则告警迁移与旧告警写门禁（待本地提交）
 
 ### 已实现
