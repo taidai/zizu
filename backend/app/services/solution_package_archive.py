@@ -691,6 +691,18 @@ def _validate_acceptance_definition(
             )
         _validate_timeout(definition.get("timeout"))
         return
+    if definition.get("kind") == "gateway_readiness":
+        allowed_fields = {"schemaVersion", "id", "kind", "required", "gateway", "timeout"}
+        if (
+            set(definition) != allowed_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+            or definition.get("gateway") != "neuron"
+        ):
+            raise DeliveryError("ASSET_REFERENCE_INVALID", "Gateway readiness acceptance is invalid")
+        _validate_timeout(definition.get("timeout"))
+        return
     if definition.get("kind") == "release_lock":
         allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
         if (

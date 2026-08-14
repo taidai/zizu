@@ -58,6 +58,7 @@ assets:
   - {id: workbench.ems, kind: ems_workbench, path: workbench/ems.yaml}
   - {id: policy.grid-import-cap, kind: ems_policy, path: policies/grid-import-cap.yaml}
   - {id: acceptance.platform-liveness, kind: acceptance, path: acceptance/platform-liveness.yaml}
+  - {id: acceptance.neuron-gateway, kind: acceptance, path: acceptance/neuron-gateway.yaml}
   - {id: acceptance.pcs, kind: acceptance, path: acceptance/pcs-readiness.yaml}
   - {id: acceptance.bms, kind: acceptance, path: acceptance/bms-readiness.yaml}
   - {id: acceptance.pv, kind: acceptance, path: acceptance/pv-readiness.yaml}
@@ -71,6 +72,7 @@ assets:
   - {id: acceptance.release-lock, kind: acceptance, path: acceptance/release-lock.yaml}
 acceptance:
   - acceptance.platform-liveness
+  - acceptance.neuron-gateway
   - acceptance.pcs
   - acceptance.bms
   - acceptance.pv

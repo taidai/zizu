@@ -61,6 +61,7 @@ from app.services.solution_policies import (
     validate_ems_policy_assets,
     validate_policy_execution_acceptances,
 )
+from app.services.gateway_readiness import GatewayReadiness
 
 __all__ = [
     "DeliveryError",
@@ -125,6 +126,7 @@ class SolutionDelivery:
         alarm_runtime: AlarmRuntime | None = None,
         policy_runtime: PolicyExecutionRuntime | None = None,
         control_command_runtime: ControlCommandEvidenceRuntime | None = None,
+        gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._repository = repository
@@ -136,6 +138,7 @@ class SolutionDelivery:
         self._alarm_runtime = alarm_runtime
         self._policy_runtime = policy_runtime
         self._control_command_runtime = control_command_runtime
+        self._gateway_readiness = gateway_readiness
         self._release_lock_reader = release_lock_reader
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
@@ -145,6 +148,9 @@ class SolutionDelivery:
     def set_control_command_runtime(self, control_command_runtime: ControlCommandEvidenceRuntime) -> None:
         """Attach the command reader in test compositions that build delivery first."""
         self._control_command_runtime = control_command_runtime
+
+    def set_gateway_readiness(self, gateway_readiness: GatewayReadiness) -> None:
+        self._gateway_readiness = gateway_readiness
 
     def import_package(self, archive: bytes) -> PackageImport:
         files = _read_archive(archive)
@@ -767,6 +773,7 @@ class SolutionDelivery:
                     "history_readiness",
                     "operation_audit",
                     "manual_control_execution",
+                    "gateway_readiness",
                     "alarm_lifecycle",
                     "policy_execution",
                     "release_lock",
@@ -803,6 +810,15 @@ class SolutionDelivery:
                         installation,
                         acceptance_id,
                         bool(definition.get("required", True)),
+                        item_started,
+                    )
+                )
+                continue
+            if definition["kind"] == "gateway_readiness":
+                items.append(
+                    await self._run_gateway_readiness_acceptance(
+                        acceptance_id,
+                        definition,
                         item_started,
                     )
                 )
@@ -1001,6 +1017,28 @@ class SolutionDelivery:
             "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
             "evidence": evidence,
         }
+
+    async def _run_gateway_readiness_acceptance(
+        self,
+        acceptance_id: str,
+        definition: dict[str, Any],
+        item_started: float,
+    ) -> dict[str, Any]:
+        required = bool(definition.get("required", True))
+        if self._gateway_readiness is None:
+            return _acceptance_result(
+                acceptance_id, required, item_started, "failed", "GATEWAY_RUNTIME_UNAVAILABLE", {}
+            )
+        result = await self._gateway_readiness.check()
+        valid = result.gateway == definition["gateway"] and result.status == "connected"
+        return _acceptance_result(
+            acceptance_id,
+            required,
+            item_started,
+            "passed" if valid else "failed",
+            result.code if valid else "GATEWAY_UNAVAILABLE",
+            result.public_dict(),
+        )
 
     def _run_manual_control_execution_acceptance(
         self,

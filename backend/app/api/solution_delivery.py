@@ -46,6 +46,8 @@ from app.services.ems_policy_runtime import (
     PostgresPolicyActivationRepository,
 )
 from app.services.release_lock import current_release_lock_summary
+from app.services.gateway_readiness import NeuronGatewayReadiness
+from app.services.neuron_client import get_neuron_client
 
 
 router = APIRouter()
@@ -85,6 +87,7 @@ _delivery = SolutionDelivery(
     alarm_definitions=_alarm_definition_catalog,
     alarm_runtime=_alarm_runtime,
     control_command_runtime=_control_commands,
+    gateway_readiness=NeuronGatewayReadiness(get_neuron_client),
     release_lock_reader=current_release_lock_summary,
 )
 _ems_workbench = EmsWorkbench(

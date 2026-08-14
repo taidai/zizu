@@ -869,6 +869,19 @@ timeout: 30s
 ```
 
 ```yaml
+# acceptance/neuron-gateway.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.neuron-gateway
+kind: gateway_readiness
+required: true
+gateway: neuron
+timeout: 10s
+```
+
+`gateway_readiness` 只证明平台可用受控凭据访问已配置的协议网关；它不回显地址、账户、版本或
+连接参数。它必须与实体实时新鲜度和历史样本验收同时通过，才能证明“网关在线且数据已进入平台”。
+
+```yaml
 # entities/pcs-active-power.yaml
 schemaVersion: zizu.entity-definition/v1alpha1
 id: pcs.activePower

@@ -16,6 +16,13 @@ from tests.test_delivery_public_api import AuthenticatedDeliveryClient
 from tests import test_entity_delivery_public_api as entity_delivery_test
 
 
+class ConnectedGateway:
+    async def check(self):
+        from app.services.gateway_readiness import GatewayReadinessResult
+
+        return GatewayReadinessResult("neuron", "connected", "GATEWAY_CONNECTED")
+
+
 class RecordingDispatcher:
     def __init__(self) -> None:
         self.requests: list[object] = []
@@ -97,6 +104,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         app.state.solution_delivery.set_policy_runtime(policy_runtime)
         app.state.solution_delivery.set_control_command_runtime(runtime)
+        app.state.solution_delivery.set_gateway_readiness(ConnectedGateway())
         app.state.policy_runtime = policy_runtime
         app.dependency_overrides[get_default_ems_policy_runtime] = lambda: policy_runtime
         app.state.control_compatibility_targets = compatibility_targets

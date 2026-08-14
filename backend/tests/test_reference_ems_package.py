@@ -37,7 +37,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(imported.acceptance_ids),
             {
-                "acceptance.platform-liveness", "acceptance.pcs", "acceptance.bms",
+                "acceptance.platform-liveness", "acceptance.neuron-gateway", "acceptance.pcs", "acceptance.bms",
                 "acceptance.pv", "acceptance.evse", "acceptance.meter", "acceptance.meter-history",
                 "acceptance.operation-audit", "acceptance.manual-pcs-setpoint",
                 "acceptance.grid-import-lifecycle", "acceptance.policy-grid-import-cap",
@@ -230,6 +230,21 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 json={"policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]}},
                 headers={"Idempotency-Key": "reference-ems-acceptance-missing-manual"},
             )
+            from app.services.gateway_readiness import GatewayReadinessResult
+
+            class UnavailableGateway:
+                async def check(self) -> GatewayReadinessResult:
+                    return GatewayReadinessResult("neuron", "unavailable", "GATEWAY_UNAVAILABLE")
+
+            app.state.solution_delivery.set_gateway_readiness(UnavailableGateway())
+            gateway_down = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                json={
+                    "manual_commands": {"acceptance.manual-pcs-setpoint": manual_done.json()["id"]},
+                    "policy_commands": {"acceptance.policy-grid-import-cap": policy_command["id"]},
+                },
+                headers={"Idempotency-Key": "reference-ems-acceptance-gateway-down"},
+            )
 
         self.assertEqual(201, report.status_code, report.text)
         self.assertEqual("passed", report.json()["status"], report.text)
@@ -241,6 +256,13 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             if item["acceptance_id"] == "acceptance.manual-pcs-setpoint"
         )
         self.assertEqual("MANUAL_CONTROL_COMMAND_REQUIRED", manual_item["code"])
+        self.assertEqual(201, gateway_down.status_code, gateway_down.text)
+        self.assertEqual("failed", gateway_down.json()["status"])
+        gateway_item = next(
+            item for item in gateway_down.json()["items"]
+            if item["acceptance_id"] == "acceptance.neuron-gateway"
+        )
+        self.assertEqual("GATEWAY_UNAVAILABLE", gateway_item["code"])
 
 
 if __name__ == "__main__":
