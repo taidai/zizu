@@ -3611,6 +3611,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 前端 `npm run build`：通过（仅既有大 bundle warning）。
 - `git diff --check`：通过。
 
+### 文档校正
+
+- README 已同步工程师可以在产品页选择已验证包的实际权限，避免仍把旧的“仅管理员读包”描述
+  当作当前产品约束。
+
 ---
 
 ## Session 2026-08-15 — 交付报告操作审计覆盖（待推送）
