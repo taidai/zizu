@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-14 — 光储充 EMS 公开参考包首版（待提交）
+## Session 2026-08-14 — 光储充 EMS 公开参考包首版（已提交，待推送）
 
 ### 本轮已实现
 
@@ -16,6 +16,8 @@
 
 - 参考包导入 + 交付公开 API + 实体交付公开 API：42/42 通过；`compileall` 与 diff check
   通过。
+- 本地提交：`c4dcd2e feat(reference): add pv storage charging ems package`。首次 push 因 GitHub
+  连接被重置失败，网络恢复后执行 `git push origin HEAD`。
 
 ### 真实边界 / Next
 
