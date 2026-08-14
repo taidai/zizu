@@ -111,6 +111,7 @@ class AlarmRuntimeTest(unittest.TestCase):
 
         self.assertEqual("active_acknowledged", acknowledged.state)
         self.assertEqual("ALARM_ACKNOWLEDGED", acknowledged.code)
+        self.assertIsNotNone(acknowledged.audit_event_id)
         self.assertEqual("active_acknowledged", recovery_pending.state)
         self.assertEqual("ALARM_RECOVERY_PENDING", recovery_pending.code)
         self.assertEqual("active_acknowledged", jittered_active.state)

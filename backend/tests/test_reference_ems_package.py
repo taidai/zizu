@@ -266,6 +266,13 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(201, report.status_code, report.text)
         self.assertEqual("passed", report.json()["status"], report.text)
         self.assertTrue(all(item["status"] == "passed" for item in report.json()["items"]))
+        alarm_item = next(
+            item for item in report.json()["items"]
+            if item["acceptance_id"] == "acceptance.grid-import-lifecycle"
+        )
+        self.assertTrue(
+            all(event["acknowledgement_audit_event_ids"] for event in alarm_item["evidence"]["events"])
+        )
         self.assertEqual(201, missing_manual.status_code, missing_manual.text)
         self.assertEqual("failed", missing_manual.json()["status"])
         manual_item = next(

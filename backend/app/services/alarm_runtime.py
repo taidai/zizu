@@ -90,6 +90,7 @@ class AlarmTransition:
     evidence: dict[str, Any] | None = None
     actor: str | None = None
     note: str | None = None
+    audit_event_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ class AlarmOutcome:
     transition: dict[str, str] | None
     code: str
     notification_created: bool
+    audit_event_id: UUID | None = None
 
 
 class AlarmDefinitionCatalog(Protocol):
@@ -137,7 +139,7 @@ class AlarmRepository(Protocol):
 
     def save_event(self, event: AlarmEvent) -> AlarmEvent: ...
 
-    def append_transition(self, transition: AlarmTransition) -> None: ...
+    def append_transition(self, transition: AlarmTransition) -> UUID | None: ...
 
     def last_notification_at(
         self,
@@ -259,8 +261,10 @@ class InMemoryAlarmRepository:
         self._events[event.id] = event
         return event
 
-    def append_transition(self, transition: AlarmTransition) -> None:
-        self._transitions.append(transition)
+    def append_transition(self, transition: AlarmTransition) -> UUID:
+        audit_event_id = transition.audit_event_id or uuid4()
+        self._transitions.append(replace(transition, audit_event_id=audit_event_id))
+        return audit_event_id
 
     def last_notification_at(
         self,
@@ -413,7 +417,7 @@ class AlarmRuntime:
                 acknowledgement_note=command.note,
             )
             repository.save_event(updated)
-            repository.append_transition(
+            audit_event_id = repository.append_transition(
                 AlarmTransition(
                     event.id,
                     event.state,
@@ -430,6 +434,7 @@ class AlarmRuntime:
                 {"from": event.state, "to": updated.state},
                 "ALARM_ACKNOWLEDGED",
                 False,
+                audit_event_id,
             )
 
     def get(self, event_id: UUID) -> AlarmEvent:

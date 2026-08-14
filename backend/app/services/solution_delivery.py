@@ -1313,15 +1313,27 @@ class SolutionDelivery:
                 continue
             timeline = self._alarm_runtime.timeline(event.id)
             transition_codes = {item.code for item in timeline}
+            acknowledgement_audit_ids = [
+                str(item.audit_event_id)
+                for item in timeline
+                if item.code == "ALARM_ACKNOWLEDGED" and item.audit_event_id is not None
+            ]
             evidence.append(
                 {
                     "definition_id": installed_definition["id"],
                     "event_id": str(event.id),
                     "state": event.state,
                     "transitions": [
-                        {"to_state": item.to_state, "code": item.code}
+                        {
+                            "to_state": item.to_state,
+                            "code": item.code,
+                            "audit_event_id": (
+                                str(item.audit_event_id) if item.audit_event_id else None
+                            ),
+                        }
                         for item in timeline
                     ],
+                    "acknowledgement_audit_event_ids": acknowledgement_audit_ids,
                     "missing_transition_codes": sorted(
                         required_transition_codes - transition_codes
                     ),
@@ -1330,6 +1342,7 @@ class SolutionDelivery:
             if (
                 event.state != expected_state
                 or not required_transition_codes.issubset(transition_codes)
+                or not acknowledgement_audit_ids
             ):
                 passed = False
         return _alarm_acceptance_result(

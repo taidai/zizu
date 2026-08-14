@@ -651,6 +651,8 @@ OPC GOOD(192) 观测可触发或持续恢复；缺失/坏质量按不可恢复�
 选择当前或仍有活动事件的历史定义版本。旧 `/alarms` 仅保留历史只读查询，删除节点、标签、实体
 或规则也不会改写其中的历史证据；`/alarms/counts`、
 `/alarms/entities` 和 `/alarms/group-counts` 统计统一事件，创建、旧确认和人工恢复接口均已删除。
+`POST /alarm-events/{id}/acknowledgements` 成功响应会返回不透明 `audit_event_id`；同一 ID 也会出现在
+事件 timeline 的 `ALARM_ACKNOWLEDGED` transition。它只用于交付报告核验证据，不是全局审计查询入口。
 
 ```yaml
 # solution.yaml 的 assets/acceptance 增量
@@ -707,6 +709,9 @@ alarmDefinition: alarm.pcs.overpower
 expectedState: recovered
 timeout: 5s
 ```
+
+告警生命周期验收除确认 pending → active → acknowledged → recovered 的状态机外，也要求
+`ALARM_ACKNOWLEDGED` transition 绑定一条 append-only 审计事件；缺失审计 ID 时报告为 failed。
 
 `alarm_lifecycle` 验收要求本次安装的定义已完成触发、操作员确认和现场恢复，并进入声明
 状态；报告保留事件 ID、状态和机器转换码，不回显物理来源地址或原始协议负载。

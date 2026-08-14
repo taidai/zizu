@@ -178,6 +178,7 @@ async def acknowledge_alarm_event(
             "state": outcome.state,
             "transition": outcome.transition,
             "code": outcome.code,
+            "audit_event_id": str(outcome.audit_event_id) if outcome.audit_event_id else None,
         }
     except AlarmRuntimeError as exc:
         raise _error(exc) from exc

@@ -145,6 +145,8 @@ class AlarmEventPublicApiTest(unittest.IsolatedAsyncioTestCase):
             body = acknowledged.json()
             self.assertEqual("active_acknowledged", body["state"])
             self.assertEqual("ALARM_ACKNOWLEDGED", body["code"])
+            self.assertIsNotNone(body["audit_event_id"])
+            UUID(body["audit_event_id"])
 
             event = await client._client.get(
                 f"/api/v1/alarm-events/{active.event_id}",

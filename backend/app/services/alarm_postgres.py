@@ -193,9 +193,9 @@ class PostgresAlarmRepository:
         with self.transaction() as transaction:
             return transaction.save_event(event)
 
-    def append_transition(self, transition: AlarmTransition) -> None:
+    def append_transition(self, transition: AlarmTransition) -> UUID | None:
         with self.transaction() as transaction:
-            transaction.append_transition(transition)
+            return transaction.append_transition(transition)
 
     def last_notification_at(self, definition_id: UUID, entity_instance_id: UUID) -> datetime | None:
         with self.transaction() as transaction:
@@ -275,7 +275,7 @@ class _PostgresAlarmTransaction:
             cur.execute(
                 """
                 SELECT event_id, from_state, to_state, occurred_at, code,
-                       evidence, actor, note
+                       evidence, actor, note, audit_event_id
                 FROM t_alarm_transitions WHERE event_id = %s
                 ORDER BY occurred_at, id
                 """,
@@ -348,8 +348,8 @@ class _PostgresAlarmTransaction:
                 )
         return event
 
-    def append_transition(self, transition: AlarmTransition) -> None:
-        audit_event_id = uuid4()
+    def append_transition(self, transition: AlarmTransition) -> UUID:
+        audit_event_id = transition.audit_event_id or uuid4()
         with self._connection.cursor() as cur:
             cur.execute(
                 """
@@ -385,6 +385,7 @@ class _PostgresAlarmTransaction:
                     transition.note,
                 ),
             )
+        return audit_event_id
 
     def last_notification_at(self, definition_id: UUID, entity_instance_id: UUID) -> datetime | None:
         with self._connection.cursor() as cur:
