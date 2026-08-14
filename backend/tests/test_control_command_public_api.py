@@ -666,6 +666,32 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(409, missing_inputs.status_code, missing_inputs.text)
         self.assertEqual("RULE_CONTROL_INPUTS_REQUIRED", missing_inputs.json()["detail"]["code"])
 
+    async def test_rule_api_rejects_legacy_alarm_lifecycle_actions_before_write(self) -> None:
+        app, _dispatcher = self.build_app()
+        async with AuthenticatedDeliveryClient(app) as client:
+            response = await client.post(
+                "/api/v1/rules",
+                json={
+                    "name": "Legacy alarm writer",
+                    "rule_type": "alarm",
+                    "jdm_content": {
+                        "_config": {
+                            "actions": [{
+                                "type": "alarm",
+                                "level": "MAJOR",
+                                "message": "legacy manually-created alarm",
+                            }]
+                        }
+                    },
+                },
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual(
+            "RULE_ALARM_ACTION_INVALID",
+            response.json()["detail"]["code"],
+        )
+
     def test_gorules_control_outputs_cannot_define_runtime_control_targets(self) -> None:
         from app.services.gorules_adapter import _extract_actions
 

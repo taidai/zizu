@@ -6,7 +6,7 @@ F2 规则引擎 — 告警/控制/联动策略
   - 从 t_telemetry_latest 构建上下文（tag_name -> value）
   - 对每条规则通过 GoRules zen-engine 求值
   - 触发动作：
-      alarm     -> 写入 t_alarms（同一规则未恢复时不再重复创建）
+      alarm     -> 提交统一告警观测，由 AlarmRuntime 维护事件生命周期
       control   -> 创建统一控制命令，由命令运行时完成下发与回读
       linkage   -> 更新指定虚拟点位的 sources 或触发另一规则（MVP 未实现）
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from uuid import UUID
 
 from loguru import logger
@@ -43,7 +44,7 @@ def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]
         try:
             entity_instance_id = UUID(raw_id)
             resolved = registry.resolve(entity_instance_id)
-            observation = runtime.read(entity_instance_id)
+            observation = runtime.read_for_alarm(entity_instance_id)
         except (ValueError, EntityInstanceError) as exc:
             logger.warning("[RuleEngine] entity instance {} is unavailable: {}", raw_id, exc)
             continue
@@ -52,6 +53,8 @@ def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]
             "entity_instance_id": resolved.entity_instance_id,
             "observed_at": observation.observed_at.isoformat(),
             "quality": observation.quality,
+            "fresh": observation.fresh,
+            "max_observation_gap_seconds": observation.max_observation_gap_seconds,
             "is_entity_instance": True,
         }
     return context
@@ -215,45 +218,6 @@ def _is_legacy_control_action(action: dict) -> bool:
     return bool(_LEGACY_CONTROL_FIELDS.intersection(action))
 
 
-def _has_active_alarm(cur, rule_id: UUID) -> bool:
-    cur.execute(
-        """
-        SELECT 1 FROM t_alarms
-        WHERE rule_id = %s AND resolved_at IS NULL
-        LIMIT 1
-        """,
-        (rule_id,),
-    )
-    return cur.fetchone() is not None
-
-
-def _create_alarm(
-    cur,
-    rule_id: UUID,
-    node_id: UUID | None,
-    tag_id: UUID | None,
-    trigger_tag_name: str | None,
-    trigger_value: float | int | bool | str | None,
-    level: str,
-    message: str,
-) -> None:
-    cur.execute(
-        """
-        INSERT INTO t_alarms (rule_id, node_id, tag_id, trigger_tag_name, trigger_value, level, message, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-        """,
-        (
-            rule_id,
-            node_id,
-            tag_id,
-            trigger_tag_name,
-            float(trigger_value) if isinstance(trigger_value, (int, float)) else None,
-            level,
-            message,
-        ),
-    )
-
-
 def _resolve_value(value: Any, outputs: dict | None, context_values: dict[str, Any]) -> Any:
     """解析 value 模板，如 {{pcs_setpoint}}。优先从决策输出取，其次从上下文取。"""
     if not isinstance(value, str):
@@ -330,6 +294,8 @@ def _execute_control(
                 "value": item.get("value"),
                 "observed_at": item.get("observed_at"),
                 "quality": item.get("quality"),
+                "fresh": item.get("fresh"),
+                "max_observation_gap_seconds": item.get("max_observation_gap_seconds"),
             }
             for field, item in sorted(context.items())
             if item.get("is_entity_instance")
@@ -355,6 +321,100 @@ def _execute_control(
         )
         return False
     return True
+
+
+_rule_alarm_adapter = None
+
+
+def _default_rule_alarm_adapter():
+    global _rule_alarm_adapter
+    if _rule_alarm_adapter is None:
+        from app.services.rule_alarm_adapter import build_postgres_rule_alarm_adapter
+
+        _rule_alarm_adapter = build_postgres_rule_alarm_adapter()
+    return _rule_alarm_adapter
+
+
+def _execute_alarm(
+    rule_id: UUID,
+    rule_version: int,
+    action: dict,
+    context: dict,
+    outputs: dict | None = None,
+) -> bool:
+    """Submit one configured rule observation; the rule never writes an alarm state."""
+    from app.services.rule_alarm_adapter import RuleAlarmObservation
+
+    try:
+        entity_instance_id = UUID(str(action["entity_instance_id"]))
+        action_id = str(action["id"]).strip()
+        alarm_definition = str(action["alarm_definition"]).strip()
+        if not action_id or not alarm_definition:
+            raise ValueError("missing stable rule alarm reference")
+        value = _resolve_value(action["value"], outputs, _context_values(context))
+        evidence_inputs = [
+            {
+                "field": field,
+                "entity_instance_id": str(item["entity_instance_id"]),
+                "value": item.get("value"),
+                "observed_at": item.get("observed_at"),
+                "quality": item.get("quality"),
+                "fresh": item.get("fresh"),
+                "max_observation_gap_seconds": item.get("max_observation_gap_seconds"),
+            }
+            for field, item in sorted(context.items())
+            if item.get("is_entity_instance")
+        ]
+        observations = [
+            datetime.fromisoformat(item["observed_at"])
+            for item in evidence_inputs
+            if isinstance(item.get("observed_at"), str)
+        ]
+        qualities = [
+            int(item["quality"])
+            for item in evidence_inputs
+            if item.get("quality") is not None
+        ]
+        if not observations or not qualities:
+            raise ValueError("missing source observation timestamp or quality")
+        # A rule may combine inputs.  The oldest sample and worst quality are
+        # conservative lifecycle inputs: a delayed tick cannot fabricate a
+        # continuous trigger/recovery interval from its execution time.
+        observed_at = min(observations)
+        quality = min(qualities) if all(item.get("fresh") is not False for item in evidence_inputs) else 0
+        observation_gaps = [
+            float(item["max_observation_gap_seconds"])
+            for item in evidence_inputs
+            if item.get("max_observation_gap_seconds") is not None
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("[RuleEngine] invalid declarative alarm action for rule {}: {}", rule_id, exc)
+        return False
+    outcomes = _default_rule_alarm_adapter().submit(
+        RuleAlarmObservation(
+            rule_id=rule_id,
+            rule_version=rule_version,
+            action_id=action_id,
+            alarm_definition=alarm_definition,
+            entity_instance_id=entity_instance_id,
+            observed_at=observed_at,
+            value=value,
+            quality=quality,
+            max_observation_gap_seconds=min(observation_gaps) if observation_gaps else None,
+            evidence={
+                "inputs": evidence_inputs,
+                "outputs": _safe_alarm_evidence(outputs or {}),
+            },
+        )
+    )
+    return any(outcome.code == "ALARM_ACTIVATED" for outcome in outcomes)
+
+
+def _safe_alarm_evidence(value: object) -> object:
+    """Preserve decision proof without leaking physical routing details."""
+    from app.services.automated_control_commands import _safe_trigger_evidence
+
+    return _safe_trigger_evidence(value)
 
 
 
@@ -476,29 +536,13 @@ def run_rule_tick() -> dict[str, int]:
                     for action_index, action in enumerate(actions):
                         a_type = action.get("type")
                         if a_type == "alarm":
-                            level = action.get("level", "WARNING")
-                            message = action.get("message", f"rule {rule_id} triggered")
-                            target_node_id = action.get("node_id")
-                            # 定位触发点位（简化格式：从 when 表达式提取第一个变量）
-                            when_expr = content.get("when", "") if isinstance(content, dict) else ""
-                            trigger_tag_name = _extract_first_varname(when_expr)
-                            trigger_ctx = context.get(trigger_tag_name) if trigger_tag_name else None
-                            trigger_tag_id = trigger_ctx.get("tag_id") if trigger_ctx else None
-                            trigger_value = trigger_ctx.get("value") if trigger_ctx else None
-                            effective_node_id = target_node_id
-                            if not effective_node_id and trigger_ctx:
-                                effective_node_id = trigger_ctx.get("node_id")
-                            if not _has_active_alarm(cur, rule_id):
-                                _create_alarm(
-                                    cur,
-                                    rule_id,
-                                    effective_node_id,
-                                    trigger_tag_id,
-                                    trigger_tag_name,
-                                    trigger_value,
-                                    level,
-                                    message,
-                                )
+                            if _execute_alarm(
+                                rule_id,
+                                rule_version,
+                                action,
+                                eval_context,
+                                eval_result.get("outputs"),
+                            ):
                                 result["alarms"] += 1
                         elif a_type == "control":
                             if _is_legacy_control_action(action):

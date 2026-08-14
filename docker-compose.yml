@@ -29,15 +29,17 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${DB_USER:-zizu}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?run python scripts/bootstrap_runtime_secrets.py first}
+      POSTGRES_USER: ${DB_OWNER_USER:?run python scripts/bootstrap_runtime_secrets.py first}
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?run python scripts/bootstrap_runtime_secrets.py first}
       POSTGRES_DB: ${DB_NAME:-zizu}
+      ZIZU_APP_DB_USER: ${DB_USER:?DB_USER must be a non-owner application role}
+      ZIZU_APP_DB_PASSWORD: ${DB_PASSWORD:?run python scripts/bootstrap_runtime_secrets.py first}
       TIMESCALEDB_TELEMETRY: 'off'
     volumes:
       - tsdb_data:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-zizu} -d ${DB_NAME:-zizu} -h 127.0.0.1 -p 5432"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_OWNER_USER:-zizu_owner} -d ${DB_NAME:-zizu} -h 127.0.0.1 -p 5432"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -100,6 +102,10 @@ services:
       # Docker Compose 内部服务名解析
       DB_HOST: timescaledb
       DB_PORT: 5432
+      # Owner credentials stay in Compose interpolation / the migration job;
+      # explicitly mask every owner value inherited from .env for the web process.
+      DB_OWNER_USER: ""
+      DB_OWNER_PASSWORD: ""
       MQTT_HOST: nanomq
       MQTT_PORT: 1883
       FRONTEND_DIST: /app/frontend/dist

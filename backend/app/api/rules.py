@@ -26,8 +26,16 @@ from app.services.entity_instance_catalog import (
     EntityInstanceReferenceError,
     validate_rule_entity_references,
 )
+from app.services.rule_alarm_adapter import (
+    RuleAlarmAdapter,
+    build_postgres_rule_alarm_adapter,
+)
 
 router = APIRouter()
+
+
+def get_rule_alarm_adapter() -> RuleAlarmAdapter:
+    return build_postgres_rule_alarm_adapter()
 
 # zen-engine 为可选依赖；未安装时模拟接口回退到占位实现
 ZEN_AVAILABLE = False
@@ -177,12 +185,17 @@ async def list_rules(enabled: bool | None = Query(None)) -> dict:
 async def create_rule(
     req: RuleCreateRequest,
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
+    rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
 ) -> dict:
     """创建规则。"""
     from app.services.telemetry_store import get_connection
 
     try:
-        references = validate_rule_entity_references(req.jdm_content, catalog)
+        references = validate_rule_entity_references(
+            req.jdm_content,
+            catalog,
+            has_installed_alarm_definition=rule_alarms.has_installed_definition,
+        )
     except EntityInstanceReferenceError as exc:
         raise HTTPException(
             status_code=409,
@@ -232,6 +245,7 @@ async def update_rule(
     rule_id: UUID,
     req: RuleUpdateRequest,
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
+    rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
 ) -> dict:
     """更新规则，版本号 +1。"""
     from app.services.telemetry_store import get_connection
@@ -241,7 +255,11 @@ async def update_rule(
     data = req.model_dump(exclude_none=True)
     if req.jdm_content is not None:
         try:
-            references = validate_rule_entity_references(req.jdm_content, catalog)
+            references = validate_rule_entity_references(
+                req.jdm_content,
+                catalog,
+                has_installed_alarm_definition=rule_alarms.has_installed_definition,
+            )
         except EntityInstanceReferenceError as exc:
             raise HTTPException(
                 status_code=409,

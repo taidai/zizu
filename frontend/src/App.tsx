@@ -273,12 +273,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
           <Suspense fallback={<PageLoader />}>
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
-            {activePage === 'alarms' && (
-              <AlarmCenterPage
-                canConfigure={session.user.role !== 'operator'}
-                canResolve={session.user.role !== 'operator'}
-              />
-            )}
+            {activePage === 'alarms' && <AlarmCenterPage />}
             {activePage === 'alarm-levels' && <AlarmLevelManagerPage />}
             {activePage === 'alarm-config' && <AlarmConfigPage />}
             {activePage === 'entities' && <EntityManagerPage />}

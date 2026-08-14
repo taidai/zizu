@@ -473,7 +473,7 @@ async def get_node_tree(node_id: UUID) -> dict:
 
 @router.delete("/nodes/{node_id}", **protected(CONFIGURATION_WRITE))
 async def delete_node(node_id: UUID) -> dict:
-    """删除节点及其所有子孙节点（级联删除挂载的 tags、快照、遥测、告警）。"""
+    """删除节点及其所有子孙节点，并保留不可变的旧告警历史。"""
     from app.services.telemetry_store import get_connection
 
     with get_connection() as conn:
@@ -496,21 +496,10 @@ async def delete_node(node_id: UUID) -> dict:
             if not rows:
                 raise HTTPException(status_code=404, detail="Node not found")
             node_ids = [r[0] for r in rows]
-
-            # 2) 先删除关联告警：t_alarms 对 t_nodes/t_tags 无外键级联，
-            #    必须先清掉，否则删除节点时会触发外键约束 500 错误。
             node_placeholders = ",".join(["%s"] * len(node_ids))
-            cur.execute(
-                f"""
-                DELETE FROM t_alarms
-                WHERE node_id IN ({node_placeholders})
-                   OR tag_id IN (
-                       SELECT id FROM t_tags WHERE node_id IN ({node_placeholders})
-                   )
-                """,
-                node_ids + node_ids,
-            )
-            alarms_deleted = cur.rowcount
+
+            # 2) t_alarms 是只读历史。migration_030 移除了其级联外键，
+            #    因此删除节点不会抹掉或改写旧告警证据。
 
             # 3) 删除节点：t_tags/t_telemetry/t_telemetry_latest
             #    均已设置 ON DELETE CASCADE（t_node_snapshot 已移除）
@@ -522,9 +511,12 @@ async def delete_node(node_id: UUID) -> dict:
             conn.commit()
 
     logger.info(
-        "[API/nodes] deleted node {} and {} descendants, {} alarms",
+        "[API/nodes] deleted node {} and {} descendants; legacy alarms preserved",
         node_id,
         deleted_count - 1,
-        alarms_deleted,
     )
-    return {"deleted": str(node_id), "cascade_nodes": deleted_count, "alarms_deleted": alarms_deleted}
+    return {
+        "deleted": str(node_id),
+        "cascade_nodes": deleted_count,
+        "legacy_alarms_preserved": True,
+    }

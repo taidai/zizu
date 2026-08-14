@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from uuid import UUID
 
 
@@ -85,6 +85,8 @@ class EntityInstanceCatalog:
 def validate_rule_entity_references(
     content: dict[str, Any],
     catalog: EntityInstanceCatalog,
+    *,
+    has_installed_alarm_definition: Callable[[str, UUID], bool] | None = None,
 ) -> tuple[tuple[str, str, UUID], ...]:
     """Reject legacy control addresses and validate every stable rule instance ID."""
     config = content.get("_config", {})
@@ -119,9 +121,9 @@ def validate_rule_entity_references(
         for field, value in input_mappings.items()
         if value not in (None, "")
     ]
-    action_references = _control_action_references(config_actions, section="config")
+    action_references = _rule_action_references(config_actions, section="config")
     action_references.extend(
-        _control_action_references(top_level_actions, section="actions")
+        _rule_action_references(top_level_actions, section="actions")
     )
     action_keys = [reference[1] for reference in action_references]
     if len(action_keys) != len(set(action_keys)):
@@ -158,15 +160,26 @@ def validate_rule_entity_references(
     instance_ids = tuple(dict.fromkeys(item[2] for item in normalized))
     if instance_ids:
         catalog.require(instance_ids)
+    if has_installed_alarm_definition is not None:
+        for action in (*config_actions, *top_level_actions):
+            if isinstance(action, dict) and action.get("type") == "alarm":
+                if not has_installed_alarm_definition(
+                    action["alarm_definition"].strip(),
+                    UUID(action["entity_instance_id"]),
+                ):
+                    raise EntityInstanceReferenceError(
+                        "RULE_ALARM_DEFINITION_NOT_INSTALLED",
+                        "Rule alarm action must reference a currently installed definition for its entity instance",
+                    )
     return normalized
 
 
-def _control_action_references(
+def _rule_action_references(
     actions: list[object],
     *,
     section: str,
 ) -> list[tuple[str, str, object]]:
-    """Accept only declarative entity-instance targets for automatic control."""
+    """Accept only declarative entity-instance targets for rule control or alarm observations."""
     references: list[tuple[str, str, object]] = []
     forbidden_fields = {
         "node", "group", "tag", "topic", "payload", "command",
@@ -184,7 +197,26 @@ def _control_action_references(
                 "RULE_CONTROL_LEGACY_FORBIDDEN",
                 "Rule control actions must target an entity_instance_id, not a Neuron address",
             )
-        if action_type != "control":
+        if action_type not in {"control", "alarm"}:
+            continue
+        if action_type == "alarm":
+            allowed = {"type", "id", "alarm_definition", "entity_instance_id", "value"}
+            if set(action) != allowed:
+                raise EntityInstanceReferenceError(
+                    "RULE_ALARM_ACTION_INVALID",
+                    "Rule alarm actions require only id, alarm_definition, entity_instance_id, and value",
+                )
+            if not isinstance(action.get("id"), str) or not action["id"].strip():
+                raise EntityInstanceReferenceError(
+                    "RULE_ALARM_ACTION_INVALID",
+                    "Rule alarm actions require a stable string id",
+                )
+            if not isinstance(action.get("alarm_definition"), str) or not action["alarm_definition"].strip():
+                raise EntityInstanceReferenceError(
+                    "RULE_ALARM_ACTION_INVALID",
+                    "Rule alarm actions require an installed alarm definition asset id",
+                )
+            references.append(("alarm", action["id"].strip(), action.get("entity_instance_id")))
             continue
         if forbidden_fields.intersection(action):
             raise EntityInstanceReferenceError(

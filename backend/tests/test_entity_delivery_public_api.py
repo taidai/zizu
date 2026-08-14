@@ -310,7 +310,10 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         from app.api.alarm_events import get_alarm_runtime, router as alarm_event_router
         from app.api.health import router as health_router
-        from app.api.rules import router as rules_router
+        from app.api.rules import (
+            get_rule_alarm_adapter,
+            router as rules_router,
+        )
         from app.services.entity_instance_registry import (
             EntityInstanceRegistry,
             InMemoryEntityInstanceRepository,
@@ -330,6 +333,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             InMemoryAlarmRepository,
         )
         from app.services.entity_alarm_adapter import EntityAlarmAdapter
+        from app.services.rule_alarm_adapter import RuleAlarmAdapter
         from app.services.solution_delivery import (
             InMemoryDeliveryRepository,
             SolutionDelivery,
@@ -389,6 +393,10 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_entity_instance_catalog] = lambda: catalog
         app.dependency_overrides[get_entity_instance_failover] = lambda: failover
         app.dependency_overrides[get_alarm_runtime] = lambda: alarm_runtime
+        app.dependency_overrides[get_rule_alarm_adapter] = lambda: RuleAlarmAdapter(
+            alarm_definitions,
+            alarm_runtime,
+        )
         app.state.entity_instance_registry = registry
         app.state.entity_instance_repository = entity_repository
         app.state.entity_instance_runtime = runtime
@@ -1130,7 +1138,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 missing_policy.json()["detail"]["code"],
             )
 
-    def test_rule_instance_context_reuses_registry_resolution_and_runtime_read(self) -> None:
+    def test_rule_instance_context_reuses_registry_resolution_and_alarm_safe_runtime_read(self) -> None:
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
         from app.services.rule_engine import _entity_instance_context
@@ -1143,10 +1151,12 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             entity_instance_id=entity_id,
         )
         runtime = Mock()
-        runtime.read.return_value = SimpleNamespace(
+        runtime.read_for_alarm.return_value = SimpleNamespace(
             value=125.5,
             observed_at=datetime.now(timezone.utc),
             quality=192,
+            fresh=True,
+            max_observation_gap_seconds=30,
         )
         with patch(
             "app.api.solution_delivery.get_default_entity_instance_registry",
@@ -1158,7 +1168,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             context = _entity_instance_context({str(entity_id)})
 
         registry.resolve.assert_called_once_with(entity_id)
-        runtime.read.assert_called_once_with(entity_id)
+        runtime.read_for_alarm.assert_called_once_with(entity_id)
         self.assertEqual(125.5, context[str(entity_id)]["value"])
 
     async def test_ambiguous_sources_require_explicit_selection_and_stale_plan_is_zero_write(

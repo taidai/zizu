@@ -119,6 +119,22 @@ python scripts/bootstrap_runtime_secrets.py  # 隐式输入已轮换的 Neuron �
 的维护窗口后执行 `python scripts/bootstrap_runtime_secrets.py --rotate`。
 Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入新值。
 
+`DB_OWNER_*` 只属于受控的数据库迁移作业；后端只使用 `DB_USER`/`DB_PASSWORD` 的
+非 owner 应用账号。首次 Compose 初始化会自动创建该账号并给予旧 `t_alarms` 的只读权限。
+升级已有数据库时，先停止 backend，填入原 schema owner 的 `DB_OWNER_*`、为 `DB_USER`
+设置一个新的非 owner 名称和密码，再在受控终端运行：
+
+```bash
+# 使用项目 backend 虚拟环境（其中包含 PostgreSQL 驱动）运行；不要在 web 容器中运行。
+# 在 Compose 宿主机上，timescaledb 只是容器内 DNS，因此显式给 owner job 本机地址。
+DB_OWNER_HOST=127.0.0.1 backend/.venv/Scripts/python.exe scripts/provision_database_roles.py  # Windows PowerShell 请改用 $env:DB_OWNER_HOST='127.0.0.1'
+# Linux/macOS: DB_OWNER_HOST=127.0.0.1 backend/.venv/bin/python scripts/provision_database_roles.py
+```
+
+该作业以 owner 身份执行未应用迁移、撤销应用账号对旧告警历史的写权限并验证它不是
+`t_alarms` owner。生产 backend 若仍以 owner 身份连接、缺少旧表只读权限或发现未应用迁移，
+会直接拒绝启动；不要把 `DB_OWNER_PASSWORD` 注入 web 容器。
+
 生产模式是默认值，缺失、空白或公开示例 Secret 都会阻止后端启动。只有完全
 隔离的本机开发环境才可显式同时设置 `DEPLOYMENT_MODE=development` 和
 `ALLOW_INSECURE_DEV_SECRETS=true`；进程启动时会在标准错误输出显示
@@ -187,7 +203,8 @@ docker compose exec backend \
 - 规则引擎支持 GoRules JDM Editor 编辑决策图/决策表
 - `https://localhost:9000/api/docs` — Swagger API 文档（仅 development 模式提供）
 
-> 首次启动会自动执行 `init-db/*.sql` 初始化数据库。
+> 首次启动由 PostgreSQL schema owner 执行 `init-db/*.sql` 初始化数据库；生产 web
+> 进程只验证迁移版本，不拥有 DDL 或旧告警历史写权限。
 
 ### 3. 认证与 HTTPS
 
@@ -247,7 +264,6 @@ ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true
 | 配置读取与导出 | ✓ | ✓ | — |
 | 配置创建、修改、导入与绑定 | ✓ | ✓ | — |
 | 告警确认 | ✓ | ✓ | ✓ |
-| 临时告警创建/人工恢复（待移除） | ✓ | ✓ | — |
 
 operator 读取节点和点位运行视图时不会收到连接参数、来源路径、公式、缩放、阈值等
 配置字段。告警确认主体固定来自服务端会话，客户端不能提交或伪造 `ack_user`。
@@ -496,8 +512,12 @@ engineer 在 `binding_selections` 中明确确认。来源目录或站点配置�
 只会把观测提交给同一状态机。标签必须已唯一确认到实体实例；MQTT 的外部 ID 也必须在该
 确认来源中唯一，重复名称不会猜测路由。MQTT 告警 payload 顶层必须携带整数 `quality`，只有
 OPC GOOD(192) 观测可触发或持续恢复；缺失/坏质量按不可恢复样本处理。无法映射的旧配置不再
-产生新旧表写入，须通过解决方案包完成实体绑定后才可进入统一事件模型。旧 `/alarms` 保持只读
-历史面，不能据此宣称旧告警面已完全退役。
+产生新旧表写入，须通过解决方案包完成实体绑定后才可进入统一事件模型。规则告警同样只提交
+观测：规则动作必须给出稳定 `id`、已安装告警资产 `alarm_definition`、目标
+`entity_instance_id` 与计算值 `value`，不能携带等级、消息、物理地址或恢复指令。运行期按资产
+选择当前或仍有活动事件的历史定义版本。旧 `/alarms` 仅保留历史只读查询，删除节点、标签、实体
+或规则也不会改写其中的历史证据；`/alarms/counts`、
+`/alarms/entities` 和 `/alarms/group-counts` 统计统一事件，创建、旧确认和人工恢复接口均已删除。
 
 ```yaml
 # solution.yaml 的 assets/acceptance 增量
@@ -528,6 +548,20 @@ recovery: {op: lte, value: 90}
 recoveryDuration: 5s
 severity: MAJOR
 notificationThrottle: 60s
+```
+
+```yaml
+# 规则中的告警动作：规则只投递观测，定义决定等级、触发和恢复语义
+_config:
+  sourceEntityInstanceIds: ["<PCS-01.activePower-instance-uuid>"]
+  inputMappings:
+    grid_power: "<PCS-01.activePower-instance-uuid>"
+  actions:
+    - id: export-limit
+      type: alarm
+      alarm_definition: alarm.pcs.overpower
+      entity_instance_id: "<PCS-01.activePower-instance-uuid>"
+      value: "{{grid_power}}"
 ```
 
 ```yaml

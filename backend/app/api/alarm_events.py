@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
@@ -80,12 +80,49 @@ def _error(exc: AlarmRuntimeError) -> HTTPException:
 
 @router.get("/alarm-events", **protected(RUNTIME_READ))
 async def list_alarm_events(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    state: str | None = Query(
+        None,
+        pattern="^(pending|active_unacknowledged|active_acknowledged|recovered|open)$",
+    ),
+    severity: str | None = Query(None, pattern="^(INFO|WARNING|MAJOR|CRITICAL)$"),
+    entity_instance_id: UUID | None = None,
     runtime: AlarmRuntime = Depends(get_alarm_runtime),
 ) -> dict[str, Any]:
-    items = runtime.list()
+    # ``normal`` is an internal cleared-pending audit state, not an operator
+    # alarm.  It must not appear in the active/default event worklist.
+    all_items = tuple(item for item in runtime.list() if item.state != "normal")
+    filtered = tuple(
+        item
+        for item in all_items
+        if (
+            state is None
+            or (
+                item.state in {"pending", "active_unacknowledged", "active_acknowledged"}
+                if state == "open"
+                else item.state == state
+            )
+        )
+        and (severity is None or item.severity == severity)
+        and (entity_instance_id is None or item.entity_instance_id == entity_instance_id)
+    )
+    start = (page - 1) * page_size
+    items = filtered[start:start + page_size]
     return {
         "items": [_event_public(item) for item in items],
-        "total": len(items),
+        "total": len(filtered),
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (len(filtered) + page_size - 1) // page_size),
+        "summary": {
+            "total": len(all_items),
+            "unacknowledged": sum(item.state == "active_unacknowledged" for item in all_items),
+            "by_severity": {
+                level: sum(item.severity == level for item in all_items)
+                for level in ("CRITICAL", "MAJOR", "WARNING", "INFO")
+            },
+        },
         "model_version": "v1",
     }
 

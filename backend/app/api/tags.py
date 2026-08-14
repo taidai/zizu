@@ -713,7 +713,8 @@ async def delete_tag(tag_id: UUID) -> dict:
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Tag not found")
 
-            # t_telemetry / t_telemetry_latest / t_alarms 均已外键级联删除
+            # t_telemetry / t_telemetry_latest 外键级联删除；migration_030
+            # 已移除只读 t_alarms 的外键，以保留不可变告警历史。
             cur.execute("DELETE FROM t_tags WHERE id = %s", (tag_id,))
             conn.commit()
 

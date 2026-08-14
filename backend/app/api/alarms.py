@@ -3,38 +3,17 @@ ZiZu Alarms API - 告警中心
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
-    ALARM_ACKNOWLEDGE,
-    LEGACY_ALARM_WRITE,
     RUNTIME_READ,
-    capability_metadata,
-    principal_for,
     protected,
 )
-from app.api.security import _client_ip, get_identity
-from app.services.identity import AuditEvent, Identity, Principal
 
 router = APIRouter()
-
-
-class AcknowledgeRequest(BaseModel):
-    """The actor comes from the authenticated session, never from this body."""
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class AlarmCreateRequest(BaseModel):
-    rule_id: UUID | None = None
-    node_id: UUID | None = None
-    level: str = Field(..., pattern="^(INFO|WARNING|MAJOR|CRITICAL)$")
-    message: str = Field(..., min_length=1, max_length=500)
 
 
 def _serialize_alarm(row: dict) -> dict:
@@ -136,7 +115,7 @@ async def list_alarm_types() -> dict:
 async def alarm_counts(
     node_ids: list[str] | None = Query(None, description="节点 ID 列表，逗号分隔"),
 ) -> dict:
-    """按节点统计未恢复告警数量，用于节点树角标。"""
+    """按节点统计统一活动告警事件，用于节点树角标。"""
     from app.services.telemetry_store import get_connection
 
     with get_connection() as conn:
@@ -149,151 +128,72 @@ async def alarm_counts(
                 placeholders = ",".join(["%s"] * len(uuids))
                 cur.execute(
                     f"""
-                    SELECT node_id, COUNT(*) AS cnt
-                    FROM t_alarms
-                    WHERE resolved_at IS NULL AND node_id IN ({placeholders})
-                    GROUP BY node_id
+                    SELECT tag.node_id, COUNT(DISTINCT event.id) AS cnt
+                    FROM t_alarm_events event
+                    JOIN t_entity_instance_bindings binding
+                      ON binding.entity_instance_id = event.entity_instance_id
+                     AND binding.active = TRUE
+                    JOIN t_tags tag ON tag.id = binding.tag_id
+                    WHERE event.state IN ('active_unacknowledged', 'active_acknowledged')
+                      AND tag.node_id IN ({placeholders})
+                    GROUP BY tag.node_id
                     """,
                     uuids,
                 )
             else:
                 cur.execute(
                     """
-                    SELECT node_id, COUNT(*) AS cnt
-                    FROM t_alarms
-                    WHERE resolved_at IS NULL
-                    GROUP BY node_id
+                    SELECT tag.node_id, COUNT(DISTINCT event.id) AS cnt
+                    FROM t_alarm_events event
+                    JOIN t_entity_instance_bindings binding
+                      ON binding.entity_instance_id = event.entity_instance_id
+                     AND binding.active = TRUE
+                    JOIN t_tags tag ON tag.id = binding.tag_id
+                    WHERE event.state IN ('active_unacknowledged', 'active_acknowledged')
+                    GROUP BY tag.node_id
                     """
                 )
             counts = {str(row[0]): row[1] for row in cur.fetchall()}
 
     return {"counts": counts}
-
-
-
-
 @router.get("/alarms/entities", **protected(RUNTIME_READ))
 async def list_alarm_entities() -> dict:
-    """返回当前有未恢复告警的实体列表。"""
+    """返回当前有活动事件的实体实例列表。"""
     from app.services.telemetry_store import get_connection
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT DISTINCT e.id, e.name, e.display_name
-                FROM t_alarms a
-                JOIN t_entities e ON e.id = a.entity_id
-                WHERE a.resolved_at IS NULL
-                ORDER BY e.name
+                SELECT DISTINCT instance.id, instance.definition_id, instance.display_name
+                FROM t_alarm_events event
+                JOIN t_entity_instances instance ON instance.id = event.entity_instance_id
+                WHERE event.state IN ('active_unacknowledged', 'active_acknowledged')
+                ORDER BY instance.display_name, instance.definition_id
             """)
             columns = [desc[0] for desc in cur.description]
             rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-    return {"items": [{"id": str(r["id"]), "name": r["name"], "display_name": r.get("display_name")} for r in rows]}
+    return {"items": [{"id": str(r["id"]), "name": r["definition_id"], "display_name": r.get("display_name")} for r in rows]}
 
 @router.get("/alarms/group-counts", **protected(RUNTIME_READ))
 async def alarm_group_counts() -> dict:
-    """按 error1/error2/error3 分组统计未恢复告警数量。"""
+    """按严重度统计统一活动事件。"""
     from app.services.telemetry_store import get_connection
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT source_key, COUNT(*) AS cnt
-                FROM t_alarms
-                WHERE resolved_at IS NULL AND source_key IN ('error1', 'error2', 'error3')
-                GROUP BY source_key
+                SELECT severity, COUNT(*) AS cnt
+                FROM t_alarm_events
+                WHERE state IN ('active_unacknowledged', 'active_acknowledged')
+                GROUP BY severity
                 """
             )
             counts = {row[0]: row[1] for row in cur.fetchall()}
 
-    # 保证三个分组都有返回值
-    for key in ("error1", "error2", "error3"):
+    for key in ("CRITICAL", "MAJOR", "WARNING", "INFO"):
         counts.setdefault(key, 0)
     return {"counts": counts}
 
 
-@router.post("/alarms", **protected(LEGACY_ALARM_WRITE))
-async def create_alarm(req: AlarmCreateRequest) -> dict:
-    """手动创建一条告警（用于测试）。"""
-    from app.services.telemetry_store import get_connection
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO t_alarms (rule_id, node_id, level, message, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id, rule_id, node_id, level, message, acknowledged, ack_user, ack_at, created_at, resolved_at
-                """,
-                (req.rule_id, req.node_id, req.level, req.message, datetime.now(timezone.utc)),
-            )
-            columns = [desc[0] for desc in cur.description]
-            row = dict(zip(columns, cur.fetchone()))
-            conn.commit()
-    return _serialize_alarm(row)
-
-
-@router.put(
-    "/alarms/{alarm_id}/acknowledge",
-    openapi_extra=capability_metadata(ALARM_ACKNOWLEDGE),
-)
-async def acknowledge_alarm(
-    alarm_id: UUID,
-    req: AcknowledgeRequest,
-    request: Request,
-    principal: Principal = Depends(principal_for(ALARM_ACKNOWLEDGE)),
-    identity: Identity = Depends(get_identity),
-) -> dict:
-    """确认告警。"""
-    from app.services.telemetry_store import get_connection
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE t_alarms
-                SET acknowledged = TRUE, ack_user = %s, ack_at = %s
-                WHERE id = %s
-                RETURNING id
-                """,
-                (principal.actor, datetime.now(timezone.utc), alarm_id),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Alarm not found")
-            identity.audit(
-                AuditEvent(
-                    event="alarm.acknowledge",
-                    outcome="allowed",
-                    actor=principal.actor,
-                    target=f"alarm:{alarm_id}",
-                    request_id=request.headers.get("X-Request-ID"),
-                    client_ip=_client_ip(request),
-                ),
-                connection=conn,
-            )
-            conn.commit()
-    return {
-        "status": "acknowledged",
-        "id": str(alarm_id),
-        "ack_user": principal.actor,
-    }
-
-
-@router.put("/alarms/{alarm_id}/resolve", **protected(LEGACY_ALARM_WRITE))
-async def resolve_alarm(alarm_id: UUID) -> dict:
-    """手动将告警标记为已恢复。"""
-    from app.services.telemetry_store import get_connection
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE t_alarms SET resolved_at = %s WHERE id = %s RETURNING id",
-                (datetime.now(timezone.utc), alarm_id),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Alarm not found")
-            conn.commit()
-    return {"status": "resolved", "id": str(alarm_id)}
+# New lifecycle state is owned by t_alarm_events; this module only exposes history and summaries.

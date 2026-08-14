@@ -162,24 +162,10 @@ CONFIGURATION_WRITE = {
     ),
 }
 
-ALARM_ACKNOWLEDGE = _operations(
-    "PUT",
-    "/api/v1/alarms/{alarm_id}/acknowledge",
-)
-
-# ADR-0004 removes these two compatibility writes in Ticket #14.  Until then
-# they are never operator capabilities and remain independently visible here.
-LEGACY_ALARM_WRITE = {
-    ("POST", "/api/v1/alarms"),
-    ("PUT", "/api/v1/alarms/{alarm_id}/resolve"),
-}
-
 TICKET_03_CAPABILITIES: dict[Operation, str] = {
     **{operation: "runtime.read" for operation in RUNTIME_READ},
     **{operation: "configuration.read" for operation in CONFIGURATION_READ},
     **{operation: "configuration.write" for operation in CONFIGURATION_WRITE},
-    **{operation: "alarm.acknowledge" for operation in ALARM_ACKNOWLEDGE},
-    **{operation: "legacy_alarm.write" for operation in LEGACY_ALARM_WRITE},
 }
 
 # Ticket #4 owns the control/system-management REST surface below, plus the
@@ -495,7 +481,7 @@ class FakeCursor:
             self._one = (ALARM_ID,)
             return
 
-        if "GROUP BY node_id" in normalized and "FROM t_alarms" in normalized:
+        if "FROM t_alarm_events event" in normalized and "GROUP BY tag.node_id" in normalized:
             self._all = [(NODE_ID, 3)]
             return
 
@@ -611,9 +597,9 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=app)
 
         expected_statuses = {
-            "admin": (200, 200, 200, 200, 200),
-            "engineer": (200, 200, 200, 200, 200),
-            "operator": (200, 403, 403, 200, 403),
+            "admin": (200, 200, 200),
+            "engineer": (200, 200, 200),
+            "operator": (200, 403, 403),
         }
         with mock.patch(
             "app.services.telemetry_store.get_connection",
@@ -640,15 +626,6 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
                                 headers=headers[role],
                                 json={"name": "Energy", "node_type": "ENERGY"},
                             ),
-                            await client.put(
-                                f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                                headers=headers[role],
-                                json={},
-                            ),
-                            await client.put(
-                                f"/api/v1/alarms/{ALARM_ID}/resolve",
-                                headers=headers[role],
-                            ),
                         )
                         self.assertEqual(
                             tuple(response.status_code for response in responses),
@@ -665,7 +642,7 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             operator_denials,
-            {"configuration.read", "configuration.write", "legacy_alarm.write"},
+            {"configuration.read", "configuration.write"},
         )
 
     async def test_configuration_write_fails_closed_before_business_when_audit_is_unavailable(
@@ -822,45 +799,6 @@ class BusinessRestAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual([event.outcome for event in changes], ["requested"])
         self.assertEqual(database.commits, 0)
-
-    async def test_alarm_acknowledgement_actor_cannot_be_forged_by_request_body(
-        self,
-    ) -> None:
-        app, _ = self.build_representative_app()
-        database = FakeDatabaseState()
-        transport = httpx.ASGITransport(app=app)
-
-        with mock.patch(
-            "app.services.telemetry_store.get_connection",
-            database.connection,
-        ):
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url="https://testserver",
-            ) as client:
-                headers = await self.login(client, "operator")
-                forged = await client.put(
-                    f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                    headers=headers,
-                    json={"ack_user": "forged-admin"},
-                )
-                response = await client.put(
-                    f"/api/v1/alarms/{ALARM_ID}/acknowledge",
-                    headers=headers,
-                    json={},
-                )
-
-        actor = "user:00000000-0000-0000-0000-000000000003"
-        self.assertEqual(forged.status_code, 422, forged.text)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["ack_user"], actor)
-        acknowledgement_params = next(
-            params
-            for query, params in database.executions
-            if "SET acknowledged = TRUE" in query
-        )
-        self.assertEqual(acknowledgement_params[0], actor)
-        self.assertNotIn("forged-admin", repr(database.executions))
 
     async def test_operator_runtime_node_representation_does_not_leak_secrets(
         self,
@@ -1050,9 +988,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(RUNTIME_READ), 17)
         self.assertEqual(len(CONFIGURATION_READ), 20)
         self.assertEqual(len(CONFIGURATION_WRITE), 43)
-        self.assertEqual(len(ALARM_ACKNOWLEDGE), 1)
-        self.assertEqual(len(LEGACY_ALARM_WRITE), 2)
-        self.assertEqual(len(TICKET_03_CAPABILITIES), 83)
+        self.assertEqual(len(TICKET_03_CAPABILITIES), 80)
         self.assertEqual(len(ISSUE_04_REST), 29)
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
 
@@ -1086,7 +1022,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 141)
+        self.assertEqual(len(registered), 138)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

@@ -918,6 +918,7 @@ export interface Alarm {
   alarm_source?: string | null
   alarm_count?: number | null
   alarm_code?: string | null
+  state?: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
 }
 
 export interface AlarmListResponse {
@@ -926,6 +927,25 @@ export interface AlarmListResponse {
   page: number
   page_size: number
   total_pages: number
+  summary: {
+    total: number
+    unacknowledged: number
+    by_severity: Record<AlarmLevel, number>
+  }
+}
+
+interface AlarmEventWire {
+  id: string
+  definition_id: string
+  entity_instance_id: string
+  state: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
+  severity: AlarmLevel
+  pending_at: string
+  active_at: string | null
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+  recovered_at: string | null
+  last_observation: { evidence?: { alarm_definition?: string } } | null
 }
 
 export async function fetchAlarms(
@@ -938,16 +958,46 @@ export async function fetchAlarms(
   nodeId?: string,
   entityId?: string,
 ): Promise<AlarmListResponse> {
+  void sourceKey
+  void nodeId
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
-  if (level) params.set('level', level)
-  if (sourceKey) params.set('source_key', sourceKey)
-  if (acknowledged !== undefined) params.set('acknowledged', String(acknowledged))
-  if (resolved !== undefined) params.set('resolved', String(resolved))
-  if (nodeId) params.set('node_id', nodeId)
-  if (entityId) params.set('entity_id', entityId)
-  const res = await apiFetch(`${API_BASE}/alarms?${params}`)
-  if (!res.ok) throw new Error(`Fetch alarms failed: ${res.status}`)
-  return res.json()
+  if (level) params.set('severity', level)
+  if (entityId) params.set('entity_instance_id', entityId)
+  if (resolved === true) params.set('state', 'recovered')
+  else if (acknowledged === true) params.set('state', 'active_acknowledged')
+  else if (acknowledged === false && resolved === false) params.set('state', 'open')
+  const res = await apiFetch(`${API_BASE}/alarm-events?${params}`)
+  if (!res.ok) throw new Error(`Fetch alarm events failed: ${res.status}`)
+  const data: {
+    items: AlarmEventWire[]
+    total: number
+    page: number
+    page_size: number
+    total_pages: number
+    summary: AlarmListResponse['summary']
+  } = await res.json()
+  return {
+    alarms: data.items.map((item): Alarm => ({
+      id: item.id,
+      rule_id: null,
+      node_id: null,
+      entity_id: item.entity_instance_id,
+      entity_name: `实体实例 ${item.entity_instance_id}`,
+      level: item.severity,
+      message: item.last_observation?.evidence?.alarm_definition || `告警定义 ${item.definition_id}`,
+      acknowledged: item.state === 'active_acknowledged',
+      ack_user: item.acknowledged_by,
+      ack_at: item.acknowledged_at,
+      created_at: item.active_at || item.pending_at,
+      resolved_at: item.recovered_at,
+      state: item.state,
+    })),
+    total: data.total,
+    page: data.page,
+    page_size: data.page_size,
+    total_pages: data.total_pages,
+    summary: data.summary,
+  }
 }
 
 
@@ -974,19 +1024,12 @@ export async function fetchAlarmCounts(nodeIds?: string[]): Promise<Record<strin
 }
 
 export async function acknowledgeAlarm(alarmId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/acknowledge`, {
-    method: 'PUT',
+  const res = await apiFetch(`${API_BASE}/alarm-events/${alarmId}/acknowledgements`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   })
   if (!res.ok) throw new Error(`Acknowledge alarm failed: ${res.status}`)
-}
-
-export async function resolveAlarm(alarmId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/alarms/${alarmId}/resolve`, {
-    method: 'PUT',
-  })
-  if (!res.ok) throw new Error(`Resolve alarm failed: ${res.status}`)
 }
 // ── Alarm Types & Config ──
 

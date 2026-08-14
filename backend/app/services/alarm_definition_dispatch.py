@@ -42,3 +42,27 @@ class AlarmDefinitionDispatcher:
         }
         definitions.update(historical)
         return tuple(definitions[key] for key in sorted(definitions, key=str))
+
+    def for_asset(
+        self,
+        asset_id: str,
+        entity_instance_id: UUID,
+    ) -> tuple[AlarmDefinition, ...]:
+        """Resolve one stable package alarm asset, including an open historical version."""
+        return tuple(
+            definition
+            for definition in self.for_entity(entity_instance_id)
+            if definition.asset_id == asset_id
+        )
+
+    def current_for_asset(
+        self,
+        asset_id: str,
+        entity_instance_id: UUID,
+    ) -> tuple[AlarmDefinition, ...]:
+        """Resolve only a currently installed definition for configuration checks."""
+        return tuple(
+            definition
+            for definition in self._definitions.for_entity(entity_instance_id)
+            if definition.asset_id == asset_id
+        )

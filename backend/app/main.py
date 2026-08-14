@@ -70,7 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from app.core.config import settings
         from app.services.config_store import init_config_table, load_mqtt_topics
-        from app.services.telemetry_store import init_db_pool
+        from app.services.telemetry_store import (
+            init_db_pool,
+            verify_legacy_alarm_history_gate,
+        )
         from app.core.migrations import run_migrations
 
         # DB pool must be initialized before reading t_system_config
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if settings.deployment_mode == "production":
                 raise RuntimeError(message)
             logger.warning("[Main] {} (development mode)", message)
+        if settings.deployment_mode == "production":
+            verify_legacy_alarm_history_gate()
         try:
             from app.services.identity import verify_identity_schema
 

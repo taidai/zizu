@@ -71,6 +71,36 @@ def close_db_pool() -> None:
         logger.info("[DB] Connection pool closed")
 
 
+def verify_legacy_alarm_history_gate() -> None:
+    """Fail closed unless the web process has read-only, non-owner legacy access."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user),
+                    has_table_privilege(current_user, 'public.t_alarms', 'SELECT'),
+                    has_table_privilege(current_user, 'public.t_alarms', 'INSERT')
+                        OR has_table_privilege(current_user, 'public.t_alarms', 'UPDATE')
+                        OR has_table_privilege(current_user, 'public.t_alarms', 'DELETE')
+                        OR has_table_privilege(current_user, 'public.t_alarms', 'TRUNCATE'),
+                    has_schema_privilege(current_user, 'public', 'CREATE')
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relname = 't_alarms'
+                """
+            )
+            row = cur.fetchone()
+    if row is None:
+        raise RuntimeError("Legacy alarm history table is unavailable")
+    is_owner, can_read, can_write, can_create_schema = row
+    if is_owner or not can_read or can_write or can_create_schema:
+        raise RuntimeError(
+            "Application DB role must be a non-owner without public schema CREATE and with SELECT-only access to t_alarms; "
+            "run scripts/provision_database_roles.py before production startup"
+        )
+
+
 @contextmanager
 def get_connection():
     """获取数据库连接 (上下文管理器)。"""

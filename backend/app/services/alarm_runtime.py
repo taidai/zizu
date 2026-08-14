@@ -455,7 +455,11 @@ class AlarmRuntime:
     ) -> AlarmOutcome:
         observed_at = _utc(observation.observed_at)
         evidence = _evidence(observation)
-        if not condition:
+        # A pending trigger has the same continuity requirement as recovery:
+        # samples separated by a freshness gap cannot prove a sustained fault.
+        # In particular, do not activate merely because the next good sample
+        # arrives after the configured trigger duration.
+        if not condition or _has_continuity_gap(event, observation):
             closed = replace(event, state="normal", last_observation=evidence)
             repository.save_event(closed)
             repository.append_transition(

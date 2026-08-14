@@ -1,5 +1,26 @@
 ---
 
+## Session 2026-08-14 — Ticket #14 规则告警迁移与旧告警写门禁（待本地提交）
+
+### 已实现
+- 规则只提交带现场观测时间、质量和连续性窗口的 `RuleAlarmObservation`；`AlarmRuntime` 独占 pending、激活、确认与恢复状态。规则输入映射可实际解析 YAML 中的变量，数据空洞不能跨越触发或恢复时长。
+- 所有来源的旧 `t_alarms` 写入器、旧人工创建/恢复 API 和前端恢复按钮均已移除；`/alarms` 仅保留旧历史只读兼容面，新工作台仅使用 `alarm-events`。
+- 新事件列表/汇总不把已清除的 `normal` pending 候选当作活动告警；只有活动未确认事件显示确认操作。
+- 新增 migration_030 与受控 owner 角色作业：web 使用非 owner 应用账号，旧告警表仅 SELECT，撤销 schema CREATE；生产启动会对未迁移、owner 身份、旧表写权限或可建 schema 直接 fail-closed。
+- 为升级数据库加入 `scripts/provision_database_roles.py`。它能正确读取 dotenv 行内注释，支持 `DB_OWNER_HOST`/`DB_OWNER_PORT` 指向宿主可达的 PostgreSQL；README 与 `.env.example` 已给出 Compose 宿主示例。
+
+### 验证证据
+- 规则/事件/实体交付/旧表门禁定向回归：18/18 通过；角色引导与 owner 作业脚本：9/9 通过；`compileall`、shell 语法与 `git diff --check` 通过。
+- 完整后端 pytest：182 passed、1 skipped；仅保留既有 Aggregator SUM/LAST 两项 SQL 断言失败，本票未触及该模块。
+- 前端 `npm run build` 通过（仅既有大 chunk 警告）。
+- Ticket #14 Spec 与 Standards 双轴复审均 PASS；真实 PostgreSQL 角色 smoke 尚未在隔离库执行，绝不使用 1 号机替代。
+
+### 部署边界 / Next
+- **禁止直接执行当前 `deploy.sh` 或旧 e606 文档**：它仍有固定现场 SSH 参数、关闭 host-key 校验和非制品化同步方式，不满足安全发布门禁。
+- 1 号机当前仍是旧明文匿名 v0.4.77。进入现场前必须合入/验证安全部署链、构建锁定 ARM64 制品、配置 TLS 与固定主机指纹，并在隔离 PostgreSQL 完成 migration_030 与非 owner 角色 smoke；随后才可维护窗口部署与回滚验证。
+
+---
+
 ## Session 2026-08-14 — Ticket #13 标签与 MQTT 告警来源迁移（已本地提交并复审）
 
 ### 已实现

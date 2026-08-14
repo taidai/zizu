@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchAlarms, fetchAlarmGroupCounts, acknowledgeAlarm, resolveAlarm, fetchAlarmLevels, fetchAlarmEntities, type Alarm, type AlarmLevel, type AlarmLevelEntity } from '../api/client'
+import { fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -14,17 +14,14 @@ interface Stats {
   byLevel: Record<AlarmLevel, number>
 }
 
-export default function AlarmCenterPage({ canConfigure = true, canResolve = true }: { canConfigure?: boolean; canResolve?: boolean }) {
+export default function AlarmCenterPage() {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [levelFilter, setLevelFilter] = useState<AlarmLevel | ''>('')
-  const [groupFilter, setGroupFilter] = useState<string>('')
-  const [groupCounts, setGroupCounts] = useState<Record<string, number>>({})
   const [entityFilter, setEntityFilter] = useState<string>('')
   const [alarmEntities, setAlarmEntities] = useState<{ id: string; name: string; display_name: string | null }[]>([])
-  const [alarmLevels, setAlarmLevels] = useState<AlarmLevelEntity[]>([])
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [stats, setStats] = useState<Stats>({ total: 0, unack: 0, byLevel: { CRITICAL: 0, MAJOR: 0, WARNING: 0, INFO: 0 } })
@@ -34,26 +31,16 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
     setLoading(true)
     try {
       const level = levelFilter || undefined
-      const sourceKey = groupFilter || undefined
       const entityId = entityFilter || undefined
       const acknowledged = statusFilter === 'acknowledged' ? true : statusFilter === 'active' ? false : undefined
       const resolved = statusFilter === 'resolved' ? true : statusFilter === 'active' ? false : undefined
-      const [data, counts] = await Promise.all([
-        fetchAlarms(targetPage, pageSize, level, sourceKey, acknowledged, resolved, undefined, entityId),
-        fetchAlarmGroupCounts(),
-      ])
-      setGroupCounts(counts || {})
+      const data = await fetchAlarms(targetPage, pageSize, level, undefined, acknowledged, resolved, undefined, entityId)
       setAlarms(data.alarms)
       setTotalPages(data.total_pages || 1)
       setStats({
-        total: data.total,
-        unack: data.alarms.filter((a) => !a.acknowledged && !a.resolved_at).length,
-        byLevel: {
-          CRITICAL: data.alarms.filter((a) => a.level === 'CRITICAL').length,
-          MAJOR: data.alarms.filter((a) => a.level === 'MAJOR').length,
-          WARNING: data.alarms.filter((a) => a.level === 'WARNING').length,
-          INFO: data.alarms.filter((a) => a.level === 'INFO').length,
-        },
+        total: data.summary.total,
+        unack: data.summary.unacknowledged,
+        byLevel: data.summary.by_severity,
       })
     } finally {
       setLoading(false)
@@ -61,14 +48,13 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
   }
 
   useEffect(() => {
-    if (canConfigure) fetchAlarmLevels(true).then((d) => setAlarmLevels(d.items)).catch(() => {})
     fetchAlarmEntities().then((d) => setAlarmEntities(d.items)).catch(() => {})
-  }, [canConfigure])
+  }, [])
 
   useEffect(() => {
     setPage(1)
     load(1)
-  }, [levelFilter, statusFilter, groupFilter, entityFilter])
+  }, [levelFilter, statusFilter, entityFilter])
 
   useEffect(() => {
     load(page)
@@ -78,7 +64,7 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
     if (!autoRefresh) return
     const id = setInterval(() => load(page), 5000)
     return () => clearInterval(id)
-  }, [autoRefresh, page, levelFilter, statusFilter, groupFilter, entityFilter])
+  }, [autoRefresh, page, levelFilter, statusFilter, entityFilter])
 
   const handleAck = async (alarm: Alarm) => {
     try {
@@ -89,25 +75,12 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
     }
   }
 
-  const handleResolve = async (alarm: Alarm) => {
-    try {
-      await resolveAlarm(alarm.id)
-      load(page)
-    } catch {
-      alert('恢复失败')
-    }
-  }
-
-  const levelBadgeStyle = (level: AlarmLevelEntity) => {
-    return LEVEL_STYLES[level.severity]
-  }
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-bold text-gray-800">告警中心</h2>
-          <p className="text-xs text-gray-500">查看并处理由规则引擎、MQTT 分级告警与全局实体告警触发的实时告警。</p>
+          <p className="text-xs text-gray-500">查看统一告警事件；确认表示已知悉，只有现场恢复条件才能关闭事件。</p>
         </div>
         <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
           <input
@@ -165,21 +138,6 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
             </button>
           ))}
         </div>
-        {canConfigure && <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-gray-500">告警等级:</span>
-          {alarmLevels.map((g) => (
-            <button
-              key={g.code}
-              onClick={() => setGroupFilter(groupFilter === g.code ? '' : g.code)}
-              className={`neu-btn px-3 py-1.5 text-xs font-medium ${
-                groupFilter === g.code ? levelBadgeStyle(g) : 'text-gray-600'
-              }`}
-            >
-              {g.name}
-              <span className="ml-1.5 font-mono-value">{groupCounts[g.code] || 0}</span>
-            </button>
-          ))}
-        </div>}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">实体:</span>
           <select
@@ -224,65 +182,25 @@ export default function AlarmCenterPage({ canConfigure = true, canResolve = true
                     >
                       {alarm.level}
                     </span>
-                    {alarm.source_key && (
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                          LEVEL_STYLES[alarm.level] || 'bg-gray-100 text-gray-600 border-gray-200'
-                        }`}
-                      >
-                        {alarm.source_key}
-                      </span>
-                    )}
-                    {alarm.alarm_type && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700 border border-purple-200">
-                        {alarm.alarm_type}
-                      </span>
-                    )}
-                    {alarm.alarm_source && (
-                      <span className="px-2 py-0.5 rounded text-[10px] text-gray-500 bg-gray-50 border border-gray-200">
-                        {alarm.alarm_source}
-                      </span>
-                    )}
                     {alarm.entity_name && (
                       <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
                         {alarm.entity_name}
                       </span>
                     )}
-                    {alarm.alarm_count && alarm.alarm_count > 1 && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-orange-100 text-orange-700 border border-orange-200">
-                        ×{alarm.alarm_count}
-                      </span>
-                    )}
                     <span className="text-xs text-gray-400">{new Date(alarm.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
-                    {alarm.rule_name && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#534AB7]/10 text-[#534AB8]">
-                        {alarm.rule_name}
-                      </span>
-                    )}
                   </div>
                   <h3 className="text-sm font-bold text-gray-800">{alarm.message}</h3>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    来源: {alarm.external_id || alarm.node_name || alarm.node_id || 'MQTT告警'}
-                    {alarm.alarm_threshold != null && <span className="ml-2 text-[10px] text-amber-600">阈值:{alarm.alarm_threshold}</span>}
-                    {alarm.alarm_code && <span className="ml-2 text-[10px] text-gray-400 font-mono">编码:{alarm.alarm_code}</span>}
-                    {alarm.source_topic && <span className="ml-2 text-[10px] text-gray-400 font-mono">{alarm.source_topic}</span>}
+                    事件状态: {alarm.state === 'pending' ? '触发待确认' : alarm.resolved_at ? '已恢复' : alarm.acknowledged ? '活动已确认' : '活动未确认'}
                   </p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  {!alarm.acknowledged && !alarm.resolved_at && (
+                  {alarm.state === 'active_unacknowledged' && (
                     <button
                       onClick={() => handleAck(alarm)}
                       className="neu-btn px-3 py-1 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
                     >
                       确认
-                    </button>
-                  )}
-                  {canResolve && alarm.acknowledged && !alarm.resolved_at && (
-                    <button
-                      onClick={() => handleResolve(alarm)}
-                      className="neu-btn px-3 py-1 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600"
-                    >
-                      恢复
                     </button>
                   )}
                   {alarm.acknowledged && (

@@ -374,69 +374,34 @@ finally:
         print('  cleaning up condition tag...')
         http('DELETE', f'/tags/{condition_tag_id}')
 
-# ---------- F2: Rules / Alarms / RPC ----------
-print('\n--- F2.1 Alarm rule trigger and acknowledge ---')
-rule_id = None
-alarm_id = None
-try:
-    alarm_rule_body = {
-        'name': f'_accept_alarm_rule_{int(time.time())}',
-        'rule_type': 'alarm',
-        'jdm_content': {
-            'when': 'bms_current > -2000',
-            'actions': [
-                {'type': 'alarm', 'level': 'MAJOR', 'message': '验收：bms_current 超过阈值'}
-            ]
-        },
-        'enabled': True,
-    }
-    status, rule_created = http('POST', '/rules', alarm_rule_body)
-    check('created alarm rule', status in (200, 201), f'{status}: {rule_created}')
-    rule_id = rule_created.get('id') if status in (200, 201) else None
+# ---------- F2: Unified alarms / RPC ----------
+print('\n--- F2.1 Unified alarm event surface ---')
+status, events = http('GET', '/alarm-events')
+check(
+    'alarm event list uses v1 event model',
+    status == 200 and events.get('model_version') == 'v1' and isinstance(events.get('items'), list),
+    f'{status}: {events}',
+)
 
-    if rule_id:
-        # 确保来源数据存在（已发布过）
-        print(f'  rule_id={rule_id}, waiting for rule tick (up to {AGG_POLL_MAX}s)...')
-        alarm_id = None
-        for i in range(0, AGG_POLL_MAX, AGG_POLL_INTERVAL):
-            time.sleep(AGG_POLL_INTERVAL)
-            status, alarms = http('GET', '/alarms?active=true&level=MAJOR')
-            if status == 200:
-                found = next((a for a in alarms.get('alarms', []) if a.get('rule_id') == rule_id), None)
-                if found:
-                    alarm_id = found.get('id')
-                    print(f'  [{i+AGG_POLL_INTERVAL}s] alarm_id={alarm_id}')
-                    break
-            print(f'  [{i+AGG_POLL_INTERVAL}s] no alarm yet (status={status})')
+active_unacknowledged = next(
+    (item for item in events.get('items', []) if item.get('state') == 'active_unacknowledged'),
+    None,
+) if status == 200 else None
+if active_unacknowledged:
+    event_id = active_unacknowledged['id']
+    status, ack = http('POST', f'/alarm-events/{event_id}/acknowledgements', {})
+    check('acknowledged active event', status == 200 and ack.get('state') == 'active_acknowledged', f'{status}: {ack}')
+    status, event = http('GET', f'/alarm-events/{event_id}')
+    check('event remains active after acknowledgement', status == 200 and event.get('state') == 'active_acknowledged', event)
+else:
+    print('  no active unacknowledged event; acknowledgement path is covered by public integration tests')
 
-        check('alarm created by rule', alarm_id is not None, alarms)
+status, legacy_create = http('POST', '/alarms', {})
+check('legacy alarm creation is removed', status == 405, f'{status}: {legacy_create}')
+status, legacy_resolve = http('PUT', '/alarms/00000000-0000-0000-0000-000000000000/resolve', {})
+check('manual alarm recovery is removed', status in (404, 405), f'{status}: {legacy_resolve}')
 
-        if alarm_id:
-            status, ack = http('PUT', f'/alarms/{alarm_id}/acknowledge', {})
-            check('acknowledged alarm', status == 200, f'{status}: {ack}')
-            check(
-                'alarm actor comes from authenticated session',
-                str(ack.get('ack_user', '')).startswith('user:'),
-                ack,
-            )
-
-            # 确认后查 acknowledged=true 应该能查到已确认记录
-            status, alarms = http('GET', '/alarms?acknowledged=true')
-            found = next((a for a in alarms.get('alarms', []) if a.get('id') == alarm_id), None) if status == 200 else None
-            check('alarm marked acknowledged', found is not None and found.get('acknowledged') is True, found)
-
-    print('\n--- F2.2 Rule simulation endpoint ---')
-    if rule_id:
-        status, sim = http('POST', f'/rules/{rule_id}/simulate', {'context': {'bms_current': -500}})
-        check('rule simulation true for -500', status == 200 and sim.get('triggered') is True, sim)
-        status, sim = http('POST', f'/rules/{rule_id}/simulate', {'context': {'bms_current': -3000}})
-        check('rule simulation false for -3000', status == 200 and sim.get('triggered') is False, sim)
-finally:
-    if rule_id:
-        print('  cleaning up alarm rule...')
-        http('DELETE', f'/rules/{rule_id}')
-
-print('\n--- F2.3 Legacy RPC side door remains closed ---')
+print('\n--- F2.2 Legacy RPC side door remains closed ---')
 status, rpc_resp = http('POST', '/devices/55555555-5555-5555-5555-555555555555/rpc', {
     'command': 'test_breaker',
     'payload': {'tag': 'breaker', 'value': 1},
