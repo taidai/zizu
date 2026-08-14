@@ -3563,3 +3563,26 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 完整后端 pytest：189 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` SUM/LAST 两项 SQL 断言失败，本票未触及该模块。
 - Spec 与 Standards 双轴复审无阻断；非阻断建议是后续在隔离 PostgreSQL 补“启用后进程重启仍保持状态”的主缝。
 - Ticket #17、#18 和干净环境交付试验仍未开始；不得声称产品已可生产交付或直接部署到 1 号机。
+
+---
+
+## Session 2026-08-15 — 高风险策略授权收紧与参考试验修复（待推送）
+
+- 参考 EMS 策略保持 **10 kW** 隔离动作；仅作协议模拟与交付演练，不是现场默认值。
+- 高风险策略例外新增进程内、不可持久化的服务端授权证明。`origin_evidence` 只保留审计用途；
+  即使未来内部调用方伪造同样的策略字段，也不能绕过人工二次确认。
+- 例外仍要求当前安装版本、engineer 显式启用、有限数值、小于等于包内上限，以及原有目标限值、
+  联锁、冷却与回读。ADR-0008 和 README 已同步该边界。
+- 修复参考交付试验对三等级告警返回顺序的错误假设：550 kW 时 WARNING/MAJOR pending、
+  CRITICAL normal；测试不再依赖目录排序。
+
+### 验证
+
+- `tests.test_control_command_public_api tests.test_reference_ems_package`：47 passed。
+- `scripts.test_build_release_images scripts.test_release_image_build`：5 passed。
+- `git diff --check` 通过。
+
+### 未完成门禁
+
+- 未部署到 1 号机；仍缺固定 ARM64 发布制品、TLS、真实 release lock 和独立四小时交付试验。
+- 本地提交 `ba773ea` 与 `18187c4` 仍因 GitHub 网络失败未推送；本会话变更同样尚未提交。

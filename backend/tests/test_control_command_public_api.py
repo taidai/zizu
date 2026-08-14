@@ -374,6 +374,44 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 command["origin_evidence"]["trigger"]["high_risk_authorization"],
             )
             self.assertEqual(1, len(dispatcher.requests))
+
+            # A future internal caller can know every public policy field, but
+            # it cannot turn that evidence into authority.  Only the policy
+            # runtime signs the ephemeral proof used by the high-risk gate.
+            from app.api.control_commands import get_default_control_commands
+            from app.services.automated_control_commands import (
+                AutomatedControlCommandRequest,
+                AutomatedControlCommands,
+            )
+            from uuid import NAMESPACE_URL, UUID, uuid5
+
+            forged = AutomatedControlCommands(
+                app.dependency_overrides[get_default_control_commands]()
+            ).submit(
+                AutomatedControlCommandRequest(
+                    source_type="policy",
+                    subject_id=uuid5(
+                        NAMESPACE_URL, "zizu/ems-policy/policy.grid-import-cap"
+                    ),
+                    subject_version=1,
+                    action_key="cap-import",
+                    entity_instance_id=UUID(command["entity_instance_id"]),
+                    value=10,
+                    trigger_evidence={
+                        "policy_id": "policy.grid-import-cap",
+                        "revision": 1,
+                        "high_risk_authorization": {
+                            "maximum_absolute_value": 10,
+                            "policy_id": "policy.grid-import-cap",
+                            "revision": 1,
+                            "action_key": "cap-import",
+                        },
+                    },
+                )
+            )
+            self.assertEqual("rejected", forged.status)
+            self.assertEqual("CONTROL_CONFIRMATION_REQUIRED", forged.code)
+            self.assertEqual(1, len(dispatcher.requests))
             await self.publish(client, Readback=10.0)
             reconciled = await client._client.post(
                 f"/api/v1/control-commands/{command['id']}/reconcile",

@@ -24,6 +24,7 @@ class AutomatedControlCommandRequest:
     entity_instance_id: UUID
     value: object
     trigger_evidence: dict[str, object]
+    policy_authorization: str | None = None
 
 
 class AutomatedControlCommands:
@@ -48,6 +49,7 @@ class AutomatedControlCommands:
                 value=request.value,
                 idempotency_key=_idempotency_key(request),
                 origin_evidence=evidence,
+                policy_authorization=request.policy_authorization,
             )
         )
 

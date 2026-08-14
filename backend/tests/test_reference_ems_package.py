@@ -168,11 +168,22 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(5.1)
             alarm_started_at = datetime.now(timezone.utc) + timedelta(seconds=1)
             triggered = await publish("METER-01", {"ActivePower": 550.0}, alarm_started_at)
-            self.assertEqual("ALARM_TRIGGER_PENDING", triggered["alarm_outcomes"][0]["code"])
+            # One input fan-outs to three independently declared severities.  Their
+            # execution order is not part of the public protocol: at 550 kW the
+            # WARNING and MAJOR definitions enter pending while CRITICAL remains
+            # normal.  Do not accidentally make the catalogue's sort order a
+            # delivery contract.
+            self.assertCountEqual(
+                [outcome["code"] for outcome in triggered["alarm_outcomes"]],
+                ["ALARM_TRIGGER_PENDING", "ALARM_TRIGGER_PENDING", "ALARM_NORMAL"],
+            )
             activated = await publish(
                 "METER-01", {"ActivePower": 550.0}, alarm_started_at + timedelta(seconds=11)
             )
-            self.assertEqual("ALARM_ACTIVATED", activated["alarm_outcomes"][0]["code"])
+            self.assertCountEqual(
+                [outcome["code"] for outcome in activated["alarm_outcomes"]],
+                ["ALARM_ACTIVATED", "ALARM_ACTIVATED", "ALARM_NORMAL"],
+            )
             events = await client.get("/api/v1/alarm-events?state=open")
             self.assertEqual(2, events.json()["total"], events.text)
             self.assertEqual(1, events.json()["summary"]["by_severity"]["WARNING"])

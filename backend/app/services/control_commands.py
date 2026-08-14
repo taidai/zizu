@@ -49,6 +49,10 @@ class SubmitControlCommand:
     confirmation_id: UUID | None = None
     capability: str = "control.write"
     origin_evidence: dict[str, object] = field(default_factory=dict)
+    # An opaque, process-local proof emitted only by the policy runtime.  It is
+    # deliberately not persisted or exposed: request evidence is audit data,
+    # never an authority to bypass a high-risk confirmation.
+    policy_authorization: str | None = None
 
 
 @dataclass(frozen=True)

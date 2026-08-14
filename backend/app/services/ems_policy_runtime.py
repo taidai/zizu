@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
+import hmac
+import json
 import math
+import secrets
 from collections.abc import Iterator
 from threading import RLock
 from typing import Any, Protocol
@@ -139,12 +143,17 @@ class EmsPolicyRuntime:
         observations: EntityInstanceRuntime,
         commands: AutomatedControlCommands,
         activations: PolicyActivationRepository | None = None,
+        authorization_key: bytes | None = None,
     ) -> None:
         self._delivery = delivery
         self._catalog = catalog
         self._observations = observations
         self._commands = commands
         self._activations = activations or InMemoryPolicyActivationRepository()
+        # This key is intentionally process-local.  A policy evaluation and the
+        # immediately following control submission share it; a replay after a
+        # restart still has to pass the ordinary persisted command safeguards.
+        self._authorization_key = authorization_key or secrets.token_bytes(32)
 
     def simulate(
         self,
@@ -168,9 +177,19 @@ class EmsPolicyRuntime:
         with self._activations.active(version, policy_id) as active:
             if not active:
                 raise DeliveryError("POLICY_NOT_ENABLED", "EMS policy must be enabled by an engineer")
-            return self._evaluate_active(policy_id)
+            return self._evaluate_active(policy_id, site_configuration_version=version)
 
-    def _evaluate_active(self, policy_id: str) -> dict[str, Any]:
+    def _evaluate_active(
+        self,
+        policy_id: str,
+        *,
+        site_configuration_version: int,
+    ) -> dict[str, Any]:
+        if self._delivery.site_configuration_version() != site_configuration_version:
+            raise DeliveryError(
+                "POLICY_CONFIGURATION_CHANGED",
+                "Site configuration changed before the policy could dispatch",
+            )
         policy, descriptors = self._policy(policy_id)
         source = self._reference(policy["input"], descriptors)
         try:
@@ -213,6 +232,14 @@ class EmsPolicyRuntime:
                 entity_instance_id=target.id,
                 value=policy["action"]["value"],
                 trigger_evidence=evidence,
+                policy_authorization=self._policy_authorization(
+                    policy_id=policy["id"],
+                    revision=policy["revision"],
+                    action_key=policy["action"]["id"],
+                    entity_instance_id=target.id,
+                    value=policy["action"]["value"],
+                    site_configuration_version=site_configuration_version,
+                ),
             )
         )
         return {"policy_id": policy["id"], "triggered": True, "input": evidence["input"], "command": command.public_dict()}
@@ -294,7 +321,47 @@ class EmsPolicyRuntime:
         maximum = authorization.get("maximum_absolute_value")
         if not isinstance(maximum, (int, float)) or not math.isfinite(float(maximum)):
             return False
-        return abs(float(request.value)) <= float(maximum)
+        return (
+            abs(float(request.value)) <= float(maximum)
+            and isinstance(request.policy_authorization, str)
+            and hmac.compare_digest(
+                request.policy_authorization,
+                self._policy_authorization(
+                    policy_id=policy_id,
+                    revision=policy["revision"],
+                    action_key=policy["action"]["id"],
+                    entity_instance_id=target.id,
+                    value=policy["action"]["value"],
+                    site_configuration_version=version,
+                ),
+            )
+        )
+
+    def _policy_authorization(
+        self,
+        *,
+        policy_id: str,
+        revision: int,
+        action_key: str,
+        entity_instance_id: UUID,
+        value: object,
+        site_configuration_version: int,
+    ) -> str:
+        """Bind the high-risk exception to the installed, enabled policy state."""
+        payload = json.dumps(
+            {
+                "policy_id": policy_id,
+                "revision": revision,
+                "action_key": action_key,
+                "entity_instance_id": str(entity_instance_id),
+                "value": value,
+                "site_configuration_version": site_configuration_version,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hmac.new(self._authorization_key, payload, hashlib.sha256).hexdigest()
 
     def acceptance_evidence(
         self,
