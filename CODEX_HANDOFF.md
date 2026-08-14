@@ -3678,3 +3678,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   `sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648`，其中包含
   linux/amd64 与 linux/arm64 子清单。它只是待安全/运维审核的候选，未写入 release.json、
   未触发 GitHub Actions，也未部署。
+
+### 本地制品冒烟阻断
+
+- 本机 Docker/Buildx/Compose 可用，但实际执行 `docker build --pull -f backend/Dockerfile` 时，
+  Docker Hub `python:3.12-slim` 的匿名令牌连接超时；构建尚未进入任何 Dockerfile 层。仅
+  `node:22-alpine` 已在本机缓存，Python 基础镜像不在缓存中。因此当前网络也不能提供一次
+  真实的本地镜像构建证据；这不是 Dockerfile 失败。
