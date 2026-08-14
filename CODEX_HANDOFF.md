@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-14 — Ticket #12 统一告警状态机：实体来源切片（待提交）
+## Session 2026-08-14 — Ticket #12 统一告警状态机：实体来源切片（已本地提交）
 
 ### 已实现
 - 新增 `AlarmRuntime`，外部命令仅 `submit(observation)` 与 `acknowledge(command)`；状态严格经过 `normal`、`pending`、`active_unacknowledged`、`active_acknowledged` 与 `recovered`，确认绝不伪造恢复。
@@ -18,7 +18,7 @@
 ### 当前边界 / Next
 - Ticket #12 仅迁移实体来源；标签、MQTT 和规则告警仍由 Ticket #13/#14 收口。旧 `/alarms` 是只读兼容历史面，不能与新事件数混用。
 - 仍未满足生产发布门禁：TLS、固定 ARM64 制品、凭据轮换、迁移演练和真实目标环境交付试验均未完成，禁止部署到 1 号机。
-- 下一步先提交本票并作双轴审查；随后推进标签/MQTT 告警 Adapter、完整 EMS 解决方案包与实施工作台。
+- 本地提交：`a7bd834 feat(alarm): unify entity alarm lifecycle`。下一步作双轴审查；随后推进标签/MQTT 告警 Adapter、完整 EMS 解决方案包与实施工作台。
 
 ---
 
