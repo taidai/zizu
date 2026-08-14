@@ -1185,6 +1185,92 @@ export async function reconcileControlCommand(commandId: string): Promise<Contro
   return response.json()
 }
 
+export interface SolutionPackage {
+  id: string
+  package_id: string
+  version: string
+  display_name: string
+  digest: string
+  status: string
+  parameter_contracts: { id: string; type: string; required?: boolean; description?: string; values?: string[] }[]
+}
+
+export interface InstallationPlan {
+  id: string
+  package_record_id: string
+  status: string
+  digest: string
+  blockers: { code: string; message: string }[]
+  items: Record<string, unknown>[]
+}
+
+export interface SolutionInstallation {
+  id: string
+  package_record_id: string
+  site_configuration_version: number
+  status: string
+}
+
+export interface DeliveryReport {
+  id: string
+  installation_id: string
+  status: string
+  items: { acceptance_id: string; status: string; code: string }[]
+}
+
+export async function fetchSolutionPackages(): Promise<SolutionPackage[]> {
+  const response = await apiFetch(`${API_BASE}/solution-packages`)
+  if (!response.ok) throw await authError(response, `Fetch solution packages failed: ${response.status}`)
+  return (await response.json() as { items: SolutionPackage[] }).items
+}
+
+export async function importSolutionPackage(archive: File): Promise<SolutionPackage> {
+  const data = new FormData()
+  data.append('archive', archive)
+  const response = await apiFetch(`${API_BASE}/solution-packages/import`, { method: 'POST', body: data })
+  if (!response.ok) throw await authError(response, `Import solution package failed: ${response.status}`)
+  return response.json()
+}
+
+export async function createInstallationPlan(
+  packageRecordId: string,
+  request: { parameters: Record<string, unknown>; secret_references: Record<string, string> },
+): Promise<InstallationPlan> {
+  const response = await apiFetch(`${API_BASE}/solution-packages/${encodeURIComponent(packageRecordId)}/install-plans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!response.ok) throw await authError(response, `Create installation plan failed: ${response.status}`)
+  return response.json()
+}
+
+export async function applyInstallationPlan(plan: InstallationPlan): Promise<SolutionInstallation> {
+  const response = await apiFetch(`${API_BASE}/install-plans/${encodeURIComponent(plan.id)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({ plan_digest: plan.digest }),
+  })
+  if (!response.ok) throw await authError(response, `Apply installation plan failed: ${response.status}`)
+  return response.json()
+}
+
+export async function fetchSolutionInstallations(): Promise<SolutionInstallation[]> {
+  const response = await apiFetch(`${API_BASE}/solution-installations`)
+  if (!response.ok) throw await authError(response, `Fetch solution installations failed: ${response.status}`)
+  return (await response.json() as { items: SolutionInstallation[] }).items
+}
+
+export async function runDeliveryAcceptance(installationId: string, policyCommands: Record<string, string> = {}): Promise<DeliveryReport> {
+  const response = await apiFetch(`${API_BASE}/solution-installations/${encodeURIComponent(installationId)}/acceptance-runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({ policy_commands: policyCommands }),
+  })
+  if (!response.ok) throw await authError(response, `Run delivery acceptance failed: ${response.status}`)
+  return response.json()
+}
+
 export interface LegacyEntityMigrationItem {
   legacy_entity_id: string
   legacy_entity_name: string

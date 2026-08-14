@@ -8,7 +8,7 @@ import {
   type AuthSession,
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
-import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard } from 'lucide-react'
+import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard, PackageCheck } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
@@ -18,6 +18,7 @@ const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
 const AlarmLevelManagerPage = lazy(() => import('./pages/AlarmLevelManagerPage'))
 const AlarmConfigPage = lazy(() => import('./pages/AlarmConfigPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
+const SolutionDeliveryPage = lazy(() => import('./pages/SolutionDeliveryPage'))
 
 function PageLoader() {
   return (
@@ -55,7 +56,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'workbench' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
+type PageKey = 'workbench' | 'delivery' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -76,6 +77,7 @@ const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
 
 const NAV_ITEMS: NavigationItem[] = [
   { key: 'workbench', label: 'EMS 工作台', icon: <LayoutDashboard size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
+  { key: 'delivery', label: '解决方案交付', icon: <PackageCheck size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
@@ -274,6 +276,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
+            {activePage === 'delivery' && <SolutionDeliveryPage canImport={session.user.role === 'admin'} />}
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
