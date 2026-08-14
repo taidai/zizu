@@ -222,11 +222,17 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             recovery_pending = await publish(
                 "METER-01", {"ActivePower": 200.0}, alarm_started_at + timedelta(seconds=13)
             )
-            self.assertEqual("ALARM_RECOVERY_PENDING", recovery_pending["alarm_outcomes"][0]["code"])
+            self.assertCountEqual(
+                [outcome["code"] for outcome in recovery_pending["alarm_outcomes"]],
+                ["ALARM_RECOVERY_PENDING", "ALARM_RECOVERY_PENDING", "ALARM_NORMAL"],
+            )
             recovered = await publish(
                 "METER-01", {"ActivePower": 200.0}, alarm_started_at + timedelta(seconds=24)
             )
-            self.assertEqual("ALARM_RECOVERED", recovered["alarm_outcomes"][0]["code"])
+            self.assertCountEqual(
+                [outcome["code"] for outcome in recovered["alarm_outcomes"]],
+                ["ALARM_RECOVERED", "ALARM_RECOVERED", "ALARM_NORMAL"],
+            )
 
             release_lock.update(
                 {

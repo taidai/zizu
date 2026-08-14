@@ -305,7 +305,11 @@ CAPABILITY_ROLES: dict[str, frozenset[str]] = {
     "control.write": frozenset({"admin", "engineer", "operator"}),
     "telemetry.subscribe": frozenset({"admin", "engineer", "operator"}),
     "solution.package.import": frozenset({"admin"}),
-    "solution.package.read": frozenset({"admin"}),
+    # A ZiZu instance is one station, not a multi-tenant package marketplace.
+    # Validated package metadata is intentionally public to its implementation
+    # engineer so the delivery UI can start from a selected package.  Import
+    # and every package lifecycle mutation remain admin-only.
+    "solution.package.read": frozenset({"admin", "engineer"}),
     "solution.install.plan": frozenset({"admin", "engineer"}),
     "solution.install.apply": frozenset({"admin", "engineer"}),
     "solution.installation.read": frozenset({"admin", "engineer", "operator"}),

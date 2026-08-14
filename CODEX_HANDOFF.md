@@ -3593,3 +3593,20 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   `ticket/07-multi-device-instance-consumers`；没有推送到 `main` 或执行现场部署。
 - 已新增 Proposed ADR-0009，定义不等同于工单的“交付分配”最小授权边界；它尚未实现，不能
   作为工程师包可见性或计划/安装范围的现有保证。
+
+---
+
+## Session 2026-08-15 — 工程师从产品界面开始交付（待推送）
+
+- 基于单站实例与已验证包不含现场 Secret 的约束，拒绝引入交付分配/工单子系统：engineer 现在可只读
+  已验证解决方案包，直接从“解决方案交付”页面填写参数、创建计划、安装并运行验收；admin 仍独占包
+  导入和生命周期管理，operator 仍无包读取权限。
+- 前端不再因非 admin 而清空包列表，ADR-0009 已记录为 Rejected，避免把未实现的对象当成产品保证。
+- 参考试验的告警恢复阶段同样改为按多等级状态集合断言，不依赖目录返回顺序。
+
+### 验证
+
+- `tests.test_authenticated_delivery_public_api tests.test_reference_ems_package`：38 passed。
+- `tests.test_business_rest_authorization tests.test_authenticated_delivery_public_api`：25 passed。
+- 前端 `npm run build`：通过（仅既有大 bundle warning）。
+- `git diff --check`：通过。
