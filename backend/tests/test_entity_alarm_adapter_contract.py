@@ -9,6 +9,19 @@ from uuid import UUID
 
 
 class EntityAlarmAdapterContractTest(unittest.TestCase):
+    def test_alarm_definition_schema_rejects_mutation(self) -> None:
+        migration = (
+            Path(__file__).resolve().parents[2]
+            / "init-db"
+            / "migration_029_unified_alarm_runtime.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("trg_alarm_definitions_immutable", migration)
+        self.assertIn(
+            "BEFORE UPDATE OR DELETE OR TRUNCATE ON t_alarm_definitions",
+            migration,
+        )
+
     def test_pipeline_uses_installed_entity_alarm_adapter_not_legacy_engine(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
@@ -64,7 +77,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
             version="2.0.0",
             entity_instance_id=entity_instance_id,
             entity_definition_id=old_definition.entity_definition_id,
-            trigger={"op": "gt", "value": 200},
+            trigger=old_definition.trigger,
             trigger_duration_seconds=1,
             recovery=old_definition.recovery,
             recovery_duration_seconds=old_definition.recovery_duration_seconds,
@@ -92,6 +105,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.fresh = True
                 self.observed_at = started_at + timedelta(seconds=2)
+                self.value = 101
 
             def read_for_alarm(self, requested_id: UUID) -> EntityInstanceObservation:
                 if requested_id != entity_instance_id:
@@ -100,7 +114,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
                     entity_instance_id=entity_instance_id,
                     definition_id="pcs.activePower",
                     instance_key="PCS-01",
-                    value=90,
+                    value=self.value,
                     data_type="FLOAT",
                     unit="kW",
                     observed_at=self.observed_at,
@@ -112,18 +126,29 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
 
         entity_runtime = CurrentEntityObservation()
         adapter = EntityAlarmAdapter(definitions, entity_runtime, alarms)
-        outcomes = adapter.submit_entity(entity_instance_id)
+        continuing_outcomes = adapter.submit_entity(entity_instance_id)
 
         self.assertEqual(
-            {"ALARM_NORMAL", "ALARM_RECOVERY_PENDING"},
-            {outcome.code for outcome in outcomes},
+            {"ALARM_STILL_ACTIVE"},
+            {outcome.code for outcome in continuing_outcomes},
+        )
+        self.assertEqual(
+            1,
+            len([event for event in alarms.list() if event.state != "normal"]),
+        )
+        entity_runtime.value = 90
+        entity_runtime.observed_at = started_at + timedelta(seconds=3)
+        recovery_outcomes = adapter.submit_entity(entity_instance_id)
+        self.assertEqual(
+            {"ALARM_RECOVERY_PENDING"},
+            {outcome.code for outcome in recovery_outcomes},
         )
         entity_runtime.fresh = False
-        entity_runtime.observed_at = started_at + timedelta(seconds=3)
+        entity_runtime.observed_at = started_at + timedelta(seconds=4)
         invalid_outcomes = adapter.submit_entity(entity_instance_id)
 
         self.assertEqual(
-            {"ALARM_NORMAL", "ALARM_STILL_ACTIVE"},
+            {"ALARM_STILL_ACTIVE"},
             {outcome.code for outcome in invalid_outcomes},
         )
         active_event = next(event for event in alarms.list() if event.state != "normal")

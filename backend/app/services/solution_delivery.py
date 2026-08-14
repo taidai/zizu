@@ -806,6 +806,11 @@ class SolutionDelivery:
                 {"alarm_definition": definition["alarmDefinition"]},
             )
         expected_state = definition["expectedState"]
+        required_transition_codes = {
+            "ALARM_ACTIVATED",
+            "ALARM_ACKNOWLEDGED",
+            "ALARM_RECOVERED",
+        }
         events_by_definition = {
             str(event.definition_id): event
             for event in self._alarm_runtime.list()
@@ -824,6 +829,7 @@ class SolutionDelivery:
                 )
                 continue
             timeline = self._alarm_runtime.timeline(event.id)
+            transition_codes = {item.code for item in timeline}
             evidence.append(
                 {
                     "definition_id": installed_definition["id"],
@@ -833,9 +839,15 @@ class SolutionDelivery:
                         {"to_state": item.to_state, "code": item.code}
                         for item in timeline
                     ],
+                    "missing_transition_codes": sorted(
+                        required_transition_codes - transition_codes
+                    ),
                 }
             )
-            if event.state != expected_state:
+            if (
+                event.state != expected_state
+                or not required_transition_codes.issubset(transition_codes)
+            ):
                 passed = False
         return _alarm_acceptance_result(
             acceptance_id,

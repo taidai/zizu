@@ -49,6 +49,7 @@ class AlarmObservation:
     source_kind: str
     source_ref: str
     evidence: dict[str, Any]
+    max_observation_gap_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -511,6 +512,7 @@ class AlarmRuntime:
         recovery_condition = (
             _matches(definition.recovery, observation.value)
             and observation.quality == GOOD_QUALITY
+            and not _has_continuity_gap(event, observation)
         )
         if not recovery_condition:
             updated = replace(
@@ -604,7 +606,23 @@ def _evidence(observation: AlarmObservation) -> dict[str, Any]:
         "source_kind": observation.source_kind,
         "source_ref": observation.source_ref,
         "evidence": dict(observation.evidence),
+        "max_observation_gap_seconds": observation.max_observation_gap_seconds,
     }
+
+
+def _has_continuity_gap(event: AlarmEvent, observation: AlarmObservation) -> bool:
+    """Reject recovery when the source was unobserved past its freshness window."""
+    window = observation.max_observation_gap_seconds
+    if window is None or window <= 0 or event.last_observation is None:
+        return False
+    previous_at = event.last_observation.get("observed_at")
+    if not isinstance(previous_at, str):
+        return True
+    try:
+        previous = _utc(datetime.fromisoformat(previous_at))
+    except ValueError:
+        return True
+    return _utc(observation.observed_at) > previous + timedelta(seconds=window)
 
 
 def _matches(condition: dict[str, Any], value: Any) -> bool:

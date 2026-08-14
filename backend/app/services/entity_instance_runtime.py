@@ -93,6 +93,7 @@ class EntityInstanceObservation:
     age_ms: int
     fresh: bool
     quality_good: bool
+    max_observation_gap_seconds: float | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -169,4 +170,5 @@ class EntityInstanceRuntime:
             age_ms=round(age_seconds * 1000),
             fresh=age_seconds <= resolved.freshness_seconds,
             quality_good=observation.quality == 192,
+            max_observation_gap_seconds=resolved.freshness_seconds,
         )

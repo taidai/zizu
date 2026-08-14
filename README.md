@@ -537,8 +537,8 @@ expectedState: recovered
 timeout: 5s
 ```
 
-`alarm_lifecycle` 验收只检查本次安装的定义是否已产生事件并进入声明状态；报告保留
-事件 ID、状态和机器转换码，不回显物理来源地址或原始协议负载。
+`alarm_lifecycle` 验收要求本次安装的定义已完成触发、操作员确认和现场恢复，并进入声明
+状态；报告保留事件 ID、状态和机器转换码，不回显物理来源地址或原始协议负载。
 
 ```yaml
 # solution.yaml 的 assets 片段

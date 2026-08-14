@@ -43,7 +43,13 @@ class AlarmRuntimeTest(unittest.TestCase):
             repository=self.repository,
         )
 
-    def observe(self, *, value: object, after_seconds: int):
+    def observe(
+        self,
+        *,
+        value: object,
+        after_seconds: int,
+        max_observation_gap_seconds: float | None = None,
+    ):
         return self.runtime.submit(
             self.observation_type(
                 definition_id=DEFINITION_ID,
@@ -54,6 +60,7 @@ class AlarmRuntimeTest(unittest.TestCase):
                 source_kind="entity",
                 source_ref="PCS-01.activePower",
                 evidence={"sample": after_seconds},
+                max_observation_gap_seconds=max_observation_gap_seconds,
             )
         )
 
@@ -110,5 +117,35 @@ class AlarmRuntimeTest(unittest.TestCase):
         self.assertEqual("ALARM_STILL_ACTIVE", jittered_active.code)
         self.assertEqual("ALARM_RECOVERY_PENDING", second_recovery_pending.code)
         self.assertEqual("recovered", recovered.state)
+        self.assertEqual("ALARM_RECOVERED", recovered.code)
+        self.assertEqual(active.event_id, recovered.event_id)
+
+    def test_recovery_cannot_span_a_stale_observation_gap(self) -> None:
+        self.observe(value=101, after_seconds=0, max_observation_gap_seconds=30)
+        active = self.observe(value=101, after_seconds=10, max_observation_gap_seconds=30)
+        recovery_pending = self.observe(
+            value=90,
+            after_seconds=12,
+            max_observation_gap_seconds=30,
+        )
+        after_gap = self.observe(
+            value=90,
+            after_seconds=43,
+            max_observation_gap_seconds=30,
+        )
+        second_recovery_pending = self.observe(
+            value=90,
+            after_seconds=44,
+            max_observation_gap_seconds=30,
+        )
+        recovered = self.observe(
+            value=90,
+            after_seconds=49,
+            max_observation_gap_seconds=30,
+        )
+
+        self.assertEqual("ALARM_RECOVERY_PENDING", recovery_pending.code)
+        self.assertEqual("ALARM_STILL_ACTIVE", after_gap.code)
+        self.assertEqual("ALARM_RECOVERY_PENDING", second_recovery_pending.code)
         self.assertEqual("ALARM_RECOVERED", recovered.code)
         self.assertEqual(active.event_id, recovered.event_id)

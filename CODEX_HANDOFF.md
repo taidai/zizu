@@ -6,19 +6,20 @@
 - 新增 `AlarmRuntime`，外部命令仅 `submit(observation)` 与 `acknowledge(command)`；状态严格经过 `normal`、`pending`、`active_unacknowledged`、`active_acknowledged` 与 `recovered`，确认绝不伪造恢复。
 - 解决方案包可声明版本化 `alarm_definition` 与 `alarm_lifecycle` 验收资产。安装计划将定义绑定到已确认实体实例；定义、事件、追加式转换审计和通知 outbox 由 migration_029 持久化，旧 `t_alarms` 不回填、不重写。
 - 实体协议观测经解析/归一化/确认实体来源后提交状态机；数据管道停止调用旧实体告警引擎。坏质量或陈旧观测会作为不可恢复样本打断恢复计时，不能跨越数据空洞关闭活动事件。
-- 新包升级后，仍活动的旧事件继续使用其不可变历史定义接收观测并自然恢复，避免被“当前定义”投影切换后永久滞留。
+- 新包升级后，仍活动的旧事件继续使用其不可变历史定义接收观测并自然恢复；同资产的当前定义被抑制，连续故障不会被升级拆成两条事件。定义在数据库层拒绝更新、删除或截断。
+- 实体告警恢复还会校验相邻观测间隔不超过声明的新鲜度窗口，数据静默后到达的“恢复值”只能重新开始恢复计时，不能跨越空洞关闭事件。
 - 新事件 API 提供列表、详情、转换时间线和仅确认命令；所有端点进入 Bearer/OpenAPI 权限台账。operator 主体由认证上下文写入确认记录。
 
 ### 验证证据
-- 告警运行时、事件 HTTP、实体 Adapter、协议模拟的包→安装→触发→确认→坏质量打断恢复→现场恢复→机器验收：13/13 通过。
-- 交付安全设置与公开交付回归：31/31 通过；生产应用注册、告警事件 OpenAPI 与完整路由权限台账另行通过 5/5。
-- `compileall` 与 `git diff --check` 通过。真实 PostgreSQL 主缝已扩展至 migration_029，但本机没有隔离 `*_test` 数据库，未运行且绝不使用现场库。
-- 完整 `unittest discover` 在 64 秒外层时限中止，未得到成功或失败结论；不能据此宣称全量套件通过。
+- 告警运行时、事件 HTTP、实体 Adapter、协议模拟的包→安装→触发→确认→坏质量/静默空洞打断恢复→现场恢复→机器验收：最新定向 16/16 通过。
+- 机器验收同时证明必须存在 `ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、`ALARM_RECOVERED` 三段转换；遗漏确认会稳定失败为 `ALARM_LIFECYCLE_INCOMPLETE`。
+- 完整 `pytest tests -q`：170 passed、1 skipped；仅保留既有 `tests/test_aggregator.py` 的 SUM/LAST 两项 SQL 断言失败，本票未触及该模块。此前 `unittest discover` 的 2 个导入错误来自项目虚拟环境未安装 pytest，已改用现有 pytest 运行时配合项目 site-packages 完整执行。
+- `compileall` 与 `git diff --check` 通过；Spec/Standards 双轴复审均 PASS。真实 PostgreSQL 主缝已扩展至 migration_029，但本机没有隔离 `*_test` 数据库，未运行且绝不使用现场库。
 
 ### 当前边界 / Next
 - Ticket #12 仅迁移实体来源；标签、MQTT 和规则告警仍由 Ticket #13/#14 收口。旧 `/alarms` 是只读兼容历史面，不能与新事件数混用。
 - 仍未满足生产发布门禁：TLS、固定 ARM64 制品、凭据轮换、迁移演练和真实目标环境交付试验均未完成，禁止部署到 1 号机。
-- 本地提交：`a7bd834 feat(alarm): unify entity alarm lifecycle`。下一步作双轴审查；随后推进标签/MQTT 告警 Adapter、完整 EMS 解决方案包与实施工作台。
+- 基础提交：`a7bd834 feat(alarm): unify entity alarm lifecycle`；连续性与验收收口补丁已随本次会话本地提交。下一步进入 Ticket #13：将标签、MQTT 告警迁入同一状态机；随后推进完整 EMS 解决方案包与实施工作台。
 
 ---
 

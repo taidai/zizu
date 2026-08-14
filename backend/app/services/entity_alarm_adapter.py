@@ -55,6 +55,9 @@ class EntityAlarmAdapter:
                             "fresh": observation.fresh,
                             "source_quality": observation.quality,
                         },
+                        max_observation_gap_seconds=(
+                            observation.max_observation_gap_seconds
+                        ),
                     )
                 )
             )
@@ -71,10 +74,9 @@ class EntityAlarmAdapter:
         receive confirmed observations until its own recovery condition closes
         it; otherwise an active alarm can become permanently stranded.
         """
-        definitions = {
-            definition.id: definition
-            for definition in self._definitions.for_entity(entity_instance_id)
-        }
+        current = self._definitions.for_entity(entity_instance_id)
+        historical: dict[UUID, AlarmDefinition] = {}
+        assets_with_open_events: set[str] = set()
         for event in self._alarm_runtime.list():
             if (
                 event.entity_instance_id == entity_instance_id
@@ -82,7 +84,14 @@ class EntityAlarmAdapter:
             ):
                 definition = self._definitions.get(event.definition_id)
                 if definition is not None:
-                    definitions.setdefault(definition.id, definition)
+                    historical[definition.id] = definition
+                    assets_with_open_events.add(definition.asset_id)
+        definitions = {
+            definition.id: definition
+            for definition in current
+            if definition.asset_id not in assets_with_open_events
+        }
+        definitions.update(historical)
         return tuple(definitions[key] for key in sorted(definitions, key=str))
 
     def submit_all(self) -> tuple[AlarmOutcome, ...]:

@@ -92,6 +92,18 @@ CREATE INDEX IF NOT EXISTS idx_alarm_notification_outbox_pending
     ON t_alarm_notification_outbox(created_at)
     WHERE delivered_at IS NULL;
 
+CREATE OR REPLACE FUNCTION reject_alarm_definition_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'alarm definitions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_alarm_definitions_immutable ON t_alarm_definitions;
+CREATE TRIGGER trg_alarm_definitions_immutable
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON t_alarm_definitions
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_alarm_definition_mutation();
+
 CREATE OR REPLACE FUNCTION reject_alarm_transition_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

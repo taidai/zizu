@@ -513,7 +513,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 (await publish(90, 2.5, quality=0))["alarm_outcomes"][0]["code"],
             )
             self.assertEqual("ALARM_RECOVERY_PENDING", (await publish(90, 3.1))["alarm_outcomes"][0]["code"])
-            recovered = await publish(90, 4.2)
+            self.assertEqual("ALARM_STILL_ACTIVE", (await publish(90, 34.2))["alarm_outcomes"][0]["code"])
+            self.assertEqual("ALARM_RECOVERY_PENDING", (await publish(90, 35.0))["alarm_outcomes"][0]["code"])
+            recovered = await publish(90, 36.1)
             self.assertEqual("ALARM_RECOVERED", recovered["alarm_outcomes"][0]["code"])
             event = await client.get(f"/api/v1/alarm-events/{event_id}")
             self.assertEqual(200, event.status_code, event.text)
@@ -536,6 +538,67 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("passed", lifecycle_item["status"], accepted.text)
             self.assertEqual("ALARM_LIFECYCLE_CONFIRMED", lifecycle_item["code"])
             self.assertEqual("recovered", lifecycle_item["evidence"]["events"][0]["state"])
+            self.assertEqual(
+                [],
+                lifecycle_item["evidence"]["events"][0]["missing_transition_codes"],
+            )
+
+    async def test_alarm_lifecycle_acceptance_requires_operator_acknowledgement(
+        self,
+    ) -> None:
+        app = self.build_app(sources=(self.source(),))
+        started_at = datetime.now(timezone.utc)
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            _, planned = await self.import_and_plan(
+                client,
+                archive=build_alarm_entity_package(),
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-unacknowledged-alarm"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+
+            async def publish(value: float, after_seconds: float) -> None:
+                response = await client.post(
+                    "/protocol-simulator/neuron",
+                    json={
+                        "message": {
+                            "node": "PCS-01",
+                            "timestamp": round(
+                                (started_at + timedelta(seconds=after_seconds)).timestamp()
+                                * 1000
+                            ),
+                            "values": {"ActivePower": value},
+                        }
+                    },
+                )
+                self.assertEqual(200, response.status_code, response.text)
+
+            await publish(101, 0)
+            await publish(101, 1.1)
+            await publish(90, 2.0)
+            await publish(90, 3.1)
+            report = await client.post(
+                f"/api/v1/solution-installations/{installed.json()['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "accept-unacknowledged-alarm"},
+            )
+
+        self.assertEqual(201, report.status_code, report.text)
+        lifecycle_item = next(
+            item
+            for item in report.json()["items"]
+            if item["acceptance_id"] == "acceptance.pcs-overpower-lifecycle"
+        )
+        self.assertEqual("failed", lifecycle_item["status"], report.text)
+        self.assertEqual("ALARM_LIFECYCLE_INCOMPLETE", lifecycle_item["code"])
+        self.assertEqual(
+            ["ALARM_ACKNOWLEDGED"],
+            lifecycle_item["evidence"]["events"][0]["missing_transition_codes"],
+        )
 
     async def test_package_to_confirmed_fresh_entity_delivery_report(self) -> None:
         app = self.build_app(
