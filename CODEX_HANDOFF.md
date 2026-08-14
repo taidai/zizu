@@ -3645,3 +3645,22 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 - 前端 `npm run build`：通过（仅既有大 bundle warning）。
 - `git diff --check`：通过。
+
+---
+
+## Session 2026-08-15 — 参考试验与发布门禁复核（待推送）
+
+- 参考 EMS 的公开主缝已以 180 秒上限完整跑完：导入、安装、协议模拟、分级告警、手动/策略
+  控制回读、权限拒绝、网关失败与最终交付报告均通过。
+- 发布门禁 19 项通过：多架构摘要清单、TLS Compose、运行镜像/架构核验、发布锁和回滚拒绝
+  跨 Schema 均受测试保护。
+- README 修正为根据实际目标选择常规或 e606 的 release Compose，再查询同一编排实际启动的
+  backend/edge 容器写发布锁；避免常规 Docker 目标误用 e606 查询命令。
+- 仍没有真实 `release.json`、ARM64 镜像、TLS 域名、目标 release lock 或独立四小时试验。
+  这些外部证据缺失时不得部署或宣称交付就绪。
+
+### 验证
+
+- `tests.test_reference_ems_package tests.test_delivery_public_api`：49 passed（64.114s）。
+- 发布门禁 unittest：19 passed（1.768s）。
+- `git diff --check`：通过。

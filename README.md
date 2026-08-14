@@ -355,10 +355,13 @@ docker compose --env-file release.env -f deploy/docker-compose.release.yml \
 核对实际镜像架构，不能只凭相同版本号写锁：
 
 ```bash
+# 常规 Docker 主机使用 docker-compose.release.yml；仅 e606 使用 e606 变体。
+RELEASE_COMPOSE=deploy/docker-compose.release.yml
+# RELEASE_COMPOSE=deploy/docker-compose.release.e606.yml
 BACKEND_CONTAINER=$(docker compose --env-file release.env \
-  -f deploy/docker-compose.release.e606.yml ps -q backend)
+  -f "$RELEASE_COMPOSE" ps -q backend)
 EDGE_CONTAINER=$(docker compose --env-file release.env \
-  -f deploy/docker-compose.release.e606.yml ps -q edge)
+  -f "$RELEASE_COMPOSE" ps -q edge)
 python scripts/record_release_lock.py \
   --release release.json --migrations-dir init-db \
   --architecture linux/arm64 --public-api "https://${ZIZU_PUBLIC_HOST}" \
