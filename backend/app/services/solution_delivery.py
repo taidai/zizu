@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
@@ -120,6 +120,7 @@ class SolutionDelivery:
         alarm_definitions: AlarmDefinitionInstaller | None = None,
         alarm_runtime: AlarmRuntime | None = None,
         policy_runtime: PolicyExecutionRuntime | None = None,
+        release_lock_reader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
@@ -129,6 +130,7 @@ class SolutionDelivery:
         self._alarm_definitions = alarm_definitions
         self._alarm_runtime = alarm_runtime
         self._policy_runtime = policy_runtime
+        self._release_lock_reader = release_lock_reader
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
         """Attach the runtime after construction to avoid a delivery-policy cycle."""
@@ -730,12 +732,6 @@ class SolutionDelivery:
         )
         if repeated is not None:
             return repeated
-        if self._public_api_probe is None:
-            raise DeliveryError(
-                "LIVENESS_HTTP_ERROR",
-                "Public API probe is not configured",
-            )
-
         items: list[dict[str, Any]] = []
         started_at = datetime.now(timezone.utc)
         run_started = time.monotonic()
@@ -757,6 +753,7 @@ class SolutionDelivery:
                     "entity_readiness",
                     "alarm_lifecycle",
                     "policy_execution",
+                    "release_lock",
                 }
             ):
                 raise DeliveryError(
@@ -793,6 +790,22 @@ class SolutionDelivery:
                 )
                 items.append(item)
                 continue
+            if definition["kind"] == "release_lock":
+                items.append(
+                    self._run_release_lock_acceptance(
+                        installation,
+                        package,
+                        acceptance_id,
+                        bool(definition.get("required", True)),
+                        item_started,
+                    )
+                )
+                continue
+            if self._public_api_probe is None:
+                raise DeliveryError(
+                    "LIVENESS_HTTP_ERROR",
+                    "Public API probe is not configured",
+                )
             try:
                 response_status, evidence = await self._public_api_probe.get(
                     "/api/v1/health/live",
@@ -890,6 +903,57 @@ class SolutionDelivery:
             idempotency_key,
             request_digest,
         )
+
+    def _run_release_lock_acceptance(
+        self,
+        installation: InstallationOutcome,
+        package: PackageImport,
+        acceptance_id: str,
+        required: bool,
+        item_started: float,
+    ) -> dict[str, Any]:
+        """Require a deployment-owned lock for this exact installed configuration."""
+        summary = (
+            self._release_lock_reader()
+            if self._release_lock_reader is not None
+            else {"status": "unavailable"}
+        )
+        status = summary.get("status") if isinstance(summary, dict) else "unavailable"
+        if status == "missing":
+            code = "RELEASE_LOCK_MISSING"
+        elif status != "locked":
+            code = "RELEASE_LOCK_UNAVAILABLE"
+        else:
+            locked_package = summary.get("package")
+            consistent = (
+                summary.get("platform_version") == self._platform_version
+                and summary.get("site_configuration_version")
+                == installation.site_configuration_version
+                and isinstance(locked_package, dict)
+                and locked_package.get("id") == package.package_id
+                and locked_package.get("version") == package.version
+                and locked_package.get("digest") == package.digest
+                and summary.get("architecture") in {"linux/amd64", "linux/arm64"}
+            )
+            code = "RELEASE_LOCK_CONSISTENT" if consistent else "RELEASE_LOCK_INCONSISTENT"
+        evidence = {
+            "status": status,
+            "id": summary.get("id") if isinstance(summary, dict) else None,
+            "platform_version": summary.get("platform_version") if isinstance(summary, dict) else None,
+            "architecture": summary.get("architecture") if isinstance(summary, dict) else None,
+            "site_configuration_version": (
+                summary.get("site_configuration_version") if isinstance(summary, dict) else None
+            ),
+            "package": summary.get("package") if isinstance(summary, dict) else None,
+        }
+        return {
+            "acceptance_id": acceptance_id,
+            "status": "passed" if code == "RELEASE_LOCK_CONSISTENT" else "failed",
+            "code": code,
+            "required": required,
+            "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+            "evidence": evidence,
+        }
 
     def _run_policy_execution_acceptance(
         self,

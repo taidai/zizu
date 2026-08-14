@@ -31,6 +31,7 @@ MIGRATION_028 = BACKEND_ROOT.parent / "init-db" / "migration_028_rule_control_co
 MIGRATION_029 = BACKEND_ROOT.parent / "init-db" / "migration_029_unified_alarm_runtime.sql"
 MIGRATION_030 = BACKEND_ROOT.parent / "init-db" / "migration_030_rule_alarm_and_legacy_gate.sql"
 MIGRATION_031 = BACKEND_ROOT.parent / "init-db" / "migration_031_ems_policy_activations.sql"
+MIGRATION_032 = BACKEND_ROOT.parent / "init-db" / "migration_032_release_locks.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -44,6 +45,7 @@ MIGRATIONS = (
     MIGRATION_029,
     MIGRATION_030,
     MIGRATION_031,
+    MIGRATION_032,
 )
 def build_minimal_package(
     *,
@@ -324,6 +326,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     if migration == MIGRATION_024:
                         cls._create_source_catalog_tables(cursor)
                     cursor.execute(migration.read_text(encoding="utf-8"))
+                cursor.execute("SELECT to_regclass('public.t_release_locks')")
+                if cursor.fetchone() != ("t_release_locks",):
+                    raise AssertionError("release lock migration was not applied")
                 cursor.execute(
                     """
                     INSERT INTO t_nodes (id, name, source_catalog_key, enabled)

@@ -337,6 +337,40 @@ docker compose --env-file release.env -f deploy/docker-compose.release.yml \
   up -d --no-build
 ```
 
+确认公开 HTTPS liveness 精确返回该平台版本后，仍由 owner 作业写入一次不可变发布锁。Web
+进程只有读取权限；`/api/v1/health` 对已认证角色只展示摘要和两个内容 digest，不显示镜像
+仓库、凭据或内部地址。该作业同时核对容器实际 image ID 与 release.json 的摘要解析结果，并
+核对实际镜像架构，不能只凭相同版本号写锁：
+
+```bash
+BACKEND_CONTAINER=$(docker compose --env-file release.env \
+  -f deploy/docker-compose.release.e606.yml ps -q backend)
+EDGE_CONTAINER=$(docker compose --env-file release.env \
+  -f deploy/docker-compose.release.e606.yml ps -q edge)
+python scripts/record_release_lock.py \
+  --release release.json --migrations-dir init-db \
+  --architecture linux/arm64 --public-api "https://${ZIZU_PUBLIC_HOST}" \
+  --backend-container "$BACKEND_CONTAINER" --edge-container "$EDGE_CONTAINER"
+```
+
+干净站点可以先记录 `site_configuration_version=0` 的平台锁。工程师安装解决方案包后，必须以
+相同命令再次记录包含该包摘要和站点配置版本的新锁，才可运行包中的 `release_lock` 验收。该
+验收只有在锁的版本、架构、包 ID/版本/摘要和站点配置版本全部一致时通过；缺失、不可读或
+不一致锁都会生成 failed 的不可变交付报告。
+
+回滚不是“替换一个镜像标签”。只能显式选择已存在的锁，并在启动任何容器前运行 owner 校验：
+
+```bash
+python scripts/validate_release_rollback.py \
+  --release previous-release.json --migrations-dir init-db \
+  --architecture linux/arm64 --lock-id "<immutable-release-lock-uuid>"
+```
+
+它要求清单与锁的两个 digest、平台版本和架构完全相同，当前 Schema 与锁相同，且当前站点配置
+版本、包摘要和 Secret 引用仍兼容。跨 Schema 回滚默认拒绝；需要可逆迁移时必须另行提交并演练。
+校验成功后才可用相应 `release.env` 执行受控 Compose 切换，并再次运行 `record_release_lock.py`
+证明运行中的容器与公开 HTTPS 入口。
+
 e606 的裁剪内核使用独立的 host-network 编排；backend 固定绑定 `127.0.0.1:9000`，只有
 固定摘要的 Caddy TLS 入口监听公网 `80/443`：
 
@@ -857,6 +891,19 @@ timeout: 5s
 `ENTITY_BINDING_TYPE_MISMATCH`、`ENTITY_BINDING_UNIT_MISMATCH`、
 `ENTITY_BINDING_DIRECTION_MISMATCH` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
 绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
+
+```yaml
+# acceptance/release-lock.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.release-lock
+kind: release_lock
+required: true
+timeout: 5s
+```
+
+`release_lock` 是平台维护的白名单验收类型，不携带 URL、镜像名称或脚本。它只读取 owner 作业
+追加写入的当前发布锁，并校验锁中平台版本、架构、当前站点配置版本和该包的 ID、版本与摘要；
+此项用于阻止“包验收成功但运行的并非已锁定制品”的伪交付。
 
 规则输入的公开配置只接受 `_config.sourceEntityInstanceIds` 和将决策字段映射到实例 UUID
 的 `_config.inputMappings`。新建/更新规则出现旧 `_config.sourceEntityIds` 时返回

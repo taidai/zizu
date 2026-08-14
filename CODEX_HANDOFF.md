@@ -1,5 +1,40 @@
 ---
 
+## Session 2026-08-14 — Ticket #18 发布锁与回滚门禁（待提交）
+
+### 本轮已实现
+
+- 新增 `migration_032_release_locks.sql`：owner 才能追加写入的发布锁同时保存平台/边缘镜像
+  digest、容器实际 image ID、目标架构、Schema、站点配置版本和解决方案包摘要；表拒绝更新、
+  删除和截断，web 应用只有 SELECT 权限。
+- `record_release_lock.py` 不再只比较版本号：它在目标主机比对运行中的 backend/edge 容器 image
+  ID 与 release.json 的 digest 解析结果、镜像架构、公开 HTTPS liveness、Schema 与当前站点配置；
+  成功输出可供回滚使用的不可变 lock ID。
+- 已认证 `/api/v1/health` 回显经脱敏的发布锁摘要；解决方案包可声明 `release_lock` 验收项，只有
+  锁与该安装的版本、架构、包 ID/版本/摘要、站点配置版本精确匹配才会 passed。缺失、不可读或
+  不一致均生成失败的不可变交付报告。
+- 新增 `validate_release_rollback.py`：回滚前必须显式选择已有锁，拒绝跨 Schema、错误架构/摘要、
+  不兼容站点配置或无效 Secret 引用；它只作 owner 预检，不会自行重启容器。
+
+### 当前验证
+
+- 发布预检/Compose/镜像定义、owner 锁记录、回滚预检和角色脚本：16/16 通过。
+- 发布锁健康公开缝 + 完整交付公开 HTTP 回归：25/25 通过；新增覆盖“锁缺失失败、精确锁通过”。
+- `compileall` 与 `git diff --check` 通过。
+- PostgreSQL migration_032 已纳入公开主缝的迁移清单，但当前无明确隔离 `*_test` 数据库配置，
+  尚未执行；绝不使用 1 号机数据库替代。
+
+### 未完成 / Next
+
+1. 提供可访问 Docker Registry 的构建环境，产出并验证真实 amd64/arm64 digest；当前环境仍不能
+   连接 Docker Hub 认证端点，因此不能生成 release.json 或部署。
+2. 在隔离 PostgreSQL 执行 fresh/upgrade migration_032、owner/app 权限与发布锁写读 smoke；随后
+   才能让 Ticket #18 进入现场维护窗候选。
+3. 制作公开、无现场 Secret 的完整 EMS 解决方案包，并以 `release_lock`、实体、告警、策略和
+   工作台验收证明干净环境交付。
+
+---
+
 ## Session 2026-08-14 — Ticket #18 不可变发布首个切片（已提交并推送）
 
 ### 本轮已实现

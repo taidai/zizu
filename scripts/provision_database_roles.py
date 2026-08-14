@@ -116,6 +116,8 @@ def main() -> None:
             ).format(sql.Identifier(app_user)))
             cur.execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE public.t_alarms FROM {}").format(sql.Identifier(app_user)))
             cur.execute(sql.SQL("GRANT SELECT ON TABLE public.t_alarms TO {}").format(sql.Identifier(app_user)))
+            cur.execute(sql.SQL("REVOKE ALL PRIVILEGES ON TABLE public.t_release_locks FROM {}").format(sql.Identifier(app_user)))
+            cur.execute(sql.SQL("GRANT SELECT ON TABLE public.t_release_locks TO {}").format(sql.Identifier(app_user)))
             cur.execute("SELECT has_table_privilege(%s, 'public.t_alarms', 'INSERT')", (app_user,))
             if cur.fetchone()[0]:
                 raise RuntimeError("application role still has INSERT on t_alarms")
@@ -129,6 +131,9 @@ def main() -> None:
             )
             if cur.fetchone()[0]:
                 raise RuntimeError("application role must not own t_alarms")
+            cur.execute("SELECT has_table_privilege(%s, 'public.t_release_locks', 'INSERT')", (app_user,))
+            if cur.fetchone()[0]:
+                raise RuntimeError("application role must not write t_release_locks")
         connection.commit()
     except Exception:
         connection.rollback()

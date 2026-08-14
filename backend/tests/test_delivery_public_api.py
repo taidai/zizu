@@ -1893,6 +1893,87 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_release_lock_acceptance_requires_the_exact_installed_package_lock(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        release_lock = {"status": "missing"}
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        repository = InMemoryDeliveryRepository()
+        delivery = SolutionDelivery(
+            repository,
+            platform_version="0.4.77",
+            release_lock_reader=lambda: release_lock,
+        )
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        acceptance = (
+            "schemaVersion: zizu.acceptance/v1alpha1\n"
+            "id: acceptance.platform-liveness\n"
+            "kind: release_lock\n"
+            "required: true\n"
+            "timeout: 5s\n"
+        ).encode()
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "release-lock.zizu.zip",
+                        build_minimal_package(acceptance_override=acceptance),
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={},
+            )
+            plan = planned.json()
+            installed = await client.post(
+                f"/api/v1/install-plans/{plan['id']}/apply",
+                json={"plan_digest": plan["digest"]},
+                headers={"Idempotency-Key": "install-release-lock-acceptance"},
+            )
+            installation = installed.json()
+            missing = await client.post(
+                f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "missing-release-lock"},
+            )
+            release_lock.update(
+                {
+                    "status": "locked",
+                    "id": "00000000-0000-0000-0000-000000000004",
+                    "platform_version": "0.4.77",
+                    "architecture": "linux/arm64",
+                    "site_configuration_version": installation["site_configuration_version"],
+                    "package": {
+                        "id": imported.json()["package_id"],
+                        "version": imported.json()["version"],
+                        "digest": imported.json()["digest"],
+                    },
+                }
+            )
+            consistent = await client.post(
+                f"/api/v1/solution-installations/{installation['id']}/acceptance-runs",
+                headers={"Idempotency-Key": "consistent-release-lock"},
+            )
+
+        self.assertEqual(missing.status_code, 201, missing.text)
+        self.assertEqual(missing.json()["status"], "failed")
+        self.assertEqual(missing.json()["items"][0]["code"], "RELEASE_LOCK_MISSING")
+        self.assertEqual(consistent.status_code, 201, consistent.text)
+        self.assertEqual(consistent.json()["status"], "passed")
+        self.assertEqual(
+            consistent.json()["items"][0]["code"], "RELEASE_LOCK_CONSISTENT"
+        )
+
     async def test_liveness_failures_are_saved_as_redacted_machine_reports(self) -> None:
         from app.api.solution_delivery import (
             get_solution_delivery,

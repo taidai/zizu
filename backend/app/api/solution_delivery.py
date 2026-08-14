@@ -45,6 +45,7 @@ from app.services.ems_policy_runtime import (
     EmsPolicyRuntime,
     PostgresPolicyActivationRepository,
 )
+from app.services.release_lock import current_release_lock_summary
 
 
 router = APIRouter()
@@ -83,6 +84,7 @@ _delivery = SolutionDelivery(
     entity_instance_runtime=_entity_instance_runtime,
     alarm_definitions=_alarm_definition_catalog,
     alarm_runtime=_alarm_runtime,
+    release_lock_reader=current_release_lock_summary,
 )
 _ems_workbench = EmsWorkbench(
     _repository,
