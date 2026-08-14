@@ -75,6 +75,10 @@
   `verify_legacy_alarm_history_gate()`。测试角色只存在于 `*_test` 数据库环境。
 - 仍没有真实 amd64/arm64 摘要制品、TLS、发布锁及维护窗证据；因此不能合并为可部署声明，更不能
   部署至 1 号机。
+- 2026-08-14 复查 `docker buildx build --check --platform linux/amd64 -f backend/Dockerfile .` 仍在
+  Docker Hub 匿名令牌端点超时，无法拉取 `python:3.12-slim` 元数据；因此当前构建机不能生成
+  多架构摘要制品。待可访问 Registry 的构建环境恢复后，必须从 `release_preflight` 开始继续，
+  不能用 latest、源码挂载或 1 号机现网镜像替代。
 - 10 kW 只是协议模拟和公开参考包中的保守演练值，不是任何现场的安全许可。不得因此绕过
   TLS、固定制品、凭据轮换、隔离 PostgreSQL 迁移/角色 smoke、发布锁与 1 号机维护窗门禁。
 
