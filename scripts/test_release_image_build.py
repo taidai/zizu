@@ -19,6 +19,11 @@ class ReleaseImageBuildTest(unittest.TestCase):
         self.assertIn('org.opencontainers.image.version="${ZIZU_VERSION}"', dockerfile)
         self.assertNotIn("zizu:0.1.0", dockerfile)
         self.assertNotIn('LABEL version="0.1.0"', dockerfile)
+        self.assertIn("COPY VERSION /app/VERSION", dockerfile)
+        self.assertLess(
+            dockerfile.index("COPY VERSION /app/VERSION"),
+            dockerfile.index("RUN npm run build"),
+        )
         self.assertIn("COPY init-db ./init-db", dockerfile)
         migration = REPO_ROOT / "init-db" / "migration_032_release_locks.sql"
         self.assertTrue(migration.exists())

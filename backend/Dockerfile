@@ -22,6 +22,7 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --prefer-offline
 
+COPY VERSION /app/VERSION
 COPY frontend/ ./
 RUN npm run build
 

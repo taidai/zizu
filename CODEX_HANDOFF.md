@@ -3688,3 +3688,16 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 根因已只读确认：Docker daemon 强制使用 `HTTP(S) Proxy: http.docker.internal:3128`，但该
   主机无法解析、TCP 3128 不可达。不要修改仓库 Dockerfile 或改用不可信镜像源；需由本机维护者
   在 Docker Desktop 的代理设置中修正/关闭失效代理并重启 daemon，然后重试同一构建命令。
+
+---
+
+## Session 2026-08-15 — GitHub 制品构建真实修复（进行中）
+
+- 为取得真实多架构制品证据，已仅触发 GitHub Actions 的 build-only 工作流
+  `31838906206`；它不部署、不写发布锁、不触及 1 号机。工作流已能完成检出、Buildx、GHCR 登录和
+  基础镜像拉取，但前端阶段失败：`frontend/vite.config.ts` 读取 `/app/VERSION`，镜像构建上下文此前
+  没有复制根目录 `VERSION`。
+- 已先增加镜像定义回归，再在前端构建阶段加入 `COPY VERSION /app/VERSION`，确保 Vite 构建可获得
+  与 OCI label 相同的候选版本。相关静态发布测试 6/6 通过，`git diff --check` 通过。
+- 下一步：提交、推送并合并该小修复，然后以相同参数重新触发 build-only 工作流；只有工作流成功并
+  产出真实 amd64/arm64 摘要后，才讨论隔离目标的 TLS、owner migration、release lock 和独立交付试验。
