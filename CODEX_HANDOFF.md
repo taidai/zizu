@@ -85,8 +85,9 @@
   定向发布契约测试 9/9 通过，但当前网络仍不能执行真实 buildx push。
 - 新增手动 GitHub Actions 工作流 `Build immutable release images`：使用仓库临时
   `GITHUB_TOKEN` 写入 GHCR，调用同一构建脚本并保存 `release.json` artifact；它不部署、不写
-  发布锁、不触及现场。待分支推送且 GitHub Actions 的 Packages 写权限可用后，才能在云端生成
-  真实多架构摘要制品。
+  发布锁、不触及现场。该工作流已随提交 `7e9f077` 推送到
+  `ticket/07-multi-device-instance-consumers`；仍须在 GitHub Actions 确认 Packages 写权限并提供
+  已审核的 TLS 入口摘要，才能在云端生成真实多架构摘要制品。
 - 新增 `docs/delivery-trial-protocol.md`：将独立实施工程师的四小时试验固定为发布前门禁、九个
   计时阶段、八项能力证据、90% 配置覆盖率算法和无现场私有数据的记录模板。实际试验仍须在
   固定制品/TLS/发布锁具备后，由未参与开发者执行；文档不能替代该人工证据。
