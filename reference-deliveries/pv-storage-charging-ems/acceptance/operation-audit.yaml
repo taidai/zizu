@@ -1,0 +1,5 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.operation-audit
+kind: operation_audit
+required: true
+timeout: 5s

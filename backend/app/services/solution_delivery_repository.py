@@ -12,6 +12,7 @@ from psycopg2.extras import Json
 from app.services.solution_delivery_contracts import (
     DeliveryError,
     DeliveryReport,
+    InstallationAuditEvent,
     InstallationOutcome,
     InstallationPlan,
     PackageImport,
@@ -56,6 +57,7 @@ class InMemoryDeliveryRepository:
             tuple[str, str, str], tuple[str, InstallationOutcome | DeliveryReport]
         ] = {}
         self._reports: dict[UUID, DeliveryReport] = {}
+        self._installation_audits: dict[UUID, list[InstallationAuditEvent]] = {}
         self._site_configuration_version = 0
         self._site_configurations: dict[int, SiteConfigurationVersion] = {}
 
@@ -183,6 +185,16 @@ class InMemoryDeliveryRepository:
             request_digest,
             outcome,
         )
+        self._installation_audits.setdefault(outcome.id, []).append(
+            InstallationAuditEvent(
+                event="solution.install",
+                outcome="allowed",
+                reason=None,
+                actor=actor,
+                target=f"installation:{outcome.id}",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
         return outcome
 
     def list_installations(self) -> list[InstallationOutcome]:
@@ -238,6 +250,12 @@ class InMemoryDeliveryRepository:
 
     def get_report(self, report_id: UUID) -> DeliveryReport | None:
         return self._reports.get(report_id)
+
+    def list_installation_audit_events(
+        self,
+        installation_id: UUID,
+    ) -> list[InstallationAuditEvent]:
+        return list(self._installation_audits.get(installation_id, ()))
 
 
 class PostgresDeliveryRepository:
@@ -965,3 +983,32 @@ class PostgresDeliveryRepository:
                 )
                 row = cur.fetchone()
                 return self._report_from_row(row) if row else None
+
+    def list_installation_audit_events(
+        self,
+        installation_id: UUID,
+    ) -> list[InstallationAuditEvent]:
+        """Return only audit events owned by the requested delivery installation."""
+        with self._connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event, outcome, reason, actor, target, created_at
+                    FROM t_audit_events
+                    WHERE event = 'solution.install'
+                      AND target = %s
+                    ORDER BY created_at, id
+                    """,
+                    (f"installation:{installation_id}",),
+                )
+                return [
+                    InstallationAuditEvent(
+                        event=row[0],
+                        outcome=row[1],
+                        reason=row[2],
+                        actor=row[3],
+                        target=row[4],
+                        created_at=row[5],
+                    )
+                    for row in cur.fetchall()
+                ]

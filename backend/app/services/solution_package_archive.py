@@ -679,6 +679,20 @@ def _validate_acceptance_definition(
             )
         _validate_timeout(definition.get("timeout"))
         return
+    if definition.get("kind") == "operation_audit":
+        allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
+        if (
+            set(definition) != allowed_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or not isinstance(definition.get("required"), bool)
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Operation audit acceptance is invalid",
+            )
+        _validate_timeout(definition.get("timeout"))
+        return
     allowed_fields = {"schemaVersion", "id", "kind", "required", "timeout"}
     if set(definition) != allowed_fields:
         raise DeliveryError(

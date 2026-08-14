@@ -34,6 +34,7 @@ class ReferenceEmsPackageTest(unittest.TestCase):
             {
                 "acceptance.platform-liveness", "acceptance.pcs", "acceptance.bms",
                 "acceptance.pv", "acceptance.evse", "acceptance.meter", "acceptance.meter-history",
+                "acceptance.operation-audit",
                 "acceptance.grid-import-lifecycle", "acceptance.policy-grid-import-cap",
                 "acceptance.release-lock",
             },

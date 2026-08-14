@@ -185,6 +185,37 @@ def build_minimal_package(
     return archive.getvalue()
 
 
+def build_operation_audit_package() -> bytes:
+    acceptance = (
+        "schemaVersion: zizu.acceptance/v1alpha1\n"
+        "id: acceptance.operation-audit\n"
+        "kind: operation_audit\n"
+        "required: true\n"
+        "timeout: 5s\n"
+    ).encode()
+    asset_digest = hashlib.sha256(acceptance).hexdigest()
+    manifest = (
+        "schemaVersion: zizu.solution/v1alpha1\n"
+        "id: org.zizu.operation-audit\n"
+        "version: 1.0.0\n"
+        "displayName: Operation audit\n"
+        "platform:\n"
+        "  version: \">=0.4.77,<0.5.0\"\n"
+        "assets:\n"
+        "  - id: acceptance.operation-audit\n"
+        "    kind: acceptance\n"
+        "    path: acceptance/operation-audit.yaml\n"
+        f"    sha256: \"{asset_digest}\"\n"
+        "acceptance:\n"
+        "  - acceptance.operation-audit\n"
+    ).encode()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("solution.yaml", manifest)
+        package.writestr("acceptance/operation-audit.yaml", acceptance)
+    return archive.getvalue()
+
+
 def add_archive_entry(archive_bytes: bytes, path: str, content: bytes) -> bytes:
     source = zipfile.ZipFile(io.BytesIO(archive_bytes))
     target_buffer = io.BytesIO()
@@ -272,6 +303,10 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         paths = app.openapi()["paths"]
         self.assertIn("/api/v1/solution-packages/import", paths)
         self.assertIn("/api/v1/solution-installations", paths)
+        self.assertIn(
+            "/api/v1/solution-installations/{installation_id}/audit-events",
+            paths,
+        )
         self.assertIn("/api/v1/delivery-reports/{report_id}", paths)
         self.assertIn("/api/v1/alarm-events", paths)
         self.assertIn("/api/v1/alarm-events/{event_id}/acknowledgements", paths)
@@ -1891,6 +1926,62 @@ class DeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     "evidence": {"status": "alive", "version": "0.4.77"},
                 }
             ],
+        )
+
+    async def test_installation_audit_is_readable_and_verifiable_in_a_delivery_report(self) -> None:
+        from app.api.solution_delivery import (
+            get_solution_delivery,
+            router as delivery_router,
+        )
+        from app.services.solution_delivery import (
+            InMemoryDeliveryRepository,
+            SolutionDelivery,
+        )
+
+        app = FastAPI()
+        app.include_router(delivery_router, prefix="/api/v1")
+        delivery = SolutionDelivery(InMemoryDeliveryRepository(), platform_version="0.4.77")
+        app.dependency_overrides[get_solution_delivery] = lambda: delivery
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported = await client.post(
+                "/api/v1/solution-packages/import",
+                files={
+                    "archive": (
+                        "operation-audit.zizu.zip",
+                        build_operation_audit_package(),
+                        "application/zip",
+                    )
+                },
+            )
+            planned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={},
+            )
+            installed = await client.post(
+                f"/api/v1/install-plans/{planned.json()['id']}/apply",
+                json={"plan_digest": planned.json()["digest"]},
+                headers={"Idempotency-Key": "install-operation-audit"},
+            )
+            installation_id = installed.json()["id"]
+            audit = await client.get(
+                f"/api/v1/solution-installations/{installation_id}/audit-events"
+            )
+            report = await client.post(
+                f"/api/v1/solution-installations/{installation_id}/acceptance-runs",
+                headers={"Idempotency-Key": "accept-operation-audit"},
+            )
+
+        self.assertEqual(installed.status_code, 201, installed.text)
+        self.assertEqual(audit.status_code, 200, audit.text)
+        self.assertEqual(audit.json()["total"], 1)
+        self.assertEqual(audit.json()["items"][0]["event"], "solution.install")
+        self.assertEqual(audit.json()["items"][0]["outcome"], "allowed")
+        self.assertEqual(audit.json()["items"][0]["actor"], "user:00000000-0000-0000-0000-000000000002")
+        self.assertEqual(report.status_code, 201, report.text)
+        self.assertEqual(report.json()["status"], "passed")
+        self.assertEqual(
+            report.json()["items"][0]["code"],
+            "OPERATION_AUDIT_AVAILABLE",
         )
 
     async def test_release_lock_acceptance_requires_the_exact_installed_package_lock(self) -> None:

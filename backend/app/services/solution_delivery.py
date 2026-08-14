@@ -752,6 +752,7 @@ class SolutionDelivery:
                     "platform_liveness",
                     "entity_readiness",
                     "history_readiness",
+                    "operation_audit",
                     "alarm_lifecycle",
                     "policy_execution",
                     "release_lock",
@@ -778,6 +779,16 @@ class SolutionDelivery:
                         installation,
                         acceptance_id,
                         definition,
+                        item_started,
+                    )
+                )
+                continue
+            if definition["kind"] == "operation_audit":
+                items.append(
+                    self._run_operation_audit(
+                        installation,
+                        acceptance_id,
+                        bool(definition.get("required", True)),
                         item_started,
                     )
                 )
@@ -1266,11 +1277,55 @@ class SolutionDelivery:
             },
         }
 
+    def _run_operation_audit(
+        self,
+        installation: InstallationOutcome,
+        acceptance_id: str,
+        required: bool,
+        item_started: float,
+    ) -> dict[str, Any]:
+        """Prove the installation itself entered the immutable audit trail."""
+        try:
+            events = self._repository.list_installation_audit_events(installation.id)
+        except Exception:
+            events = []
+            code = "OPERATION_AUDIT_UNAVAILABLE"
+        else:
+            code = (
+                "OPERATION_AUDIT_AVAILABLE"
+                if any(event.event == "solution.install" and event.outcome == "allowed" for event in events)
+                else "OPERATION_AUDIT_MISSING"
+            )
+        return {
+            "acceptance_id": acceptance_id,
+            "status": "passed" if code == "OPERATION_AUDIT_AVAILABLE" else "failed",
+            "code": code,
+            "required": required,
+            "duration_ms": max(0, round((time.monotonic() - item_started) * 1000)),
+            "evidence": {
+                "installation_id": str(installation.id),
+                "event_count": len(events),
+                "events": [
+                    {"event": event.event, "outcome": event.outcome, "actor": event.actor}
+                    for event in events
+                ],
+            },
+        }
+
     def get_report(self, report_id: UUID) -> DeliveryReport:
         report = self._repository.get_report(report_id)
         if report is None:
             raise DeliveryError("REPORT_NOT_FOUND", "Delivery report was not found")
         return report
+
+    def get_installation_audit_events(self, installation_id: UUID) -> list[dict[str, Any]]:
+        """Expose the narrow, immutable audit evidence for one installation."""
+        if self._repository.get_installation(installation_id) is None:
+            raise DeliveryError("INSTALLATION_NOT_FOUND", "Solution installation was not found")
+        return [
+            event.public_dict()
+            for event in self._repository.list_installation_audit_events(installation_id)
+        ]
 
 
 def _parameter_plan_items(

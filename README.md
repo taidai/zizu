@@ -915,6 +915,20 @@ timeout: 5s
 质量非 GOOD 时，会以 `HISTORY_SAMPLE_MISSING` 或 `HISTORY_QUALITY_BAD` 记录 failed 报告。
 
 ```yaml
+# acceptance/operation-audit.yaml
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.operation-audit
+kind: operation_audit
+required: true
+timeout: 5s
+```
+
+`operation_audit` 证明本次安装已经写入不可变审计流；报告只携带事件类型、结果、服务端主体和
+计数，不携带请求体、凭据或完整审计详情。实施工程师可通过
+`GET /api/v1/solution-installations/{installation_id}/audit-events` 读取该安装限定范围内的只读证据，
+接口需要 `solution.report.read` 权限。
+
+```yaml
 # acceptance/release-lock.yaml
 schemaVersion: zizu.acceptance/v1alpha1
 id: acceptance.release-lock

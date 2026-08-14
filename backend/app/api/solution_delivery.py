@@ -267,6 +267,24 @@ async def list_solution_installations(
     }
 
 
+@router.get("/solution-installations/{installation_id}/audit-events")
+async def get_installation_audit_events(
+    installation_id: UUID,
+    principal: Principal = Depends(require_capability("solution.report.read")),
+    delivery: SolutionDelivery = Depends(get_solution_delivery),
+) -> dict:
+    """Read the narrow, immutable audit trail for one delivery installation."""
+    del principal
+    try:
+        events = delivery.get_installation_audit_events(installation_id)
+    except DeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return {"installation_id": str(installation_id), "items": events, "total": len(events)}
+
+
 @router.get("/site-configuration-versions/{version}")
 async def get_site_configuration_version(
     version: int,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from collections.abc import Callable
 from typing import Any, Protocol
 from uuid import UUID
@@ -163,6 +164,28 @@ class DeliveryReport:
         return value
 
 
+@dataclass(frozen=True)
+class InstallationAuditEvent:
+    """A narrow, delivery-owned projection of the append-only audit stream."""
+
+    event: str
+    outcome: str
+    reason: str | None
+    actor: str | None
+    target: str
+    created_at: datetime
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "event": self.event,
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "actor": self.actor,
+            "target": self.target,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
 class DeliveryRepository(Protocol):
     """`SolutionDelivery` 使用的最小持久化端口。"""
 
@@ -224,6 +247,11 @@ class DeliveryRepository(Protocol):
     ) -> DeliveryReport: ...
 
     def get_report(self, report_id: UUID) -> DeliveryReport | None: ...
+
+    def list_installation_audit_events(
+        self,
+        installation_id: UUID,
+    ) -> list[InstallationAuditEvent]: ...
 
 
 class PublicApiProbe(Protocol):
