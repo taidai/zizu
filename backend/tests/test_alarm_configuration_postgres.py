@@ -294,7 +294,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     cursor.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
                     self.assertEqual(table_name, cursor.fetchone()[0])
 
-    def test_upgrade_versions_legacy_digests_without_rewriting_event_evidence(self) -> None:
+    def test_upgrade_marks_unversioned_digests_unknown_without_rewriting_evidence(self) -> None:
         from app.services.alarm_definitions import (
             AlarmDefinitionPlan,
             InstalledAlarmDefinition,
@@ -428,13 +428,81 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     (definition.installation_id, definition.asset_id),
                 )
                 self.assertEqual(
-                    (1, old_digest, "sha256-v1-installation-bound"),
+                    (1, old_digest, "legacy-unknown"),
                     cursor.fetchone(),
                 )
                 cursor.execute("SELECT definition_id FROM t_alarm_events")
                 self.assertEqual(legacy_definition_id, cursor.fetchone()[0])
                 cursor.execute("SELECT definition_id FROM t_alarm_definition_current")
                 self.assertEqual(legacy_definition_id, cursor.fetchone()[0])
+
+    def test_upgrade_does_not_mislabel_original_034_v2_digest_as_v1(self) -> None:
+        self._reset_schema_through_032()
+        definition_id = str(uuid4())
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                entity_id, _ = self._insert_entities(cursor, installation_id)
+                content = {
+                    "asset_id": "site.alarm.original-034.high",
+                    "version": "rule-set:original-034:1",
+                    "entity_instance_id": entity_id,
+                    "entity_definition_id": "pcs.activePower",
+                    "trigger": {"operator": "gt", "value": 90},
+                    "trigger_duration_seconds": 1,
+                    "recovery": {"operator": "lt", "value": 80},
+                    "recovery_duration_seconds": 1,
+                    "severity": "WARNING",
+                    "notification_throttle_seconds": 1,
+                }
+                original_034_v2_digest = hashlib.sha256(
+                    json.dumps(
+                        content,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definitions
+                      (id, asset_id, definition_version, installation_id,
+                       site_configuration_version, entity_instance_id,
+                       entity_definition_id, trigger_condition,
+                       trigger_duration_seconds, recovery_condition,
+                       recovery_duration_seconds, severity,
+                       notification_throttle_seconds, content_digest)
+                    VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 1, %s, 1,
+                            'WARNING', 1, %s)
+                    """,
+                    (
+                        definition_id,
+                        content["asset_id"],
+                        content["version"],
+                        installation_id,
+                        entity_id,
+                        content["entity_definition_id"],
+                        json.dumps(content["trigger"]),
+                        json.dumps(content["recovery"]),
+                        original_034_v2_digest,
+                    ),
+                )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                cursor.execute(
+                    """
+                    SELECT content_digest, content_digest_algorithm
+                    FROM t_alarm_definitions WHERE id = %s
+                    """,
+                    (definition_id,),
+                )
+                self.assertEqual(
+                    (original_034_v2_digest, "legacy-unknown"),
+                    cursor.fetchone(),
+                )
 
     def test_legacy_migration_targets_are_fk_backed_nonempty_evidence(self) -> None:
         from app.services.alarm_definitions import (
@@ -478,6 +546,17 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                 ),
                 transaction=connection,
             )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_alarm_definition_origins
+                          (definition_id, origin_type, plan_id, details, actor)
+                        VALUES (%s, 'package', %s, '{}', 'user:engineer')
+                        """,
+                        (definition.id, uuid4()),
+                    )
         migration_id = uuid4()
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:

@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS t_alarm_definition_origins (
             origin_type IN ('package', 'legacy_migration')
             AND rule_set_id IS NULL
             AND rule_set_revision IS NULL
+            AND plan_id IS NULL
         )
     ),
     CONSTRAINT chk_alarm_definition_origin_actor_nonempty
@@ -223,6 +224,7 @@ ALTER TABLE t_alarm_definition_origins
             origin_type IN ('package', 'legacy_migration')
             AND rule_set_id IS NULL
             AND rule_set_revision IS NULL
+            AND plan_id IS NULL
         )
     ),
     ADD CONSTRAINT chk_alarm_definition_origin_actor_nonempty
@@ -316,7 +318,7 @@ ALTER TABLE t_alarm_definitions
 ALTER TABLE t_alarm_definitions
     ADD COLUMN IF NOT EXISTS content_digest_algorithm TEXT;
 UPDATE t_alarm_definitions
-SET content_digest_algorithm = 'sha256-v1-installation-bound'
+SET content_digest_algorithm = 'legacy-unknown'
 WHERE content_digest_algorithm IS NULL;
 ALTER TABLE t_alarm_definitions
     ALTER COLUMN content_digest_algorithm
@@ -325,6 +327,7 @@ ALTER TABLE t_alarm_definitions
     DROP CONSTRAINT IF EXISTS chk_alarm_definition_digest_algorithm,
     ADD CONSTRAINT chk_alarm_definition_digest_algorithm CHECK (
         content_digest_algorithm IN (
+            'legacy-unknown',
             'sha256-v1-installation-bound',
             'sha256-v2-content'
         )
