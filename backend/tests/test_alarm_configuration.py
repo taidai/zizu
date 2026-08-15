@@ -4,8 +4,10 @@ import unittest
 from uuid import UUID, uuid4
 
 from app.services.alarm_configuration import (
+    AlarmConfigurationError,
     AlarmConfiguration,
     AlarmRule,
+    ApplyAlarmConfigurationPlan,
     EntitySelection,
     InMemoryAlarmConfigurationRepository,
     PlanAlarmConfiguration,
@@ -18,7 +20,7 @@ class UncheckedRepository(InMemoryAlarmConfigurationRepository):
         raise AssertionError("service must reject invalid rules before repository")
 
 
-def rule(rule_id: str, severity: str, trigger_operator: str, trigger_value: float, recovery_operator: str, recovery_value: float) -> AlarmRule:
+def rule(rule_id: str, severity: str, trigger_operator: str, trigger_value: float, recovery_operator: str, recovery_value: float, unit: str | None = None) -> AlarmRule:
     return AlarmRule(
         id=rule_id,
         name=rule_id,
@@ -28,6 +30,7 @@ def rule(rule_id: str, severity: str, trigger_operator: str, trigger_value: floa
         recovery={"operator": recovery_operator, "value": recovery_value},
         recovery_duration_seconds=0,
         notification_throttle_seconds=0,
+        unit=unit,
     )
 
 
@@ -175,7 +178,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
         self.assertEqual("blocked", plan.status)
         self.assertEqual(3, len(plan.items))
-        self.assertTrue(any(blocker["code"] == "UNCONFIRMED_ENTITY" for blocker in plan.blockers))
+        self.assertTrue(any(blocker["code"] == "ALARM_ENTITY_UNRESOLVED" for blocker in plan.blockers))
 
     def test_plan_sorts_entities_even_when_repository_returns_them_reversed(self) -> None:
         service, repository, revision = self._configuration()
@@ -216,6 +219,91 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
             revision.rules[0].trigger["value"] = 999
         with self.assertRaises(TypeError):
             revision.rules[0].trigger.__ior__({"value": 999})
+
+
+class AlarmConfigurationValidationTest(unittest.TestCase):
+    def test_invalid_entity_and_rule_inputs_block_the_plan_without_applying(self) -> None:
+        def entity(*, data_type: str = "number", unit: str | None = "kW", confirmed: bool = True) -> ResolvedAlarmEntity:
+            return ResolvedAlarmEntity(
+                id=UUID(int=1), device_instance_id=UUID(int=101), definition_id="pcs.activePower",
+                display_name="PCS-1", data_type=data_type, unit=unit,
+                confirmation_id=UUID(int=1001) if confirmed else None,
+            )
+
+        def unconfirmed_entity() -> ResolvedAlarmEntity:
+            return entity(confirmed=False)
+
+        def unsafe_hysteresis_rule() -> AlarmRule:
+            return rule("x", "MAJOR", "gt", 10, "lte", 10, unit="kW")
+
+        cases = (
+            ((unconfirmed_entity(),), rule("x", "MAJOR", "gt", 10, "lte", 9, unit="kW"), "ALARM_ENTITY_UNRESOLVED"),
+            ((entity(data_type="STRING"),), rule("x", "MAJOR", "gt", 10, "lte", 9, unit="kW"), "ALARM_DATA_TYPE_UNSUPPORTED"),
+            ((entity(unit="kW"),), rule("x", "MAJOR", "gt", 10, "lte", 9, unit="degC"), "ALARM_UNIT_MISMATCH"),
+            ((entity(),), unsafe_hysteresis_rule(), "ALARM_THRESHOLD_INVALID"),
+        )
+        for entities, alarm_rule, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                installation_id = uuid4()
+                repository = InMemoryAlarmConfigurationRepository(installation_id=installation_id, entities=entities)
+                service = AlarmConfiguration(repository)
+                revision = service.create_rule_set(key="validation", name="Validation", rules=(alarm_rule,), actor="user:engineer")
+                plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+                self.assertEqual("blocked", plan.status)
+                self.assertIn(expected_code, [blocker["code"] for blocker in plan.blockers])
+                self.assertEqual(0, repository.applied_count)
+
+
+class AlarmConfigurationApplyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.service, self.repository = configured_service(entity_count=1)
+        self.revision = self.service.create_rule_set(
+            key="pcs-power-limits", name="PCS 功率分级",
+            rules=(rule("warning", "WARNING", "gt", 450, "lte", 430, unit="kW"),), actor="user:engineer",
+        )
+
+    def ready_plan(self):
+        return self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id, EntitySelection(), self.revision.rule_set_id, self.revision.revision,
+        ))
+
+    def test_apply_is_atomic_and_same_key_returns_same_derived_installation(self) -> None:
+        plan = self.ready_plan()
+        first = self.service.apply(ApplyAlarmConfigurationPlan(
+            plan_id=plan.id, plan_digest=plan.digest, idempotency_key="alarm-plan-1", actor="user:engineer"))
+        replay = self.service.apply(ApplyAlarmConfigurationPlan(
+            plan_id=plan.id, plan_digest=plan.digest, idempotency_key="alarm-plan-1", actor="user:engineer"))
+        self.assertEqual(first, replay)
+        self.assertEqual(1, self.repository.applied_count)
+        self.assertEqual(plan.base_site_configuration_version + 1, first.site_configuration_version)
+
+    def test_apply_rejects_a_reused_key_for_a_different_request(self) -> None:
+        plan = self.ready_plan()
+        self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "alarm-plan-1", "user:engineer"))
+        with self.assertRaisesRegex(AlarmConfigurationError, "IDEMPOTENCY_KEY_REUSED"):
+            self.service.apply(ApplyAlarmConfigurationPlan(uuid4(), plan.digest, "alarm-plan-1", "user:engineer"))
+
+    def test_apply_rejects_stale_plan_without_writes(self) -> None:
+        plan = self.ready_plan()
+        self.repository._site_version += 1
+        with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_PLAN_STALE"):
+            self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "stale-plan", "user:engineer"))
+        self.assertEqual(0, self.repository.applied_count)
+
+    def test_apply_rejects_wrong_digest_without_writes(self) -> None:
+        plan = self.ready_plan()
+        with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_PLAN_DIGEST_MISMATCH"):
+            self.service.apply(ApplyAlarmConfigurationPlan(plan.id, "wrong", "wrong-digest", "user:engineer"))
+        self.assertEqual(0, self.repository.applied_count)
+
+    def test_audit_failure_rolls_back_all_apply_mutations(self) -> None:
+        plan = self.ready_plan()
+        before = self.repository.current_site_context()
+        self.repository.fail_audit = True
+        with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_AUDIT_FAILED"):
+            self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "audit-failure", "user:engineer"))
+        self.assertEqual(before, self.repository.current_site_context())
+        self.assertEqual(0, self.repository.applied_count)
 
 
 if __name__ == "__main__":
