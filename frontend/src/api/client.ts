@@ -12,6 +12,14 @@ import {
   type AuthSession,
   type AuthUser,
 } from './authSession'
+import {
+  AlarmConfigurationResultUnknownError,
+  readAlarmConfigurationApplyResult,
+  type AlarmConditionValue,
+} from '../components/alarm-configuration/alarmConfigurationContracts'
+
+export { AlarmConfigurationResultUnknownError } from '../components/alarm-configuration/alarmConfigurationContracts'
+export type { AlarmConditionValue } from '../components/alarm-configuration/alarmConfigurationContracts'
 
 const API_BASE = '/api/v1'
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/telemetry`
@@ -1009,6 +1017,10 @@ export type AlarmConditionOperator = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'
 
 export interface AlarmCondition {
   operator: AlarmConditionOperator
+  value: AlarmConditionValue
+}
+
+export interface NumericAlarmCondition extends AlarmCondition {
   value: number
 }
 
@@ -1016,9 +1028,9 @@ export interface AlarmRule {
   id: string
   name: string
   severity: AlarmSeverity
-  trigger: AlarmCondition
+  trigger: NumericAlarmCondition
   trigger_duration_seconds: number
-  recovery: AlarmCondition
+  recovery: NumericAlarmCondition
   recovery_duration_seconds: number
   notification_throttle_seconds: number
   unit: string | null
@@ -1076,9 +1088,9 @@ export interface LegacyAlarmMigrationCandidate {
     proposed_definitions: {
       name: string
       severity: AlarmSeverity | null
-      trigger: { operator: AlarmConditionOperator; value: unknown } | null
+      trigger: AlarmCondition | null
       trigger_duration_seconds: number
-      recovery: { operator: AlarmConditionOperator; value: unknown } | null
+      recovery: AlarmCondition | null
       recovery_duration_seconds: number
       notification_throttle_seconds: number
       blockers: AlarmBlocker[]
@@ -1117,13 +1129,6 @@ export class AlarmConfigurationApiError extends Error {
   constructor(message: string, readonly code: string | null, readonly status: number) {
     super(message)
     this.name = 'AlarmConfigurationApiError'
-  }
-}
-
-export class AlarmConfigurationResultUnknownError extends Error {
-  constructor(readonly cause: unknown) {
-    super('Alarm configuration request result is unknown')
-    this.name = 'AlarmConfigurationResultUnknownError'
   }
 }
 
@@ -1214,7 +1219,7 @@ export async function applyAlarmConfigurationPlan(planId: string, planDigest: st
     body: JSON.stringify({ plan_digest: planDigest }),
   })
   if (!response.ok) throw await alarmConfigurationError(response, `应用配置计划失败：${response.status}`)
-  return response.json()
+  return readAlarmConfigurationApplyResult<AlarmConfigurationApplyResult>(response)
 }
 
 export async function fetchLegacyAlarmMigrationCandidates(): Promise<{ installation_id: string; items: LegacyAlarmMigrationCandidate[] }> {

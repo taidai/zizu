@@ -3910,3 +3910,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 补齐 `_legacy_alarm_sources()` 成员资格并发锁：apply 在 locked re-read 前以单条、固定顺序的 `LOCK TABLE ... IN SHARE MODE` 锁定 `t_tags`、旧 `t_entities` 及既有候选关系表。
 - 真实 PostgreSQL RED 分别覆盖 tag `enabled FALSE→TRUE` 与 legacy entity `TRUE→FALSE`；修复后 apply 等待未提交更新，再基于新来源集合返回 `ALARM_MIGRATION_PLAN_STALE`，定义与迁移证据均零写。
 - Task5 HTTP + 真实 PG：`45 passed, 24 subtests passed`；告警领域/业务授权：`37 passed, 100 subtests passed`；`compileall` 与 `git diff --check` 通过。
+
+### 2026-08-16 — Task 6 fix round 5/5
+
+- apply 在 HTTP 2xx 已到达但 JSON 体读取/解析失败时改为结果未知，保留 plan、digest 与相同幂等键；无领域 code、可重试领域错误同样不清证据，只有成功 Applied 或显式非重试领域 code 才清。
+- current/legacy 条件值契约覆盖 `number | string | boolean`，规则编辑仍按后端请求限定数字；布尔摘要统一显示“是/否”，字符串与负数保持原值。
+- TDD 证据：Node 客户端/格式契约 3/3，TypeScript 类型契约通过；公共后端增加 boolean/string/负数响应锁定，相关回归 59/59；`compileall`、`npx tsc -b`、`npm run build` 与静态扫描通过。
+- 临时 `frontend/node_modules` Junction 已核对目标后仅移除链接，共享依赖目录仍存在。
+- 未连接现场或修改 PostgreSQL；仍未做认证后端交互浏览器 smoke。

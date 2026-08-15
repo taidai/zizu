@@ -878,6 +878,90 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(configuration.repository.current_installation_id), payload["installation_id"])
         self.assertEqual("tag-ready", payload["items"][0]["source_key"])
 
+    async def test_current_and_legacy_conditions_preserve_boolean_string_and_negative_values(self) -> None:
+        boolean_entity = ResolvedAlarmEntity(
+            id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,
+            definition_id="pcs.running", display_name="PCS running",
+            data_type="boolean", unit=None,
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
+        )
+        text_entity = ResolvedAlarmEntity(
+            id=ENTITY_IDS[1], device_instance_id=DEVICE_ID,
+            definition_id="pcs.state", display_name="PCS state",
+            data_type="text", unit=None,
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000011"),
+        )
+        number_entity = ResolvedAlarmEntity(
+            id=UUID("40000000-0000-0000-0000-000000000005"),
+            device_instance_id=DEVICE_ID,
+            definition_id="pcs.temperature", display_name="PCS temperature",
+            data_type="number", unit="°C",
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000012"),
+        )
+        sources = (
+            _legacy_source(
+                "tag_alarm", "boolean-active", entities=(boolean_entity,),
+                level_code="error2", trigger_rules=({"op": "active"},),
+            ),
+            _legacy_source(
+                "tag_alarm", "string-equality", entities=(text_entity,),
+                level_code="error3", trigger_rules=({"op": "eq", "value": "故障"},),
+            ),
+            _legacy_source(
+                "tag_alarm", "negative-threshold", entities=(number_entity,),
+                level_code="error1", trigger_rules=({"op": "gte", "threshold": -12.5},),
+            ),
+        )
+        app, _identity_repository, configuration = self.build_app(
+            entities=(boolean_entity, text_entity, number_entity),
+            legacy_sources=sources,
+        )
+        configuration.repository.current_site_context = lambda: {
+            "site_configuration_version": 7,
+            "definitions": {
+                "pcs-running": {
+                    "entity_display_name": "PCS running",
+                    "rule_name": "Stopped",
+                    "severity": "MAJOR",
+                    "trigger": {"operator": "eq", "value": True},
+                    "recovery": {"operator": "eq", "value": False},
+                    "source": "legacy_migration",
+                    "version_description": "旧配置迁移版",
+                    "enabled": True,
+                    "status": "current",
+                },
+            },
+        }
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            current = await client.get("/api/v1/alarm-configurations", headers=headers)
+            legacy = await client.get(
+                "/api/v1/alarm-configuration-migrations/legacy", headers=headers,
+            )
+
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+        current_definition = current.json()["definitions"][0]
+        self.assertIs(current_definition["trigger"]["value"], True)
+        self.assertIs(current_definition["recovery"]["value"], False)
+        legacy_items = {item["source_key"]: item for item in legacy.json()["items"]}
+        self.assertIs(
+            legacy_items["boolean-active"]["proposed_rules"][0]
+            ["proposed_definitions"][0]["trigger"]["value"],
+            True,
+        )
+        self.assertEqual(
+            legacy_items["string-equality"]["proposed_rules"][0]
+            ["proposed_definitions"][0]["trigger"]["value"],
+            "故障",
+        )
+        self.assertEqual(
+            legacy_items["negative-threshold"]["proposed_rules"][0]
+            ["proposed_definitions"][0]["trigger"]["value"],
+            -12.5,
+        )
+
     async def test_legacy_apply_stale_and_blocked_codes_are_conflicts(self) -> None:
         confirmed = ResolvedAlarmEntity(
             id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,

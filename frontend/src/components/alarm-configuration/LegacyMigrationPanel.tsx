@@ -1,4 +1,5 @@
 import type { AlarmBlocker, EntityInstance, LegacyAlarmMigrationCandidate } from '../../api/client'
+import { formatAlarmConditionValue } from './alarmConfigurationContracts'
 
 interface Props {
   candidates: LegacyAlarmMigrationCandidate[]
@@ -21,7 +22,7 @@ const blockerText: Record<string, string> = {
   ALARM_THRESHOLD_INVALID: '旧规则阈值无效。',
 }
 
-const condition = (value: { operator: string; value: unknown }) => `${operator[value.operator] || '比较'} ${String(value.value)}`
+const condition = (value: { operator: string; value: number | string | boolean }) => `${operator[value.operator] || '比较'} ${formatAlarmConditionValue(value.value)}`
 const reason = (code: string) => blockerText[code] || '配置存在阻断，请查看诊断信息。'
 const ambiguous = (candidate: LegacyAlarmMigrationCandidate) => candidate.blockers.some((blocker) => blocker.code === 'ALARM_MIGRATION_AMBIGUOUS')
 const diagnostic = (blockers: AlarmBlocker[]) => blockers.map((blocker) => blocker.message).join('；')
