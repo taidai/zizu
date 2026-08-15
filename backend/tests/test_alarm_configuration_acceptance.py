@@ -157,6 +157,43 @@ class AlarmConfigurationAcceptanceTest(unittest.TestCase):
         self.assertEqual("recovered", report.items[0].event_state)
         self.assertIsNotNone(report.items[0].acknowledgement_audit_event_id)
 
+    def test_progress_observes_four_guided_stages_without_saving_report(self) -> None:
+        repository = InMemoryAlarmConfigurationAcceptanceRepository()
+        acceptance = self.acceptance(repository=repository)
+        item = replace(
+            self.plan_items[0],
+            after={"rule": {"name": "有功功率越限"}},
+        )
+        applied = self.applied_for(DEFINITION_IDS[0], item)
+
+        waiting_trigger = acceptance.progress(applied)
+        self.observe(DEFINITION_IDS[0], ENTITY_IDS[0], value=101, after_seconds=0)
+        still_waiting_trigger = acceptance.progress(applied)
+        active = self.observe(DEFINITION_IDS[0], ENTITY_IDS[0], value=101, after_seconds=1)
+        waiting_acknowledgement = acceptance.progress(applied)
+        self.runtime.acknowledge(AcknowledgeAlarm(
+            event_id=active.event_id,
+            actor="user:operator",
+            acknowledged_at=self.started_at + timedelta(seconds=2),
+        ))
+        waiting_recovery = acceptance.progress(applied)
+        self.observe(DEFINITION_IDS[0], ENTITY_IDS[0], value=90, after_seconds=3)
+        passed = acceptance.progress(applied)
+
+        self.assertEqual(
+            ["waiting_trigger", "waiting_trigger", "waiting_acknowledgement", "waiting_recovery", "passed"],
+            [
+                waiting_trigger.items[0].stage,
+                still_waiting_trigger.items[0].stage,
+                waiting_acknowledgement.items[0].stage,
+                waiting_recovery.items[0].stage,
+                passed.items[0].stage,
+            ],
+        )
+        self.assertEqual("有功功率越限", passed.items[0].rule_name)
+        self.assertTrue(passed.ready_to_report)
+        self.assertIsNone(repository.find_idempotency("user:engineer", "acceptance"))
+
     def test_missing_event_fails_with_literal_code(self) -> None:
         report = self.run_acceptance(self.acceptance(), self.applied)
 

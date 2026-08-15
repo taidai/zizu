@@ -209,6 +209,24 @@ def load_applied_alarm_configuration(
     return _result_from_json(row[1], items=items)
 
 
+def load_latest_applied_alarm_configuration(
+    connection: Any,
+) -> AppliedAlarmConfiguration | None:
+    """Load the most recently applied immutable alarm configuration."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT application_id
+            FROM t_alarm_configuration_plans
+            WHERE status = 'applied' AND application_id IS NOT NULL
+            ORDER BY applied_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+    return None if row is None else load_applied_alarm_configuration(connection, row[0])
+
+
 class PostgresAlarmConfigurationRepository:
     """The single atomic write seam for applying an alarm configuration plan."""
 

@@ -69,6 +69,29 @@ class AlarmConfigurationAcceptanceReport:
     digest: str
 
 
+@dataclass(frozen=True)
+class AlarmConfigurationAcceptanceProgressItem:
+    definition_id: UUID
+    entity_instance_id: UUID
+    action: str
+    rule_name: str
+    stage: str
+    code: str
+    event_id: UUID | None
+    event_state: str | None
+    transition_codes: tuple[str, ...]
+    acknowledgement_audit_event_id: UUID | None
+
+
+@dataclass(frozen=True)
+class AlarmConfigurationAcceptanceProgress:
+    application_id: UUID
+    site_configuration_version: int
+    applied_at: datetime
+    ready_to_report: bool
+    items: tuple[AlarmConfigurationAcceptanceProgressItem, ...]
+
+
 class AlarmConfigurationAcceptanceRuntime(Protocol):
     """The observer receives only the AlarmRuntime query surface."""
 
@@ -154,8 +177,7 @@ class AlarmConfigurationAcceptance:
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_COMMAND_INVALID")
         if command.application_id != applied.id:
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_APPLICATION_MISMATCH")
-        if not applied.definition_ids or len(applied.definition_ids) != len(applied.items):
-            raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID")
+        self._validate_applied(applied)
         request_digest = _digest({"application_id": command.application_id, "actor": command.actor, "idempotency_key": command.idempotency_key, "applied": applied})
         existing = self._repository.find_idempotency(command.actor, command.idempotency_key)
         if existing is not None:
@@ -187,11 +209,52 @@ class AlarmConfigurationAcceptance:
         report = replace(report, digest=_digest(_report_payload(report)))
         return self._repository.save(report, idempotency_key=command.idempotency_key, request_digest=request_digest)
 
+    def progress(
+        self,
+        applied: AppliedAlarmConfiguration,
+    ) -> AlarmConfigurationAcceptanceProgress:
+        """Classify the latest evidence without creating a report."""
+        self._validate_applied(applied)
+        events = {event.definition_id: event for event in self._runtime.list()}
+        classified = tuple(
+            self._classify(definition_id, item, events.get(definition_id))
+            for definition_id, item in zip(
+                applied.definition_ids, applied.items, strict=True,
+            )
+        )
+        items = tuple(
+            AlarmConfigurationAcceptanceProgressItem(
+                definition_id=result.definition_id,
+                entity_instance_id=plan_item.entity_instance_id,
+                action=result.action,
+                rule_name=_rule_name(plan_item),
+                stage=_progress_stage(result),
+                code=result.code,
+                event_id=result.event_id,
+                event_state=result.event_state,
+                transition_codes=result.transition_codes,
+                acknowledgement_audit_event_id=result.acknowledgement_audit_event_id,
+            )
+            for plan_item, result in zip(applied.items, classified, strict=True)
+        )
+        return AlarmConfigurationAcceptanceProgress(
+            application_id=applied.id,
+            site_configuration_version=applied.site_configuration_version,
+            applied_at=applied.applied_at,
+            ready_to_report=all(item.status == "passed" for item in classified),
+            items=items,
+        )
+
     def get(self, report_id: UUID) -> AlarmConfigurationAcceptanceReport:
         report = self._repository.get(report_id)
         if report is None:
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_REPORT_NOT_FOUND")
         return report
+
+    @staticmethod
+    def _validate_applied(applied: AppliedAlarmConfiguration) -> None:
+        if not applied.definition_ids or len(applied.definition_ids) != len(applied.items):
+            raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID")
 
     def _classify(
         self,
@@ -275,6 +338,24 @@ def _item(
         acknowledgement_audit_event_id=acknowledgement_audit_event_id,
         evidence=_freeze({} if event is None else {"pending_at": event.pending_at.isoformat()}),
     )
+
+
+def _rule_name(item: AlarmConfigurationPlanItem) -> str:
+    payload = item.after or item.before or {}
+    rule = payload.get("rule") if isinstance(payload, dict) else None
+    name = rule.get("name") if isinstance(rule, dict) else None
+    return name.strip() if isinstance(name, str) and name.strip() else item.rule_id
+
+
+def _progress_stage(item: AlarmConfigurationAcceptanceItem) -> str:
+    if item.status == "passed":
+        return "passed"
+    codes = set(item.transition_codes)
+    if "ALARM_ACTIVATED" not in codes:
+        return "waiting_trigger"
+    if item.acknowledgement_audit_event_id is None:
+        return "waiting_acknowledgement"
+    return "waiting_recovery"
 
 
 def _json_value(value: Any) -> Any:

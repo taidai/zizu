@@ -278,7 +278,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
-            {activePage === 'alarm-config' && <AlarmConfigurationPage />}
+            {activePage === 'alarm-config' && <AlarmConfigurationPage onOpenAlarms={() => setActivePage('alarms')} />}
             {activePage === 'entities' && <EntityManagerPage />}
             {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>

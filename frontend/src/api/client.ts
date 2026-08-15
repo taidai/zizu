@@ -1125,6 +1125,55 @@ export interface AlarmConfigurationApplyResult {
   applied_at: string
 }
 
+export type AlarmAcceptanceStage = 'waiting_trigger' | 'waiting_acknowledgement' | 'waiting_recovery' | 'passed'
+
+export interface AlarmConfigurationAcceptanceProgressItem {
+  definition_id: string
+  entity_instance_id: string
+  action: 'add' | 'update' | 'preserve'
+  rule_name: string
+  stage: AlarmAcceptanceStage
+  code: string
+  event_id: string | null
+  event_state: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered' | null
+  transition_codes: string[]
+  acknowledgement_audit_event_id: string | null
+}
+
+export interface AlarmConfigurationAcceptanceProgress {
+  application_id: string
+  site_configuration_version: number
+  applied_at: string
+  ready_to_report: boolean
+  items: AlarmConfigurationAcceptanceProgressItem[]
+}
+
+export interface AlarmConfigurationAcceptanceReportItem {
+  definition_id: string
+  definition_key: string
+  action: 'add' | 'update' | 'preserve'
+  status: 'passed' | 'failed'
+  code: string
+  event_id: string | null
+  event_state: string | null
+  transition_codes: string[]
+  acknowledgement_audit_event_id: string | null
+  evidence: Record<string, unknown>
+}
+
+export interface AlarmConfigurationAcceptanceReport {
+  id: string
+  application_id: string
+  installation_id: string
+  site_configuration_version: number
+  actor: string
+  status: 'passed' | 'failed'
+  items: AlarmConfigurationAcceptanceReportItem[]
+  started_at: string
+  finished_at: string
+  digest: string
+}
+
 export class AlarmConfigurationApiError extends Error {
   constructor(message: string, readonly code: string | null, readonly status: number) {
     super(message)
@@ -1146,6 +1195,10 @@ const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_MIGRATION_PLAN_BLOCKED: '旧配置迁移存在阻断项。',
   ALARM_RULE_CONFLICT: '规则稳定标识冲突。',
   ALARM_BATCH_LIMIT_EXCEEDED: '单次配置范围超过系统上限。',
+  ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND: '当前没有可验收的已应用告警配置。',
+  ALARM_ACCEPTANCE_REPORT_NOT_FOUND: '未找到该验收报告。',
+  ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID: '已应用配置的验收范围不完整。',
+  ALARM_ACCEPTANCE_PERSISTENCE_UNAVAILABLE: '验收证据暂时不可用，请稍后重试。',
 }
 
 async function alarmConfigurationError(response: Response, fallback: string): Promise<AlarmConfigurationApiError> {
@@ -1220,6 +1273,31 @@ export async function applyAlarmConfigurationPlan(planId: string, planDigest: st
   })
   if (!response.ok) throw await alarmConfigurationError(response, `应用配置计划失败：${response.status}`)
   return readAlarmConfigurationApplyResult<AlarmConfigurationApplyResult>(response)
+}
+
+export async function fetchAlarmConfigurationAcceptanceProgress(): Promise<AlarmConfigurationAcceptanceProgress> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-applications/latest/acceptance-progress`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取验收进度失败：${response.status}`)
+  return response.json()
+}
+
+export async function runAlarmConfigurationAcceptance(applicationId: string, idempotencyKey: string): Promise<AlarmConfigurationAcceptanceReport> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-applications/${encodeURIComponent(applicationId)}/acceptance`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `生成验收报告失败：${response.status}`)
+  try {
+    return await response.json()
+  } catch (cause) {
+    throw new AlarmConfigurationResultUnknownError(cause)
+  }
+}
+
+export async function fetchAlarmConfigurationReport(reportId: string): Promise<AlarmConfigurationAcceptanceReport> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-reports/${encodeURIComponent(reportId)}`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取验收报告失败：${response.status}`)
+  return response.json()
 }
 
 export async function fetchLegacyAlarmMigrationCandidates(): Promise<{ installation_id: string; items: LegacyAlarmMigrationCandidate[] }> {

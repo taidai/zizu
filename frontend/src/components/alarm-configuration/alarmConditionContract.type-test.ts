@@ -1,7 +1,14 @@
 import type {
+  AlarmConfigurationAcceptanceProgress,
+  AlarmConfigurationAcceptanceReport,
   AlarmCondition,
   AlarmConfigurationCurrent,
   LegacyAlarmMigrationCandidate,
+} from '../../api/client'
+import {
+  fetchAlarmConfigurationAcceptanceProgress,
+  fetchAlarmConfigurationReport,
+  runAlarmConfigurationAcceptance,
 } from '../../api/client'
 
 const booleanCondition: AlarmCondition = { operator: 'eq', value: true }
@@ -52,3 +59,14 @@ const legacyCandidate: LegacyAlarmMigrationCandidate = {
 
 void currentConfiguration
 void legacyCandidate
+
+const progressRequest: () => Promise<AlarmConfigurationAcceptanceProgress> =
+  fetchAlarmConfigurationAcceptanceProgress
+const reportRequest: (reportId: string) => Promise<AlarmConfigurationAcceptanceReport> =
+  fetchAlarmConfigurationReport
+const runRequest: (applicationId: string, idempotencyKey: string) => Promise<AlarmConfigurationAcceptanceReport> =
+  runAlarmConfigurationAcceptance
+
+void progressRequest
+void reportRequest
+void runRequest

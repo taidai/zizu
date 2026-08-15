@@ -1,5 +1,41 @@
 ---
 
+## Session 2026-08-16 — Task 4 告警配置引导验收与最终门禁
+
+### 已完成
+
+- 统一告警配置工作台新增 latest applied plan 的只读证据进度，逐个新增/更新定义显示“待触发、
+  待操作员在告警中心确认、待现场恢复、通过”。配置页没有确认或恢复入口；确认按钮只导航到
+  既有告警中心，现场恢复仍只能由正常协议观测产生。
+- 新增公开 `GET /api/v1/alarm-configuration-applications/latest/acceptance-progress` read model。
+  服务端用与报告相同的 AlarmRuntime 事件/时间线分类，但不创建报告或幂等绑定。只有服务端返回
+  `ready_to_report=true` 才能生成报告，客户端不猜测 passed。
+- typed client 已覆盖 progress、POST run 与 GET report。POST 网络或 2xx 响应体不确定时保留同一
+  组件内幂等键重试，不写 localStorage、URL 或自由 JSON。报告显示短可读报告/事件/审计引用、站点
+  配置版本、完整 digest、总体结论与逐定义时间线，不向产品界面暴露 UUID 或机器码。
+- README 已同步 observer-only 语义、`ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、
+  `ALARM_RECOVERED`、相同不可变 definition ID 的 preserve 规则、migration 036 和 PostgreSQL/
+  协议证据边界。
+
+### 验证
+
+- TDD RED：新 progress 公开 GET 首次为 404；typed client 首次由 TypeScript 报 5 个缺失导出。
+  GREEN 后相关告警配置/验收/运行时为 80 tests，72 passed、8 个 PG 环境门控 skipped；
+  `compileall` 通过。
+- 隔离 TimescaleDB 容器与数据库均为 `zizu_alarm_task4_test`，`NO_PROXY` 指向本机；migration 036、
+  progress 零报告写、并发/回滚/append-only 与 Task3 公开协议重启主缝为 12/12。容器及匿名 volume
+  已按精确名称删除。
+- 前端 `tsc -b` 和 production `npm run build` 通过，8183 modules，3m26s；仅保留既有大 chunk
+  warning。完整后端最终为 **305 passed、34 skipped、199 subtests passed**（116.85s），仅有既有
+  Starlette/httpx 弃用和重复 ZIP 成员警告。
+- 本地 production preview 可在 `127.0.0.1:4173` 启动，但应用内 browser runtime 没有任何可用
+  浏览器，故没有声称交互 smoke 通过；preview 已停止。没有连接现场、部署或修改客户数据。
+
+### 仍在边界外
+
+- 仍需未参与开发的实施工程师在干净环境中仅凭公开制品、文档、产品界面和正常协议动作完成计时
+  交付试验。上述自动化、隔离 PostgreSQL 和本地构建不能替代现场部署或独立验收结论。
+
 ## Session 2026-08-16 — 统一告警配置实现停在安全断路门
 
 ### 已完成

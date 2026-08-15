@@ -13,6 +13,7 @@ from app.services.alarm_configuration_acceptance import (
     AlarmConfigurationAcceptance,
     AlarmConfigurationAcceptanceError,
     AlarmConfigurationAcceptanceItem,
+    AlarmConfigurationAcceptanceProgress,
     AlarmConfigurationAcceptanceReport,
     RunAlarmConfigurationAcceptance,
     _digest,
@@ -21,6 +22,7 @@ from app.services.alarm_configuration_acceptance import (
 )
 from app.services.alarm_configuration_postgres import (
     load_applied_alarm_configuration,
+    load_latest_applied_alarm_configuration,
 )
 from app.services.alarm_runtime import AlarmEvent, AlarmTransition
 
@@ -315,6 +317,26 @@ class PostgresAlarmConfigurationAcceptance:
                         "ALARM_ACCEPTANCE_REPORT_NOT_FOUND"
                     )
                 return report
+        except AlarmConfigurationAcceptanceError:
+            raise
+        except (psycopg2.Error, OSError) as error:
+            raise AlarmConfigurationAcceptanceError(
+                "ALARM_ACCEPTANCE_PERSISTENCE_UNAVAILABLE"
+            ) from error
+
+    def progress(self) -> AlarmConfigurationAcceptanceProgress:
+        try:
+            with self._connection() as connection:
+                applied = load_latest_applied_alarm_configuration(connection)
+                if applied is None:
+                    raise AlarmConfigurationAcceptanceError(
+                        "ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND"
+                    )
+                observer = AlarmConfigurationAcceptance(
+                    runtime=_PostgresAcceptanceRuntime(connection),
+                    repository=PostgresAlarmConfigurationAcceptanceRepository(connection),
+                )
+                return observer.progress(applied)
         except AlarmConfigurationAcceptanceError:
             raise
         except (psycopg2.Error, OSError) as error:

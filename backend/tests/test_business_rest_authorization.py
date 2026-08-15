@@ -287,6 +287,7 @@ ALARM_CONFIGURATION_CAPABILITIES = {
     ("GET", "/api/v1/alarm-configuration-migrations/legacy"): "configuration.read",
     ("POST", "/api/v1/alarm-configuration-migrations/legacy/plans"): "configuration.write",
     ("POST", "/api/v1/alarm-configuration-applications/{application_id}/acceptance"): "configuration.write",
+    ("GET", "/api/v1/alarm-configuration-applications/latest/acceptance-progress"): "configuration.read",
     ("GET", "/api/v1/alarm-configuration-reports/{report_id}"): "runtime.read",
 }
 
@@ -1026,7 +1027,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
         self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
-        self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 11)
+        self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 12)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1061,7 +1062,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 156)
+        self.assertEqual(len(registered), 157)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

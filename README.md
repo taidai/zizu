@@ -520,6 +520,9 @@ zizu/
 | GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
 | GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
 | POST | `/api/v1/alarm-events/{id}/acknowledgements` | 确认活动未确认事件；不提供人工恢复命令 |
+| GET | `/api/v1/alarm-configuration-applications/latest/acceptance-progress` | 只读观察最新已应用告警配置的逐定义验收进度，不生成报告 |
+| POST | `/api/v1/alarm-configuration-applications/{id}/acceptance` | 以 `Idempotency-Key` 为已完整证据生成不可变告警配置验收报告 |
+| GET | `/api/v1/alarm-configuration-reports/{id}` | 读取包含事件、转换时间线、确认审计、站点版本与摘要的不可变报告 |
 | POST | `/api/v1/entity-instances/{id}/control-confirmations` | 为高风险控制申请绑定主体和内容的 60 秒二次确认 |
 | POST | `/api/v1/entity-instances/{id}/control-commands` | 以实体实例提交手动控制命令，必须携带 `Idempotency-Key` |
 | GET | `/api/v1/control-commands/{id}` | 查询命令的持久状态与稳定机器码 |
@@ -528,6 +531,19 @@ zizu/
 | POST | `/api/v1/devices/{node_id}/rpc` | 兼容 RPC：新形态使用 `entity_instance_id` + `value`；受限旧形态使用定义 ID `command` + `payload.value`，均创建控制命令 |
 | POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
 | GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
+
+统一告警配置页会在最新已应用计划下显示每个新增或更新定义的四段中文进度：待触发、
+待操作员在告警中心确认、待现场恢复、通过。该页只观察服务端事件和时间线，不创建遥测、
+告警、确认或恢复，也不提供确认旁路。操作员仍只在告警中心确认，现场恢复仍只来自正常协议
+观测。只有服务端确认全部定义证据完整后，“生成验收报告”才可用；网络或响应不确定时，页面
+保留同一组件内的幂等键供原操作重试，不把键写入本地存储或 URL。
+
+告警配置验收由 migration 036 保存报告与幂等绑定。新增和更新定义必须拥有同一不可变定义的
+`ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、`ALARM_RECOVERED` 转换，其中确认转换必须关联非空
+审计事件；质量不合格或新鲜度中断不能补足持续时间。`preserve` 只能引用此前对完全相同定义 ID
+已通过的报告。报告绑定执行主体、应用、站点配置版本和内容摘要，写入后禁止更新、删除或清空；
+隔离 PostgreSQL 双连接并发、事务回滚、进程重启重放和公开 Neuron 协议生命周期主缝均已覆盖，
+这些机器证据不等同于现场部署或独立交付试验。
 
 控制与管理能力矩阵：`system.manage` 仅 admin（系统、SQL、NanoMQ）；
 `gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色。

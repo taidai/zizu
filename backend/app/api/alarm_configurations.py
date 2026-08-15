@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import CONFIGURATION_READ, CONFIGURATION_WRITE, RUNTIME_READ, capability_metadata, principal_for, protected
 from app.services.alarm_configuration import AlarmConfiguration, AlarmConfigurationError, AlarmConfigurationPlan, AlarmConfigurationPlanItem, AlarmRule, AlarmRuleSetRevision, ApplyAlarmConfigurationPlan, EntitySelection, LegacyAlarmMigrationCandidate, LegacyAlarmMigrationPlan, PlanAlarmConfiguration
-from app.services.alarm_configuration_acceptance import AlarmConfigurationAcceptanceError, AlarmConfigurationAcceptanceReport, RunAlarmConfigurationAcceptance
+from app.services.alarm_configuration_acceptance import AlarmConfigurationAcceptanceError, AlarmConfigurationAcceptanceProgress, AlarmConfigurationAcceptanceReport, RunAlarmConfigurationAcceptance
 from app.services.identity import Principal
 
 
@@ -259,6 +259,34 @@ def _acceptance_report(report: AlarmConfigurationAcceptanceReport) -> dict[str, 
     }
 
 
+def _acceptance_progress(progress: AlarmConfigurationAcceptanceProgress) -> dict[str, Any]:
+    return {
+        "application_id": str(progress.application_id),
+        "site_configuration_version": progress.site_configuration_version,
+        "applied_at": progress.applied_at.isoformat(),
+        "ready_to_report": progress.ready_to_report,
+        "items": [
+            {
+                "definition_id": str(item.definition_id),
+                "entity_instance_id": str(item.entity_instance_id),
+                "action": item.action,
+                "rule_name": item.rule_name,
+                "stage": item.stage,
+                "code": item.code,
+                "event_id": None if item.event_id is None else str(item.event_id),
+                "event_state": item.event_state,
+                "transition_codes": list(item.transition_codes),
+                "acknowledgement_audit_event_id": (
+                    None
+                    if item.acknowledgement_audit_event_id is None
+                    else str(item.acknowledgement_audit_event_id)
+                ),
+            }
+            for item in progress.items
+        ],
+    }
+
+
 def _error(error: AlarmConfigurationError) -> HTTPException:
     raw_code = str(error)
     code = {"ALARM_AUDIT_FAILED": "AUDIT_UNAVAILABLE", "rule ids must be unique": "ALARM_RULE_CONFLICT", "rule id must be non-empty": "ALARM_RULE_CONFLICT", "rule count must not exceed 20": "ALARM_BATCH_LIMIT_EXCEEDED", "entity count must not exceed 200": "ALARM_BATCH_LIMIT_EXCEEDED", "expanded definition count must not exceed 2000": "ALARM_BATCH_LIMIT_EXCEEDED", "rule set revision not found": "ALARM_RULE_SET_NOT_FOUND"}.get(raw_code, raw_code)
@@ -400,6 +428,19 @@ async def run_alarm_configuration_acceptance(
             actor=principal.actor,
             idempotency_key=idempotency_key,
         )))
+    except AlarmConfigurationAcceptanceError as error:
+        raise _acceptance_error(error) from error
+
+
+@router.get(
+    "/alarm-configuration-applications/latest/acceptance-progress",
+    **protected(CONFIGURATION_READ),
+)
+async def get_latest_alarm_configuration_acceptance_progress(
+    acceptance: Any = Depends(get_alarm_configuration_acceptance),
+) -> dict[str, Any]:
+    try:
+        return _acceptance_progress(acceptance.progress())
     except AlarmConfigurationAcceptanceError as error:
         raise _acceptance_error(error) from error
 

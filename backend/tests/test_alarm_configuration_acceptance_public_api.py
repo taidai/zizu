@@ -73,8 +73,10 @@ class _InMemoryApplicationAcceptance:
     ) -> None:
         self._acceptance = acceptance
         self._applications = {application.id: application for application in applications}
+        self.run_calls = 0
 
     def run(self, command: RunAlarmConfigurationAcceptance):
+        self.run_calls += 1
         applied = self._applications.get(command.application_id)
         if applied is None:
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND")
@@ -82,6 +84,13 @@ class _InMemoryApplicationAcceptance:
 
     def get(self, report_id: UUID):
         return self._acceptance.get(report_id)
+
+    def progress(self):
+        latest = max(
+            self._applications.values(),
+            key=lambda application: (application.applied_at, str(application.id)),
+        )
+        return self._acceptance.progress(latest)
 
 
 class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase):
@@ -293,6 +302,31 @@ class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase
             "IDEMPOTENCY_KEY_REUSED",
             reused.json()["detail"]["code"],
         )
+
+    async def test_latest_progress_is_read_only_and_server_classified(self) -> None:
+        app, acceptance = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        path = "/api/v1/alarm-configuration-applications/latest/acceptance-progress"
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            anonymous = await client.get(path)
+            operator_headers = await self.login(client, "operator")
+            engineer_headers = await self.login(client, "engineer")
+            operator = await client.get(path, headers=operator_headers)
+            first = await client.get(path, headers=engineer_headers)
+            second = await client.get(path, headers=engineer_headers)
+
+        self.assertEqual(401, anonymous.status_code, anonymous.text)
+        self.assertEqual(403, operator.status_code, operator.text)
+        self.assertEqual(200, first.status_code, first.text)
+        self.assertEqual(first.json(), second.json())
+        progress = first.json()
+        self.assertEqual(str(APPLICATION_IDS[1]), progress["application_id"])
+        self.assertTrue(progress["ready_to_report"])
+        self.assertEqual("passed", progress["items"][0]["stage"])
+        self.assertEqual("overpower", progress["items"][0]["rule_name"])
+        self.assertNotIn("id", progress)
+        self.assertNotIn("digest", progress)
+        self.assertEqual(0, acceptance.run_calls)
 
 
 @unittest.skipUnless(
@@ -641,6 +675,31 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
                 self.assertEqual(1, cursor.fetchone()[0])
                 cursor.execute("SELECT count(*) FROM t_alarm_configuration_acceptance_idempotency")
                 self.assertEqual(1, cursor.fetchone()[0])
+
+    def test_latest_progress_reads_complete_evidence_without_report_writes(self) -> None:
+        self._apply_036()
+        _plan, result = self._create_applied_configuration()
+        self._insert_recovered_evidence(result)
+        from app.services.alarm_configuration_acceptance_postgres import (
+            PostgresAlarmConfigurationAcceptance,
+        )
+
+        service = PostgresAlarmConfigurationAcceptance(
+            connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+        )
+        first = service.progress()
+        second = service.progress()
+
+        self.assertEqual(result.id, first.application_id)
+        self.assertEqual(first, second)
+        self.assertTrue(first.ready_to_report)
+        self.assertEqual("passed", first.items[0].stage)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_alarm_configuration_reports")
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_alarm_configuration_acceptance_idempotency")
+                self.assertEqual(0, cursor.fetchone()[0])
 
     def test_second_insert_commit_failure_rolls_back_report(self) -> None:
         self._apply_036()
