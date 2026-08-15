@@ -964,20 +964,27 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             -12.5,
         )
 
-    async def test_legacy_object_condition_is_blocked_without_writing(self) -> None:
+    async def test_legacy_unsafe_conditions_are_blocked_without_writing(self) -> None:
         confirmed = ResolvedAlarmEntity(
             id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,
             definition_id="pcs.status", display_name="PCS 状态",
             data_type="text", unit=None,
             confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
         )
-        source = _legacy_source(
-            "tag_alarm", "object-equality", entities=(confirmed,),
-            level_code="error2",
-            trigger_rules=({"op": "eq", "value": {"state": "fault"}},),
+        sources = (
+            _legacy_source(
+                "tag_alarm", "object-equality", entities=(confirmed,),
+                level_code="error2",
+                trigger_rules=({"op": "eq", "value": {"state": "fault"}},),
+            ),
+            _legacy_source(
+                "tag_alarm", "oversized-equality", entities=(confirmed,),
+                level_code="error2",
+                trigger_rules=({"op": "eq", "value": 10**400},),
+            ),
         )
         app, _identity_repository, configuration = self.build_app(
-            entities=(confirmed,), legacy_sources=(source,),
+            entities=(confirmed,), legacy_sources=sources,
         )
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
@@ -992,12 +999,13 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(preview.status_code, 200, preview.text)
-        item = preview.json()["items"][0]
-        self.assertEqual(item["status"], "blocked")
-        self.assertIn(
-            "ALARM_LEGACY_RULE_UNSUPPORTED",
-            {blocker["code"] for blocker in item["blockers"]},
-        )
+        self.assertEqual(len(preview.json()["items"]), 2)
+        for item in preview.json()["items"]:
+            self.assertEqual(item["status"], "blocked")
+            self.assertIn(
+                "ALARM_LEGACY_RULE_UNSUPPORTED",
+                {blocker["code"] for blocker in item["blockers"]},
+            )
         self.assertEqual(apply_response.status_code, 422, apply_response.text)
         self.assertEqual(
             apply_response.json()["detail"]["code"],

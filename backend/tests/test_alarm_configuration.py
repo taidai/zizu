@@ -329,6 +329,8 @@ class AlarmConfigurationValidationTest(unittest.TestCase):
             float("inf"),
             float("-inf"),
             float("nan"),
+            10**400,
+            -(10**400),
         )
         for index, value in enumerate(invalid_values, start=1):
             with self.subTest(value=value):
