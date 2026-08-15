@@ -315,6 +315,47 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
 
 
 class AlarmConfigurationValidationTest(unittest.TestCase):
+    def test_legacy_equality_rejects_non_scalar_values(self) -> None:
+        entity = ResolvedAlarmEntity(
+            id=UUID(int=703), device_instance_id=UUID(int=713),
+            definition_id="pcs.status", display_name="PCS 状态",
+            data_type="text", unit=None, confirmation_id=UUID(int=723),
+        )
+
+        invalid_values = (
+            {"state": "fault"},
+            ["fault"],
+            None,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+        )
+        for index, value in enumerate(invalid_values, start=1):
+            with self.subTest(value=value):
+                source = LegacyAlarmSource(
+                    source_kind="tag_alarm",
+                    source_key=f"unsafe-equality-{index}",
+                    display_name="旧版状态告警",
+                    entity_candidates=(entity,),
+                    level_code="error2",
+                    stored_severity=None,
+                    trigger_rules=({"op": "eq", "value": value},),
+                )
+
+                item = compile_legacy_migration_plan(
+                    installation_id=UUID(int=700),
+                    sources=(source,),
+                    selections={},
+                    actor="user:engineer",
+                ).items[0]
+
+                self.assertEqual("blocked", item.status)
+                self.assertIn(
+                    "ALARM_LEGACY_RULE_UNSUPPORTED",
+                    {blocker["code"] for blocker in item.blockers},
+                )
+                self.assertEqual((), item.definitions)
+
     def test_legacy_entity_candidates_compile_every_rule_and_block_incompatible_choices(self) -> None:
         installation_id = UUID(int=700)
         numeric = ResolvedAlarmEntity(

@@ -383,6 +383,11 @@ def _legacy_condition_pair(
         return {"op": operator, "value": value}, {"op": inverse[operator], "value": value}
     if operator in {"eq", "ne"}:
         value = rule.get("value")
+        supported_scalar = isinstance(value, (str, bool)) or (
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+        )
+        if not supported_scalar:
+            raise AlarmConfigurationError("ALARM_LEGACY_RULE_UNSUPPORTED")
         return {"op": operator, "value": value}, {"op": "ne" if operator == "eq" else "eq", "value": value}
     raise AlarmConfigurationError("ALARM_LEGACY_RULE_UNSUPPORTED")
 
