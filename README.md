@@ -1004,7 +1004,8 @@ timeout: 5s
 `range/page_size` 及可选 `tag_id/node_id`；若 `has_more=true`，下一页原样回传
 `next_cursor`。游标绑定原筛选条件，跨筛选复用或格式错误返回
 `TELEMETRY_CURSOR_INVALID`。响应的 `total` 固定为 `null`，避免同步扫描数百万行；需要离线
-全量数据时使用独立 CSV 导出，不能用交互列表推算精确总数。
+提取时使用独立的有界 CSV 导出（当前最多 10,000 行）。精确计数必须由独立报表任务承担，
+当前交互 API 不提供，不能用列表页或 CSV 行数推算总量。
 
 ```yaml
 # acceptance/grid-power-history.yaml
