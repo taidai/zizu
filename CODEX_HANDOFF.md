@@ -3726,8 +3726,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   runner 无法可靠访问的镜像站，而不是前端源码或 Python/ARM 构建问题。
 - 已做保持版本与 SHA-512 integrity 不变的机械域名替换：`registry.npmmirror.com` →
   `registry.npmjs.org`。新增回归拒绝前者、要求后者，防止再次将私有/地域镜像写进可复现发布输入。
-  同一发布测试 6/6 仍通过。本地提交为 `a014fdb`，但当前环境访问 GitHub 443 被拒绝，尚未推送或
-  创建 PR；网络恢复后先推送/合并，再重新触发 build-only workflow。
+  同一发布测试 6/6 仍通过。本地提交最终为 `14f1a83`；其后的 PR #34/构建结果见本节续记。
 
 ### 2026-08-15 续：网络复核
 
@@ -3735,5 +3734,21 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   构建或接触 1 号机。
 - 本地以与 Dockerfile 一致的有界参数启动 `npm ci`，60 秒没有任何安装进度；已主动中止，不能把它
   视为前端构建通过证据。该现象与受限网络下无法访问公共 npm 一致。
-- 下一个可执行动作仍是：网络恢复后推送 `a014fdb`、合并并以 v0.4.78 触发双架构 build-only 工作流；
-  在获得真实 `release.json`、两个架构摘要和 EMS ZIP+SHA 前，禁止部署 1 号机。
+- 后续动作已由本节续记取代；在目标完成 TLS、迁移、运行时 Secret 与发布锁前，仍禁止部署 1 号机。
+
+### 2026-08-15 续：真实 v0.4.78 发布候选已构建
+
+- 本机系统代理为 `http://127.0.0.1:7890`；已为当前用户的 Codex 子进程写入标准
+  `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`，并为 Git 配置同一代理。未写入仓库配置、代码或凭据。
+- lockfile 修复以 PR #34 合并到 `main`（`448c8ba`）。手动 build-only workflow `31859720966` 在
+  13 分 7 秒成功：双架构镜像、release manifest、公开 EMS 参考包与 SHA 均生成；没有部署、没有
+  写发布锁、没有连接 1 号机。
+- 已下载 artifact 并独立复核：`pv-storage-charging-ems.zizu.zip` 的 SHA-256 为
+  `8c25558029f590df30d9e01734d5fdbb5ac2da8cecb57c2507bf9bf57bb8b127`，与签发文件一致。
+  `release_preflight verify` 通过，schema=032。1 号机 ARM64 必须使用
+  `ghcr.io/taidai/zizu@sha256:936f195df7e67f3e7f8711df957c5620759630743dea50249f7253fa38981ab7`；
+  Caddy 候选摘要仍为
+  `caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648`。
+- 当前绝不可把“候选已构建”称为“已交付”：目标仍需 DNS 指向、TLS/80/443 防火墙、受控维护窗、
+  owner migration/最小权限收敛、受限 runtime Secret 文件、目标 compose 切换、HTTPS liveness 与
+  release lock；随后才可让独立实施工程师开始计时交付试验。
