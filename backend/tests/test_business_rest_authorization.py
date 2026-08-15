@@ -20,6 +20,7 @@ from fastapi import APIRouter, FastAPI
 
 from app.api.admin import router as admin_router
 from app.api.alarm_levels import router as alarm_levels_router
+from app.api.alarm_configurations import router as alarm_configurations_router
 from app.api.alarm_events import router as alarm_event_router
 from app.api.alarms import router as alarms_router
 from app.api.auth import router as auth_router
@@ -275,6 +276,18 @@ TICKET_16_CAPABILITIES = {
     ("POST", "/api/v1/ems-policies/{policy_id}/evaluate"): "configuration.write",
 }
 
+ALARM_CONFIGURATION_CAPABILITIES = {
+    ("GET", "/api/v1/alarm-configurations"): "configuration.read",
+    ("GET", "/api/v1/alarm-rule-sets"): "configuration.read",
+    ("POST", "/api/v1/alarm-rule-sets"): "configuration.write",
+    ("POST", "/api/v1/alarm-rule-sets/{rule_set_id}/revisions"): "configuration.write",
+    ("POST", "/api/v1/alarm-configuration-plans"): "configuration.write",
+    ("GET", "/api/v1/alarm-configuration-plans/{plan_id}"): "configuration.read",
+    ("POST", "/api/v1/alarm-configuration-plans/{plan_id}/apply"): "configuration.write",
+    ("GET", "/api/v1/alarm-configuration-migrations/legacy"): "configuration.read",
+    ("POST", "/api/v1/alarm-configuration-migrations/legacy/plans"): "configuration.write",
+}
+
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
 
 
@@ -290,6 +303,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     rules_router,
     alarms_router,
     alarm_event_router,
+    alarm_configurations_router,
     rule_templates_router,
     entities_router,
     fault_maps_router,
@@ -1010,6 +1024,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(TICKET_12_CAPABILITIES), 4)
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
         self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
+        self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 9)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1021,6 +1036,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             set(TICKET_12_CAPABILITIES),
             set(TICKET_15_CAPABILITIES),
             set(TICKET_16_CAPABILITIES),
+            set(ALARM_CONFIGURATION_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1043,7 +1059,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 145)
+        self.assertEqual(len(registered), 154)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
@@ -1078,6 +1094,11 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
         for (method, path), capability in sorted(TICKET_16_CAPABILITIES.items()):
+            operation = schema["paths"][path][method.lower()]
+            self.assertEqual(operation.get("x-zizu-capability"), capability)
+            self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
+
+        for (method, path), capability in sorted(ALARM_CONFIGURATION_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
             self.assertEqual(operation.get("x-zizu-capability"), capability)
             self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
