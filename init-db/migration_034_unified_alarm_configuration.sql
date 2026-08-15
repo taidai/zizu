@@ -12,12 +12,20 @@ CREATE TABLE IF NOT EXISTS t_alarm_rule_sets (
         CHECK (length(btrim(rule_set_key)) > 0),
     CONSTRAINT chk_alarm_rule_set_name_nonempty
         CHECK (length(btrim(name)) > 0),
+    CONSTRAINT chk_alarm_rule_set_created_by_nonempty
+        CHECK (length(btrim(created_by)) > 0),
     CONSTRAINT uq_alarm_rule_sets_key UNIQUE (rule_set_key)
 );
+ALTER TABLE t_alarm_rule_sets
+    DROP CONSTRAINT IF EXISTS chk_alarm_rule_set_created_by_nonempty,
+    ADD CONSTRAINT chk_alarm_rule_set_created_by_nonempty
+        CHECK (length(btrim(created_by)) > 0);
 
 CREATE TABLE IF NOT EXISTS t_alarm_rule_set_revisions (
     rule_set_id UUID NOT NULL REFERENCES t_alarm_rule_sets(id),
     revision INTEGER NOT NULL,
+    rule_set_key TEXT,
+    rule_set_name TEXT,
     rules JSONB NOT NULL,
     digest CHAR(64) NOT NULL,
     actor TEXT NOT NULL,
@@ -29,8 +37,35 @@ CREATE TABLE IF NOT EXISTS t_alarm_rule_set_revisions (
     CONSTRAINT chk_alarm_rule_set_revision_rules_array
         CHECK (jsonb_typeof(rules) = 'array'),
     CONSTRAINT chk_alarm_rule_set_revision_digest_sha256
-        CHECK (digest ~ '^[0-9a-f]{64}$')
+        CHECK (digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_alarm_rule_set_revision_actor_nonempty
+        CHECK (length(btrim(actor)) > 0)
 );
+
+DROP TRIGGER IF EXISTS trg_alarm_rule_set_revisions_immutable
+    ON t_alarm_rule_set_revisions;
+ALTER TABLE t_alarm_rule_set_revisions
+    ADD COLUMN IF NOT EXISTS rule_set_key TEXT,
+    ADD COLUMN IF NOT EXISTS rule_set_name TEXT;
+UPDATE t_alarm_rule_set_revisions revision
+SET rule_set_key = rule_set.rule_set_key,
+    rule_set_name = rule_set.name
+FROM t_alarm_rule_sets rule_set
+WHERE rule_set.id = revision.rule_set_id
+  AND (revision.rule_set_key IS NULL OR revision.rule_set_name IS NULL);
+ALTER TABLE t_alarm_rule_set_revisions
+    DROP CONSTRAINT IF EXISTS chk_alarm_rule_set_revision_key_nonempty,
+    DROP CONSTRAINT IF EXISTS chk_alarm_rule_set_revision_name_nonempty,
+    ALTER COLUMN rule_set_key SET NOT NULL,
+    ALTER COLUMN rule_set_name SET NOT NULL,
+    ADD CONSTRAINT chk_alarm_rule_set_revision_key_nonempty
+        CHECK (length(btrim(rule_set_key)) > 0),
+    ADD CONSTRAINT chk_alarm_rule_set_revision_name_nonempty
+        CHECK (length(btrim(rule_set_name)) > 0);
+ALTER TABLE t_alarm_rule_set_revisions
+    DROP CONSTRAINT IF EXISTS chk_alarm_rule_set_revision_actor_nonempty,
+    ADD CONSTRAINT chk_alarm_rule_set_revision_actor_nonempty
+        CHECK (length(btrim(actor)) > 0);
 
 CREATE TABLE IF NOT EXISTS t_alarm_configuration_plans (
     id UUID PRIMARY KEY,
@@ -42,7 +77,8 @@ CREATE TABLE IF NOT EXISTS t_alarm_configuration_plans (
     canonical_plan JSONB NOT NULL,
     digest CHAR(64) NOT NULL,
     status TEXT NOT NULL,
-    actor TEXT,
+    planned_by TEXT,
+    applied_by TEXT,
     applied_result JSONB,
     applied_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -54,14 +90,78 @@ CREATE TABLE IF NOT EXISTS t_alarm_configuration_plans (
         CHECK (digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT chk_alarm_configuration_plan_status
         CHECK (status IN ('ready', 'blocked', 'applied')),
+    CONSTRAINT chk_alarm_configuration_plan_planned_by_nonempty
+        CHECK (length(btrim(planned_by)) > 0),
+    CONSTRAINT chk_alarm_configuration_plan_applied_by_nonempty
+        CHECK (applied_by IS NULL OR length(btrim(applied_by)) > 0),
     CONSTRAINT chk_alarm_configuration_plan_applied_result CHECK (
-        (status = 'applied' AND actor IS NOT NULL
+        (status = 'applied' AND applied_by IS NOT NULL
          AND applied_result IS NOT NULL AND applied_at IS NOT NULL)
         OR
-        (status <> 'applied' AND actor IS NULL
+        (status <> 'applied' AND applied_by IS NULL
          AND applied_result IS NULL AND applied_at IS NULL)
     )
 );
+
+-- A revised migration_034 can be replayed safely on databases that briefly ran
+-- the original actor-only plan schema. Drop lifecycle triggers before the
+-- one-time metadata backfill; canonical plan JSON remains byte-for-byte stable
+-- after this migration finishes.
+DROP TRIGGER IF EXISTS trg_alarm_configuration_plans_append_only
+    ON t_alarm_configuration_plans;
+DROP TRIGGER IF EXISTS trg_alarm_configuration_plans_truncate
+    ON t_alarm_configuration_plans;
+ALTER TABLE t_alarm_configuration_plans
+    ADD COLUMN IF NOT EXISTS planned_by TEXT,
+    ADD COLUMN IF NOT EXISTS applied_by TEXT;
+ALTER TABLE t_alarm_configuration_plans
+    DROP CONSTRAINT IF EXISTS chk_alarm_configuration_plan_applied_result,
+    DROP CONSTRAINT IF EXISTS chk_alarm_configuration_plan_planned_by_nonempty,
+    DROP CONSTRAINT IF EXISTS chk_alarm_configuration_plan_applied_by_nonempty;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 't_alarm_configuration_plans'
+          AND column_name = 'actor'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE t_alarm_configuration_plans
+            SET planned_by = COALESCE(
+                    NULLIF(btrim(canonical_plan->>'planned_by'), ''),
+                    NULLIF(btrim(actor), ''),
+                    'system:legacy-alarm-planner'
+                ),
+                applied_by = CASE WHEN status = 'applied' THEN COALESCE(
+                    NULLIF(btrim(actor), ''),
+                    'system:legacy-alarm-applier'
+                ) ELSE NULL END
+        $sql$;
+        EXECUTE 'ALTER TABLE t_alarm_configuration_plans DROP COLUMN actor';
+    ELSE
+        UPDATE t_alarm_configuration_plans
+        SET planned_by = COALESCE(
+                NULLIF(btrim(canonical_plan->>'planned_by'), ''),
+                'system:legacy-alarm-planner'
+            )
+        WHERE planned_by IS NULL OR btrim(planned_by) = '';
+    END IF;
+END;
+$$;
+ALTER TABLE t_alarm_configuration_plans
+    ALTER COLUMN planned_by SET NOT NULL,
+    ADD CONSTRAINT chk_alarm_configuration_plan_planned_by_nonempty
+        CHECK (length(btrim(planned_by)) > 0),
+    ADD CONSTRAINT chk_alarm_configuration_plan_applied_by_nonempty
+        CHECK (applied_by IS NULL OR length(btrim(applied_by)) > 0),
+    ADD CONSTRAINT chk_alarm_configuration_plan_applied_result CHECK (
+        (status = 'applied' AND applied_by IS NOT NULL
+         AND applied_result IS NOT NULL AND applied_at IS NOT NULL)
+        OR
+        (status <> 'applied' AND applied_by IS NULL
+         AND applied_result IS NULL AND applied_at IS NULL)
+    );
 
 CREATE TABLE IF NOT EXISTS t_alarm_definition_origins (
     definition_id UUID PRIMARY KEY REFERENCES t_alarm_definitions(id),
@@ -78,16 +178,60 @@ CREATE TABLE IF NOT EXISTS t_alarm_definition_origins (
     CONSTRAINT chk_alarm_definition_origin_type
         CHECK (origin_type IN ('package', 'rule_set', 'site_override', 'legacy_migration')),
     CONSTRAINT chk_alarm_definition_origin_rule_set CHECK (
-        origin_type <> 'rule_set'
-        OR (rule_set_id IS NOT NULL AND rule_set_revision IS NOT NULL)
-    )
+        (
+            origin_type = 'rule_set'
+            AND rule_set_id IS NOT NULL
+            AND rule_set_revision IS NOT NULL
+            AND plan_id IS NOT NULL
+        )
+        OR
+        (
+            origin_type = 'site_override'
+            AND rule_set_id IS NULL
+            AND rule_set_revision IS NULL
+            AND plan_id IS NOT NULL
+        )
+        OR
+        (
+            origin_type IN ('package', 'legacy_migration')
+            AND rule_set_id IS NULL
+            AND rule_set_revision IS NULL
+        )
+    ),
+    CONSTRAINT chk_alarm_definition_origin_actor_nonempty
+        CHECK (length(btrim(actor)) > 0)
 );
+ALTER TABLE t_alarm_definition_origins
+    DROP CONSTRAINT IF EXISTS chk_alarm_definition_origin_rule_set,
+    DROP CONSTRAINT IF EXISTS chk_alarm_definition_origin_actor_nonempty,
+    ADD CONSTRAINT chk_alarm_definition_origin_rule_set CHECK (
+        (
+            origin_type = 'rule_set'
+            AND rule_set_id IS NOT NULL
+            AND rule_set_revision IS NOT NULL
+            AND plan_id IS NOT NULL
+        )
+        OR
+        (
+            origin_type = 'site_override'
+            AND rule_set_id IS NULL
+            AND rule_set_revision IS NULL
+            AND plan_id IS NOT NULL
+        )
+        OR
+        (
+            origin_type IN ('package', 'legacy_migration')
+            AND rule_set_id IS NULL
+            AND rule_set_revision IS NULL
+        )
+    ),
+    ADD CONSTRAINT chk_alarm_definition_origin_actor_nonempty
+        CHECK (length(btrim(actor)) > 0);
 
 CREATE TABLE IF NOT EXISTS t_legacy_alarm_migrations (
     id UUID PRIMARY KEY,
     source_kind TEXT NOT NULL,
     source_key TEXT NOT NULL,
-    target_definition_ids UUID[] NOT NULL,
     state TEXT NOT NULL,
     actor TEXT NOT NULL,
     migrated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -98,11 +242,47 @@ CREATE TABLE IF NOT EXISTS t_legacy_alarm_migrations (
         CHECK (length(btrim(source_kind)) > 0),
     CONSTRAINT chk_legacy_alarm_migration_source_key
         CHECK (length(btrim(source_key)) > 0),
-    CONSTRAINT chk_legacy_alarm_migration_targets
-        CHECK (cardinality(target_definition_ids) > 0),
     CONSTRAINT chk_legacy_alarm_migration_state
-        CHECK (state IN ('previewed', 'migrated', 'rejected'))
+        CHECK (state IN ('previewed', 'migrated', 'rejected')),
+    CONSTRAINT chk_legacy_alarm_migration_actor_nonempty
+        CHECK (length(btrim(actor)) > 0)
 );
+ALTER TABLE t_legacy_alarm_migrations
+    DROP CONSTRAINT IF EXISTS chk_legacy_alarm_migration_actor_nonempty,
+    ADD CONSTRAINT chk_legacy_alarm_migration_actor_nonempty
+        CHECK (length(btrim(actor)) > 0);
+
+CREATE TABLE IF NOT EXISTS t_legacy_alarm_migration_targets (
+    migration_id UUID NOT NULL REFERENCES t_legacy_alarm_migrations(id),
+    definition_id UUID NOT NULL REFERENCES t_alarm_definitions(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT pk_legacy_alarm_migration_targets
+        PRIMARY KEY (migration_id, definition_id)
+);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 't_legacy_alarm_migrations'
+          AND column_name = 'target_definition_ids'
+    ) THEN
+        EXECUTE $sql$
+            INSERT INTO t_legacy_alarm_migration_targets
+              (migration_id, definition_id)
+            SELECT migration.id, target.definition_id
+            FROM t_legacy_alarm_migrations migration
+            CROSS JOIN LATERAL unnest(migration.target_definition_ids)
+              AS target(definition_id)
+            ON CONFLICT (migration_id, definition_id) DO NOTHING
+        $sql$;
+        EXECUTE $sql$
+            ALTER TABLE t_legacy_alarm_migrations
+            DROP COLUMN target_definition_ids
+        $sql$;
+    END IF;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS t_alarm_configuration_idempotency (
     actor TEXT NOT NULL,
@@ -117,12 +297,38 @@ CREATE TABLE IF NOT EXISTS t_alarm_configuration_idempotency (
     CONSTRAINT chk_alarm_configuration_idempotency_key
         CHECK (length(btrim(idempotency_key)) > 0),
     CONSTRAINT chk_alarm_configuration_idempotency_digest_sha256
-        CHECK (request_digest ~ '^[0-9a-f]{64}$')
+        CHECK (request_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_alarm_configuration_idempotency_actor_nonempty
+        CHECK (length(btrim(actor)) > 0)
 );
+ALTER TABLE t_alarm_configuration_idempotency
+    DROP CONSTRAINT IF EXISTS chk_alarm_configuration_idempotency_actor_nonempty,
+    ADD CONSTRAINT chk_alarm_configuration_idempotency_actor_nonempty
+        CHECK (length(btrim(actor)) > 0);
 
+DROP TRIGGER IF EXISTS trg_alarm_definitions_immutable
+    ON t_alarm_definitions;
 ALTER TABLE t_alarm_definitions
     DROP CONSTRAINT IF EXISTS
-        t_alarm_definitions_installation_id_asset_id_entity_instance_id_key;
+        t_alarm_definitions_installation_id_asset_id_entity_instance_id_key,
+    DROP CONSTRAINT IF EXISTS
+        t_alarm_definitions_installation_id_asset_id_entity_instanc_key;
+ALTER TABLE t_alarm_definitions
+    ADD COLUMN IF NOT EXISTS content_digest_algorithm TEXT;
+UPDATE t_alarm_definitions
+SET content_digest_algorithm = 'sha256-v1-installation-bound'
+WHERE content_digest_algorithm IS NULL;
+ALTER TABLE t_alarm_definitions
+    ALTER COLUMN content_digest_algorithm
+        SET DEFAULT 'sha256-v2-content',
+    ALTER COLUMN content_digest_algorithm SET NOT NULL,
+    DROP CONSTRAINT IF EXISTS chk_alarm_definition_digest_algorithm,
+    ADD CONSTRAINT chk_alarm_definition_digest_algorithm CHECK (
+        content_digest_algorithm IN (
+            'sha256-v1-installation-bound',
+            'sha256-v2-content'
+        )
+    );
 ALTER TABLE t_alarm_definitions
     DROP CONSTRAINT IF EXISTS
         t_alarm_definitions_trigger_duration_seconds_check,
@@ -148,7 +354,13 @@ ALTER TABLE t_alarm_definitions
         uq_alarm_definitions_installation_asset_entity_digest;
 ALTER TABLE t_alarm_definitions
     ADD CONSTRAINT uq_alarm_definitions_installation_asset_entity_digest
-    UNIQUE (installation_id, asset_id, entity_instance_id, content_digest);
+    UNIQUE (
+        installation_id, asset_id, entity_instance_id,
+        content_digest_algorithm, content_digest
+    );
+CREATE TRIGGER trg_alarm_definitions_immutable
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON t_alarm_definitions
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_alarm_definition_mutation();
 
 CREATE OR REPLACE FUNCTION reject_alarm_rule_set_revision_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -174,6 +386,7 @@ BEGIN
        AND NEW.base_site_configuration_version = OLD.base_site_configuration_version
        AND NEW.rule_set_id = OLD.rule_set_id
        AND NEW.rule_set_revision = OLD.rule_set_revision
+       AND NEW.planned_by = OLD.planned_by
        AND NEW.canonical_plan = OLD.canonical_plan
        AND NEW.digest = OLD.digest
        AND NEW.created_at = OLD.created_at THEN
@@ -219,6 +432,32 @@ DROP TRIGGER IF EXISTS trg_legacy_alarm_migrations_append_only
 CREATE TRIGGER trg_legacy_alarm_migrations_append_only
     BEFORE UPDATE OR DELETE OR TRUNCATE ON t_legacy_alarm_migrations
     FOR EACH STATEMENT EXECUTE FUNCTION reject_legacy_alarm_migration_mutation();
+
+DROP TRIGGER IF EXISTS trg_legacy_alarm_migration_targets_append_only
+    ON t_legacy_alarm_migration_targets;
+CREATE TRIGGER trg_legacy_alarm_migration_targets_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON t_legacy_alarm_migration_targets
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_legacy_alarm_migration_mutation();
+
+CREATE OR REPLACE FUNCTION require_legacy_alarm_migration_target()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM t_legacy_alarm_migration_targets target
+        WHERE target.migration_id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'legacy alarm migration requires an existing definition target';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_legacy_alarm_migration_requires_target
+    ON t_legacy_alarm_migrations;
+CREATE CONSTRAINT TRIGGER trg_legacy_alarm_migration_requires_target
+    AFTER INSERT ON t_legacy_alarm_migrations
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_legacy_alarm_migration_target();
 
 COMMENT ON TABLE t_alarm_configuration_plans IS
     'Complete canonical alarm plans; ready plans become immutable applied evidence';

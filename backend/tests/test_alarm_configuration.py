@@ -70,6 +70,42 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         )
         return service, repository, revision
 
+    def test_plan_requires_nonblank_planner_and_binds_it_to_the_digest(self) -> None:
+        service, repository, revision = self._configuration(entity_count=1)
+        with self.assertRaisesRegex(
+            AlarmConfigurationError,
+            "ALARM_PLAN_ACTOR_INVALID",
+        ):
+            service.plan(
+                PlanAlarmConfiguration(
+                    installation_id=repository.current_installation_id,
+                    selection=EntitySelection(),
+                    rule_set_id=revision.rule_set_id,
+                    rule_set_revision=revision.revision,
+                    planned_by=" ",
+                )
+            )
+        first = service.plan(
+            PlanAlarmConfiguration(
+                installation_id=repository.current_installation_id,
+                selection=EntitySelection(),
+                rule_set_id=revision.rule_set_id,
+                rule_set_revision=revision.revision,
+                planned_by="user:planner-a",
+            )
+        )
+        second = service.plan(
+            PlanAlarmConfiguration(
+                installation_id=repository.current_installation_id,
+                selection=EntitySelection(),
+                rule_set_id=revision.rule_set_id,
+                rule_set_revision=revision.revision,
+                planned_by="user:planner-b",
+            )
+        )
+        self.assertEqual("user:planner-a", first.planned_by)
+        self.assertNotEqual(first.digest, second.digest)
+
     def test_four_entities_and_three_rules_expand_to_twelve_stable_definitions(self) -> None:
         service, repository = configured_service(entity_count=4)
         revision = repository.save_rule_set_revision(
@@ -93,6 +129,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
                 ),
                 rule_set_id=revision.rule_set_id,
                 rule_set_revision=revision.revision,
+                planned_by="user:engineer",
             )
         )
 
@@ -120,6 +157,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
                 selection=EntitySelection(entity_instance_ids=repository.entity_ids),
                 rule_set_id=revision.rule_set_id,
                 rule_set_revision=revision.revision,
+                planned_by="user:engineer",
             )
         )
         reversed_revision = repository.save_rule_set_revision(
@@ -134,6 +172,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
                 selection=EntitySelection(entity_instance_ids=tuple(reversed(repository.entity_ids))),
                 rule_set_id=reversed_revision.rule_set_id,
                 rule_set_revision=reversed_revision.revision,
+                planned_by="user:engineer",
             )
         )
         self.assertEqual(first.digest, second.digest)
@@ -145,7 +184,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
     def test_rejects_more_than_two_hundred_entities(self) -> None:
         service, repository, revision = self._configuration(entity_count=201)
         with self.assertRaisesRegex(ValueError, "200"):
-            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision))
+            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision, "user:engineer"))
 
     def test_rejects_more_than_twenty_rules(self) -> None:
         service, repository = configured_service()
@@ -158,7 +197,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         rules = tuple(rule(f"rule-{index}", "WARNING", "gt", index, "lte", index - 1) for index in range(11))
         revision = repository.save_rule_set_revision(key="too-many-expanded", name="Too many", rules=rules, actor="user:engineer")
         with self.assertRaisesRegex(ValueError, "2000"):
-            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision))
+            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision, "user:engineer"))
 
     def test_rejects_empty_duplicate_and_invalid_rule_values(self) -> None:
         service, _ = configured_service()
@@ -178,7 +217,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
             id=UUID(int=999), device_instance_id=UUID(int=999), definition_id="pcs.activePower",
             display_name="unconfirmed", data_type="number", unit="kW", confirmation_id=None,
         ))
-        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision, "user:engineer"))
         self.assertEqual("blocked", plan.status)
         self.assertEqual(3, len(plan.items))
         self.assertTrue(any(blocker["code"] == "ALARM_ENTITY_UNRESOLVED" for blocker in plan.blockers))
@@ -187,7 +226,7 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         service, repository, revision = self._configuration()
         original = repository.resolve_entities
         repository.resolve_entities = lambda installation_id, selection: tuple(reversed(original(installation_id, selection)))
-        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision, "user:engineer"))
         self.assertEqual(sorted(item.entity_instance_id for item in plan.items), [item.entity_instance_id for item in plan.items])
 
     def test_rule_revision_defensively_copies_nested_conditions(self) -> None:
@@ -251,7 +290,7 @@ class AlarmConfigurationValidationTest(unittest.TestCase):
                 repository = InMemoryAlarmConfigurationRepository(installation_id=installation_id, entities=entities)
                 service = AlarmConfiguration(repository)
                 revision = service.create_rule_set(key="validation", name="Validation", rules=(alarm_rule,), actor="user:engineer")
-                plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+                plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision, "user:engineer"))
                 self.assertEqual("blocked", plan.status)
                 self.assertIn(expected_code, [blocker["code"] for blocker in plan.blockers])
                 self.assertEqual(0, repository.applied_count)
@@ -267,7 +306,7 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
 
     def ready_plan(self):
         return self.service.plan(PlanAlarmConfiguration(
-            self.repository.current_installation_id, EntitySelection(), self.revision.rule_set_id, self.revision.revision,
+            self.repository.current_installation_id, EntitySelection(), self.revision.rule_set_id, self.revision.revision, "user:engineer",
         ))
 
     def test_apply_is_atomic_and_same_key_returns_same_derived_installation(self) -> None:
@@ -280,6 +319,77 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
         self.assertEqual(1, self.repository.applied_count)
         self.assertEqual(plan.base_site_configuration_version + 1, first.site_configuration_version)
 
+    def test_apply_persists_plan_lifecycle_without_changing_planner(self) -> None:
+        plan = self.ready_plan()
+        result = self.service.apply(
+            ApplyAlarmConfigurationPlan(
+                plan.id,
+                plan.digest,
+                "lifecycle",
+                "user:applier",
+            )
+        )
+        persisted = self.repository.get_plan(plan.id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual("applied", persisted.status)
+        self.assertEqual(result, persisted.applied_result)
+        self.assertEqual("user:engineer", persisted.planned_by)
+
+    def test_repository_rejects_blank_apply_actor_before_any_write(self) -> None:
+        plan = self.ready_plan()
+        with self.assertRaisesRegex(
+            AlarmConfigurationError,
+            "ALARM_APPLY_COMMAND_INVALID",
+        ):
+            self.repository.apply_plan(
+                plan,
+                idempotency_key="blank-actor",
+                actor=" ",
+            )
+        self.assertEqual(0, self.repository.applied_count)
+
+    def test_same_idempotency_key_is_scoped_by_actor(self) -> None:
+        first_plan = self.ready_plan()
+        first = self.service.apply(
+            ApplyAlarmConfigurationPlan(
+                first_plan.id,
+                first_plan.digest,
+                "shared-key",
+                "user:applier-a",
+            )
+        )
+        second_revision = self.service.create_rule_set_revision(
+            rule_set_id=self.revision.rule_set_id,
+            rules=(rule("major", "MAJOR", "gt", 500, "lte", 470, unit="kW"),),
+            actor="user:engineer",
+        )
+        second_plan = self.service.plan(
+            PlanAlarmConfiguration(
+                self.repository.current_installation_id,
+                EntitySelection(),
+                second_revision.rule_set_id,
+                second_revision.revision,
+                "user:planner-b",
+            )
+        )
+        second = self.service.apply(
+            ApplyAlarmConfigurationPlan(
+                second_plan.id,
+                second_plan.digest,
+                "shared-key",
+                "user:applier-b",
+            )
+        )
+        self.assertNotEqual(first.installation_id, second.installation_id)
+        self.assertEqual(
+            first,
+            self.repository.find_idempotency("user:applier-a", "shared-key")[3],
+        )
+        self.assertEqual(
+            second,
+            self.repository.find_idempotency("user:applier-b", "shared-key")[3],
+        )
+
     def test_apply_rejects_a_reused_key_for_a_different_request(self) -> None:
         plan = self.ready_plan()
         self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "alarm-plan-1", "user:engineer"))
@@ -288,7 +398,7 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
             rules=(rule("major", "MAJOR", "gt", 500, "lte", 470, unit="kW"),), actor="user:engineer",
         )
         replacement = self.service.plan(PlanAlarmConfiguration(
-            self.repository.current_installation_id, EntitySelection(), replacement_revision.rule_set_id, replacement_revision.revision,
+            self.repository.current_installation_id, EntitySelection(), replacement_revision.rule_set_id, replacement_revision.revision, "user:engineer",
         ))
         with self.assertRaisesRegex(AlarmConfigurationError, "IDEMPOTENCY_KEY_REUSED"):
             self.service.apply(ApplyAlarmConfigurationPlan(replacement.id, replacement.digest, "alarm-plan-1", "user:engineer"))
@@ -343,7 +453,7 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
             actor="user:engineer",
         )
         second = self.service.plan(PlanAlarmConfiguration(
-            self.repository.current_installation_id, EntitySelection(), second_revision.rule_set_id, second_revision.revision,
+            self.repository.current_installation_id, EntitySelection(), second_revision.rule_set_id, second_revision.revision, "user:engineer",
         ))
         deletes = [item for item in second.items if item.action == "delete_candidate"]
         self.assertEqual(1, len(deletes))
@@ -371,7 +481,7 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
             key="pcs-power-limits", name="PCS 功率分级",
             rules=(rule("warning", "WARNING", "gt", 450, "lte", 430, unit="kW"),), actor="user:engineer",
         )
-        plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision, "user:engineer"))
         command = ApplyAlarmConfigurationPlan(plan.id, plan.digest, "concurrent-key", "user:engineer")
         with ThreadPoolExecutor(max_workers=2) as workers:
             first, second = list(workers.map(lambda _: service.apply(command), range(2)))

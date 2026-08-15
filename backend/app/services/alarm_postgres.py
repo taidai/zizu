@@ -95,6 +95,7 @@ class PostgresAlarmDefinitionCatalog:
             raise RuntimeError(
                 "alarm definition installation requires an outer transaction"
             )
+        installed_ids: list[UUID] = []
         with _connection(transaction) as conn:
             with conn.cursor() as cur:
                 for definition in plan.definitions:
@@ -118,23 +119,26 @@ class PostgresAlarmDefinitionCatalog:
                     ).hexdigest()
                     cur.execute(
                         """
-                        INSERT INTO t_alarm_definitions
-                          (id, asset_id, definition_version, installation_id,
-                           site_configuration_version, entity_instance_id,
-                           entity_definition_id, trigger_condition,
-                           trigger_duration_seconds, recovery_condition,
-                           recovery_duration_seconds, severity,
-                           notification_throttle_seconds, content_digest)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (id) DO NOTHING
+                        SELECT id FROM t_alarm_definitions
+                        WHERE installation_id = %s
+                          AND asset_id = %s
+                          AND entity_instance_id = %s
+                          AND definition_version = %s
+                          AND entity_definition_id = %s
+                          AND trigger_condition = %s
+                          AND trigger_duration_seconds = %s
+                          AND recovery_condition = %s
+                          AND recovery_duration_seconds = %s
+                          AND severity = %s
+                          AND notification_throttle_seconds = %s
+                        ORDER BY created_at, id
+                        LIMIT 1
                         """,
                         (
-                            definition.id,
-                            definition.asset_id,
-                            definition.version,
                             definition.installation_id,
-                            definition.site_configuration_version,
+                            definition.asset_id,
                             definition.entity_instance_id,
+                            definition.version,
                             definition.entity_definition_id,
                             Json(definition.trigger),
                             definition.trigger_duration_seconds,
@@ -142,9 +146,42 @@ class PostgresAlarmDefinitionCatalog:
                             definition.recovery_duration_seconds,
                             definition.severity,
                             definition.notification_throttle_seconds,
-                            digest,
                         ),
                     )
+                    existing = cur.fetchone()
+                    definition_id = existing[0] if existing else definition.id
+                    if existing is None:
+                        cur.execute(
+                            """
+                            INSERT INTO t_alarm_definitions
+                              (id, asset_id, definition_version, installation_id,
+                               site_configuration_version, entity_instance_id,
+                               entity_definition_id, trigger_condition,
+                               trigger_duration_seconds, recovery_condition,
+                               recovery_duration_seconds, severity,
+                               notification_throttle_seconds, content_digest,
+                               content_digest_algorithm)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                    %s, %s, %s, %s, %s,
+                                    'sha256-v2-content')
+                            """,
+                            (
+                                definition_id,
+                                definition.asset_id,
+                                definition.version,
+                                definition.installation_id,
+                                definition.site_configuration_version,
+                                definition.entity_instance_id,
+                                definition.entity_definition_id,
+                                Json(definition.trigger),
+                                definition.trigger_duration_seconds,
+                                Json(definition.recovery),
+                                definition.recovery_duration_seconds,
+                                definition.severity,
+                                definition.notification_throttle_seconds,
+                                digest,
+                            ),
+                        )
                     cur.execute(
                         """
                         INSERT INTO t_alarm_definition_current
@@ -160,11 +197,12 @@ class PostgresAlarmDefinitionCatalog:
                         (
                             definition.asset_id,
                             definition.entity_instance_id,
-                            definition.id,
+                            definition_id,
                             definition.site_configuration_version,
                         ),
                     )
-        return tuple(item.id for item in plan.definitions)
+                    installed_ids.append(definition_id)
+        return tuple(installed_ids)
 
 
 class PostgresAlarmRepository:

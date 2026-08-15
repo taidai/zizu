@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from copy import deepcopy
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Literal, Protocol
@@ -86,6 +86,7 @@ class PlanAlarmConfiguration:
     selection: EntitySelection
     rule_set_id: UUID
     rule_set_revision: int
+    planned_by: str
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,8 @@ class AlarmConfigurationPlan:
     items: tuple[AlarmConfigurationPlanItem, ...]
     blockers: tuple[dict[str, Any], ...]
     digest: str
+    planned_by: str
+    applied_result: AppliedAlarmConfiguration | None = None
 
 
 @dataclass(frozen=True)
@@ -138,7 +141,7 @@ class AlarmConfigurationRepository(Protocol):
     def save_plan(self, plan: AlarmConfigurationPlan) -> AlarmConfigurationPlan: ...
     def get_plan(self, plan_id: UUID) -> AlarmConfigurationPlan | None: ...
     def current_site_context(self) -> dict[str, Any]: ...
-    def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None: ...
+    def find_idempotency(self, actor: str, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None: ...
     def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration: ...
 
 
@@ -257,7 +260,7 @@ class InMemoryAlarmConfigurationRepository:
         self._plans_by_id: dict[UUID, AlarmConfigurationPlan] = {}
         self._definitions: dict[str, dict[str, Any]] = {}
         self._current_pointers: dict[str, UUID] = {}
-        self._idempotency: dict[str, tuple[UUID, str, str, AppliedAlarmConfiguration]] = {}
+        self._idempotency: dict[tuple[str, str], tuple[UUID, str, str, AppliedAlarmConfiguration]] = {}
         self._derived_installation_id = uuid4()
         self._audit_events: dict[UUID, dict[str, Any]] = {}
         self._apply_lock = RLock()
@@ -316,8 +319,8 @@ class InMemoryAlarmConfigurationRepository:
     def current_site_context(self) -> dict[str, Any]:
         return {"site_configuration_version": self._site_version, "definitions": deepcopy(self._definitions)}
 
-    def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
-        return self._idempotency.get(idempotency_key)
+    def find_idempotency(self, actor: str, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
+        return self._idempotency.get((actor, idempotency_key))
 
     def _stage_apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
         definitions = deepcopy(self._definitions)
@@ -334,14 +337,15 @@ class InMemoryAlarmConfigurationRepository:
         audit_event_id = uuid4()
         if self.fail_audit:
             raise AlarmConfigurationError("ALARM_AUDIT_FAILED")
+        derived_installation_id = uuid4()
         result = AppliedAlarmConfiguration(
-            id=uuid4(), plan_id=plan.id, installation_id=self._derived_installation_id,
+            id=uuid4(), plan_id=plan.id, installation_id=derived_installation_id,
             site_configuration_version=self._site_version + 1,
             definition_ids=tuple(definition_ids), audit_event_id=audit_event_id,
             applied_at=datetime.now(timezone.utc),
         )
         idempotency = dict(self._idempotency)
-        idempotency[idempotency_key] = (plan.id, plan.digest, actor, result)
+        idempotency[(actor, idempotency_key)] = (plan.id, plan.digest, actor, result)
         audits = dict(self._audit_events)
         audits[audit_event_id] = {"plan_id": plan.id, "actor": actor}
         self._definitions = definitions
@@ -349,12 +353,15 @@ class InMemoryAlarmConfigurationRepository:
         self._site_version = result.site_configuration_version
         self._idempotency = idempotency
         self._audit_events = audits
+        self._derived_installation_id = derived_installation_id
         self.applied_count += 1
         return result
 
     def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
+        if not idempotency_key.strip() or not actor.strip():
+            raise AlarmConfigurationError("ALARM_APPLY_COMMAND_INVALID")
         with self._apply_lock:
-            previous = self._idempotency.get(idempotency_key)
+            previous = self._idempotency.get((actor, idempotency_key))
             if previous is not None:
                 plan_id, digest, previous_actor, result = previous
                 if (plan_id, digest, previous_actor) != (plan.id, plan.digest, actor):
@@ -370,7 +377,11 @@ class InMemoryAlarmConfigurationRepository:
                 raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
             if plan.base_site_configuration_version != self._site_version:
                 raise AlarmConfigurationError("ALARM_PLAN_STALE")
-            return self._stage_apply_plan(plan, idempotency_key=idempotency_key, actor=actor)
+            result = self._stage_apply_plan(plan, idempotency_key=idempotency_key, actor=actor)
+            applied_plan = replace(plan, status="applied", applied_result=result)
+            self._plans_by_id[plan.id] = applied_plan
+            self.plans = [applied_plan if item.id == plan.id else item for item in self.plans]
+            return result
 
 
 class AlarmConfiguration:
@@ -389,6 +400,8 @@ class AlarmConfiguration:
         return self.repository.save_rule_set_revision(key=previous.key, name=previous.name, rules=rules, actor=actor)
 
     def plan(self, command: PlanAlarmConfiguration) -> AlarmConfigurationPlan:
+        if not command.planned_by.strip():
+            raise AlarmConfigurationError("ALARM_PLAN_ACTOR_INVALID")
         revision = self.repository.get_rule_set_revision(command.rule_set_id, command.rule_set_revision)
         if revision is None:
             raise AlarmConfigurationError("rule set revision not found")
@@ -452,6 +465,7 @@ class AlarmConfiguration:
         digest = _digest({
             "base_site_configuration_version": self.repository.current_site_version(),
             "installation_id": command.installation_id,
+            "planned_by": command.planned_by,
             "rule_set_revision_digest": revision.digest,
             "selection": {
                 "entity_instance_ids": tuple(sorted(command.selection.entity_instance_ids, key=str)),
@@ -469,6 +483,7 @@ class AlarmConfiguration:
             items=items,
             blockers=tuple(blockers),
             digest=digest,
+            planned_by=command.planned_by,
         )
         return self.repository.save_plan(plan)
 

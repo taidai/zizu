@@ -9,6 +9,7 @@ import json
 from typing import Any, Callable, Iterator
 from uuid import UUID, uuid4
 
+import psycopg2
 from psycopg2.extras import Json, register_uuid
 
 from app.services.alarm_configuration import (
@@ -88,13 +89,19 @@ def _revision_from_json(value: dict[str, Any]) -> AlarmRuleSetRevision:
     )
 
 
-def _plan_from_json(value: dict[str, Any]) -> AlarmConfigurationPlan:
+def _plan_from_json(
+    value: dict[str, Any],
+    *,
+    lifecycle_status: str | None = None,
+    applied_result: dict[str, Any] | None = None,
+    planned_by: str | None = None,
+) -> AlarmConfigurationPlan:
     return AlarmConfigurationPlan(
         id=UUID(value["id"]),
         installation_id=UUID(value["installation_id"]),
         base_site_configuration_version=int(value["base_site_configuration_version"]),
         rule_set_revision=_revision_from_json(value["rule_set_revision"]),
-        status=value["status"],
+        status=lifecycle_status or value["status"],
         items=tuple(
             AlarmConfigurationPlanItem(
                 definition_key=item["definition_key"],
@@ -109,6 +116,12 @@ def _plan_from_json(value: dict[str, Any]) -> AlarmConfigurationPlan:
         ),
         blockers=tuple(value["blockers"]),
         digest=value["digest"],
+        planned_by=planned_by or value["planned_by"],
+        applied_result=(
+            _result_from_json(applied_result)
+            if applied_result is not None
+            else None
+        ),
     )
 
 
@@ -148,20 +161,18 @@ class PostgresAlarmConfigurationRepository:
             with get_connection() as connection:
                 try:
                     yield connection
+                    connection.commit()
                 except Exception:
                     connection.rollback()
                     raise
-                else:
-                    connection.commit()
             return
         connection = self._connection_factory()
         try:
             yield connection
+            connection.commit()
         except Exception:
             connection.rollback()
             raise
-        else:
-            connection.commit()
         finally:
             connection.close()
 
@@ -173,6 +184,8 @@ class PostgresAlarmConfigurationRepository:
         rules: tuple[AlarmRule, ...],
         actor: str,
     ) -> AlarmRuleSetRevision:
+        if not key.strip() or not name.strip() or not actor.strip():
+            raise AlarmConfigurationError("ALARM_RULE_SET_COMMAND_INVALID")
         normalized_rules = tuple(sorted(rules, key=lambda rule: rule.id))
         digest = _digest(
             {
@@ -181,53 +194,65 @@ class PostgresAlarmConfigurationRepository:
                 "rules": [_json_value(rule) for rule in normalized_rules],
             }
         )
-        with self._connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, name FROM t_alarm_rule_sets
-                    WHERE rule_set_key = %s FOR UPDATE
-                    """,
-                    (key,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    rule_set_id = uuid4()
+        try:
+            with self._connection() as connection:
+                with connection.cursor() as cursor:
+                    candidate_rule_set_id = uuid4()
                     cursor.execute(
                         """
                         INSERT INTO t_alarm_rule_sets
                           (id, rule_set_key, name, created_by)
                         VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (rule_set_key) DO NOTHING
                         """,
-                        (rule_set_id, key, name, actor),
+                        (candidate_rule_set_id, key, name, actor),
                     )
-                else:
+                    cursor.execute(
+                        """
+                        SELECT id, name FROM t_alarm_rule_sets
+                        WHERE rule_set_key = %s FOR UPDATE
+                        """,
+                        (key,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        raise AlarmConfigurationError("ALARM_RULE_SET_CONFLICT")
                     rule_set_id = row[0]
                     if row[1] != name:
                         raise AlarmConfigurationError("ALARM_RULE_SET_NAME_MISMATCH")
-                cursor.execute(
-                    """
-                    SELECT COALESCE(max(revision), 0) + 1
-                    FROM t_alarm_rule_set_revisions
-                    WHERE rule_set_id = %s
-                    """,
-                    (rule_set_id,),
-                )
-                revision_number = int(cursor.fetchone()[0])
-                cursor.execute(
-                    """
-                    INSERT INTO t_alarm_rule_set_revisions
-                      (rule_set_id, revision, rules, digest, actor)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (
-                        rule_set_id,
-                        revision_number,
-                        Json(_json_value(normalized_rules)),
-                        digest,
-                        actor,
-                    ),
-                )
+                    cursor.execute(
+                        """
+                        SELECT COALESCE(max(revision), 0) + 1
+                        FROM t_alarm_rule_set_revisions
+                        WHERE rule_set_id = %s
+                        """,
+                        (rule_set_id,),
+                    )
+                    revision_number = int(cursor.fetchone()[0])
+                    cursor.execute(
+                        """
+                        INSERT INTO t_alarm_rule_set_revisions
+                          (rule_set_id, revision, rule_set_key, rule_set_name,
+                           rules, digest, actor)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            rule_set_id,
+                            revision_number,
+                            key,
+                            name,
+                            Json(_json_value(normalized_rules)),
+                            digest,
+                            actor,
+                        ),
+                    )
+        except psycopg2.IntegrityError as error:
+            code = {
+                "23503": "ALARM_RULE_SET_REFERENCE_INVALID",
+                "23505": "ALARM_RULE_SET_CONFLICT",
+                "23514": "ALARM_RULE_SET_COMMAND_INVALID",
+            }.get(error.pgcode, "ALARM_RULE_SET_PERSISTENCE_FAILED")
+            raise AlarmConfigurationError(code) from error
         return AlarmRuleSetRevision(
             rule_set_id=rule_set_id,
             key=key,
@@ -246,10 +271,9 @@ class PostgresAlarmConfigurationRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT rule_set.rule_set_key, rule_set.name, revision.rules,
-                           revision.digest
+                    SELECT revision.rule_set_key, revision.rule_set_name,
+                           revision.rules, revision.digest
                     FROM t_alarm_rule_set_revisions revision
-                    JOIN t_alarm_rule_sets rule_set ON rule_set.id = revision.rule_set_id
                     WHERE revision.rule_set_id = %s AND revision.revision = %s
                     """,
                     (rule_set_id, revision),
@@ -330,10 +354,11 @@ class PostgresAlarmConfigurationRepository:
                     INSERT INTO t_alarm_configuration_plans
                       (id, source_installation_id,
                        base_site_configuration_version, rule_set_id,
-                       rule_set_revision, canonical_plan, digest, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       rule_set_revision, canonical_plan, digest, status,
+                       planned_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
-                    RETURNING canonical_plan
+                    RETURNING canonical_plan, planned_by
                     """,
                     (
                         plan.id,
@@ -344,28 +369,44 @@ class PostgresAlarmConfigurationRepository:
                         Json(canonical_plan),
                         plan.digest,
                         plan.status,
+                        plan.planned_by,
                     ),
                 )
                 row = cursor.fetchone()
                 if row is None:
                     cursor.execute(
-                        "SELECT canonical_plan FROM t_alarm_configuration_plans WHERE digest = %s",
+                        """
+                        SELECT canonical_plan, planned_by
+                        FROM t_alarm_configuration_plans WHERE digest = %s
+                        """,
                         (plan.digest,),
                     )
                     row = cursor.fetchone()
         if row is None:
             raise RuntimeError("Alarm configuration plan conflict row disappeared")
-        return _plan_from_json(row[0])
+        return _plan_from_json(row[0], planned_by=row[1])
 
     def get_plan(self, plan_id: UUID) -> AlarmConfigurationPlan | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT canonical_plan FROM t_alarm_configuration_plans WHERE id = %s",
+                    """
+                    SELECT canonical_plan, status, applied_result, planned_by
+                    FROM t_alarm_configuration_plans WHERE id = %s
+                    """,
                     (plan_id,),
                 )
                 row = cursor.fetchone()
-        return _plan_from_json(row[0]) if row else None
+        return (
+            _plan_from_json(
+                row[0],
+                lifecycle_status=row[1],
+                applied_result=row[2],
+                planned_by=row[3],
+            )
+            if row
+            else None
+        )
 
     def current_site_context(self) -> dict[str, Any]:
         definitions: dict[str, dict[str, Any]] = {}
@@ -425,6 +466,7 @@ class PostgresAlarmConfigurationRepository:
 
     def find_idempotency(
         self,
+        actor: str,
         idempotency_key: str,
     ) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
         with self._connection() as connection:
@@ -436,10 +478,10 @@ class PostgresAlarmConfigurationRepository:
                     FROM t_alarm_configuration_idempotency idempotency
                     JOIN t_alarm_configuration_plans plan
                       ON plan.id = idempotency.plan_id
-                    WHERE idempotency.idempotency_key = %s
-                    ORDER BY idempotency.created_at, idempotency.actor LIMIT 1
+                    WHERE idempotency.actor = %s
+                      AND idempotency.idempotency_key = %s
                     """,
-                    (idempotency_key,),
+                    (actor, idempotency_key),
                 )
                 row = cursor.fetchone()
         if row is None:
@@ -453,6 +495,8 @@ class PostgresAlarmConfigurationRepository:
         idempotency_key: str,
         actor: str,
     ) -> AppliedAlarmConfiguration:
+        if not idempotency_key.strip() or not actor.strip():
+            raise AlarmConfigurationError("ALARM_APPLY_COMMAND_INVALID")
         request_digest = _digest({"plan_id": plan.id, "plan_digest": plan.digest})
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -479,7 +523,7 @@ class PostgresAlarmConfigurationRepository:
 
                 cursor.execute(
                     """
-                    SELECT canonical_plan, digest, status
+                    SELECT canonical_plan, digest, status, planned_by
                     FROM t_alarm_configuration_plans
                     WHERE id = %s FOR UPDATE
                     """,
@@ -490,7 +534,7 @@ class PostgresAlarmConfigurationRepository:
                     raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
                 if stored[1].strip() != plan.digest:
                     raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
-                stored_plan = _plan_from_json(stored[0])
+                stored_plan = _plan_from_json(stored[0], planned_by=stored[3])
                 if stored[2] != "ready" or stored_plan.status != "ready":
                     raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
                 if stored_plan.base_site_configuration_version != current_version:
@@ -510,7 +554,7 @@ class PostgresAlarmConfigurationRepository:
                 cursor.execute(
                     """
                     UPDATE t_alarm_configuration_plans
-                    SET status = 'applied', actor = %s,
+                    SET status = 'applied', applied_by = %s,
                         applied_result = %s, applied_at = %s
                     WHERE id = %s
                     """,
@@ -743,6 +787,50 @@ class PostgresAlarmConfigurationRepository:
                     actor,
                 ),
             )
+
+        installation_audit_details = {
+            "plan_id": str(derived_plan_id),
+            "alarm_configuration_plan_id": str(plan.id),
+            "alarm_configuration_plan_digest": plan.digest,
+            "configuration_digest": configuration_digest.strip(),
+        }
+        cursor.execute(
+            """
+            INSERT INTO t_solution_delivery_audit
+              (id, actor, action, installation_id, package_record_id,
+               package_digest, site_configuration_version, details)
+            VALUES (%s, %s, 'solution.install', %s, %s, %s, %s, %s)
+            """,
+            (
+                uuid4(),
+                actor,
+                derived_installation_id,
+                package_record_id,
+                package_digest,
+                next_version,
+                Json(installation_audit_details),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO t_audit_events
+              (id, event, outcome, actor, target, details)
+            VALUES (%s, 'solution.install', 'allowed', %s, %s, %s)
+            """,
+            (
+                uuid4(),
+                actor,
+                f"installation:{derived_installation_id}",
+                Json(
+                    {
+                        **installation_audit_details,
+                        "package_record_id": str(package_record_id),
+                        "package_digest": package_digest.strip(),
+                        "site_configuration_version": next_version,
+                    }
+                ),
+            ),
+        )
 
         audit_event_id = uuid4()
         cursor.execute(

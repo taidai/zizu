@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from datetime import datetime, timezone
+import hashlib
+import json
 import unittest
 from uuid import UUID, uuid4
 
@@ -233,20 +236,301 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                self._insert_installed_site(cursor)
+                installation_id, _ = self._insert_installed_site(cursor)
                 migration = MIGRATION_034.read_text(encoding="utf-8")
                 cursor.execute(migration)
+                rule_set_id = uuid4()
+                legacy_plan_json = {"legacy": "canonical-plan-is-immutable"}
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_rule_sets
+                      (id, rule_set_key, name, created_by)
+                    VALUES (%s, 'legacy-key', 'Legacy name', 'user:planner')
+                    """,
+                    (str(rule_set_id),),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_rule_set_revisions
+                      (rule_set_id, revision, rule_set_key, rule_set_name,
+                       rules, digest, actor)
+                    VALUES (%s, 1, 'legacy-key', 'Legacy name', '[]', %s,
+                            'user:planner')
+                    """,
+                    (str(rule_set_id), "b" * 64),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_configuration_plans
+                      (id, source_installation_id,
+                       base_site_configuration_version, rule_set_id,
+                       rule_set_revision, canonical_plan, digest, status,
+                       planned_by)
+                    VALUES (%s, %s, 1, %s, 1, %s, %s, 'ready',
+                            'user:planner')
+                    """,
+                    (
+                        str(uuid4()),
+                        installation_id,
+                        str(rule_set_id),
+                        json.dumps(legacy_plan_json),
+                        "c" * 64,
+                    ),
+                )
                 cursor.execute(migration)
+                cursor.execute(
+                    "SELECT canonical_plan FROM t_alarm_configuration_plans"
+                )
+                self.assertEqual(legacy_plan_json, cursor.fetchone()[0])
                 for table_name in (
                     "t_alarm_rule_sets",
                     "t_alarm_rule_set_revisions",
                     "t_alarm_configuration_plans",
                     "t_alarm_definition_origins",
                     "t_legacy_alarm_migrations",
+                    "t_legacy_alarm_migration_targets",
                     "t_alarm_configuration_idempotency",
                 ):
                     cursor.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
                     self.assertEqual(table_name, cursor.fetchone()[0])
+
+    def test_upgrade_versions_legacy_digests_without_rewriting_event_evidence(self) -> None:
+        from app.services.alarm_definitions import (
+            AlarmDefinitionPlan,
+            InstalledAlarmDefinition,
+        )
+        from app.services.alarm_postgres import PostgresAlarmDefinitionCatalog
+        from psycopg2.extras import register_uuid
+
+        self._reset_schema_through_032()
+        register_uuid()
+        legacy_definition_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _package_record_id = self._insert_installed_site(cursor)
+                entity_id, _ = self._insert_entities(cursor, installation_id)
+                definition = InstalledAlarmDefinition(
+                    id=legacy_definition_id,
+                    asset_id="site.alarm.legacy.high",
+                    version="package:1",
+                    installation_id=UUID(installation_id),
+                    site_configuration_version=1,
+                    entity_instance_id=UUID(entity_id),
+                    entity_definition_id="pcs.activePower",
+                    trigger={"operator": "gt", "value": 90},
+                    trigger_duration_seconds=1,
+                    recovery={"operator": "lt", "value": 80},
+                    recovery_duration_seconds=1,
+                    severity="WARNING",
+                    notification_throttle_seconds=1,
+                )
+                old_digest = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "asset_id": definition.asset_id,
+                            "version": definition.version,
+                            "installation_id": str(definition.installation_id),
+                            "site_configuration_version": definition.site_configuration_version,
+                            "entity_instance_id": str(definition.entity_instance_id),
+                            "entity_definition_id": definition.entity_definition_id,
+                            "trigger": definition.trigger,
+                            "trigger_duration_seconds": definition.trigger_duration_seconds,
+                            "recovery": definition.recovery,
+                            "recovery_duration_seconds": definition.recovery_duration_seconds,
+                            "severity": definition.severity,
+                            "notification_throttle_seconds": definition.notification_throttle_seconds,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definitions
+                      (id, asset_id, definition_version, installation_id,
+                       site_configuration_version, entity_instance_id,
+                       entity_definition_id, trigger_condition,
+                       trigger_duration_seconds, recovery_condition,
+                       recovery_duration_seconds, severity,
+                       notification_throttle_seconds, content_digest)
+                    VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 1, %s, 1,
+                            'WARNING', 1, %s)
+                    """,
+                    (
+                        definition.id,
+                        definition.asset_id,
+                        definition.version,
+                        definition.installation_id,
+                        definition.entity_instance_id,
+                        definition.entity_definition_id,
+                        json.dumps(definition.trigger),
+                        json.dumps(definition.recovery),
+                        old_digest,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definition_current
+                      (asset_id, entity_instance_id, definition_id,
+                       site_configuration_version)
+                    VALUES (%s, %s, %s, 1)
+                    """,
+                    (definition.asset_id, definition.entity_instance_id, definition.id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_events
+                      (id, definition_id, definition_version,
+                       entity_instance_id, state, severity, pending_at,
+                       recovered_at)
+                    VALUES (%s, %s, %s, %s, 'recovered', 'WARNING', %s, %s)
+                    """,
+                    (
+                        uuid4(),
+                        definition.id,
+                        definition.version,
+                        definition.entity_instance_id,
+                        datetime.now(timezone.utc),
+                        datetime.now(timezone.utc),
+                    ),
+                )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+
+        replacement = InstalledAlarmDefinition(
+            **{**definition.__dict__, "id": uuid4()}
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            installed_ids = PostgresAlarmDefinitionCatalog().install_definitions(
+                AlarmDefinitionPlan(
+                    installation_id=definition.installation_id,
+                    site_configuration_version=1,
+                    package_digest="a" * 64,
+                    definitions=(replacement,),
+                    digest="e" * 64,
+                ),
+                transaction=connection,
+            )
+        self.assertEqual((legacy_definition_id,), installed_ids)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*), min(content_digest),
+                           min(content_digest_algorithm)
+                    FROM t_alarm_definitions
+                    WHERE installation_id = %s AND asset_id = %s
+                    """,
+                    (definition.installation_id, definition.asset_id),
+                )
+                self.assertEqual(
+                    (1, old_digest, "sha256-v1-installation-bound"),
+                    cursor.fetchone(),
+                )
+                cursor.execute("SELECT definition_id FROM t_alarm_events")
+                self.assertEqual(legacy_definition_id, cursor.fetchone()[0])
+                cursor.execute("SELECT definition_id FROM t_alarm_definition_current")
+                self.assertEqual(legacy_definition_id, cursor.fetchone()[0])
+
+    def test_legacy_migration_targets_are_fk_backed_nonempty_evidence(self) -> None:
+        from app.services.alarm_definitions import (
+            AlarmDefinitionPlan,
+            InstalledAlarmDefinition,
+        )
+        from app.services.alarm_postgres import PostgresAlarmDefinitionCatalog
+        from psycopg2.extras import register_uuid
+
+        self._reset_schema_through_032()
+        register_uuid()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                entity_id, _ = self._insert_entities(cursor, installation_id)
+                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+        definition = InstalledAlarmDefinition(
+            id=uuid4(),
+            asset_id="site.alarm.legacy.target",
+            version="legacy-migration:1",
+            installation_id=UUID(installation_id),
+            site_configuration_version=1,
+            entity_instance_id=UUID(entity_id),
+            entity_definition_id="pcs.activePower",
+            trigger={"operator": "gt", "value": 90},
+            trigger_duration_seconds=0,
+            recovery={"operator": "lt", "value": 80},
+            recovery_duration_seconds=0,
+            severity="WARNING",
+            notification_throttle_seconds=0,
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            PostgresAlarmDefinitionCatalog().install_definitions(
+                AlarmDefinitionPlan(
+                    installation_id=definition.installation_id,
+                    site_configuration_version=1,
+                    package_digest="a" * 64,
+                    definitions=(definition,),
+                    digest="f" * 64,
+                ),
+                transaction=connection,
+            )
+        migration_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_legacy_alarm_migrations
+                      (id, source_kind, source_key, state, actor)
+                    VALUES (%s, 'legacy_alarm', 'alarm-1', 'migrated',
+                            'user:engineer')
+                    """,
+                    (migration_id,),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_legacy_alarm_migration_targets
+                      (migration_id, definition_id)
+                    VALUES (%s, %s)
+                    """,
+                    (migration_id, definition.id),
+                )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_legacy_alarm_migration_targets
+                          (migration_id, definition_id)
+                        VALUES (%s, %s)
+                        """,
+                        (migration_id, uuid4()),
+                    )
+        with self.assertRaises(psycopg2.errors.RaiseException):
+            with psycopg2.connect(**self.connection_kwargs) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_legacy_alarm_migrations
+                          (id, source_kind, source_key, state, actor)
+                        VALUES (%s, 'legacy_alarm', 'missing-target',
+                                'migrated', 'user:engineer')
+                        """,
+                        (uuid4(),),
+                    )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 't_legacy_alarm_migrations'
+                      AND column_name = 'target_definition_ids'
+                    """
+                )
+                self.assertIsNone(cursor.fetchone())
 
 
 @unittest.skipUnless(
@@ -325,6 +609,56 @@ class PostgresAlarmConfigurationRepositoryTest(
         ):
             PostgresAlarmDefinitionCatalog().install_definitions(plan)
 
+    def test_public_apply_seam_rejects_blank_actor_before_database_writes(self) -> None:
+        from app.services.alarm_configuration import (
+            AlarmConfiguration,
+            AlarmConfigurationError,
+            EntitySelection,
+            PlanAlarmConfiguration,
+        )
+
+        repository = self._repository()
+        service = AlarmConfiguration(repository)
+        revision = service.create_rule_set(
+            key="blank-actor",
+            name="Blank actor",
+            rules=self._rules(),
+            actor="user:engineer",
+        )
+        plan = service.plan(
+            PlanAlarmConfiguration(
+                installation_id=UUID(self.installation_id),
+                selection=EntitySelection(
+                    entity_instance_ids=tuple(
+                        UUID(value) for value in self.entity_ids
+                    ),
+                ),
+                rule_set_id=revision.rule_set_id,
+                rule_set_revision=revision.revision,
+                planned_by="user:planner",
+            )
+        )
+
+        with self.assertRaisesRegex(
+            AlarmConfigurationError,
+            "ALARM_APPLY_COMMAND_INVALID",
+        ):
+            repository.apply_plan(
+                plan,
+                idempotency_key="blank-actor",
+                actor="  ",
+            )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_version FROM t_site_configuration_state"
+                )
+                self.assertEqual(1, cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_alarm_configuration_idempotency"
+                )
+                self.assertEqual(0, cursor.fetchone()[0])
+
     def test_apply_persists_derived_site_definitions_origins_audit_and_replay(self) -> None:
         from app.services.alarm_configuration import (
             AlarmConfiguration,
@@ -348,6 +682,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                 ),
                 rule_set_id=revision.rule_set_id,
                 rule_set_revision=revision.revision,
+                planned_by="user:planner",
             )
         )
         result = service.apply(
@@ -359,7 +694,8 @@ class PostgresAlarmConfigurationRepositoryTest(
             )
         )
 
-        restarted_service = AlarmConfiguration(self._repository())
+        restarted_repository = self._repository()
+        restarted_service = AlarmConfiguration(restarted_repository)
         replay = restarted_service.apply(
             ApplyAlarmConfigurationPlan(
                 plan_id=plan.id,
@@ -369,6 +705,10 @@ class PostgresAlarmConfigurationRepositoryTest(
             )
         )
         self.assertEqual(result, replay)
+        persisted_plan = restarted_repository.get_plan(plan.id)
+        self.assertEqual("applied", persisted_plan.status)
+        self.assertEqual(result, persisted_plan.applied_result)
+        self.assertEqual("user:planner", persisted_plan.planned_by)
         self.assertEqual(2, result.site_configuration_version)
         self.assertEqual(4, len(result.definition_ids))
 
@@ -380,6 +720,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                     ("t_alarm_definitions", 4),
                     ("t_alarm_definition_current", 4),
                     ("t_alarm_definition_origins", 4),
+                    ("t_solution_delivery_audit", 1),
                     ("t_alarm_configuration_idempotency", 1),
                 ):
                     cursor.execute(f"SELECT count(*) FROM {table_name}")
@@ -388,6 +729,37 @@ class PostgresAlarmConfigurationRepositoryTest(
                     "SELECT count(*) FROM t_audit_events WHERE event = 'alarm.configuration.apply'"
                 )
                 self.assertEqual(1, cursor.fetchone()[0])
+                cursor.execute(
+                    """
+                    SELECT event, outcome, actor, target,
+                           details->>'site_configuration_version'
+                    FROM t_audit_events
+                    WHERE event = 'solution.install'
+                    """
+                )
+                self.assertEqual(
+                    (
+                        "solution.install",
+                        "allowed",
+                        "user:engineer",
+                        f"installation:{result.installation_id}",
+                        "2",
+                    ),
+                    cursor.fetchone(),
+                )
+                cursor.execute(
+                    """
+                    SELECT planned_by, applied_by,
+                           canonical_plan->>'status',
+                           canonical_plan->>'planned_by'
+                    FROM t_alarm_configuration_plans WHERE id = %s
+                    """,
+                    (plan.id,),
+                )
+                self.assertEqual(
+                    ("user:planner", "user:engineer", "ready", "user:planner"),
+                    cursor.fetchone(),
+                )
                 cursor.execute(
                     """
                     SELECT next.package_record_id = previous.package_record_id,
@@ -427,6 +799,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                 ),
                 rule_set_id=revision.rule_set_id,
                 rule_set_revision=revision.revision,
+                planned_by="user:planner",
             )
         )
         counted_tables = (
@@ -436,6 +809,7 @@ class PostgresAlarmConfigurationRepositoryTest(
             "t_alarm_definitions",
             "t_alarm_definition_current",
             "t_alarm_definition_origins",
+            "t_solution_delivery_audit",
             "t_audit_events",
             "t_alarm_configuration_idempotency",
         )
@@ -479,6 +853,106 @@ class PostgresAlarmConfigurationRepositoryTest(
                 )
                 self.assertEqual("ready", cursor.fetchone()[0])
 
+    def test_deferred_commit_failure_rolls_back_before_connection_reuse(self) -> None:
+        from app.services.alarm_configuration import (
+            AlarmConfiguration,
+            ApplyAlarmConfigurationPlan,
+            EntitySelection,
+            PlanAlarmConfiguration,
+        )
+        from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+
+        setup_service = AlarmConfiguration(self._repository())
+        revision = setup_service.create_rule_set(
+            key="deferred-commit",
+            name="Deferred commit",
+            rules=self._rules(),
+            actor="user:engineer",
+        )
+        plan = setup_service.plan(
+            PlanAlarmConfiguration(
+                installation_id=UUID(self.installation_id),
+                selection=EntitySelection(
+                    entity_instance_ids=tuple(UUID(value) for value in self.entity_ids),
+                ),
+                rule_set_id=revision.rule_set_id,
+                rule_set_revision=revision.revision,
+                planned_by="user:planner",
+            )
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE OR REPLACE FUNCTION fail_alarm_configuration_commit()
+                    RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN
+                        IF NEW.actor = 'user:commit-fail' THEN
+                            RAISE EXCEPTION 'injected deferred commit failure';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $$;
+                    CREATE CONSTRAINT TRIGGER test_alarm_configuration_commit_failure
+                    AFTER INSERT ON t_alarm_configuration_idempotency
+                    DEFERRABLE INITIALLY DEFERRED
+                    FOR EACH ROW EXECUTE FUNCTION fail_alarm_configuration_commit();
+                    """
+                )
+
+        shared_connection = psycopg2.connect(**self.connection_kwargs)
+
+        class ReusableConnection:
+            def __getattr__(self, name):
+                return getattr(shared_connection, name)
+
+            def commit(self) -> None:
+                try:
+                    shared_connection.commit()
+                except psycopg2.errors.RaiseException as deferred_error:
+                    try:
+                        with shared_connection.cursor() as cursor:
+                            cursor.execute("SELECT 1 / 0")
+                    except psycopg2.errors.DivisionByZero:
+                        pass
+                    raise deferred_error
+
+            def close(self) -> None:
+                pass
+
+        repository = self._repository()
+        repository._connection_factory = lambda: ReusableConnection()
+        service = AlarmConfiguration(repository)
+        try:
+            with self.assertRaisesRegex(
+                psycopg2.errors.RaiseException,
+                "injected deferred commit failure",
+            ):
+                service.apply(
+                    ApplyAlarmConfigurationPlan(
+                        plan.id,
+                        plan.digest,
+                        "deferred-failure",
+                        "user:commit-fail",
+                    )
+                )
+            self.assertEqual(
+                TRANSACTION_STATUS_IDLE,
+                shared_connection.get_transaction_status(),
+            )
+            result = service.apply(
+                ApplyAlarmConfigurationPlan(
+                    plan.id,
+                    plan.digest,
+                    "after-deferred-failure",
+                    "user:engineer",
+                )
+            )
+            self.assertEqual(2, result.site_configuration_version)
+        finally:
+            shared_connection.close()
+
     def test_concurrent_ready_plans_serialize_one_success_and_one_stale(self) -> None:
         from app.services.alarm_configuration import (
             AlarmConfiguration,
@@ -507,6 +981,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                         ),
                         rule_set_id=revision.rule_set_id,
                         rule_set_revision=revision.revision,
+                        planned_by="user:planner",
                     )
                 )
             )
@@ -558,6 +1033,155 @@ class PostgresAlarmConfigurationRepositoryTest(
                 )
                 self.assertEqual(0, cursor.fetchone()[0])
 
+    def test_concurrent_same_key_rule_set_creates_share_one_locked_revision_stream(self) -> None:
+        from app.services.alarm_configuration import AlarmConfiguration
+
+        start = Barrier(2)
+
+        def create_revision(_index: int):
+            service = AlarmConfiguration(self._repository())
+            start.wait(timeout=3)
+            return service.create_rule_set(
+                key="concurrent-rule-set",
+                name="Concurrent rule set",
+                rules=self._rules(),
+                actor="user:engineer",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            revisions = list(executor.map(create_revision, (0, 1)))
+        self.assertEqual(1, len({revision.rule_set_id for revision in revisions}))
+        self.assertEqual({1, 2}, {revision.revision for revision in revisions})
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM t_alarm_rule_sets WHERE rule_set_key = %s",
+                    ("concurrent-rule-set",),
+                )
+                self.assertEqual(1, cursor.fetchone()[0])
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM t_alarm_rule_set_revisions
+                    WHERE rule_set_id = %s
+                    """,
+                    (revisions[0].rule_set_id,),
+                )
+                self.assertEqual(2, cursor.fetchone()[0])
+
+    def test_revision_reads_its_immutable_key_and_name_snapshot(self) -> None:
+        from app.services.alarm_configuration import AlarmConfiguration
+
+        repository = self._repository()
+        revision = AlarmConfiguration(repository).create_rule_set(
+            key="snapshot-key",
+            name="Snapshot name",
+            rules=self._rules(),
+            actor="user:engineer",
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE t_alarm_rule_sets
+                    SET rule_set_key = 'renamed-parent', name = 'Renamed parent'
+                    WHERE id = %s
+                    """,
+                    (revision.rule_set_id,),
+                )
+        persisted = repository.get_rule_set_revision(
+            revision.rule_set_id,
+            revision.revision,
+        )
+        self.assertEqual("snapshot-key", persisted.key)
+        self.assertEqual("Snapshot name", persisted.name)
+
+    def test_same_idempotency_key_is_actor_scoped_and_restart_readable(self) -> None:
+        from app.services.alarm_configuration import (
+            AlarmConfiguration,
+            ApplyAlarmConfigurationPlan,
+            EntitySelection,
+            PlanAlarmConfiguration,
+        )
+
+        service = AlarmConfiguration(self._repository())
+        first_revision = service.create_rule_set(
+            key="actor-scoped-idempotency",
+            name="Actor scoped idempotency",
+            rules=self._rules(),
+            actor="user:engineer",
+        )
+        selection = EntitySelection(
+            entity_instance_ids=tuple(UUID(value) for value in self.entity_ids)
+        )
+        first_plan = service.plan(
+            PlanAlarmConfiguration(
+                UUID(self.installation_id),
+                selection,
+                first_revision.rule_set_id,
+                first_revision.revision,
+                "user:planner-a",
+            )
+        )
+        first = service.apply(
+            ApplyAlarmConfigurationPlan(
+                first_plan.id,
+                first_plan.digest,
+                "shared-restart-key",
+                "user:applier-a",
+            )
+        )
+        second_revision = service.create_rule_set_revision(
+            rule_set_id=first_revision.rule_set_id,
+            rules=(self._rules()[0],),
+            actor="user:engineer",
+        )
+        second_plan = service.plan(
+            PlanAlarmConfiguration(
+                first.installation_id,
+                selection,
+                second_revision.rule_set_id,
+                second_revision.revision,
+                "user:planner-b",
+            )
+        )
+        second = service.apply(
+            ApplyAlarmConfigurationPlan(
+                second_plan.id,
+                second_plan.digest,
+                "shared-restart-key",
+                "user:applier-b",
+            )
+        )
+
+        restarted = self._repository()
+        self.assertEqual(
+            first,
+            restarted.find_idempotency(
+                "user:applier-a",
+                "shared-restart-key",
+            )[3],
+        )
+        self.assertEqual(
+            second,
+            restarted.find_idempotency(
+                "user:applier-b",
+                "shared-restart-key",
+            )[3],
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT actor FROM t_alarm_configuration_idempotency
+                    WHERE idempotency_key = 'shared-restart-key'
+                    ORDER BY actor
+                    """
+                )
+                self.assertEqual(
+                    [("user:applier-a",), ("user:applier-b",)],
+                    cursor.fetchall(),
+                )
+
     def test_delete_candidates_remain_preview_only_when_a_revision_is_applied(self) -> None:
         from app.services.alarm_configuration import (
             AlarmConfiguration,
@@ -582,6 +1206,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                 selection=selection,
                 rule_set_id=first_revision.rule_set_id,
                 rule_set_revision=first_revision.revision,
+                planned_by="user:planner",
             )
         )
         first_result = service.apply(
@@ -615,6 +1240,7 @@ class PostgresAlarmConfigurationRepositoryTest(
                 selection=selection,
                 rule_set_id=second_revision.rule_set_id,
                 rule_set_revision=second_revision.revision,
+                planned_by="user:planner",
             )
         )
         self.assertEqual(
