@@ -6,6 +6,7 @@ import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -138,7 +139,7 @@ class AlarmConfigurationRepository(Protocol):
     def get_plan(self, plan_id: UUID) -> AlarmConfigurationPlan | None: ...
     def current_site_context(self) -> dict[str, Any]: ...
     def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None: ...
-    def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration: ...
+    def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration: ...
 
 
 def _json_value(value: Any) -> Any:
@@ -259,6 +260,7 @@ class InMemoryAlarmConfigurationRepository:
         self._idempotency: dict[str, tuple[UUID, str, str, AppliedAlarmConfiguration]] = {}
         self._derived_installation_id = uuid4()
         self._audit_events: dict[UUID, dict[str, Any]] = {}
+        self._apply_lock = RLock()
         self.applied_count = 0
         self.fail_audit = False
 
@@ -317,7 +319,7 @@ class InMemoryAlarmConfigurationRepository:
     def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
         return self._idempotency.get(idempotency_key)
 
-    def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
+    def _apply_plan_locked(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
         definitions = deepcopy(self._definitions)
         pointers = dict(self._current_pointers)
         definition_ids: list[UUID] = []
@@ -349,6 +351,25 @@ class InMemoryAlarmConfigurationRepository:
         self._audit_events = audits
         self.applied_count += 1
         return result
+
+    def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration:
+        with self._apply_lock:
+            previous = self._idempotency.get(command.idempotency_key)
+            if previous is not None:
+                plan_id, digest, actor, result = previous
+                if (plan_id, digest, actor) != (command.plan_id, command.plan_digest, command.actor):
+                    raise AlarmConfigurationError("IDEMPOTENCY_KEY_REUSED")
+                return result
+            plan = self._plans_by_id.get(command.plan_id)
+            if plan is None:
+                raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
+            if plan.digest != command.plan_digest:
+                raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
+            if plan.status != "ready":
+                raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
+            if plan.base_site_configuration_version != self._site_version:
+                raise AlarmConfigurationError("ALARM_PLAN_STALE")
+            return self._apply_plan_locked(plan, idempotency_key=command.idempotency_key, actor=command.actor)
 
 
 class AlarmConfiguration:
@@ -403,6 +424,27 @@ class AlarmConfiguration:
                 ))
         if not entities:
             blockers.append(_blocker("NO_ENTITIES", "no alarm entities resolved"))
+        desired_keys = {item.definition_key for item in items}
+        selected_entity_ids = {str(entity.id) for entity in entities}
+        definition_prefix = f"site.alarm.{revision.key}."
+        for definition_key, record in sorted(existing_definitions.items()):
+            before = record["payload"]
+            if (
+                definition_key.startswith(definition_prefix)
+                and before.get("entity_instance_id") in selected_entity_ids
+                and definition_key not in desired_keys
+            ):
+                rule_payload = before.get("rule", {})
+                items.append(AlarmConfigurationPlanItem(
+                    definition_key=definition_key,
+                    entity_instance_id=UUID(before["entity_instance_id"]),
+                    rule_id=rule_payload.get("id", definition_key.rsplit(".", 1)[-1]),
+                    action="delete_candidate",
+                    before=before,
+                    after=None,
+                    blockers=(),
+                ))
+        items.sort(key=lambda item: item.definition_key)
         items = tuple(items)
         if len(items) > 2000:
             raise AlarmConfigurationError("expanded definition count must not exceed 2000")
@@ -432,19 +474,4 @@ class AlarmConfiguration:
     def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration:
         if not command.idempotency_key.strip() or not command.actor.strip():
             raise AlarmConfigurationError("ALARM_APPLY_COMMAND_INVALID")
-        previous = self.repository.find_idempotency(command.idempotency_key)
-        if previous is not None:
-            plan_id, digest, actor, result = previous
-            if (plan_id, digest, actor) != (command.plan_id, command.plan_digest, command.actor):
-                raise AlarmConfigurationError("IDEMPOTENCY_KEY_REUSED")
-            return result
-        plan = self.repository.get_plan(command.plan_id)
-        if plan is None:
-            raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
-        if plan.digest != command.plan_digest:
-            raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
-        if plan.status != "ready":
-            raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
-        if plan.base_site_configuration_version != self.repository.current_site_context()["site_configuration_version"]:
-            raise AlarmConfigurationError("ALARM_PLAN_STALE")
-        return self.repository.apply_plan(plan, idempotency_key=command.idempotency_key, actor=command.actor)
+        return self.repository.apply(command)

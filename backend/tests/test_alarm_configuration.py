@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from threading import Barrier
 import unittest
 from uuid import UUID, uuid4
 
@@ -298,12 +301,72 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
 
     def test_audit_failure_rolls_back_all_apply_mutations(self) -> None:
         plan = self.ready_plan()
-        before = self.repository.current_site_context()
+        before = {
+            "definitions": deepcopy(self.repository._definitions),
+            "current_pointers": deepcopy(self.repository._current_pointers),
+            "site_version": self.repository._site_version,
+            "audit_events": deepcopy(self.repository._audit_events),
+            "idempotency": deepcopy(self.repository._idempotency),
+            "derived_installation_id": self.repository._derived_installation_id,
+        }
         self.repository.fail_audit = True
         with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_AUDIT_FAILED"):
             self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "audit-failure", "user:engineer"))
-        self.assertEqual(before, self.repository.current_site_context())
+        self.assertEqual(before["definitions"], self.repository._definitions)
+        self.assertEqual(before["current_pointers"], self.repository._current_pointers)
+        self.assertEqual(before["site_version"], self.repository._site_version)
+        self.assertEqual(before["audit_events"], self.repository._audit_events)
+        self.assertEqual(before["idempotency"], self.repository._idempotency)
+        self.assertEqual(before["derived_installation_id"], self.repository._derived_installation_id)
         self.assertEqual(0, self.repository.applied_count)
+
+    def test_revision_removal_is_a_stably_sorted_delete_candidate_preview(self) -> None:
+        first = self.ready_plan()
+        self.service.apply(ApplyAlarmConfigurationPlan(first.id, first.digest, "first-revision", "user:engineer"))
+        second_revision = self.service.create_rule_set_revision(
+            rule_set_id=self.revision.rule_set_id,
+            rules=(rule("major", "MAJOR", "gt", 500, "lte", 470, unit="kW"),),
+            actor="user:engineer",
+        )
+        second = self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id, EntitySelection(), second_revision.rule_set_id, second_revision.revision,
+        ))
+        deletes = [item for item in second.items if item.action == "delete_candidate"]
+        self.assertEqual(1, len(deletes))
+        self.assertEqual("warning", deletes[0].rule_id)
+        self.assertIsNotNone(deletes[0].before)
+        self.assertIsNone(deletes[0].after)
+        self.assertEqual([item.definition_key for item in second.items], sorted(item.definition_key for item in second.items))
+        self.assertNotEqual(first.digest, second.digest)
+
+    def test_concurrent_same_key_replays_one_atomic_apply(self) -> None:
+        class RacingRepository(InMemoryAlarmConfigurationRepository):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.barrier = Barrier(2)
+
+            def apply(self, command):
+                self.barrier.wait(timeout=2)
+                return super().apply(command)
+
+        installation_id = uuid4()
+        entity = ResolvedAlarmEntity(UUID(int=1), UUID(int=101), "pcs.activePower", "PCS-1", "number", "kW", UUID(int=1001))
+        repository = RacingRepository(installation_id=installation_id, entities=(entity,), site_version=7)
+        service = AlarmConfiguration(repository)
+        revision = service.create_rule_set(
+            key="pcs-power-limits", name="PCS 功率分级",
+            rules=(rule("warning", "WARNING", "gt", 450, "lte", 430, unit="kW"),), actor="user:engineer",
+        )
+        plan = service.plan(PlanAlarmConfiguration(installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        command = ApplyAlarmConfigurationPlan(plan.id, plan.digest, "concurrent-key", "user:engineer")
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            first, second = list(workers.map(lambda _: service.apply(command), range(2)))
+        self.assertEqual(first, second)
+        self.assertEqual(1, repository.applied_count)
+        self.assertEqual(8, repository._site_version)
+        self.assertEqual(1, len(repository._audit_events))
+        self.assertEqual(1, len(repository._idempotency))
+        self.assertEqual(1, len({first.installation_id, second.installation_id}))
 
 
 if __name__ == "__main__":
