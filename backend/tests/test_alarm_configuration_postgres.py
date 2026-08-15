@@ -1023,6 +1023,153 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                 cursor.execute("SELECT count(*) FROM t_legacy_alarm_migrations")
                 self.assertEqual(0, cursor.fetchone()[0])
 
+    def test_apply_waits_for_concurrent_tag_membership_enable_and_rejects_stale_plan(self) -> None:
+        from app.services.alarm_configuration import AlarmConfigurationError
+        from app.services.alarm_configuration_postgres import (
+            PostgresAlarmConfigurationRepository,
+        )
+
+        self._reset_schema_through_032()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                self._insert_entities(cursor, installation_id)
+                cursor.execute(
+                    "SELECT tag_id FROM t_entity_instance_bindings ORDER BY tag_id"
+                )
+                first_tag_id, second_tag_id = [row[0] for row in cursor.fetchall()]
+                cursor.execute(
+                    "UPDATE t_tags SET alarm_level = 'error1' WHERE id = %s",
+                    (first_tag_id,),
+                )
+                cursor.execute(
+                    "UPDATE t_tags SET alarm_level = 'error2', enabled = FALSE WHERE id = %s",
+                    (second_tag_id,),
+                )
+                self._apply_alarm_migrations(cursor)
+
+        repository = PostgresAlarmConfigurationRepository(
+            connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+        )
+        plan = self._build_legacy_plan(repository, installation_id)
+        self.assertEqual(1, len(plan.items))
+
+        with psycopg2.connect(**self.connection_kwargs) as writer:
+            with writer.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_tags SET enabled = TRUE WHERE id = %s",
+                    (second_tag_id,),
+                )
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        repository.apply_legacy_alarm_migration,
+                        plan,
+                        actor="user:engineer",
+                    )
+                    for _ in range(20):
+                        if future.done():
+                            break
+                        Event().wait(0.05)
+                    self.assertFalse(
+                        future.done(),
+                        "apply must wait for an in-flight tag membership change",
+                    )
+                    writer.commit()
+                    with self.assertRaisesRegex(
+                        AlarmConfigurationError, "ALARM_MIGRATION_PLAN_STALE"
+                    ):
+                        future.result(timeout=10)
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_legacy_alarm_migrations")
+                self.assertEqual(0, cursor.fetchone()[0])
+
+    def test_apply_waits_for_concurrent_legacy_entity_disable_and_rejects_stale_plan(self) -> None:
+        from app.services.alarm_configuration import AlarmConfigurationError
+        from app.services.alarm_configuration_postgres import (
+            PostgresAlarmConfigurationRepository,
+        )
+
+        self._reset_schema_through_032()
+        legacy_entity_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                self._insert_entities(cursor, installation_id)
+                cursor.execute(
+                    "SELECT tag_id FROM t_entity_instance_bindings ORDER BY tag_id LIMIT 1"
+                )
+                tag_id = cursor.fetchone()[0]
+                level_id = uuid4()
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_levels
+                      (id, code, name, severity, trigger_rules, enabled)
+                    VALUES (%s, 'entity-disable', 'Entity disable', 'MAJOR',
+                            '[{"op":"active"}]', TRUE)
+                    """,
+                    (str(level_id),),
+                )
+                cursor.execute(
+                    "INSERT INTO t_entities (id, name, enabled) VALUES (%s, 'pcs.entityDisable', TRUE)",
+                    (str(legacy_entity_id),),
+                )
+                cursor.execute("SELECT node_id FROM t_tags WHERE id = %s", (tag_id,))
+                node_id = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO t_entity_bindings (id, entity_id, tag_id, node_id, enabled) VALUES (%s, %s, %s, %s, TRUE)",
+                    (str(uuid4()), str(legacy_entity_id), tag_id, node_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_entity_alarm_bindings (id, entity_id, alarm_level_id, enabled) VALUES (%s, %s, %s, TRUE)",
+                    (str(uuid4()), str(legacy_entity_id), str(level_id)),
+                )
+                self._apply_alarm_migrations(cursor)
+
+        repository = PostgresAlarmConfigurationRepository(
+            connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+        )
+        plan = self._build_legacy_plan(repository, installation_id)
+        self.assertEqual(1, len(plan.items))
+
+        with psycopg2.connect(**self.connection_kwargs) as writer:
+            with writer.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_entities SET enabled = FALSE WHERE id = %s",
+                    (str(legacy_entity_id),),
+                )
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        repository.apply_legacy_alarm_migration,
+                        plan,
+                        actor="user:engineer",
+                    )
+                    for _ in range(20):
+                        if future.done():
+                            break
+                        Event().wait(0.05)
+                    self.assertFalse(
+                        future.done(),
+                        "apply must wait for an in-flight legacy entity membership change",
+                    )
+                    writer.commit()
+                    with self.assertRaisesRegex(
+                        AlarmConfigurationError, "ALARM_MIGRATION_PLAN_STALE"
+                    ):
+                        future.result(timeout=10)
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_legacy_alarm_migrations")
+                self.assertEqual(0, cursor.fetchone()[0])
+
     def test_repository_rejects_forged_specs_and_omitted_sources_without_writes(self) -> None:
         from app.services.alarm_configuration import (
             AlarmConfigurationError,

@@ -3904,3 +3904,9 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 035 使 target 必须与 `legacy_migration` origin 及 source kind/key 一致；含任一 legacy alarm 字段的 tag 在 DB BEFORE DELETE、tag API delete 和 node cascade 入口均被拒绝。
 - 候选关系表在锁内重查前取 SHARE 锁；并发候选写事务必须先提交，apply 再重查并稳定拒绝新歧义，消除 advisory lock 不被其他写者共享时的 TOCTOU。
 - 最终 Task5 真实 PG + HTTP：`43 passed, 24 subtests passed`；Task1–4/业务授权：`37 passed, 100 subtests passed`；完整后端：`281 passed, 23 skipped, 189 subtests passed`；`compileall` 与 `git diff --check` 通过。
+
+### 2026-08-16 — Task 5 fix round 2/5
+
+- 补齐 `_legacy_alarm_sources()` 成员资格并发锁：apply 在 locked re-read 前以单条、固定顺序的 `LOCK TABLE ... IN SHARE MODE` 锁定 `t_tags`、旧 `t_entities` 及既有候选关系表。
+- 真实 PostgreSQL RED 分别覆盖 tag `enabled FALSE→TRUE` 与 legacy entity `TRUE→FALSE`；修复后 apply 等待未提交更新，再基于新来源集合返回 `ALARM_MIGRATION_PLAN_STALE`，定义与迁移证据均零写。
+- Task5 HTTP + 真实 PG：`45 passed, 24 subtests passed`；告警领域/业务授权：`37 passed, 100 subtests passed`；`compileall` 与 `git diff --check` 通过。

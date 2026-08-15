@@ -795,7 +795,9 @@ class PostgresAlarmConfigurationRepository:
                     )
                 cursor.execute(
                     """
-                    LOCK TABLE t_entity_bindings,
+                    LOCK TABLE t_tags,
+                               t_entities,
+                               t_entity_bindings,
                                t_entity_instance_bindings,
                                t_entity_binding_confirmations,
                                t_entity_instances,
