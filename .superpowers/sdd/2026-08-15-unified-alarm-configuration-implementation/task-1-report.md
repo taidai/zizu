@@ -37,3 +37,34 @@ git diff --check
 - `backend/app/services/alarm_configuration.py`
 - `backend/tests/test_alarm_configuration.py`
 - Commit: `dca3baf`
+
+## Fix round 1/5（审查反馈）
+
+### RED 证据
+
+补充五类回归测试后先运行 `python -m unittest tests.test_alarm_configuration -v`，9 个测试中 9 个失败/未通过：
+超出实体/规则/展开上限未拒绝，空/重复/非法 severity 未拒绝，未确认实体仍为 ready，乱序仓储未排序，规则嵌套字典 mutation 改变历史值。失败原因均对应缺失实现，而非测试收集错误。
+
+### 修复摘要
+
+- 增加实体 200、规则 20、展开 2000 的稳定上限校验。
+- 创建/修订规则集校验 rule id 非空、唯一及四个允许 severity。
+- 计划只展开已确认实体；存在未确认实体时返回 blocked 及 `UNCONFIRMED_ENTITY` blocker。
+- `plan()` 自身按实体 UUID 排序，不依赖仓储排序。
+- `AlarmRule` 构造及内存仓储入库均深复制 trigger/recovery，避免输入 mutation 改写历史 revision。
+
+### 验证
+
+```text
+python -m unittest tests.test_alarm_configuration -v
+Ran 9 tests in 0.034s
+OK
+
+python -m compileall -q app/services/alarm_configuration.py tests/test_alarm_configuration.py
+git diff --check
+```
+
+### 范围与提交
+
+本轮仅修改 Task 1 领域实现、Task 1 测试及本报告；未新增依赖、未修改 API/UI/数据库。`CODEX_HANDOFF.md` 未在本轮变更。
+修复提交：待提交（本报告将在提交后同步最终 SHA）。初始提交为 `e77fd38`（包含报告与此前交接记录）。

@@ -49,6 +49,16 @@ def configured_service(entity_count: int = 4) -> tuple[AlarmConfiguration, InMem
 
 
 class AlarmConfigurationPlanTest(unittest.TestCase):
+    def _configuration(self, *, entity_count: int = 4):
+        service, repository = configured_service(entity_count=entity_count)
+        revision = repository.save_rule_set_revision(
+            key="pcs-power-limits",
+            name="PCS 功率分级",
+            rules=tuple(rule(f"rule-{index}", "WARNING", "gt", index, "lte", index - 1) for index in range(3)),
+            actor="user:engineer",
+        )
+        return service, repository, revision
+
     def test_four_entities_and_three_rules_expand_to_twelve_stable_definitions(self) -> None:
         service, repository = configured_service(entity_count=4)
         revision = repository.save_rule_set_revision(
@@ -120,6 +130,65 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
             [item.definition_key for item in first.items],
             [item.definition_key for item in second.items],
         )
+
+    def test_rejects_more_than_two_hundred_entities(self) -> None:
+        service, repository, revision = self._configuration(entity_count=201)
+        with self.assertRaisesRegex(ValueError, "200"):
+            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision))
+
+    def test_rejects_more_than_twenty_rules(self) -> None:
+        service, repository = configured_service()
+        rules = tuple(rule(f"rule-{index}", "WARNING", "gt", index, "lte", index - 1) for index in range(21))
+        with self.assertRaisesRegex(ValueError, "20"):
+            service.create_rule_set(key="too-many", name="Too many", rules=rules, actor="user:engineer")
+
+    def test_rejects_more_than_two_thousand_expanded_definitions(self) -> None:
+        service, repository = configured_service(entity_count=200)
+        rules = tuple(rule(f"rule-{index}", "WARNING", "gt", index, "lte", index - 1) for index in range(11))
+        revision = repository.save_rule_set_revision(key="too-many-expanded", name="Too many", rules=rules, actor="user:engineer")
+        with self.assertRaisesRegex(ValueError, "2000"):
+            service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(entity_instance_ids=repository.entity_ids), revision.rule_set_id, revision.revision))
+
+    def test_rejects_empty_duplicate_and_invalid_rule_values(self) -> None:
+        service, _ = configured_service()
+        cases = (
+            (rule("", "WARNING", "gt", 1, "lte", 0), "non-empty"),
+            ((rule("same", "WARNING", "gt", 1, "lte", 0), rule("same", "MAJOR", "gt", 2, "lte", 1)), "unique"),
+            (rule("bad", "INVALID", "gt", 1, "lte", 0), "severity"),
+        )
+        for invalid_rules, expected in cases:
+            rules = invalid_rules if isinstance(invalid_rules, tuple) else (invalid_rules,)
+            with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, expected):
+                service.create_rule_set(key=f"invalid-{expected}", name="Invalid", rules=rules, actor="user:engineer")
+
+    def test_blocks_unconfirmed_entities_without_expanding_them(self) -> None:
+        service, repository, revision = self._configuration()
+        repository._entities = (repository._entities[0], ResolvedAlarmEntity(
+            id=UUID(int=999), device_instance_id=UUID(int=999), definition_id="pcs.activePower",
+            display_name="unconfirmed", data_type="number", unit="kW", confirmation_id=None,
+        ))
+        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        self.assertEqual("blocked", plan.status)
+        self.assertEqual(3, len(plan.items))
+        self.assertTrue(any(blocker["code"] == "UNCONFIRMED_ENTITY" for blocker in plan.blockers))
+
+    def test_plan_sorts_entities_even_when_repository_returns_them_reversed(self) -> None:
+        service, repository, revision = self._configuration()
+        original = repository.resolve_entities
+        repository.resolve_entities = lambda installation_id, selection: tuple(reversed(original(installation_id, selection)))
+        plan = service.plan(PlanAlarmConfiguration(repository.current_installation_id, EntitySelection(), revision.rule_set_id, revision.revision))
+        self.assertEqual(sorted(item.entity_instance_id for item in plan.items), [item.entity_instance_id for item in plan.items])
+
+    def test_rule_revision_defensively_copies_nested_conditions(self) -> None:
+        service, _ = configured_service()
+        trigger = {"operator": "gt", "value": 450}
+        created = service.create_rule_set(key="immutable", name="Immutable", rules=(AlarmRule(
+            id="warning", name="Warning", severity="WARNING", trigger=trigger,
+            trigger_duration_seconds=0, recovery={"operator": "lte", "value": 430},
+            recovery_duration_seconds=0, notification_throttle_seconds=0,
+        ),), actor="user:engineer")
+        trigger["value"] = 999
+        self.assertEqual(450, created.rules[0].trigger["value"])
 
 
 if __name__ == "__main__":

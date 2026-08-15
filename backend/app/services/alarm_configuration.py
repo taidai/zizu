@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
@@ -25,6 +26,10 @@ class AlarmRule:
     notification_throttle_seconds: float
     unit: str | None = None
     fault_map_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "trigger", deepcopy(self.trigger))
+        object.__setattr__(self, "recovery", deepcopy(self.recovery))
 
 
 @dataclass(frozen=True)
@@ -118,6 +123,23 @@ def _rule_payload(rule: AlarmRule) -> dict[str, Any]:
     return _json_value(asdict(rule))
 
 
+def _clone_rule(rule: AlarmRule) -> AlarmRule:
+    return AlarmRule(**deepcopy(asdict(rule)))
+
+
+def _validate_rules(rules: tuple[AlarmRule, ...]) -> None:
+    if len(rules) > 20:
+        raise AlarmConfigurationError("rule count must not exceed 20")
+    ids = [rule.id for rule in rules]
+    if any(not rule_id.strip() for rule_id in ids):
+        raise AlarmConfigurationError("rule id must be non-empty")
+    if len(ids) != len(set(ids)):
+        raise AlarmConfigurationError("rule ids must be unique")
+    allowed = {"CRITICAL", "MAJOR", "WARNING", "INFO"}
+    if any(rule.severity not in allowed for rule in rules):
+        raise AlarmConfigurationError("rule severity is invalid")
+
+
 class InMemoryAlarmConfigurationRepository:
     def __init__(self, *, installation_id: UUID | None = None, entities: tuple[ResolvedAlarmEntity, ...] = (), site_version: int = 1) -> None:
         self.current_installation_id = installation_id or uuid4()
@@ -129,9 +151,10 @@ class InMemoryAlarmConfigurationRepository:
         self.plans: list[AlarmConfigurationPlan] = []
 
     def save_rule_set_revision(self, *, key: str, name: str, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision:
+        _validate_rules(rules)
         rule_set_id = self._rule_set_ids_by_key.setdefault(key, uuid4())
         revision_number = self._rule_sets.get(rule_set_id, {}).get("revision", 0) + 1
-        normalized_rules = tuple(sorted(rules, key=lambda item: item.id))
+        normalized_rules = tuple(sorted((_clone_rule(rule) for rule in rules), key=lambda item: item.id))
         revision = AlarmRuleSetRevision(
             rule_set_id=rule_set_id,
             key=key,
@@ -191,6 +214,15 @@ class AlarmConfiguration:
         if revision is None:
             raise AlarmConfigurationError("rule set revision not found")
         entities = self.repository.resolve_entities(command.installation_id, command.selection)
+        if len(entities) > 200:
+            raise AlarmConfigurationError("entity count must not exceed 200")
+        entities = tuple(sorted(entities, key=lambda entity: entity.id))
+        confirmed_entities = tuple(entity for entity in entities if entity.confirmation_id is not None)
+        unconfirmed_count = len(entities) - len(confirmed_entities)
+        if unconfirmed_count:
+            blockers = ({"code": "UNCONFIRMED_ENTITY", "message": "entity is not confirmed"},)
+        else:
+            blockers = ()
         items = tuple(
             AlarmConfigurationPlanItem(
                 definition_key=f"site.alarm.{revision.key}.{entity.id}.{alarm_rule.id}",
@@ -201,12 +233,13 @@ class AlarmConfiguration:
                 after={"rule": _rule_payload(alarm_rule), "entity_instance_id": str(entity.id)},
                 blockers=(),
             )
-            for entity in entities
+            for entity in confirmed_entities
             for alarm_rule in revision.rules
         )
-        blockers: tuple[dict[str, Any], ...] = ()
-        if not entities:
+        if not confirmed_entities and not blockers:
             blockers = ({"code": "NO_ENTITIES", "message": "no confirmed alarm entities resolved"},)
+        if len(items) > 2000:
+            raise AlarmConfigurationError("expanded definition count must not exceed 2000")
         digest = _digest({
             "base_site_configuration_version": self.repository.current_site_version(),
             "installation_id": command.installation_id,
