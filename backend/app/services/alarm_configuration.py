@@ -139,7 +139,7 @@ class AlarmConfigurationRepository(Protocol):
     def get_plan(self, plan_id: UUID) -> AlarmConfigurationPlan | None: ...
     def current_site_context(self) -> dict[str, Any]: ...
     def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None: ...
-    def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration: ...
+    def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration: ...
 
 
 def _json_value(value: Any) -> Any:
@@ -319,7 +319,7 @@ class InMemoryAlarmConfigurationRepository:
     def find_idempotency(self, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
         return self._idempotency.get(idempotency_key)
 
-    def _apply_plan_locked(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
+    def _stage_apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
         definitions = deepcopy(self._definitions)
         pointers = dict(self._current_pointers)
         definition_ids: list[UUID] = []
@@ -352,24 +352,25 @@ class InMemoryAlarmConfigurationRepository:
         self.applied_count += 1
         return result
 
-    def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration:
+    def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
         with self._apply_lock:
-            previous = self._idempotency.get(command.idempotency_key)
+            previous = self._idempotency.get(idempotency_key)
             if previous is not None:
-                plan_id, digest, actor, result = previous
-                if (plan_id, digest, actor) != (command.plan_id, command.plan_digest, command.actor):
+                plan_id, digest, previous_actor, result = previous
+                if (plan_id, digest, previous_actor) != (plan.id, plan.digest, actor):
                     raise AlarmConfigurationError("IDEMPOTENCY_KEY_REUSED")
                 return result
-            plan = self._plans_by_id.get(command.plan_id)
-            if plan is None:
+            stored_plan = self._plans_by_id.get(plan.id)
+            if stored_plan is None:
                 raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
-            if plan.digest != command.plan_digest:
+            if stored_plan.digest != plan.digest:
                 raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
+            plan = stored_plan
             if plan.status != "ready":
                 raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
             if plan.base_site_configuration_version != self._site_version:
                 raise AlarmConfigurationError("ALARM_PLAN_STALE")
-            return self._apply_plan_locked(plan, idempotency_key=command.idempotency_key, actor=command.actor)
+            return self._stage_apply_plan(plan, idempotency_key=idempotency_key, actor=actor)
 
 
 class AlarmConfiguration:
@@ -474,4 +475,9 @@ class AlarmConfiguration:
     def apply(self, command: ApplyAlarmConfigurationPlan) -> AppliedAlarmConfiguration:
         if not command.idempotency_key.strip() or not command.actor.strip():
             raise AlarmConfigurationError("ALARM_APPLY_COMMAND_INVALID")
-        return self.repository.apply(command)
+        plan = self.repository.get_plan(command.plan_id)
+        if plan is None:
+            raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
+        if plan.digest != command.plan_digest:
+            raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
+        return self.repository.apply_plan(plan, idempotency_key=command.idempotency_key, actor=command.actor)

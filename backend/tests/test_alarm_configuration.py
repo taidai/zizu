@@ -283,8 +283,22 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
     def test_apply_rejects_a_reused_key_for_a_different_request(self) -> None:
         plan = self.ready_plan()
         self.service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "alarm-plan-1", "user:engineer"))
+        replacement_revision = self.service.create_rule_set_revision(
+            rule_set_id=self.revision.rule_set_id,
+            rules=(rule("major", "MAJOR", "gt", 500, "lte", 470, unit="kW"),), actor="user:engineer",
+        )
+        replacement = self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id, EntitySelection(), replacement_revision.rule_set_id, replacement_revision.revision,
+        ))
         with self.assertRaisesRegex(AlarmConfigurationError, "IDEMPOTENCY_KEY_REUSED"):
-            self.service.apply(ApplyAlarmConfigurationPlan(uuid4(), plan.digest, "alarm-plan-1", "user:engineer"))
+            self.service.apply(ApplyAlarmConfigurationPlan(replacement.id, replacement.digest, "alarm-plan-1", "user:engineer"))
+
+    def test_repository_apply_plan_is_the_public_atomic_apply_seam(self) -> None:
+        plan = self.ready_plan()
+        first = self.repository.apply_plan(plan, idempotency_key="repository-key", actor="user:engineer")
+        replay = self.repository.apply_plan(plan, idempotency_key="repository-key", actor="user:engineer")
+        self.assertEqual(first, replay)
+        self.assertEqual(1, self.repository.applied_count)
 
     def test_apply_rejects_stale_plan_without_writes(self) -> None:
         plan = self.ready_plan()
@@ -345,9 +359,9 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
                 super().__init__(**kwargs)
                 self.barrier = Barrier(2)
 
-            def apply(self, command):
+            def apply_plan(self, plan, *, idempotency_key, actor):
                 self.barrier.wait(timeout=2)
-                return super().apply(command)
+                return super().apply_plan(plan, idempotency_key=idempotency_key, actor=actor)
 
         installation_id = uuid4()
         entity = ResolvedAlarmEntity(UUID(int=1), UUID(int=101), "pcs.activePower", "PCS-1", "number", "kW", UUID(int=1001))
