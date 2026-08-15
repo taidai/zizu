@@ -76,6 +76,12 @@ class EntityInstanceRegistry:
 实施工程师可以在多个候选中明确选择一个并重新生成计划；选择动作记录主体、时间、
 候选理由和计划摘要。它不是在运行态调整“优先级”。
 
+旧现场标签名称与包内规范名称不一致时，无精确名称候选仍保持
+`ENTITY_BINDING_MISSING`。计划可以另列 `override_candidates`，但只允许同一稳定设备键下
+且数据类型、单位、方向兼容的启用来源。实施工程师通过独立 `binding_overrides` 显式确认；
+该动作记录为 `engineer_override`，不得改变多精确候选使用 `binding_selections` 消歧的语义。
+跨设备、不兼容、双重选择或来源目录过期均阻断且零写入。
+
 ### 4. 持久化不变量
 
 采用 expand–migrate–contract：

@@ -273,6 +273,7 @@ class SolutionDelivery:
         parameters: dict[str, Any] | None = None,
         secret_references: dict[str, str] | None = None,
         binding_selections: dict[str, UUID] | None = None,
+        binding_overrides: dict[str, UUID] | None = None,
         upgrade_risk_resolutions: dict[str, str] | None = None,
         actor: str = "system:delivery-plan",
     ) -> InstallationPlan:
@@ -434,6 +435,7 @@ class SolutionDelivery:
                         slots=entity_slots,
                         selections=binding_selections or {},
                         actor=actor,
+                        overrides=binding_overrides or {},
                     )
                 )
             except EntityInstanceError as exc:

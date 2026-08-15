@@ -516,6 +516,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_runtime,
         )
         app.state.entity_instance_registry = registry
+        app.state.source_catalog = source_catalog
         app.state.entity_instance_repository = entity_repository
         app.state.entity_instance_runtime = runtime
         app.state.alarm_runtime = alarm_runtime
@@ -527,6 +528,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         *,
         device_key: str = "PCS-01",
         direction: str = "R",
+        tag_name: str = "ActivePower",
+        data_type: str = "FLOAT",
+        unit: str | None = "kW",
     ):
         from app.services.entity_instance_registry import SourceDescriptor
 
@@ -534,9 +538,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             tag_id=tag_id,
             device_key=device_key,
             device_name=device_key,
-            tag_name="ActivePower",
-            data_type="FLOAT",
-            unit="kW",
+            tag_name=tag_name,
+            data_type=data_type,
+            unit=unit,
             direction=direction,
             enabled=True,
         )
@@ -1868,6 +1872,188 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         registry.resolve.assert_called_once_with(entity_id)
         runtime.read_for_alarm.assert_called_once_with(entity_id)
         self.assertEqual(125.5, context[str(entity_id)]["value"])
+
+    async def test_engineer_override_maps_a_compatible_legacy_tag_and_drives_realtime(self) -> None:
+        app = self.build_app(
+            sources=(self.source(tag_name="LegacyActivePower"),),
+        )
+        key = "slot.pcs-primary/PCS-01/pcs.activePower"
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported, blocked = await self.import_and_plan(client)
+            self.assertEqual(201, blocked.status_code, blocked.text)
+            self.assertEqual("blocked", blocked.json()["status"])
+            binding = next(
+                item for item in blocked.json()["items"] if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("ENTITY_BINDING_MISSING", binding["code"])
+            self.assertEqual([], binding["candidates"])
+            self.assertEqual(
+                [str(TAG_ID)],
+                [candidate["tag_id"] for candidate in binding["override_candidates"]],
+            )
+
+            replanned = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    },
+                    "binding_overrides": {key: str(TAG_ID)},
+                },
+            )
+            self.assertEqual(201, replanned.status_code, replanned.text)
+            self.assertEqual("ready", replanned.json()["status"])
+            selected = next(
+                item for item in replanned.json()["items"] if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("ENTITY_BINDING_READY", selected["code"])
+            self.assertEqual(str(TAG_ID), selected["selected_tag_id"])
+            self.assertEqual("engineer_override", selected["selection_source"])
+            self.assertIn("LegacyActivePower", selected["selection_reason"])
+
+            installed = await client.post(
+                f"/api/v1/install-plans/{replanned.json()['id']}/apply",
+                json={"plan_digest": replanned.json()["digest"]},
+                headers={"Idempotency-Key": "install-legacy-tag-override"},
+            )
+            self.assertEqual(201, installed.status_code, installed.text)
+            entity_instance_id = installed.json()["entity_instance_ids"][0]
+
+            published = await client.post(
+                "/protocol-simulator/neuron",
+                json={
+                    "message": {
+                        "node": "PCS-01",
+                        "timestamp": round(datetime.now(timezone.utc).timestamp() * 1000),
+                        "values": {"LegacyActivePower": 88.5},
+                    }
+                },
+            )
+            self.assertEqual(1, published.json()["published"])
+            realtime = await client.get(
+                f"/api/v1/entity-instances/{entity_instance_id}/realtime"
+            )
+            self.assertEqual(200, realtime.status_code, realtime.text)
+            self.assertEqual(88.5, realtime.json()["value"])
+
+    async def test_unsafe_binding_overrides_are_rejected_with_stable_codes(self) -> None:
+        direction_tag_id = UUID("20000000-0000-0000-0000-000000000005")
+        compatible = self.source(tag_name="LegacyActivePower")
+        sources = (
+            compatible,
+            self.source(OTHER_TAG_ID, device_key="PCS-02", tag_name="OtherDevicePower"),
+            self.source(BACKUP_TAG_ID, tag_name="IntegerPower", data_type="INT"),
+            self.source(GRID_TAG_ID, tag_name="MegawattPower", unit="MW"),
+            self.source(direction_tag_id, tag_name="WriteOnlyPower", direction="W"),
+        )
+        app = self.build_app(sources=sources)
+        key = "slot.pcs-primary/PCS-01/pcs.activePower"
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported, first_plan = await self.import_and_plan(client)
+            binding = next(
+                item for item in first_plan.json()["items"] if item["kind"] == "entity_binding"
+            )
+            self.assertEqual(
+                [str(TAG_ID)],
+                [candidate["tag_id"] for candidate in binding["override_candidates"]],
+            )
+            cases = (
+                (OTHER_TAG_ID, {}, "ENTITY_BINDING_OVERRIDE_INVALID"),
+                (BACKUP_TAG_ID, {}, "ENTITY_BINDING_TYPE_MISMATCH"),
+                (GRID_TAG_ID, {}, "ENTITY_BINDING_UNIT_MISMATCH"),
+                (direction_tag_id, {}, "ENTITY_BINDING_DIRECTION_MISMATCH"),
+                (TAG_ID, {"binding_selections": {key: str(TAG_ID)}}, "ENTITY_BINDING_OVERRIDE_CONFLICT"),
+            )
+            for tag_id, extra, expected_code in cases:
+                with self.subTest(code=expected_code):
+                    response = await client.post(
+                        f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                        json={
+                            "parameters": {
+                                "pcs.instance_key": "PCS-01",
+                                "pcs.device_key": "PCS-01",
+                            },
+                            "binding_overrides": {key: str(tag_id)},
+                            **extra,
+                        },
+                    )
+                    self.assertEqual(201, response.status_code, response.text)
+                    self.assertEqual("blocked", response.json()["status"])
+                    self.assertIn(
+                        expected_code,
+                        [item["code"] for item in response.json()["blockers"]],
+                    )
+
+    async def test_override_is_not_offered_when_an_exact_name_candidate_exists(self) -> None:
+        legacy_tag_id = UUID("20000000-0000-0000-0000-000000000006")
+        app = self.build_app(
+            sources=(
+                self.source(),
+                self.source(legacy_tag_id, tag_name="LegacyActivePower"),
+            )
+        )
+        key = "slot.pcs-primary/PCS-01/pcs.activePower"
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported, ready = await self.import_and_plan(client)
+            binding = next(
+                item for item in ready.json()["items"] if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("ENTITY_BINDING_READY", binding["code"])
+            self.assertEqual([], binding["override_candidates"])
+
+            rejected = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    },
+                    "binding_overrides": {key: str(legacy_tag_id)},
+                },
+            )
+            self.assertEqual("blocked", rejected.json()["status"])
+            self.assertIn(
+                "ENTITY_BINDING_OVERRIDE_INVALID",
+                [item["code"] for item in rejected.json()["blockers"]],
+            )
+
+    async def test_source_catalog_change_makes_an_override_plan_stale_with_zero_write(self) -> None:
+        source = self.source(tag_name="LegacyActivePower")
+        app = self.build_app(sources=(source,))
+        key = "slot.pcs-primary/PCS-01/pcs.activePower"
+
+        async with AuthenticatedDeliveryClient(app) as client:
+            imported, _ = await self.import_and_plan(client)
+            ready = await client.post(
+                f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",
+                json={
+                    "parameters": {
+                        "pcs.instance_key": "PCS-01",
+                        "pcs.device_key": "PCS-01",
+                    },
+                    "binding_overrides": {key: str(TAG_ID)},
+                },
+            )
+            self.assertEqual("ready", ready.json()["status"])
+            app.state.source_catalog.replace(
+                (self.source(tag_name="RenamedAfterPlanning"),)
+            )
+            stale = await client.post(
+                f"/api/v1/install-plans/{ready.json()['id']}/apply",
+                json={"plan_digest": ready.json()["digest"]},
+                headers={"Idempotency-Key": "stale-source-override"},
+            )
+            self.assertEqual(409, stale.status_code, stale.text)
+            self.assertEqual(
+                "ENTITY_BINDING_PLAN_STALE",
+                stale.json()["detail"]["code"],
+            )
+            installations = await client.get("/api/v1/solution-installations")
+            self.assertEqual(0, installations.json()["total"])
 
     async def test_ambiguous_sources_require_explicit_selection_and_stale_plan_is_zero_write(
         self,

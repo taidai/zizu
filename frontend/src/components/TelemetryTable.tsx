@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import {
   fetchNodes, fetchTags, fetchTelemetry, exportTelemetryCsv,
   type Node, type Tag, type TelemetryPoint,
@@ -16,9 +16,11 @@ export default function TelemetryTable() {
   const [points, setPoints] = useState<TelemetryPoint[]>([])
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
-  const [total, setTotal] = useState(0)
-  const [totalPages, setTotalPages] = useState(1)
+  const [cursors, setCursors] = useState<(string | null)[]>([null])
+  const [hasMore, setHasMore] = useState(false)
   const pageSize = 50
+  const pageCursor = cursors[page - 1] || null
+  const requestSequence = useRef(0)
 
   useEffect(() => {
     fetchNodes().then((n) => setNodes(n.filter((node) => node.layer >= 3)))
@@ -34,9 +36,15 @@ export default function TelemetryTable() {
   }, [selectedNode])
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestSequence.current
     setLoading(true)
     try {
-      const data = await fetchTelemetry(selectedTag || undefined, range, page, pageSize)
+      const data = await fetchTelemetry(
+        selectedTag || undefined,
+        range,
+        pageCursor,
+        pageSize,
+      )
       // 按 tag_id + ts 去重，保留第一条
       const seen = new Set<string>()
       const deduped = data.points.filter((p) => {
@@ -45,19 +53,25 @@ export default function TelemetryTable() {
         seen.add(key)
         return true
       })
+      if (requestId !== requestSequence.current) return
       setPoints(deduped)
-      setTotal(data.total)
-      setTotalPages(data.total_pages || 1)
+      setHasMore(data.has_more)
+      setCursors((current) => {
+        const next = current.slice(0, page)
+        if (data.has_more && data.next_cursor) next[page] = data.next_cursor
+        return next
+      })
     } finally {
-      setLoading(false)
+      if (requestId === requestSequence.current) setLoading(false)
     }
-  }, [selectedTag, range, page])
+  }, [selectedTag, range, page, pageCursor])
 
   useEffect(() => { loadData() }, [loadData])
 
   useEffect(() => {
     setSelectedTag('')
     setPage(1)
+    setCursors([null])
   }, [selectedNode])
 
   const selectedTagUnit = useMemo(() => {
@@ -86,7 +100,7 @@ export default function TelemetryTable() {
           <label className="text-xs font-medium text-gray-600 whitespace-nowrap">点位:</label>
           <select
             value={selectedTag}
-            onChange={(e) => { setSelectedTag(e.target.value); setPage(1) }}
+            onChange={(e) => { setSelectedTag(e.target.value); setPage(1); setCursors([null]) }}
             className="neu-input px-3 py-1.5 text-xs bg-transparent min-w-[160px]"
             disabled={!selectedNode}
           >
@@ -102,7 +116,7 @@ export default function TelemetryTable() {
           {(['1h', '24h', '7d', 'all'] as const).map((r) => (
             <button
               key={r}
-              onClick={() => { setRange(r); setPage(1) }}
+              onClick={() => { setRange(r); setPage(1); setCursors([null]) }}
               className={`px-3 py-1 text-xs rounded-full font-medium transition-colors ${
                 range === r ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
@@ -128,7 +142,7 @@ export default function TelemetryTable() {
         </button>
 
         <div className="ml-auto flex items-center gap-3 text-xs text-gray-500">
-          <span>共 {total} 条{points.length !== total ? ` / 本页去重后 ${points.length} 条` : ''}</span>
+          <span>第 {page} 页 · 本页 {points.length} 条</span>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -137,10 +151,10 @@ export default function TelemetryTable() {
             >
               ‹
             </button>
-            <span className="px-2 font-mono">{page} / {totalPages}</span>
+            <span className="px-2 font-mono">{page}</span>
             <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages || loading}
+              onClick={() => setPage((p) => p + 1)}
+              disabled={!hasMore || loading}
               className="neu-btn w-7 h-7 flex items-center justify-center disabled:opacity-30"
             >
               ›

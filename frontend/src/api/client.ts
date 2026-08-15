@@ -544,23 +544,25 @@ export interface TelemetryPoint {
 
 export interface TelemetryResponse {
   points: TelemetryPoint[]
-  total: number
-  page: number
+  total: null
+  has_more: boolean
+  next_cursor: string | null
   page_size: number
-  total_pages: number
 }
 
 export async function fetchTelemetry(
   tagId?: string,
   range: '1h' | '24h' | '7d' | 'all' = '1h',
-  page = 1,
+  cursor: string | null = null,
   pageSize = 50,
   nodeId?: string,
 ): Promise<TelemetryResponse> {
-  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), range })
+  const params = new URLSearchParams({ page_size: String(pageSize), range })
+  if (cursor) params.set('cursor', cursor)
   if (tagId) params.set('tag_id', tagId)
   if (nodeId) params.set('node_id', nodeId)
   const res = await apiFetch(`${API_BASE}/telemetry?${params}`)
+  if (!res.ok) throw await authError(res, `Fetch telemetry failed: ${res.status}`)
   return res.json()
 }
 
@@ -1204,6 +1206,26 @@ export interface InstallationPlan {
   items: Record<string, unknown>[]
 }
 
+export interface EntityBindingCandidate {
+  tag_id: string
+  device_key: string
+  device_name: string
+  tag_name: string
+  data_type: string
+  unit: string | null
+  direction: string
+  reason: string
+}
+
+export interface EntityBindingPlanItem extends Record<string, unknown> {
+  asset_id: string
+  kind: 'entity_binding'
+  code: string
+  expected_tag_name: string
+  definition_display_name: string
+  override_candidates: EntityBindingCandidate[]
+}
+
 export interface SolutionInstallation {
   id: string
   package_record_id: string
@@ -1234,7 +1256,11 @@ export async function importSolutionPackage(archive: File): Promise<SolutionPack
 
 export async function createInstallationPlan(
   packageRecordId: string,
-  request: { parameters: Record<string, unknown>; secret_references: Record<string, string> },
+  request: {
+    parameters: Record<string, unknown>
+    secret_references: Record<string, string>
+    binding_overrides?: Record<string, string>
+  },
 ): Promise<InstallationPlan> {
   const response = await apiFetch(`${API_BASE}/solution-packages/${encodeURIComponent(packageRecordId)}/install-plans`, {
     method: 'POST',

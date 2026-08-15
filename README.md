@@ -481,7 +481,7 @@ zizu/
 | GET | `/api/v1/tags?node_id=X&page=1` | 点位分页查询（含 offset/scale） |
 | PUT | `/api/v1/tags/{tag_id}` | 修改 scale / offset / unit |
 | PUT | `/api/v1/tags/batch` | 批量修改 scale / offset |
-| GET | `/api/v1/telemetry` | 原始遥测数据查询 |
+| GET | `/api/v1/telemetry` | 原始遥测游标分页；返回 `points/has_more/next_cursor/total:null`，不执行交互式精确计数 |
 | GET | `/api/v1/snapshots` | 节点快照查询（数据黑板） |
 | POST | `/api/v1/query` | admin：SELECT-only SQL 查询 |
 | POST | `/api/v1/auth/ws-ticket` | 为实时订阅签发 30 秒一次性票据 |
@@ -558,7 +558,9 @@ zizu/
 
 前端“解决方案交付”页提供同一条受保护流程：管理员上传和管理包生命周期；管理员与实施
 工程师都可选择已验证的包，按 `parameter_contracts` 填写站点参数和 `secret://` 引用，审查
-计划中的变更及 blocker 后确认安装。安装记录可在页内运行机器验收、填写手动/策略命令及权限
+计划中的变更及 blocker 后确认安装。若规范点位名与现场旧名称不同，页面会显示“包内规范名 →
+同一稳定设备键下的兼容现场标签”，实施工程师选择后以独立 `binding_overrides` 重新规划；
+安装记录可在页内运行机器验收、填写手动/策略命令及权限
 拒绝审计映射，并读取不可变报告。页面不保存 Secret 明文，也不会自行下发策略或控制命令；
 operator 不能读取包目录或执行交付动作。
 
@@ -629,7 +631,11 @@ parameters:
 设备实例与实体实例也由解决方案包声明，不另建一套现场 CRUD。槽位既兼容单设备参数，
 也可通过一个 `device_instances` 站点参数生成多台同类设备；
 安装计划根据稳定设备键与规范点位名列出候选，唯一兼容候选可预选，多候选必须由
-engineer 在 `binding_selections` 中明确确认。来源目录或站点配置在批准后变化时，执行
+engineer 在 `binding_selections` 中明确确认。若没有精确名称候选，计划还会在
+`override_candidates` 中列出同一稳定设备键下且数据类型、单位和方向兼容的旧现场标签；
+实施工程师只能通过独立的 `binding_overrides` 明确选择并重新规划。覆盖选择在计划中记录
+`selection_source=engineer_override`、主体、理由和来源目录版本；跨设备、不兼容和同时提交
+selection/override 均以稳定机器码阻断。来源目录或站点配置在批准后变化时，执行
 返回过期错误并保持零写入；运行期只读已确认的唯一主来源，不按优先级或创建顺序猜测。
 设备节点可通过 `source_catalog_key` 配置该稳定键；升级迁移仅在节点名称站点内唯一时
 以名称初始化，重复名称必须由实施工程师显式设置不同键。
@@ -986,10 +992,19 @@ timeout: 5s
 
 创建计划时可提交
 `{"parameters":{"pcs.instance_key":"PCS-01","pcs.device_key":"PCS-01"},"binding_selections":{"slot.pcs-primary/PCS-01/pcs.activePower":"<tag UUID>"}}`。
+当规范点位 `ActivePower` 在该设备上没有精确名称匹配、但计划返回兼容旧标签时，改为提交
+`{"parameters":{"pcs.instance_key":"PCS-01","pcs.device_key":"PCS-01"},"binding_overrides":{"slot.pcs-primary/PCS-01/pcs.activePower":"<legacy tag UUID>"}}`。
 候选与计划使用稳定机器码：`ENTITY_BINDING_MISSING`、`ENTITY_BINDING_AMBIGUOUS`、
 `ENTITY_BINDING_TYPE_MISMATCH`、`ENTITY_BINDING_UNIT_MISMATCH`、
-`ENTITY_BINDING_DIRECTION_MISMATCH` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
+`ENTITY_BINDING_DIRECTION_MISMATCH`、`ENTITY_BINDING_OVERRIDE_INVALID`、
+`ENTITY_BINDING_OVERRIDE_CONFLICT` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
 绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
+
+`GET /api/v1/telemetry` 的交互查询使用 `(ts, tag_id)` 键集游标。首次请求只需传
+`range/page_size` 及可选 `tag_id/node_id`；若 `has_more=true`，下一页原样回传
+`next_cursor`。游标绑定原筛选条件，跨筛选复用或格式错误返回
+`TELEMETRY_CURSOR_INVALID`。响应的 `total` 固定为 `null`，避免同步扫描数百万行；需要离线
+全量数据时使用独立 CSV 导出，不能用交互列表推算精确总数。
 
 ```yaml
 # acceptance/grid-power-history.yaml

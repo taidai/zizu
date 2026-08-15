@@ -35,10 +35,13 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
   const [loading, setLoading] = useState(false)
   const [historyData, setHistoryData] = useState<Map<string, HistoryPoint[]>>(new Map())
   const [telemetryPoints, setTelemetryPoints] = useState<TelemetryPoint[]>([])
-  const [telemetryTotal, setTelemetryTotal] = useState(0)
   const [telemetryPage, setTelemetryPage] = useState(1)
+  const [telemetryCursors, setTelemetryCursors] = useState<(string | null)[]>([null])
+  const [telemetryHasMore, setTelemetryHasMore] = useState(false)
   const [telemetryLoading, setTelemetryLoading] = useState(false)
   const chartRef = useRef<ReactECharts>(null)
+  const telemetryCursor = telemetryCursors[telemetryPage - 1] || null
+  const telemetryRequestSequence = useRef(0)
 
   const loadTags = useCallback(async () => {
     try {
@@ -103,19 +106,33 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
 
   // Load raw telemetry records from DB for table view
   const loadTelemetry = useCallback(async () => {
+    const requestId = ++telemetryRequestSequence.current
     setTelemetryLoading(true)
     try {
-      const data = await fetchTelemetry(undefined, range, telemetryPage, PAGE_SIZE, nodeId)
+      const data = await fetchTelemetry(
+        undefined,
+        range,
+        telemetryCursor,
+        PAGE_SIZE,
+        nodeId,
+      )
+      if (requestId !== telemetryRequestSequence.current) return
       setTelemetryPoints(data.points || [])
-      setTelemetryTotal(data.total || 0)
+      setTelemetryHasMore(data.has_more)
+      setTelemetryCursors((current) => {
+        const next = current.slice(0, telemetryPage)
+        if (data.has_more && data.next_cursor) next[telemetryPage] = data.next_cursor
+        return next
+      })
     } catch (err) {
+      if (requestId !== telemetryRequestSequence.current) return
       console.error('[NodeHistoryPanel] loadTelemetry failed:', err)
       setTelemetryPoints([])
-      setTelemetryTotal(0)
+      setTelemetryHasMore(false)
     } finally {
-      setTelemetryLoading(false)
+      if (requestId === telemetryRequestSequence.current) setTelemetryLoading(false)
     }
-  }, [nodeId, range, telemetryPage])
+  }, [nodeId, range, telemetryPage, telemetryCursor])
 
   useEffect(() => {
     if (viewMode === 'table') {
@@ -125,9 +142,8 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
 
   useEffect(() => {
     setTelemetryPage(1)
+    setTelemetryCursors([null])
   }, [nodeId, range, viewMode])
-
-  const totalTelemetryPages = useMemo(() => Math.ceil(telemetryTotal / PAGE_SIZE) || 1, [telemetryTotal])
 
   const buildChartOption = () => {
     const selectedTags = tags.filter((t) => selectedTagIds.has(t.id))
@@ -193,7 +209,7 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
           {RANGE_OPTIONS.map((opt) => (
             <button
               key={opt.key}
-              onClick={() => setRange(opt.key)}
+              onClick={() => { setRange(opt.key); setTelemetryPage(1); setTelemetryCursors([null]) }}
               className={`px-3 py-1.5 text-xs font-medium rounded-full transition-colors ${
                 range === opt.key
                   ? 'bg-[#52c41a] text-white'
@@ -206,7 +222,7 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setViewMode('trend')}
+            onClick={() => { setViewMode('trend'); setTelemetryPage(1); setTelemetryCursors([null]) }}
             className={`px-3 py-1.5 text-xs font-medium rounded-full transition-colors ${
               viewMode === 'trend' ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
@@ -214,7 +230,7 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
             趋势图
           </button>
           <button
-            onClick={() => setViewMode('table')}
+            onClick={() => { setViewMode('table'); setTelemetryPage(1); setTelemetryCursors([null]) }}
             className={`px-3 py-1.5 text-xs font-medium rounded-full transition-colors ${
               viewMode === 'table' ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
@@ -281,7 +297,7 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
         <div className="neu-card overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
             <span className="text-xs text-gray-500">
-              共 {telemetryTotal} 条入库记录
+              第 {telemetryPage} 页 · 本页 {telemetryPoints.length} 条入库记录
             </span>
             <div className="flex items-center gap-1">
               <button
@@ -292,11 +308,11 @@ export default function NodeHistoryPanel({ nodeId }: NodeHistoryPanelProps) {
                 ‹
               </button>
               <span className="px-2 font-mono text-xs">
-                {telemetryPage} / {totalTelemetryPages}
+                {telemetryPage}
               </span>
               <button
-                onClick={() => setTelemetryPage((p) => Math.min(totalTelemetryPages, p + 1))}
-                disabled={telemetryPage >= totalTelemetryPages || telemetryLoading}
+                onClick={() => setTelemetryPage((p) => p + 1)}
+                disabled={!telemetryHasMore || telemetryLoading}
                 className="neu-btn w-7 h-7 flex items-center justify-center disabled:opacity-30"
               >
                 ›
