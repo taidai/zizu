@@ -3718,3 +3718,22 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   不会再无限占用执行器。镜像定义/构建脚本/工作流测试 6/6 通过；`git diff --check` 通过。
 - 下一步：提交、合并并重新触发 build-only workflow；成功后下载并核验 `release.json`、两个架构摘要
   及 EMS ZIP+SHA，再进入隔离部署门禁。
+
+### npm 安装根因（待提交）
+
+- 有界重试仍证明不是 npm audit：第二次 build-only run `31853975425` 同样停在前端安装，已及时取消。
+  检查 lockfile 发现所有包的 `resolved` URL 都固定为 `registry.npmmirror.com`；这是公共 GitHub
+  runner 无法可靠访问的镜像站，而不是前端源码或 Python/ARM 构建问题。
+- 已做保持版本与 SHA-512 integrity 不变的机械域名替换：`registry.npmmirror.com` →
+  `registry.npmjs.org`。新增回归拒绝前者、要求后者，防止再次将私有/地域镜像写进可复现发布输入。
+  同一发布测试 6/6 仍通过。本地提交为 `a014fdb`，但当前环境访问 GitHub 443 被拒绝，尚未推送或
+  创建 PR；网络恢复后先推送/合并，再重新触发 build-only workflow。
+
+### 2026-08-15 续：网络复核
+
+- 再次执行 `git push origin HEAD` 仍在连接 GitHub 443 时失败；本次未改变远端、未创建 PR、未触发
+  构建或接触 1 号机。
+- 本地以与 Dockerfile 一致的有界参数启动 `npm ci`，60 秒没有任何安装进度；已主动中止，不能把它
+  视为前端构建通过证据。该现象与受限网络下无法访问公共 npm 一致。
+- 下一个可执行动作仍是：网络恢复后推送 `a014fdb`、合并并以 v0.4.78 触发双架构 build-only 工作流；
+  在获得真实 `release.json`、两个架构摘要和 EMS ZIP+SHA 前，禁止部署 1 号机。

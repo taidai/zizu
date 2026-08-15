@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPO_ROOT / "backend" / "Dockerfile"
+FRONTEND_LOCKFILE = REPO_ROOT / "frontend" / "package-lock.json"
 
 
 class ReleaseImageBuildTest(unittest.TestCase):
@@ -29,6 +30,9 @@ class ReleaseImageBuildTest(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("COPY init-db ./init-db", dockerfile)
+        lockfile = FRONTEND_LOCKFILE.read_text(encoding="utf-8")
+        self.assertNotIn("registry.npmmirror.com", lockfile)
+        self.assertIn("registry.npmjs.org", lockfile)
         migration = REPO_ROOT / "init-db" / "migration_032_release_locks.sql"
         self.assertTrue(migration.exists())
         self.assertIn("t_release_locks", migration.read_text(encoding="utf-8"))
