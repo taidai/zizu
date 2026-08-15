@@ -3945,3 +3945,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - TDD 证据：Node 客户端/格式契约 3/3，TypeScript 类型契约通过；公共后端增加 boolean/string/负数响应锁定，相关回归 59/59；`compileall`、`npx tsc -b`、`npm run build` 与静态扫描通过。
 - 临时 `frontend/node_modules` Junction 已核对目标后仅移除链接，共享依赖目录仍存在。
 - 未连接现场或修改 PostgreSQL；仍未做认证后端交互浏览器 smoke。
+
+### 2026-08-16 — Task 6 legacy 条件安全收口
+
+- 关闭最终安全阻断：legacy `eq/ne` 仅接受字符串、布尔值和可表示的有限数值；对象、数组、`null`、NaN、正负无穷及超出浮点表示范围的整数统一返回 `ALARM_LEGACY_RULE_UNSUPPORTED`。
+- 领域与公开 HTTP 均证明阻断：preview 为 blocked、apply 为稳定 422、迁移写计数保持 0；原有布尔、字符串与负数合法值不回归。
+- 定向 `test_alarm_configuration + test_alarm_configuration_public_api` 为 50/50；超大整数补丁三项 focused tests 3/3；`compileall` 与 `git diff --check` 通过。
+- 独立 scoped review 对 `0007e8b..d402b21` 结论 Ready，无 Critical/Important。统一告警配置 Task 6 已解除阻断；下一步进入 observer-only 告警验收报告，验收迁移编号顺延为 036。
