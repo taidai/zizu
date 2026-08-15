@@ -15,8 +15,7 @@ const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
 const EntityManagerPage = lazy(() => import('./pages/EntityManagerPage'))
 const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
-const AlarmLevelManagerPage = lazy(() => import('./pages/AlarmLevelManagerPage'))
-const AlarmConfigPage = lazy(() => import('./pages/AlarmConfigPage'))
+const AlarmConfigurationPage = lazy(() => import('./pages/AlarmConfigurationPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
 const SolutionDeliveryPage = lazy(() => import('./pages/SolutionDeliveryPage'))
 
@@ -56,7 +55,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'workbench' | 'delivery' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-levels' | 'alarm-config' | 'templates' | 'admin'
+type PageKey = 'workbench' | 'delivery' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-config' | 'templates' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -82,7 +81,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
-  { key: 'alarm-levels', label: '告警等级', icon: <Bell size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'templates', label: '设备模板', icon: <Layers size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   // Server-side protection for system/control APIs is intentionally Ticket #4.
@@ -280,8 +278,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
-            {activePage === 'alarm-levels' && <AlarmLevelManagerPage />}
-            {activePage === 'alarm-config' && <AlarmConfigPage />}
+            {activePage === 'alarm-config' && <AlarmConfigurationPage />}
             {activePage === 'entities' && <EntityManagerPage />}
             {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>

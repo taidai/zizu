@@ -466,10 +466,6 @@ export async function batchUpdateTags(
     read_write?: string
     enabled?: boolean
     node_id?: string
-    alarm_level?: string
-    alarm_type?: string
-    alarm_threshold?: number
-    fault_map_id?: string
   },
 ): Promise<any> {
   const res = await apiFetch(`${API_BASE}/tags/batch`, {
@@ -497,7 +493,7 @@ export function exportTagsCsv(nodeId?: string, search?: string): Promise<void> {
   return downloadAuthenticated(`${API_BASE}/tags/export?${params}`, 'zizu_tags.csv')
 }
 
-export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale_factor' | 'value_offset' | 'unit' | 'display_name' | 'alarm_level' | 'alarm_type' | 'alarm_threshold' | 'fault_map_id'>>): Promise<any> {
+export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale_factor' | 'value_offset' | 'unit' | 'display_name'>>): Promise<any> {
   const res = await apiFetch(`${API_BASE}/tags/${tagId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -873,27 +869,6 @@ export async function applyRuleTemplate(templateId: string, name: string, enable
 
 // ── Alarms ──
 
-export interface TriggerRule {
-  op: 'active' | 'eq' | 'ne' | 'gte' | 'gt' | 'lte' | 'lt' | 'fault'
-  value?: string | number | null
-  threshold?: number | null
-  fault_map_id?: string | null
-}
-
-export interface AlarmLevelEntity {
-  id: string
-  code: string
-  name: string
-  severity: 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL'
-  color: string | null
-  trigger_rules: TriggerRule[]
-  enabled: boolean
-  sort_order: number
-  is_system: boolean
-  created_at: string
-  updated_at: string
-}
-
 export type AlarmLevel = 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL' 
 
 export interface Alarm {
@@ -1033,33 +1008,193 @@ export async function acknowledgeAlarm(alarmId: string): Promise<void> {
   })
   if (!res.ok) throw new Error(`Acknowledge alarm failed: ${res.status}`)
 }
-// ── Alarm Types & Config ──
+// ── Unified alarm configuration ──
 
-export async function fetchAlarmTypes(): Promise<string[]> {
-  const res = await apiFetch(`${API_BASE}/alarms/alarm-types`)
-  if (!res.ok) throw new Error(`Fetch alarm types failed: ${res.status}`)
-  const data = await res.json()
-  return data.types || []
+export type AlarmSeverity = 'CRITICAL' | 'MAJOR' | 'WARNING' | 'INFO'
+export type AlarmConditionOperator = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'
+
+export interface AlarmCondition {
+  operator: AlarmConditionOperator
+  value: number
 }
 
-export interface AlarmConfigTag {
+export interface AlarmRule {
   id: string
   name: string
-  display_name: string | null
-  node_id: string
-  node_name: string
-  node_type: string
-  alarm_level: string
-  alarm_type: string | null
-  alarm_threshold: number | null
+  severity: AlarmSeverity
+  trigger: AlarmCondition
+  trigger_duration_seconds: number
+  recovery: AlarmCondition
+  recovery_duration_seconds: number
+  notification_throttle_seconds: number
+  unit: string | null
   fault_map_id: string | null
-  fault_map_name: string | null
 }
 
-export async function fetchAlarmConfig(): Promise<{ tags: AlarmConfigTag[]; total: number }> {
-  const res = await apiFetch(`${API_BASE}/tags/alarm-config`)
-  if (!res.ok) throw new Error(`Fetch alarm config failed: ${res.status}`)
-  return res.json()
+export interface AlarmRuleSetRevision {
+  rule_set_id: string
+  key: string
+  name: string
+  revision: number
+  rules: AlarmRule[]
+  digest: string
+}
+
+export interface AlarmConfigurationPlanItem {
+  definition_key: string
+  entity_instance_id: string
+  rule_id: string
+  action: 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block' | string
+  before: unknown
+  after: unknown
+  blockers: string[]
+}
+
+export interface AlarmConfigurationPlan {
+  id: string
+  installation_id: string
+  base_site_configuration_version: number
+  rule_set_revision: AlarmRuleSetRevision
+  status: 'ready' | 'blocked' | string
+  items: AlarmConfigurationPlanItem[]
+  blockers: string[]
+  digest: string
+}
+
+export interface LegacyAlarmMigrationCandidate {
+  source_kind: 'tag_alarm' | 'entity_alarm_binding'
+  source_key: string
+  display_name: string
+  status: 'ready' | 'ambiguous' | 'blocked' | string
+  severity: AlarmSeverity | null
+  entity_instance_id: string | null
+  entity_instance_candidates: string[]
+  blockers: string[]
+  target_definition_ids: string[]
+}
+
+export interface LegacyAlarmMigrationPlan {
+  installation_id: string
+  status: 'ready' | 'blocked' | string
+  items: LegacyAlarmMigrationCandidate[]
+  blockers: string[]
+  digest: string
+  target_definition_ids: string[]
+}
+
+export interface AlarmConfigurationCurrent {
+  site_configuration_version: number
+  definitions: { definition_key: string; id: string; configuration: unknown }[]
+}
+
+export interface AlarmConfigurationApplyResult {
+  id: string
+  plan_id: string
+  installation_id: string
+  site_configuration_version: number
+  definition_ids: string[]
+  audit_event_id: string
+  applied_at: string
+}
+
+export class AlarmConfigurationApiError extends Error {
+  constructor(message: string, readonly code: string | null, readonly status: number) {
+    super(message)
+    this.name = 'AlarmConfigurationApiError'
+  }
+}
+
+const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
+  ALARM_PLAN_NOT_FOUND: '未找到该告警配置计划。',
+  ALARM_RULE_SET_NOT_FOUND: '未找到所选规则集。',
+  ALARM_PLAN_STALE: '配置基线已变化，请重新生成计划。',
+  ALARM_PLAN_DIGEST_MISMATCH: '计划摘要已失效，请重新生成计划。',
+  ALARM_PLAN_BLOCKED: '计划存在阻断项，不能应用。',
+  ALARM_MIGRATION_AMBIGUOUS: '旧配置存在多个实体实例候选，需要明确选择。',
+  ALARM_ENTITY_UNRESOLVED: '存在无法解析的实体实例。',
+  ALARM_FAULT_MAP_UNRESOLVED: '存在无法解析的故障映射。',
+  ALARM_MIGRATION_SELECTION_INVALID: '所选迁移目标无效，请重新选择。',
+  ALARM_MIGRATION_PLAN_STALE: '旧配置候选已变化，请重新检查。',
+  ALARM_MIGRATION_PLAN_BLOCKED: '旧配置迁移存在阻断项。',
+  ALARM_RULE_CONFLICT: '规则稳定标识冲突。',
+  ALARM_BATCH_LIMIT_EXCEEDED: '单次配置范围超过系统上限。',
+}
+
+async function alarmConfigurationError(response: Response, fallback: string): Promise<AlarmConfigurationApiError> {
+  const payload = await response.json().catch(() => null) as {
+    detail?: { code?: string; message?: string } | string
+  } | null
+  const detail = payload?.detail
+  const code = typeof detail === 'string' ? null : detail?.code || null
+  return new AlarmConfigurationApiError(code ? ALARM_CONFIGURATION_MESSAGES[code] || '告警配置请求未完成，请检查当前配置后重试。' : fallback, code, response.status)
+}
+
+export async function getUnifiedAlarmConfiguration(): Promise<AlarmConfigurationCurrent> {
+  const response = await apiFetch(`${API_BASE}/alarm-configurations`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取告警配置失败：${response.status}`)
+  return response.json()
+}
+
+export async function fetchAlarmRuleSets(): Promise<AlarmRuleSetRevision[]> {
+  const response = await apiFetch(`${API_BASE}/alarm-rule-sets`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取规则集失败：${response.status}`)
+  return (await response.json() as { items: AlarmRuleSetRevision[] }).items
+}
+
+export async function createAlarmRuleSet(input: Pick<AlarmRuleSetRevision, 'key' | 'name' | 'rules'>): Promise<AlarmRuleSetRevision> {
+  const response = await apiFetch(`${API_BASE}/alarm-rule-sets`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `创建规则集失败：${response.status}`)
+  return response.json()
+}
+
+export async function createAlarmRuleSetRevision(ruleSetId: string, rules: AlarmRule[]): Promise<AlarmRuleSetRevision> {
+  const response = await apiFetch(`${API_BASE}/alarm-rule-sets/${encodeURIComponent(ruleSetId)}/revisions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rules }),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `保存规则修订失败：${response.status}`)
+  return response.json()
+}
+
+export async function createAlarmConfigurationPlan(input: {
+  installation_id: string
+  selection: { entity_instance_ids: string[]; device_instance_ids: string[]; entity_definition_ids: string[] }
+  rule_set_id: string
+  rule_set_revision: number
+}): Promise<AlarmConfigurationPlan> {
+  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `生成配置计划失败：${response.status}`)
+  return response.json()
+}
+
+export async function applyAlarmConfigurationPlan(planId: string, planDigest: string, idempotencyKey: string): Promise<AlarmConfigurationApplyResult> {
+  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ plan_digest: planDigest }),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `应用配置计划失败：${response.status}`)
+  return response.json()
+}
+
+export async function fetchLegacyAlarmMigrationCandidates(): Promise<{ installation_id: string; items: LegacyAlarmMigrationCandidate[] }> {
+  const response = await apiFetch(`${API_BASE}/alarm-configuration-migrations/legacy`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取旧配置候选失败：${response.status}`)
+  return response.json()
+}
+
+export async function createLegacyAlarmMigrationPlan(input: {
+  installation_id: string
+  selections: { source_kind: LegacyAlarmMigrationCandidate['source_kind']; source_key: string; entity_instance_id: string }[]
+}): Promise<LegacyAlarmMigrationPlan> {
+  const response = await apiFetch(`${API_BASE}/alarm-configuration-migrations/legacy/plans`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `迁移旧配置失败：${response.status}`)
+  return response.json()
 }
 
 // ── Global Entities ──
@@ -1345,19 +1480,6 @@ export interface Entity {
   std_ref?: string | null
 }
 
-export interface EntityAlarmBinding {
-  id: string
-  entity_id: string
-  entity_name: string
-  entity_display_name: string | null
-  alarm_level_id: string
-  trigger_rules: TriggerRule[]
-  fault_map_id: string | null
-  fault_map_name: string | null
-  enabled: boolean
-  created_at: string
-}
-
 export interface EntityBinding {
   id: string
   entity_id: string
@@ -1572,66 +1694,6 @@ export interface FaultMap {
 }
 
 
-
-export async function fetchAlarmLevels(enabledOnly = false): Promise<{ items: AlarmLevelEntity[] }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels?enabled_only=${enabledOnly}`)
-  if (!res.ok) throw new Error(`Fetch alarm levels failed: ${res.status}`)
-  return res.json()
-}
-
-export async function createAlarmLevel(data: Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>): Promise<{ id: string; created_at: string }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-  if (!res.ok) throw new Error(`Create alarm level failed: ${res.status}`)
-  return res.json()
-}
-
-export async function updateAlarmLevel(levelId: string, data: Partial<Omit<AlarmLevelEntity, 'id' | 'created_at' | 'updated_at' | 'is_system'>>): Promise<{ status: string }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-  if (!res.ok) throw new Error(`Update alarm level failed: ${res.status}`)
-  return res.json()
-}
-
-export async function deleteAlarmLevel(levelId: string): Promise<{ deleted: boolean }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`Delete alarm level failed: ${res.status}`)
-  return res.json()
-}
-
-export async function fetchAlarmLevelEntities(levelId: string): Promise<{ items: EntityAlarmBinding[] }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities`)
-  if (!res.ok) throw new Error(`Fetch alarm level entities failed: ${res.status}`)
-  return res.json()
-}
-
-export async function batchBindEntitiesToAlarmLevel(
-  levelId: string,
-  entityIds: string[],
-  triggerRules?: TriggerRule[],
-  enabled = true,
-  faultMapId?: string | null,
-): Promise<{ bound: number }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ entity_ids: entityIds, trigger_rules: triggerRules, enabled, fault_map_id: faultMapId }),
-  })
-  if (!res.ok) throw new Error(`Batch bind failed: ${res.status}`)
-  return res.json()
-}
-
-export async function unbindEntityFromAlarmLevel(levelId: string, bindingId: string): Promise<{ deleted: boolean }> {
-  const res = await apiFetch(`${API_BASE}/alarm-levels/${levelId}/entities/${bindingId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`Unbind failed: ${res.status}`)
-  return res.json()
-}
 
 export async function fetchFaultMaps(): Promise<{ items: FaultMap[]; total: number }> {
   const res = await apiFetch(`${API_BASE}/fault-maps`)

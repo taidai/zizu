@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  fetchTags, updateTag, batchUpdateTags, deleteTag, createTag, fetchNodes, fetchAlarmCounts, connectTelemetryWS, fetchFaultMaps,
-  fetchAlarmTypes,
-  type Tag, type TelemetryUpdate, type TagCreateInput, type FaultMap,
+  fetchTags, updateTag, batchUpdateTags, deleteTag, createTag, fetchNodes, fetchAlarmCounts, connectTelemetryWS,
+  type Tag, type TelemetryUpdate, type TagCreateInput,
 } from '../api/client'
 import EditableCell from './EditableCell'
 import TrendChart from './TrendChart'
@@ -48,12 +47,6 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [batchEnabled, setBatchEnabled] = useState<boolean | ''>('')
   const [batchTargetNode, setBatchTargetNode] = useState('')
   const [nodes, setNodes] = useState<Node[]>([])
-  const [faultMaps, setFaultMaps] = useState<FaultMap[]>([])
-  const [batchAlarmLevel, setBatchAlarmLevel] = useState<'error1' | 'error2' | 'error3' | ''>('')
-  const [batchFaultMapId, setBatchFaultMapId] = useState<string>('__keep__')
-  const [batchAlarmType, setBatchAlarmType] = useState<string>('')
-  const [batchAlarmThreshold, setBatchAlarmThreshold] = useState('')
-  const [alarmTypes, setAlarmTypes] = useState<string[]>([])
   const [batchSaving, setBatchSaving] = useState(false)
   const [trendTag, setTrendTag] = useState<Tag | null>(null)
   const [showHistory, setShowHistory] = useState(false)
@@ -90,11 +83,6 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
 
   useEffect(() => {
     fetchNodes().then(setNodes).catch(() => {})
-    fetchFaultMaps().then((d) => setFaultMaps(d.items)).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    fetchAlarmTypes().then(setAlarmTypes).catch(() => {})
   }, [])
   useEffect(() => {
     loadTags()
@@ -160,9 +148,6 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
     if (batchEnabled !== '') updates.enabled = batchEnabled
     if (batchTargetNode !== '') updates.node_id = batchTargetNode
 
-    if (batchAlarmLevel !== '') updates.alarm_level = batchAlarmLevel
-    if (batchFaultMapId !== '__keep__') updates.fault_map_id = batchFaultMapId === '__clear__' ? '' : batchFaultMapId
-
     if (Object.keys(updates).length === 0) {
       alert('请至少选择一项批量操作')
       return
@@ -175,12 +160,8 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
       setBatchOffset('')
       setBatchUnit('')
              setBatchReadWrite('')
-             setBatchEnabled('')
-             setBatchTargetNode('')
-              setBatchAlarmLevel('')
-              setBatchFaultMapId('__keep__')
-      setBatchAlarmLevel('')
-      setBatchFaultMapId('__keep__')
+      setBatchEnabled('')
+      setBatchTargetNode('')
       loadTags()
     } catch {
       alert('批量更新失败')
@@ -439,33 +420,6 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
               <option value="">不移动</option>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>{n.name}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-600">告警级别:</label>
-            <select
-              value={batchAlarmLevel}
-              onChange={(e) => setBatchAlarmLevel(e.target.value as any)}
-              className="neu-input px-2 py-1 text-xs bg-transparent w-28"
-            >
-              <option value="">不变</option>
-              <option value="error1">error1 (CRITICAL)</option>
-              <option value="error2">error2 (MAJOR)</option>
-              <option value="error3">error3 (WARNING)</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-600">故障表:</label>
-            <select
-              value={batchFaultMapId}
-              onChange={(e) => setBatchFaultMapId(e.target.value)}
-              className="neu-input px-2 py-1 text-xs bg-transparent min-w-[120px]"
-            >
-              <option value="__keep__">不变</option>
-              <option value="__clear__">清除</option>
-              {faultMaps.map((m) => (
-                <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
           </div>
