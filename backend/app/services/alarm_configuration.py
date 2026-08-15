@@ -131,6 +131,7 @@ class AppliedAlarmConfiguration:
     definition_ids: tuple[UUID, ...]
     audit_event_id: UUID
     applied_at: datetime
+    items: tuple[AlarmConfigurationPlanItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -777,6 +778,10 @@ class InMemoryAlarmConfigurationRepository:
             site_configuration_version=self._site_version + 1,
             definition_ids=tuple(definition_ids), audit_event_id=audit_event_id,
             applied_at=datetime.now(timezone.utc),
+            items=tuple(
+                item for item in plan.items
+                if item.action in {"add", "update", "preserve"}
+            ),
         )
         idempotency = dict(self._idempotency)
         idempotency[(actor, idempotency_key)] = (plan.id, plan.digest, actor, result)
