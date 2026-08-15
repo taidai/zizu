@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 当前候选版本：**v0.4.78**（尚未取得真实多架构制品、TLS、发布锁和独立交付试验证据，不能部署到现场）
+> 当前源码候选版本：**v0.4.79**（尚未构建该版本的真实多架构制品，也未取得目标发布锁和独立交付试验证据，不能宣称交付就绪）
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 
@@ -305,8 +305,8 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 
 ```json
 {
-  "platform_version": "0.4.78",
-  "schema_version": "031",
+  "platform_version": "0.4.79",
+  "schema_version": "032",
   "edge_proxy_image": "registry.example/caddy@sha256:<64-hex>",
   "images": {
     "linux/amd64": "registry.example/zizu@sha256:<64-hex>",
@@ -328,7 +328,7 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 # TLS 入口镜像必须预先以 digest 审核。
 python scripts/build_release_images.py \
   --repository registry.example/zizu \
-  --platform-version 0.4.78 \
+  --platform-version 0.4.79 \
   --edge-proxy-image registry.example/caddy@sha256:<64-hex> \
   --output release.json
 python scripts/release_preflight.py verify \

@@ -5,8 +5,8 @@
 # Stage 2: Python 后端 + 前端静态文件
 #
 # 构建:
-#   docker build --build-arg ZIZU_VERSION=0.4.78 -t zizu:0.4.78 -f backend/Dockerfile .
-#   docker buildx build --platform linux/arm64 --build-arg ZIZU_VERSION=0.4.78 -t zizu:0.4.78 -f backend/Dockerfile . --load
+#   docker build --build-arg ZIZU_VERSION=0.4.79 -t zizu:0.4.79 -f backend/Dockerfile .
+#   docker buildx build --platform linux/arm64 --build-arg ZIZU_VERSION=0.4.79 -t zizu:0.4.79 -f backend/Dockerfile . --load
 #
 # 说明:
 #   - 正式构建使用 Docker Official Images；镜像平台摘要由 release.json 锁定
