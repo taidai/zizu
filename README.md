@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 当前源码候选版本：**v0.4.79**（尚未构建该版本的真实多架构制品，也未取得目标发布锁和独立交付试验证据，不能宣称交付就绪）
+> 当前预发布候选：[**v0.4.79-rc.1**](https://github.com/taidai/zizu/releases/tag/v0.4.79-rc.1)（已发布可核验的双架构摘要与参考 EMS 包；尚未取得目标发布锁和独立交付试验证据，不能宣称可用或交付就绪）
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 
