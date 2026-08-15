@@ -1070,6 +1070,11 @@ export interface LegacyAlarmMigrationCandidate {
   blockers: AlarmBlocker[]
   target_definition_ids: string[]
   proposed_rule: { name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition } | null
+  proposed_rules: {
+    entity_instance_id: string
+    display_name: string
+    proposed_rule: { name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition } | null
+  }[]
 }
 
 export interface LegacyAlarmMigrationPlan {

@@ -403,6 +403,7 @@ class InMemoryEntityInstanceRepository:
                     unit=entity["unit"],
                     direction=entity["direction"],
                     freshness_seconds=entity["freshness_seconds"],
+                    confirmed=True,
                 )
             )
         return tuple(sorted(descriptors, key=lambda item: (item.instance_key, item.definition_id)))

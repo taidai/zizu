@@ -3,7 +3,8 @@ import type { AlarmBlocker, AlarmConfigurationPlan, AlarmConfigurationPlanItem, 
 
 interface Props { plan: AlarmConfigurationPlan; entityNames: Map<string, string>; applying: boolean; stale: boolean; onApply: () => void }
 const actions: { value: AlarmPlanAction; label: string }[] = [{ value: 'add', label: '新增' }, { value: 'update', label: '更新' }, { value: 'preserve', label: '保留' }, { value: 'delete_candidate', label: '删除候选' }, { value: 'block', label: '阻断' }]
-function reason(blocker: AlarmBlocker) { return blocker.message || '该项需要处理后才能继续。' }
+const blockerText: Record<string, string> = { ALARM_ENTITY_UNRESOLVED: '实体实例未确认或不可用。', ALARM_DATA_TYPE_UNSUPPORTED: '实体数据类型不支持该比较。', ALARM_UNIT_MISMATCH: '规则单位与实体单位不一致。', ALARM_SEVERITY_INVALID: '严重度无效。', ALARM_THRESHOLD_INVALID: '触发与恢复条件不成立。' }
+function reason(blocker: AlarmBlocker) { return blockerText[blocker.code] || '配置存在阻断，请查看诊断信息。' }
 
 export default function PlanPreview({ plan, entityNames, applying, stale, onApply }: Props) {
   const [filter, setFilter] = useState<'all' | AlarmPlanAction>('all'); const [page, setPage] = useState(1)

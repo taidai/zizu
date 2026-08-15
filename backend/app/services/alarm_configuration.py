@@ -161,6 +161,17 @@ class LegacyAlarmDefinitionSpec:
 
 
 @dataclass(frozen=True)
+class LegacyAlarmProposedRule:
+    """只读迁移摘要，逐个候选实体保留其自身的语义。"""
+
+    entity_instance_id: UUID
+    display_name: str
+    severity: Severity
+    trigger: dict[str, Any]
+    recovery: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class LegacyAlarmMigrationCandidate:
     source_kind: str
     source_key: str
@@ -172,6 +183,7 @@ class LegacyAlarmMigrationCandidate:
     blockers: tuple[dict[str, Any], ...]
     target_definition_ids: tuple[UUID, ...]
     definitions: tuple[LegacyAlarmDefinitionSpec, ...] = ()
+    proposed_rules: tuple[LegacyAlarmProposedRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -437,15 +449,33 @@ def _legacy_candidate(
     else:
         selected_entity = entity_candidates[0]
 
-    definitions: list[LegacyAlarmDefinitionSpec] = []
     rules = tuple(source.trigger_rules) or ({"op": "active"},)
-    preview_entity = selected_entity or (entity_candidates[0] if entity_candidates else None)
-    if preview_entity is not None and severity is not None:
+    proposed_rules: list[LegacyAlarmProposedRule] = []
+    if severity is not None:
+        for entity in entity_candidates:
+            try:
+                trigger, recovery = _legacy_condition_pair(
+                    rules[0], data_type=entity.data_type
+                )
+            except AlarmConfigurationError:
+                continue
+            proposed_rules.append(
+                LegacyAlarmProposedRule(
+                    entity_instance_id=entity.id,
+                    display_name=entity.display_name,
+                    severity=severity,
+                    trigger=trigger,
+                    recovery=recovery,
+                )
+            )
+
+    definitions: list[LegacyAlarmDefinitionSpec] = []
+    if selected_entity is not None and severity is not None:
         for index, legacy_rule in enumerate(rules, start=1):
             try:
                 trigger, recovery = _legacy_condition_pair(
                     legacy_rule,
-                    data_type=preview_entity.data_type,
+                    data_type=selected_entity.data_type,
                 )
             except AlarmConfigurationError as error:
                 blockers.append(_blocker(str(error), str(error)))
@@ -459,7 +489,7 @@ def _legacy_candidate(
                     ),
                     source_kind=source.source_kind,
                     source_key=source.source_key,
-                    entity=preview_entity,
+                    entity=selected_entity,
                     severity=severity,
                     trigger=trigger,
                     recovery=recovery,
@@ -480,6 +510,7 @@ def _legacy_candidate(
         blockers=tuple(blockers),
         target_definition_ids=(),
         definitions=tuple(definitions),
+        proposed_rules=tuple(proposed_rules),
     )
 
 

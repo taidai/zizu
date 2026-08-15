@@ -407,15 +407,20 @@ class PostgresEntityInstanceRepository:
                     SELECT ei.id, di.id, di.slot_id, di.instance_key,
                            di.device_category, di.display_name, ei.definition_id,
                            ei.display_name, ei.data_type, ei.unit, ei.direction,
-                           ei.freshness_seconds
+                           ei.freshness_seconds, TRUE
                     FROM t_entity_instances ei
                     JOIN t_device_instances di ON di.id = ei.device_instance_id
+                    JOIN t_site_configuration_state state ON state.singleton = TRUE
+                    JOIN t_site_configuration_versions site
+                      ON site.version = state.current_version
+                     AND di.identity_installation_id = site.entity_identity_installation_id
                     JOIN t_entity_instance_bindings binding
                       ON binding.entity_instance_id = ei.id AND binding.active = TRUE
                     JOIN t_entity_binding_confirmations confirmation
                       ON confirmation.id = binding.confirmation_audit_id
                      AND confirmation.entity_instance_id = binding.entity_instance_id
                      AND confirmation.binding_id = binding.id
+                     AND confirmation.selected_tag_id = binding.tag_id
                     WHERE ei.active = TRUE AND di.active = TRUE
                     ORDER BY di.instance_key, ei.definition_id
                     """

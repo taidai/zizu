@@ -176,6 +176,19 @@ def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any
             "trigger": {"operator": proposed.trigger["op"], "value": proposed.trigger["value"]},
             "recovery": {"operator": proposed.recovery["op"], "value": proposed.recovery["value"]},
         },
+        "proposed_rules": [
+            {
+                "entity_instance_id": str(item.entity_instance_id),
+                "display_name": item.display_name,
+                "proposed_rule": {
+                    "name": item.display_name,
+                    "severity": item.severity,
+                    "trigger": {"operator": item.trigger["op"], "value": item.trigger["value"]},
+                    "recovery": {"operator": item.recovery["op"], "value": item.recovery["value"]},
+                },
+            }
+            for item in candidate.proposed_rules
+        ],
     }
 
 

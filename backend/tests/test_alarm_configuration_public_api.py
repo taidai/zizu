@@ -518,6 +518,13 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             items[("tag_alarm", "tag-ready")]["proposed_rule"]["trigger"]["operator"],
             {"eq", "ne", "gt", "gte", "lt", "lte"},
         )
+        ambiguous_rules = items[("entity_alarm_binding", "binding-ambiguous")]["proposed_rules"]
+        self.assertEqual(
+            {item["entity_instance_id"] for item in ambiguous_rules},
+            {str(confirmed.id), str(second.id)},
+        )
+        self.assertTrue(all(item["display_name"] for item in ambiguous_rules))
+        self.assertTrue(all(item["proposed_rule"] is not None for item in ambiguous_rules))
         self.assertEqual(
             items[("tag_alarm", "tag-unresolved")]["blockers"][0]["code"],
             "ALARM_ENTITY_UNRESOLVED",

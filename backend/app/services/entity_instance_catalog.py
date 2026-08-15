@@ -26,12 +26,13 @@ class EntityInstanceDescriptor:
     unit: str | None
     direction: str
     freshness_seconds: float
+    confirmed: bool = False
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["id"] = str(self.id)
         value["device_instance_id"] = str(self.device_instance_id)
-        value["confirmed"] = True
+        value["confirmed"] = self.confirmed
         return value
 
 
