@@ -478,6 +478,34 @@ async def delete_node(node_id: UUID) -> dict:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH RECURSIVE descendants AS (
+                    SELECT id FROM t_nodes WHERE id = %s
+                    UNION ALL
+                    SELECT node.id
+                    FROM t_nodes node
+                    JOIN descendants parent ON node.parent_id = parent.id
+                )
+                SELECT 1 AS legacy_alarm_tag
+                FROM descendants
+                JOIN t_tags tag ON tag.node_id = descendants.id
+                WHERE tag.alarm_level IS NOT NULL
+                   OR tag.alarm_type IS NOT NULL
+                   OR tag.alarm_threshold IS NOT NULL
+                   OR tag.fault_map_id IS NOT NULL
+                LIMIT 1
+                """,
+                (node_id,),
+            )
+            if cur.fetchone() is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
+                        "message": "Node contains a legacy alarm tag that must be migrated before deletion",
+                    },
+                )
             # 1) 收集待删除节点及其所有子孙
             cur.execute(
                 """

@@ -308,6 +308,25 @@ _LEGACY_LEVEL_SEVERITIES: dict[str, Severity] = {
     "error3": "WARNING",
 }
 
+_LEGACY_BLOCKER_PRIORITY = (
+    "ALARM_FAULT_MAP_UNRESOLVED",
+    "ALARM_MIGRATION_AMBIGUOUS",
+    "ALARM_LEGACY_RULE_UNSUPPORTED",
+    "ALARM_MIGRATION_SELECTION_INVALID",
+    "ALARM_ENTITY_UNRESOLVED",
+    "ALARM_SEVERITY_INVALID",
+    "ALARM_THRESHOLD_INVALID",
+)
+
+
+def _raise_legacy_blockers(blockers: tuple[dict[str, Any], ...]) -> None:
+    codes = {blocker["code"] for blocker in blockers}
+    for code in _LEGACY_BLOCKER_PRIORITY:
+        if code in codes:
+            raise AlarmConfigurationError(code)
+    if blockers:
+        raise AlarmConfigurationError(blockers[0]["code"])
+
 
 def _legacy_condition_pair(
     rule: Mapping[str, Any],
@@ -460,6 +479,55 @@ def _legacy_candidate(
         blockers=tuple(blockers),
         target_definition_ids=(),
         definitions=tuple(definitions),
+    )
+
+
+def legacy_migration_plan_digest(
+    installation_id: UUID,
+    items: tuple[LegacyAlarmMigrationCandidate, ...],
+    actor: str,
+) -> str:
+    return _digest(
+        {
+            "installation_id": installation_id,
+            "items": items,
+            "actor": actor,
+        }
+    )
+
+
+def compile_legacy_migration_plan(
+    *,
+    installation_id: UUID,
+    sources: tuple[LegacyAlarmSource, ...],
+    selections: Mapping[tuple[str, str], UUID],
+    actor: str,
+) -> LegacyAlarmMigrationPlan:
+    source_keys = {(source.source_kind, source.source_key) for source in sources}
+    if set(selections) - source_keys:
+        raise AlarmConfigurationError("ALARM_MIGRATION_SELECTION_INVALID")
+    items = tuple(
+        _legacy_candidate(
+            source,
+            selections.get((source.source_kind, source.source_key)),
+        )
+        for source in sorted(
+            sources,
+            key=lambda item: (item.source_kind, item.source_key),
+        )
+    )
+    blockers = tuple(blocker for item in items for blocker in item.blockers)
+    return LegacyAlarmMigrationPlan(
+        installation_id=installation_id,
+        status="blocked" if blockers else "ready",
+        items=items,
+        blockers=blockers,
+        digest=legacy_migration_plan_digest(installation_id, items, actor),
+        target_definition_ids=tuple(
+            definition_id
+            for item in items
+            for definition_id in item.target_definition_ids
+        ),
     )
 
 
@@ -679,21 +747,20 @@ class AlarmConfiguration:
         self,
         selections: Mapping[tuple[str, str], UUID] | None = None,
     ) -> tuple[LegacyAlarmMigrationCandidate, ...]:
-        _installation_id, sources = self.repository.list_legacy_alarm_sources()
-        explicit = dict(selections or {})
-        source_keys = {(source.source_kind, source.source_key) for source in sources}
-        if set(explicit) - source_keys:
-            raise AlarmConfigurationError("ALARM_MIGRATION_SELECTION_INVALID")
-        return tuple(
-            _legacy_candidate(
-                source,
-                explicit.get((source.source_kind, source.source_key)),
-            )
-            for source in sorted(
-                sources,
-                key=lambda item: (item.source_kind, item.source_key),
-            )
+        return self.preview_legacy_migration_snapshot(selections)[1]
+
+    def preview_legacy_migration_snapshot(
+        self,
+        selections: Mapping[tuple[str, str], UUID] | None = None,
+    ) -> tuple[UUID, tuple[LegacyAlarmMigrationCandidate, ...]]:
+        installation_id, sources = self.repository.list_legacy_alarm_sources()
+        plan = compile_legacy_migration_plan(
+            installation_id=installation_id,
+            sources=sources,
+            selections=dict(selections or {}),
+            actor="preview",
         )
+        return installation_id, plan.items
 
     def apply_legacy_migration(
         self,
@@ -704,36 +771,16 @@ class AlarmConfiguration:
     ) -> LegacyAlarmMigrationPlan:
         if not actor.strip():
             raise AlarmConfigurationError("ALARM_MIGRATION_ACTOR_INVALID")
-        current_installation_id, _sources = self.repository.list_legacy_alarm_sources()
+        current_installation_id, sources = self.repository.list_legacy_alarm_sources()
         if installation_id != current_installation_id:
             raise AlarmConfigurationError("ALARM_MIGRATION_INSTALLATION_STALE")
-        items = self.preview_legacy_migration(selections)
-        blockers = tuple(
-            blocker for item in items for blocker in item.blockers
-        )
-        if blockers:
-            codes = {blocker["code"] for blocker in blockers}
-            if "ALARM_MIGRATION_AMBIGUOUS" in codes:
-                raise AlarmConfigurationError("ALARM_MIGRATION_AMBIGUOUS")
-            raise AlarmConfigurationError(blockers[0]["code"])
-        plan = LegacyAlarmMigrationPlan(
+        plan = compile_legacy_migration_plan(
             installation_id=installation_id,
-            status="ready",
-            items=items,
-            blockers=(),
-            digest=_digest(
-                {
-                    "installation_id": installation_id,
-                    "items": items,
-                    "actor": actor,
-                }
-            ),
-            target_definition_ids=tuple(
-                definition_id
-                for item in items
-                for definition_id in item.target_definition_ids
-            ),
+            sources=sources,
+            selections=dict(selections),
+            actor=actor,
         )
+        _raise_legacy_blockers(plan.blockers)
         return self.repository.apply_legacy_alarm_migration(plan, actor=actor)
 
     def plan(self, command: PlanAlarmConfiguration) -> AlarmConfigurationPlan:

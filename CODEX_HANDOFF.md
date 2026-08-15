@@ -3895,3 +3895,12 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - legacy GET 标记 deprecated/replacement；alarm-level/binding 和 tag legacy 字段 HTTP 写口统一 409，migration 034 同时提供无 owner 例外的数据库写门禁；startup seed 与旧模板模块已删除。
 - Task5 公共 HTTP + 真实 PG 为 35 passed/10 subtests；Task1–4 与业务授权为 37 passed/100 subtests；完整后端最终回归为 278 passed/20 skipped/189 subtests。隔离 `_test` PostgreSQL 容器及匿名 volume 已安全清理。
 - 有效旧 `fault` 规则因旧 schema 不足以无损表达统一 trigger/recovery，保持显式 `ALARM_LEGACY_RULE_UNSUPPORTED`，不做推测迁移。
+
+### 2026-08-16 — Task 5 fix round 1/5
+
+- Task 5 增量 contract gate 已从已发布的 034 移到新的 `migration_035_legacy_alarm_contract_gate.sql`；真实 runner 回归覆盖已登记 034 时只应用 035，并覆盖 fresh/replay。验收计划原预留 035 后续顺延为 036。
+- 迁移 apply 在 site/source 锁内重查全部旧源与完整候选，用受信任领域编译器重编译并比对摘要/spec/blocker；新增候选、篡改 severity/trigger 或遗漏来源均稳定拒绝且零写。
+- valid fault-map 的旧 fault 规则稳定为 `ALARM_LEGACY_RULE_UNSUPPORTED`，missing map 优先 `ALARM_FAULT_MAP_UNRESOLVED`；blocker 顺序和 HTTP 409 包络已固定。
+- 035 使 target 必须与 `legacy_migration` origin 及 source kind/key 一致；含任一 legacy alarm 字段的 tag 在 DB BEFORE DELETE、tag API delete 和 node cascade 入口均被拒绝。
+- 候选关系表在锁内重查前取 SHARE 锁；并发候选写事务必须先提交，apply 再重查并稳定拒绝新歧义，消除 advisory lock 不被其他写者共享时的 TOCTOU。
+- 最终 Task5 真实 PG + HTTP：`43 passed, 24 subtests passed`；Task1–4/业务授权：`37 passed, 100 subtests passed`；完整后端：`281 passed, 23 skipped, 189 subtests passed`；`compileall` 与 `git diff --check` 通过。

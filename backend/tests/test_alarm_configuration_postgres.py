@@ -3,19 +3,26 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from dataclasses import replace
+from threading import Barrier, Event
 from datetime import datetime, timezone
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import psycopg2
 
 
+os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
+os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
+
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_ROOT = BACKEND_ROOT.parent / "init-db"
 MIGRATION_034 = MIGRATIONS_ROOT / "migration_034_unified_alarm_configuration.sql"
+MIGRATION_035 = MIGRATIONS_ROOT / "migration_035_legacy_alarm_contract_gate.sql"
 BASE_MIGRATIONS = tuple(
     MIGRATIONS_ROOT / f"migration_{version:03d}{suffix}"
     for version, suffix in (
@@ -100,6 +107,11 @@ class _PostgresAlarmConfigurationTestBase:
                     if migration.name.startswith("migration_024"):
                         self._create_source_catalog_tables(cursor)
                     cursor.execute(migration.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_alarm_migrations(cursor) -> None:
+        cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+        cursor.execute(MIGRATION_035.read_text(encoding="utf-8"))
 
     @staticmethod
     def _insert_installed_site(cursor) -> tuple[str, str]:
@@ -249,12 +261,89 @@ class _PostgresAlarmConfigurationTestBase:
     "set ZIZU_POSTGRES_TEST=1 to run the isolated Postgres alarm configuration seam",
 )
 class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unittest.TestCase):
+    def _build_legacy_plan(self, repository, installation_id, selections=None):
+        from app.services.alarm_configuration import compile_legacy_migration_plan
+
+        current_installation_id, sources = repository.list_legacy_alarm_sources()
+        self.assertEqual(UUID(installation_id), current_installation_id)
+        return compile_legacy_migration_plan(
+            installation_id=current_installation_id,
+            sources=sources,
+            selections=selections or {},
+            actor="user:engineer",
+        )
+
+    def test_runner_applies_035_after_recorded_034_and_enforces_legacy_gate(self) -> None:
+        from app.core.migrations import run_migrations
+        from app.services import telemetry_store
+
+        self._reset_schema_through_032()
+        level_id = uuid4()
+        entity_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                self._insert_entities(cursor, installation_id)
+                cursor.execute(
+                    "INSERT INTO t_alarm_levels (id, code, name, severity) VALUES (%s, 'runner-legacy', 'Runner legacy', 'MAJOR')",
+                    (str(level_id),),
+                )
+                cursor.execute(
+                    "INSERT INTO t_entities (id, name, enabled) VALUES (%s, 'pcs.runnerLegacy', TRUE)",
+                    (str(entity_id),),
+                )
+                cursor.execute(
+                    "UPDATE t_tags SET alarm_type = 'fault' WHERE id = (SELECT id FROM t_tags LIMIT 1)"
+                )
+                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                cursor.execute(
+                    "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())"
+                )
+                versions = sorted({
+                    path.name.split("_")[1]
+                    for path in MIGRATIONS_ROOT.glob("migration_*.sql")
+                    if int(path.name.split("_")[1]) <= 34
+                })
+                cursor.executemany(
+                    "INSERT INTO schema_migrations (version) VALUES (%s)",
+                    [(version,) for version in versions],
+                )
+
+        runner_connection = psycopg2.connect(**self.connection_kwargs)
+        try:
+            with patch.dict(
+                os.environ,
+                {"DEPLOYMENT_MODE": "development", "MIGRATIONS_DIR": str(MIGRATIONS_ROOT)},
+            ), patch.object(
+                telemetry_store, "get_connection", return_value=runner_connection
+            ):
+                result = run_migrations()
+        finally:
+            runner_connection.close()
+
+        self.assertEqual(["035"], result["applied"])
+        self.assertEqual(0, result["errors"])
+        rejected = (
+            "INSERT INTO t_alarm_levels (code, name, severity) VALUES ('blocked', 'Blocked', 'INFO')",
+            "DELETE FROM t_tags WHERE alarm_type = 'fault'",
+        )
+        for statement in rejected:
+            with self.subTest(statement=statement):
+                connection = psycopg2.connect(**self.connection_kwargs)
+                try:
+                    with connection.cursor() as cursor:
+                        with self.assertRaises(psycopg2.errors.RaiseException):
+                            cursor.execute(statement)
+                finally:
+                    connection.close()
+
     def test_migration_applies_to_a_fresh_schema(self) -> None:
         self._reset_schema_through_032()
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
                 cursor.execute(
                     "SELECT constraint_name FROM information_schema.table_constraints "
                     "WHERE table_name = 't_alarm_definitions' "
@@ -271,8 +360,10 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
             connection.autocommit = True
             with connection.cursor() as cursor:
                 installation_id, _ = self._insert_installed_site(cursor)
-                migration = MIGRATION_034.read_text(encoding="utf-8")
-                cursor.execute(migration)
+                migration_034 = MIGRATION_034.read_text(encoding="utf-8")
+                migration_035 = MIGRATION_035.read_text(encoding="utf-8")
+                cursor.execute(migration_034)
+                cursor.execute(migration_035)
                 rule_set_id = uuid4()
                 legacy_plan_json = {"legacy": "canonical-plan-is-immutable"}
                 cursor.execute(
@@ -311,7 +402,8 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                         "c" * 64,
                     ),
                 )
-                cursor.execute(migration)
+                cursor.execute(migration_034)
+                cursor.execute(migration_035)
                 cursor.execute(
                     "SELECT canonical_plan FROM t_alarm_configuration_plans"
                 )
@@ -433,7 +525,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
 
         replacement = InstalledAlarmDefinition(
             **{**definition.__dict__, "id": uuid4()}
@@ -553,7 +645,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
             with connection.cursor() as cursor:
                 installation_id, _ = self._insert_installed_site(cursor)
                 entity_id, _ = self._insert_entities(cursor, installation_id)
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
         definition = InstalledAlarmDefinition(
             id=uuid4(),
             asset_id="site.alarm.legacy.target",
@@ -591,6 +683,18 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                         """,
                         (definition.id, uuid4()),
                     )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definition_origins
+                      (definition_id, origin_type, source_kind, source_key,
+                       details, actor)
+                    VALUES (%s, 'legacy_migration', 'legacy_alarm', 'alarm-1',
+                            '{}', 'user:engineer')
+                    """,
+                    (definition.id,),
+                )
         migration_id = uuid4()
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -606,19 +710,46 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                 cursor.execute(
                     """
                     INSERT INTO t_legacy_alarm_migration_targets
-                      (migration_id, definition_id)
-                    VALUES (%s, %s)
+                      (migration_id, definition_id, source_kind, source_key,
+                       origin_type)
+                    VALUES (%s, %s, 'legacy_alarm', 'alarm-1',
+                            'legacy_migration')
                     """,
                     (migration_id, definition.id),
                 )
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            with psycopg2.connect(**self.connection_kwargs) as connection:
+                with connection.cursor() as cursor:
+                    mismatched_migration_id = uuid4()
+                    cursor.execute(
+                        """
+                        INSERT INTO t_legacy_alarm_migrations
+                          (id, source_kind, source_key, state, actor)
+                        VALUES (%s, 'legacy_alarm', 'different-source',
+                                'migrated', 'user:engineer')
+                        """,
+                        (mismatched_migration_id,),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_legacy_alarm_migration_targets
+                          (migration_id, definition_id, source_kind,
+                           source_key, origin_type)
+                        VALUES (%s, %s, 'legacy_alarm', 'different-source',
+                                'legacy_migration')
+                        """,
+                        (mismatched_migration_id, definition.id),
+                    )
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
                 with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
                     cursor.execute(
                         """
                         INSERT INTO t_legacy_alarm_migration_targets
-                          (migration_id, definition_id)
-                        VALUES (%s, %s)
+                          (migration_id, definition_id, source_kind,
+                           source_key, origin_type)
+                        VALUES (%s, %s, 'legacy_alarm', 'alarm-1',
+                                'legacy_migration')
                         """,
                         (migration_id, uuid4()),
                     )
@@ -667,7 +798,31 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     "INSERT INTO t_entity_alarm_bindings (id, entity_id, alarm_level_id) VALUES (%s, %s, %s)",
                     (str(binding_id), str(entity_id), str(level_id)),
                 )
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                cursor.execute("SELECT id FROM t_nodes ORDER BY id LIMIT 1")
+                node_id = cursor.fetchone()[0]
+                fault_map_id = uuid4()
+                cursor.execute(
+                    "INSERT INTO t_fault_maps (id, name) VALUES (%s, 'delete-gate-map')",
+                    (str(fault_map_id),),
+                )
+                legacy_delete_ids = [uuid4() for _index in range(4)]
+                cursor.execute(
+                    "INSERT INTO t_tags (id, node_id, name, data_type, alarm_level) VALUES (%s, %s, 'delete-level', 'FLOAT', 'error1')",
+                    (str(legacy_delete_ids[0]), node_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_tags (id, node_id, name, data_type, alarm_type) VALUES (%s, %s, 'delete-type', 'FLOAT', 'fault')",
+                    (str(legacy_delete_ids[1]), node_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_tags (id, node_id, name, data_type, alarm_threshold) VALUES (%s, %s, 'delete-threshold', 'FLOAT', 10)",
+                    (str(legacy_delete_ids[2]), node_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_tags (id, node_id, name, data_type, fault_map_id) VALUES (%s, %s, 'delete-map', 'FLOAT', %s)",
+                    (str(legacy_delete_ids[3]), node_id, str(fault_map_id)),
+                )
+                self._apply_alarm_migrations(cursor)
 
         rejected_statements = (
             ("INSERT INTO t_alarm_levels (code, name, severity) VALUES ('new', 'New', 'INFO')", None),
@@ -680,6 +835,11 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
             ("TRUNCATE t_entity_alarm_bindings", None),
             ("INSERT INTO t_tags (id, node_id, name, data_type, alarm_level) SELECT gen_random_uuid(), id, 'blocked', 'FLOAT', 'error1' FROM t_nodes LIMIT 1", None),
             ("UPDATE t_tags SET alarm_threshold = alarm_threshold WHERE id = (SELECT id FROM t_tags LIMIT 1)", None),
+            ("TRUNCATE t_tags CASCADE", None),
+            *((
+                "DELETE FROM t_tags WHERE id = %s",
+                (str(tag_id),),
+            ) for tag_id in legacy_delete_ids),
         )
         for statement, parameters in rejected_statements:
             with self.subTest(statement=statement):
@@ -719,7 +879,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     "UPDATE t_tags SET alarm_level = 'error1' WHERE id = (SELECT tag_id FROM t_entity_instance_bindings ORDER BY tag_id LIMIT 1) RETURNING id"
                 )
                 legacy_tag_id = cursor.fetchone()[0]
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
 
         repository = PostgresAlarmConfigurationRepository(
             connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
@@ -778,6 +938,161 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     "unique_confirmed_binding",
                     migration_details["selection_reason"],
                 )
+
+    def test_apply_recompiles_after_source_lock_and_rejects_new_ambiguity(self) -> None:
+        from app.services.alarm_configuration import AlarmConfigurationError
+        from app.services.alarm_configuration_postgres import (
+            PostgresAlarmConfigurationRepository,
+        )
+
+        self._reset_schema_through_032()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                installation_id, _ = self._insert_installed_site(cursor)
+                self._insert_entities(cursor, installation_id)
+                cursor.execute(
+                    "SELECT tag_id FROM t_entity_instance_bindings ORDER BY tag_id"
+                )
+                tag_ids = [row[0] for row in cursor.fetchall()]
+                level_id = uuid4()
+                legacy_entity_id = uuid4()
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_levels
+                      (id, code, name, severity, trigger_rules, enabled)
+                    VALUES (%s, 'revalidate', 'Revalidate', 'MAJOR',
+                            '[{"op":"active"}]', TRUE)
+                    """,
+                    (str(level_id),),
+                )
+                cursor.execute(
+                    "INSERT INTO t_entities (id, name, enabled) VALUES (%s, 'pcs.revalidate', TRUE)",
+                    (str(legacy_entity_id),),
+                )
+                cursor.execute("SELECT node_id FROM t_tags WHERE id = %s", (tag_ids[0],))
+                node_id = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO t_entity_bindings (id, entity_id, tag_id, node_id, enabled) VALUES (%s, %s, %s, %s, TRUE)",
+                    (str(uuid4()), str(legacy_entity_id), tag_ids[0], node_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_entity_alarm_bindings (id, entity_id, alarm_level_id, enabled) VALUES (%s, %s, %s, TRUE)",
+                    (str(uuid4()), str(legacy_entity_id), str(level_id)),
+                )
+                self._apply_alarm_migrations(cursor)
+
+        repository = PostgresAlarmConfigurationRepository(
+            connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+        )
+        plan = self._build_legacy_plan(repository, installation_id)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT node_id FROM t_tags WHERE id = %s", (tag_ids[1],))
+                second_node_id = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO t_entity_bindings (id, entity_id, tag_id, node_id, enabled) VALUES (%s, %s, %s, %s, TRUE)",
+                    (str(uuid4()), str(legacy_entity_id), tag_ids[1], second_node_id),
+                )
+                applying_repository = PostgresAlarmConfigurationRepository(
+                    connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+                )
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        applying_repository.apply_legacy_alarm_migration,
+                        plan,
+                        actor="user:engineer",
+                    )
+                    for _ in range(20):
+                        if future.done():
+                            break
+                        Event().wait(0.05)
+                    self.assertFalse(
+                        future.done(),
+                        "apply must wait for an in-flight candidate write",
+                    )
+                    connection.commit()
+                    with self.assertRaisesRegex(
+                        AlarmConfigurationError, "ALARM_MIGRATION_AMBIGUOUS"
+                    ):
+                        future.result(timeout=10)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_legacy_alarm_migrations")
+                self.assertEqual(0, cursor.fetchone()[0])
+
+    def test_repository_rejects_forged_specs_and_omitted_sources_without_writes(self) -> None:
+        from app.services.alarm_configuration import (
+            AlarmConfigurationError,
+            legacy_migration_plan_digest,
+        )
+        from app.services.alarm_configuration_postgres import (
+            PostgresAlarmConfigurationRepository,
+        )
+
+        for tamper in ("severity", "trigger", "omit_source"):
+            with self.subTest(tamper=tamper):
+                self._reset_schema_through_032()
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        installation_id, _ = self._insert_installed_site(cursor)
+                        self._insert_entities(cursor, installation_id)
+                        cursor.execute(
+                            "UPDATE t_tags SET alarm_level = 'error1' WHERE id IN (SELECT tag_id FROM t_entity_instance_bindings)"
+                        )
+                        self._apply_alarm_migrations(cursor)
+
+                repository = PostgresAlarmConfigurationRepository(
+                    connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+                )
+                plan = self._build_legacy_plan(repository, installation_id)
+                if tamper == "omit_source":
+                    forged_items = plan.items[:-1]
+                else:
+                    first = plan.items[0]
+                    definition = first.definitions[0]
+                    if tamper == "severity":
+                        forged_definition = replace(definition, severity="INFO")
+                        forged_first = replace(
+                            first,
+                            severity="INFO",
+                            definitions=(forged_definition,),
+                        )
+                    else:
+                        forged_definition = replace(
+                            definition, trigger={"op": "gt", "value": 999}
+                        )
+                        forged_first = replace(
+                            first, definitions=(forged_definition,)
+                        )
+                    forged_items = (forged_first, *plan.items[1:])
+                forged = replace(
+                    plan,
+                    items=tuple(forged_items),
+                    digest=legacy_migration_plan_digest(
+                        plan.installation_id,
+                        tuple(forged_items),
+                        "user:engineer",
+                    ),
+                )
+                applying_repository = PostgresAlarmConfigurationRepository(
+                    connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+                )
+                with self.assertRaisesRegex(
+                    AlarmConfigurationError, "ALARM_MIGRATION_PLAN_STALE"
+                ):
+                    applying_repository.apply_legacy_alarm_migration(
+                        forged, actor="user:engineer"
+                    )
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+                        self.assertEqual(0, cursor.fetchone()[0])
+                        cursor.execute("SELECT count(*) FROM t_legacy_alarm_migrations")
+                        self.assertEqual(0, cursor.fetchone()[0])
 
     def test_postgres_preview_classifies_unresolved_ambiguous_custom_and_missing_map(self) -> None:
         from app.services.alarm_configuration import (
@@ -914,6 +1229,15 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     "INSERT INTO t_fault_maps (id, name) VALUES (%s, 'Existing map')",
                     (str(existing_map_id),),
                 )
+                valid_fault_tag_id = tag_ids[1]
+                cursor.execute(
+                    """
+                    UPDATE t_tags
+                    SET alarm_level = 'error3', alarm_type = 'fault', fault_map_id = %s
+                    WHERE id = %s
+                    """,
+                    (str(existing_map_id), valid_fault_tag_id),
+                )
                 missing_level_id = uuid4()
                 cursor.execute(
                     """
@@ -940,12 +1264,18 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
                     "INSERT INTO t_entity_bindings (id, entity_id, tag_id, node_id, enabled) VALUES (%s, %s, %s, %s, TRUE)",
                     (str(uuid4()), str(missing_entity_id), tag_ids[0], old_node_id),
                 )
+                cursor.execute("SELECT node_id FROM t_tags WHERE id = %s", (tag_ids[1],))
+                second_old_node_id = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO t_entity_bindings (id, entity_id, tag_id, node_id, enabled) VALUES (%s, %s, %s, %s, TRUE)",
+                    (str(uuid4()), str(missing_entity_id), tag_ids[1], second_old_node_id),
+                )
                 missing_binding_id = uuid4()
                 cursor.execute(
                     "INSERT INTO t_entity_alarm_bindings (id, entity_id, alarm_level_id, enabled) VALUES (%s, %s, %s, TRUE)",
                     (str(missing_binding_id), str(missing_entity_id), str(missing_level_id)),
                 )
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
 
         service = AlarmConfiguration(
             PostgresAlarmConfigurationRepository(
@@ -961,6 +1291,10 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
             if item.source_kind == "tag_alarm" and item.status == "ready"
         )
         self.assertEqual("CRITICAL", ready.severity)
+        self.assertEqual(
+            "ALARM_LEGACY_RULE_UNSUPPORTED",
+            items[("tag_alarm", str(valid_fault_tag_id))].blockers[0]["code"],
+        )
         self.assertEqual(
             "ALARM_ENTITY_UNRESOLVED",
             items[("tag_alarm", str(mismatched_tag_id))].blockers[0]["code"],
@@ -979,7 +1313,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
         )
         with self.assertRaisesRegex(
             AlarmConfigurationError,
-            "ALARM_MIGRATION_AMBIGUOUS",
+            "ALARM_FAULT_MAP_UNRESOLVED",
         ):
             service.apply_legacy_migration(
                 installation_id=UUID(installation_id),
@@ -1013,7 +1347,7 @@ class PostgresAlarmConfigurationRepositoryTest(
             with connection.cursor() as cursor:
                 self.installation_id, self.package_record_id = self._insert_installed_site(cursor)
                 self.entity_ids = self._insert_entities(cursor, self.installation_id)
-                cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
+                self._apply_alarm_migrations(cursor)
 
     @staticmethod
     def _rules():

@@ -191,7 +191,7 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
     response_status = 422
     if code in {"ALARM_PLAN_NOT_FOUND", "ALARM_RULE_SET_NOT_FOUND"}:
         response_status = status.HTTP_404_NOT_FOUND
-    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_MIGRATION_AMBIGUOUS", "ALARM_ENTITY_UNRESOLVED", "ALARM_FAULT_MAP_UNRESOLVED", "ALARM_MIGRATION_SELECTION_INVALID", "ALARM_MIGRATION_INSTALLATION_STALE"}:
+    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_MIGRATION_AMBIGUOUS", "ALARM_ENTITY_UNRESOLVED", "ALARM_FAULT_MAP_UNRESOLVED", "ALARM_MIGRATION_SELECTION_INVALID", "ALARM_MIGRATION_INSTALLATION_STALE", "ALARM_MIGRATION_PLAN_STALE", "ALARM_MIGRATION_PLAN_BLOCKED"}:
         response_status = status.HTTP_409_CONFLICT
     elif (
         code == "AUDIT_UNAVAILABLE"
@@ -274,8 +274,7 @@ async def list_legacy_alarm_configuration_migrations(
     configuration: AlarmConfiguration = Depends(get_alarm_configuration),
 ) -> dict[str, Any]:
     try:
-        installation_id, _sources = configuration.repository.list_legacy_alarm_sources()
-        items = configuration.preview_legacy_migration()
+        installation_id, items = configuration.preview_legacy_migration_snapshot()
         return {
             "installation_id": str(installation_id),
             "items": [_legacy_candidate(item) for item in items],

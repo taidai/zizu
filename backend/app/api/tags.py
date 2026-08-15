@@ -436,7 +436,11 @@ async def list_alarm_configured_tags() -> dict:
                     FROM t_tags t
                     JOIN t_nodes n ON n.id = t.node_id
                     LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
-                    WHERE t.alarm_level IS NOT NULL AND t.enabled = TRUE
+                    WHERE (t.alarm_level IS NOT NULL
+                           OR t.alarm_type IS NOT NULL
+                           OR t.alarm_threshold IS NOT NULL
+                           OR t.fault_map_id IS NOT NULL)
+                      AND t.enabled = TRUE
                     ORDER BY t.alarm_level, t.alarm_type, n.node_type
                 """);
                 columns = [desc[0] for desc in cur.description]
@@ -732,9 +736,24 @@ async def delete_tag(tag_id: UUID) -> dict:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM t_tags WHERE id = %s", (tag_id,))
-            if not cur.fetchone():
+            cur.execute(
+                """
+                SELECT alarm_level, alarm_type, alarm_threshold, fault_map_id
+                FROM t_tags WHERE id = %s
+                """,
+                (tag_id,),
+            )
+            legacy_alarm_values = cur.fetchone()
+            if legacy_alarm_values is None:
                 raise HTTPException(status_code=404, detail="Tag not found")
+            if any(value is not None for value in legacy_alarm_values):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
+                        "message": "Legacy alarm tag must be migrated before deletion",
+                    },
+                )
 
             # t_telemetry / t_telemetry_latest 外键级联删除；migration_030
             # 已移除只读 t_alarms 的外键，以保留不可变告警历史。

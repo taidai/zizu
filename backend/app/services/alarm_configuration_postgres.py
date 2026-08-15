@@ -25,6 +25,9 @@ from app.services.alarm_configuration import (
     LegacyAlarmMigrationPlan,
     LegacyAlarmSource,
     ResolvedAlarmEntity,
+    compile_legacy_migration_plan,
+    legacy_migration_plan_digest,
+    _raise_legacy_blockers,
 )
 from app.services.alarm_definitions import (
     AlarmDefinitionPlan,
@@ -612,9 +615,19 @@ class PostgresAlarmConfigurationRepository:
                     "level_code": row[2] or "",
                     "stored_severity": None,
                     "trigger_rules": (
-                        ({"op": "gte", "threshold": row[4]},)
-                        if row[4] is not None
-                        else ({"op": "active"},)
+                        ({
+                            "op": "fault",
+                            "alarm_type": row[3],
+                            "fault_map_id": (
+                                str(row[5]) if row[5] is not None else None
+                            ),
+                        },)
+                        if row[3] is not None or row[5] is not None
+                        else (
+                            ({"op": "gte", "threshold": row[4]},)
+                            if row[4] is not None
+                            else ({"op": "active"},)
+                        )
                     ),
                     "fault_map_id": row[5],
                     "fault_map_exists": bool(row[6]),
@@ -765,14 +778,77 @@ class PostgresAlarmConfigurationRepository:
                 if site is None or site[0] != plan.installation_id:
                     raise AlarmConfigurationError("ALARM_MIGRATION_INSTALLATION_STALE")
                 installation_id, site_version, package_digest, identity_installation_id = site
+                _snapshot_installation_id, snapshot_sources = self._legacy_alarm_sources(
+                    cursor
+                )
+                plan_keys = {
+                    (item.source_kind, item.source_key) for item in plan.items
+                }
+                snapshot_keys = {
+                    (source.source_kind, source.source_key)
+                    for source in snapshot_sources
+                }
+                for source_kind, source_key in sorted(plan_keys | snapshot_keys):
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"{source_kind}:{source_key}",),
+                    )
+                cursor.execute(
+                    """
+                    LOCK TABLE t_entity_bindings,
+                               t_entity_instance_bindings,
+                               t_entity_binding_confirmations,
+                               t_entity_instances,
+                               t_device_instances
+                    IN SHARE MODE
+                    """
+                )
+                locked_installation_id, locked_sources = self._legacy_alarm_sources(
+                    cursor
+                )
+                if locked_installation_id != installation_id:
+                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+                locked_keys = {
+                    (source.source_kind, source.source_key)
+                    for source in locked_sources
+                }
+                if plan_keys != locked_keys:
+                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+                if plan.status != "ready" or plan.blockers:
+                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_BLOCKED")
+                if plan.digest != legacy_migration_plan_digest(
+                    plan.installation_id, plan.items, actor
+                ):
+                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+                selections = {
+                    (item.source_kind, item.source_key): item.entity_instance_id
+                    for item in plan.items
+                    if len(item.entity_instance_candidates) > 1
+                    and item.entity_instance_id is not None
+                }
+                trusted_plan = compile_legacy_migration_plan(
+                    installation_id=installation_id,
+                    sources=locked_sources,
+                    selections=selections,
+                    actor=actor,
+                )
+                _raise_legacy_blockers(trusted_plan.blockers)
+                supplied_by_source = {
+                    (item.source_kind, item.source_key): item for item in plan.items
+                }
+                for trusted_item in trusted_plan.items:
+                    if trusted_item.status == "migrated":
+                        continue
+                    supplied = supplied_by_source[
+                        (trusted_item.source_kind, trusted_item.source_key)
+                    ]
+                    if supplied != trusted_item:
+                        raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+                plan = trusted_plan
                 current_items = []
                 pending_specs: list[LegacyAlarmDefinitionSpec] = []
                 target_ids: list[UUID] = []
                 for item in sorted(plan.items, key=lambda value: (value.source_kind, value.source_key)):
-                    cursor.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"{item.source_kind}:{item.source_key}",),
-                    )
                     cursor.execute(
                         """
                         SELECT target.definition_id
@@ -845,11 +921,14 @@ class PostgresAlarmConfigurationRepository:
                         cursor.execute(
                             """
                             INSERT INTO t_alarm_definition_origins
-                              (definition_id, origin_type, details, actor)
-                            VALUES (%s, 'legacy_migration', %s, %s)
+                              (definition_id, origin_type, source_kind,
+                               source_key, details, actor)
+                            VALUES (%s, 'legacy_migration', %s, %s, %s, %s)
                             """,
                             (
                                 definition_id,
+                                spec.source_kind,
+                                spec.source_key,
                                 Json(
                                     {
                                         "source_kind": spec.source_kind,
@@ -916,10 +995,16 @@ class PostgresAlarmConfigurationRepository:
                             cursor.execute(
                                 """
                                 INSERT INTO t_legacy_alarm_migration_targets
-                                  (migration_id, definition_id)
-                                VALUES (%s, %s)
+                                  (migration_id, definition_id, source_kind,
+                                   source_key, origin_type)
+                                VALUES (%s, %s, %s, %s, 'legacy_migration')
                                 """,
-                                (migration_id, definition_id),
+                                (
+                                    migration_id,
+                                    definition_id,
+                                    source[0],
+                                    source[1],
+                                ),
                             )
                     rebuilt_items = []
                     for item in current_items:
