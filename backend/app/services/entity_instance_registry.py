@@ -386,6 +386,8 @@ class InMemoryEntityInstanceRepository:
     def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
         descriptors = []
         for entity_id, entity in self._entities.items():
+            if entity_id not in self._bindings:
+                continue
             device = self._devices[entity["device_instance_id"]]
             descriptors.append(
                 EntityInstanceDescriptor(

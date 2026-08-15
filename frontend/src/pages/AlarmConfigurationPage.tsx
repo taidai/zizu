@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlarmConfigurationApiError, applyAlarmConfigurationPlan, createAlarmConfigurationPlan, createAlarmRuleSet,
   createAlarmRuleSetRevision, createLegacyAlarmMigrationPlan, getAlarmConfigurationPlan, getUnifiedAlarmConfiguration, fetchAlarmRuleSets,
@@ -13,6 +13,7 @@ import RuleSetEditor, { ruleValidation } from '../components/alarm-configuration
 
 const EMPTY_SCOPE: AlarmEntityScope = { entity_instance_ids: [], device_instance_ids: [], entity_definition_ids: [] }
 const severityLabel: Record<string, string> = { CRITICAL: '严重', MAJOR: '重要', WARNING: '警告', INFO: '提示' }
+const operatorLabel: Record<string, string> = { gt: '大于', gte: '大于等于', lt: '小于', lte: '小于等于', eq: '等于', ne: '不等于' }
 
 function defaultRule(): AlarmRule {
   return { id: 'threshold-warning', name: '阈值告警', severity: 'WARNING', trigger: { operator: 'gte', value: 0 }, trigger_duration_seconds: 0, recovery: { operator: 'lt', value: 0 }, recovery_duration_seconds: 0, notification_throttle_seconds: 300, unit: null, fault_map_id: null }
@@ -40,6 +41,7 @@ export default function AlarmConfigurationPage() {
   const [success, setSuccess] = useState('')
   const [planStale, setPlanStale] = useState(false)
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null)
+  const selectedRevisionRef = useRef<AlarmRuleSetRevision | null>(null)
   const selectedRuleSet = ruleSets.find((item) => `${item.rule_set_id}:${item.revision}` === selectedRuleSetKey) || null
   const entityNames = useMemo(() => new Map(entities.map((entity) => [entity.id, `${entity.device_display_name} / ${entity.display_name}`])), [entities])
   const scopeHasValue = scope.entity_instance_ids.length + scope.device_instance_ids.length + scope.entity_definition_ids.length > 0
@@ -50,20 +52,32 @@ export default function AlarmConfigurationPage() {
       const [configuration, revisions, entityResponse, migrations] = await Promise.all([getUnifiedAlarmConfiguration(), fetchAlarmRuleSets(), fetchEntityInstances(), fetchLegacyAlarmMigrationCandidates()])
       setCurrent(configuration); setRuleSets(revisions); setEntities(entityResponse.items); setMigrationInstallationId(migrations.installation_id); setMigrationCandidates(migrations.items); setMigrationSelections({})
       const latest = Array.from(new Map(revisions.map((item) => [item.rule_set_id, item])).values())
-      setSelectedRuleSetKey((previous) => previous || (latest[0] ? `${latest[0].rule_set_id}:${latest[0].revision}` : ''))
-      if (!selectedRuleSetKey && latest[0]) setRules(latest[0].rules)
+      const retained = selectedRevisionRef.current && revisions.find((item) => item.rule_set_id === selectedRevisionRef.current?.rule_set_id && item.revision === selectedRevisionRef.current?.revision)
+      const chosen = retained || latest[0] || null
+      selectedRevisionRef.current = chosen
+      setSelectedRuleSetKey(chosen ? `${chosen.rule_set_id}:${chosen.revision}` : '')
+      if (chosen) setRules(chosen.rules)
     } catch { setError('无法读取告警配置工作台数据，请检查平台连接与权限后重试。') } finally { setLoading(false) }
   }, [])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    const planId = sessionStorage.getItem('zizu.alarm-configuration.plan')
-    if (!planId) return
-    void getAlarmConfigurationPlan(planId).then((saved) => setPlan(saved)).catch(() => sessionStorage.removeItem('zizu.alarm-configuration.plan'))
-  }, [])
+    const raw = sessionStorage.getItem('zizu.alarm-configuration.plan')
+    if (!raw || !current) return
+    try {
+      const saved = JSON.parse(raw) as { id?: string; version?: number; revision?: string }
+      if (!saved.id || saved.version !== current.site_configuration_version || saved.revision !== selectedRuleSetKey) throw new Error('stale')
+      void getAlarmConfigurationPlan(saved.id).then((loaded) => {
+        if (loaded.status !== 'ready' || loaded.base_site_configuration_version !== current.site_configuration_version) throw new Error('stale')
+        setPlan(loaded)
+        const apply = JSON.parse(sessionStorage.getItem('zizu.alarm-configuration.apply') || '{}') as { planId?: string; key?: string }
+        if (apply.planId === loaded.id && apply.key) setIdempotencyKey(apply.key)
+      }).catch(() => resetPlan())
+    } catch { resetPlan() }
+  }, [current, selectedRuleSetKey])
 
-  const resetPlan = () => { setPlan(null); setPlanStale(false); setIdempotencyKey(null) }
-  const chooseRuleSet = (key: string) => { setSelectedRuleSetKey(key); const revision = ruleSets.find((item) => `${item.rule_set_id}:${item.revision}` === key); if (revision) setRules(revision.rules); resetPlan() }
+  const resetPlan = () => { setPlan(null); setPlanStale(false); setIdempotencyKey(null); sessionStorage.removeItem('zizu.alarm-configuration.plan') }
+  const chooseRuleSet = (key: string) => { const revision = ruleSets.find((item) => `${item.rule_set_id}:${item.revision}` === key) || null; selectedRevisionRef.current = revision; setSelectedRuleSetKey(key); if (revision) setRules(revision.rules); resetPlan() }
 
   const createPlan = async () => {
     if (!migrationInstallationId || !scopeHasValue) { setError('请先选择至少一个配置范围。'); return }
@@ -74,26 +88,26 @@ export default function AlarmConfigurationPage() {
       let revision = selectedRuleSet
       if (!revision) {
         revision = await createAlarmRuleSet({ key: `workspace-${Date.now()}`, name: newRuleSetName.trim() || '现场告警规则', rules })
-        setRuleSets((items) => [...items, revision!]); setSelectedRuleSetKey(`${revision.rule_set_id}:${revision.revision}`)
+        setRuleSets((items) => [...items, revision!]); selectedRevisionRef.current = revision; setSelectedRuleSetKey(`${revision.rule_set_id}:${revision.revision}`)
       } else if (!sameRules(rules, revision.rules)) {
         revision = await createAlarmRuleSetRevision(revision.rule_set_id, rules)
-        setRuleSets((items) => [...items, revision!]); setSelectedRuleSetKey(`${revision.rule_set_id}:${revision.revision}`)
+        setRuleSets((items) => [...items, revision!]); selectedRevisionRef.current = revision; setSelectedRuleSetKey(`${revision.rule_set_id}:${revision.revision}`)
       }
       const created = await createAlarmConfigurationPlan({ installation_id: migrationInstallationId, selection: scope, rule_set_id: revision.rule_set_id, rule_set_revision: revision.revision })
-      setPlan(created); sessionStorage.setItem('zizu.alarm-configuration.plan', created.id); setPlanStale(false); setIdempotencyKey(null)
+      setPlan(created); sessionStorage.setItem('zizu.alarm-configuration.plan', JSON.stringify({ id: created.id, version: created.base_site_configuration_version, revision: `${created.rule_set_revision.rule_set_id}:${created.rule_set_revision.revision}` })); setPlanStale(false); setIdempotencyKey(null)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '生成计划失败。') } finally { setPlanning(false) }
   }
 
   const applyPlan = async () => {
     if (!plan) return
     const key = idempotencyKey || crypto.randomUUID()
-    setIdempotencyKey(key); setApplying(true); setError(''); setSuccess('')
+    sessionStorage.setItem('zizu.alarm-configuration.apply', JSON.stringify({ planId: plan.id, key })); setIdempotencyKey(key); setApplying(true); setError(''); setSuccess('')
     try {
       const result = await applyAlarmConfigurationPlan(plan.id, plan.digest, key)
-      setSuccess(`已应用告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); setPlan(null); sessionStorage.removeItem('zizu.alarm-configuration.plan'); setIdempotencyKey(null); await load()
+      setSuccess(`已应用告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); setPlan(null); sessionStorage.removeItem('zizu.alarm-configuration.plan'); sessionStorage.removeItem('zizu.alarm-configuration.apply'); setIdempotencyKey(null); await load()
     } catch (reason) {
       const stale = reason instanceof AlarmConfigurationApiError && ['ALARM_PLAN_STALE', 'ALARM_PLAN_DIGEST_MISMATCH'].includes(reason.code || '')
-      if (stale) setPlanStale(true)
+      if (stale) { setPlanStale(true); sessionStorage.removeItem('zizu.alarm-configuration.plan'); sessionStorage.removeItem('zizu.alarm-configuration.apply') }
       setError(reason instanceof Error ? reason.message : '应用配置计划失败。')
     } finally { setApplying(false) }
   }
@@ -110,7 +124,7 @@ export default function AlarmConfigurationPage() {
     <header className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-base font-bold text-gray-800">统一告警配置</h2><p className="mt-1 text-xs text-gray-500">面向实施工程师的预览优先工作台。严重度固定为严重、重要、警告、提示。</p></div><div className="flex items-center gap-3 text-xs text-gray-500"><span>当前配置版本 {current?.site_configuration_version ?? '未加载'}</span><span>旧配置候选 {migrationCandidates.length}</span><button type="button" onClick={() => void load()} className="neu-btn px-3 py-1.5 text-xs" disabled={loading}>刷新</button></div></header>
     {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</div>}
     {success && <div role="status" className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{success}</div>}
-    <section aria-labelledby="current-alarm-definitions" className="neu-card p-4"><h3 id="current-alarm-definitions" className="text-sm font-bold text-gray-800">当前告警定义</h3><div className="mt-2 grid gap-2 md:grid-cols-2">{current?.definitions.map((definition, index) => <article key={`${definition.entity_display_name}-${definition.rule_name}-${index}`} className="rounded border border-white/70 p-2 text-xs"><strong>{definition.entity_display_name}</strong><p className="mt-1 text-gray-600">{definition.rule_name}，{severityLabel[definition.severity]}，触发 {definition.trigger.operator} {definition.trigger.value}，恢复 {definition.recovery.operator} {definition.recovery.value}</p><p className="mt-1 text-gray-500">来源：{definition.source}　版本：{definition.definition_version}　{definition.enabled ? '已启用' : '未启用'}　当前</p></article>)}{!current?.definitions.length && <p className="text-xs text-gray-400">当前没有已安装的告警定义。</p>}</div></section>
+    <section aria-labelledby="current-alarm-definitions" className="neu-card p-4"><h3 id="current-alarm-definitions" className="text-sm font-bold text-gray-800">当前告警定义</h3><div className="mt-2 grid gap-2 md:grid-cols-2">{current?.definitions.map((definition, index) => <article key={`${definition.entity_display_name}-${definition.rule_name}-${index}`} className="rounded border border-white/70 p-2 text-xs"><strong>{definition.entity_display_name}</strong><p className="mt-1 text-gray-600">{definition.rule_name}，{severityLabel[definition.severity]}，触发 {operatorLabel[definition.trigger.operator]} {definition.trigger.value}，恢复 {operatorLabel[definition.recovery.operator]} {definition.recovery.value}</p><p className="mt-1 text-gray-500">来源：{definition.source === 'rule_set' ? '规则集' : '配置资产'}　版本：{definition.definition_version}　{definition.enabled ? '已启用' : '未启用'}　当前</p></article>)}{!current?.definitions.length && <p className="text-xs text-gray-400">当前没有已安装的告警定义。</p>}</div></section>
     <section aria-labelledby="rule-set-heading" className="neu-card p-4"><div className="grid gap-3 md:grid-cols-2"><label className="text-xs font-medium text-gray-700">使用已有规则集<select aria-label="选择已有规则集" value={selectedRuleSetKey} onChange={(event) => chooseRuleSet(event.target.value)} className="neu-input mt-1 block w-full px-3 py-2 text-xs"><option value="">新建规则集</option>{ruleSets.map((item) => <option key={`${item.rule_set_id}:${item.revision}`} value={`${item.rule_set_id}:${item.revision}`}>{item.name}（第 {item.revision} 版）</option>)}</select></label>{!selectedRuleSetKey ? <label className="text-xs font-medium text-gray-700">新规则集名称<input value={newRuleSetName} onChange={(event) => setNewRuleSetName(event.target.value)} className="neu-input mt-1 block w-full px-3 py-2 text-xs" maxLength={200} /></label> : <p className="self-end pb-2 text-xs text-gray-500">修改规则后会在生成计划时创建新的修订，不会覆盖既有版本。</p>}</div></section>
     <EntityScopePicker entities={entities} value={scope} onChange={(next) => { setScope(next); resetPlan() }} disabled={planning || applying} />
     <RuleSetEditor rules={rules} onChange={(next) => { setRules(next); resetPlan() }} disabled={planning || applying} />

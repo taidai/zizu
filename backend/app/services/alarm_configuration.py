@@ -439,12 +439,13 @@ def _legacy_candidate(
 
     definitions: list[LegacyAlarmDefinitionSpec] = []
     rules = tuple(source.trigger_rules) or ({"op": "active"},)
-    if selected_entity is not None and severity is not None and not blockers:
+    preview_entity = selected_entity or (entity_candidates[0] if entity_candidates else None)
+    if preview_entity is not None and severity is not None:
         for index, legacy_rule in enumerate(rules, start=1):
             try:
                 trigger, recovery = _legacy_condition_pair(
                     legacy_rule,
-                    data_type=selected_entity.data_type,
+                    data_type=preview_entity.data_type,
                 )
             except AlarmConfigurationError as error:
                 blockers.append(_blocker(str(error), str(error)))
@@ -458,7 +459,7 @@ def _legacy_candidate(
                     ),
                     source_kind=source.source_kind,
                     source_key=source.source_key,
-                    entity=selected_entity,
+                    entity=preview_entity,
                     severity=severity,
                     trigger=trigger,
                     recovery=recovery,
