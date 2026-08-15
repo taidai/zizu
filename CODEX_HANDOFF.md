@@ -3879,3 +3879,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   v0.4.77 发布面，不能作为认证版本 HTTPS 入口、存活验收或 release lock 的运行证据。
 - 这不是 DNS 修改授权或目标部署失败；只有在维护窗口按 e606 release compose 使用固定摘要的
   Caddy TLS 入口、公开 GET liveness 和 release lock 全部完成后，才可替换该结论。
+
+### 2026-08-15 — Task 1 统一告警配置批量编译器
+
+- 已完成并提交 `dca3baf`：新增纯领域 `alarm_configuration.py` 及其 TDD 测试。
+- 实现规则集修订、内存仓储、实体选择、确定性实体×规则展开、稳定定义键和规范摘要。
+- `python -m unittest tests.test_alarm_configuration -v`：2 passed；`compileall` 与 `git diff --check` 通过。
+- 工作树没有 brief 指定 `.venv`，测试报告记录了这一环境限制；未引入依赖，未触碰仓储/API/UI。
