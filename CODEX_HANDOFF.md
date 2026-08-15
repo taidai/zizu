@@ -3707,3 +3707,14 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 修复已通过 PR #31 于 2026-08-15 合并至 `main`（merge commit `50060e0`）。同一参数的第二次
   build-only 工作流为 `31839239668`，当前仍在“双架构构建与发布”步骤中；不得在它完成前声称已有
   `release.json`、可部署镜像或发布锁。
+
+### 构建超时诊断与修复（待提交）
+
+- 工作流 `31839239668` 后续持续近 4 小时而未推进，已取消以释放 GitHub 托管执行器；没有产生镜像、
+  release.json、artifact 或任何现场改动。完成后的真实日志表明 Python 依赖 114 秒内完成，阻塞点是
+  前端 `npm ci --prefer-offline`，无任何后续输出。
+- Dockerfile 的前端安装现在禁用不需要的 audit/fund 请求，并设 `--fetch-retries=2`、
+  `--fetch-timeout=120000`。它保留 lockfile 安装与双架构构建，但网络异常会在有界时间内明确失败，
+  不会再无限占用执行器。镜像定义/构建脚本/工作流测试 6/6 通过；`git diff --check` 通过。
+- 下一步：提交、合并并重新触发 build-only workflow；成功后下载并核验 `release.json`、两个架构摘要
+  及 EMS ZIP+SHA，再进入隔离部署门禁。
