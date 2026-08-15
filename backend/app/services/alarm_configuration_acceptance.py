@@ -172,15 +172,6 @@ class AlarmConfigurationAcceptance:
         )
         finished_at = datetime.now(timezone.utc)
         status = "passed" if all(item.status == "passed" for item in items) else "failed"
-        report_payload = {
-            "application_id": command.application_id,
-            "installation_id": applied.installation_id,
-            "site_configuration_version": applied.site_configuration_version,
-            "actor": command.actor,
-            "idempotency_key": command.idempotency_key,
-            "status": status,
-            "items": items,
-        }
         report = AlarmConfigurationAcceptanceReport(
             id=uuid4(),
             application_id=command.application_id,
@@ -193,7 +184,7 @@ class AlarmConfigurationAcceptance:
             finished_at=finished_at,
             digest="",
         )
-        report = replace(report, digest=_digest({**report_payload, "id": report.id, "started_at": report.started_at, "finished_at": report.finished_at}))
+        report = replace(report, digest=_digest(_report_payload(report)))
         return self._repository.save(report, idempotency_key=command.idempotency_key, request_digest=request_digest)
 
     def get(self, report_id: UUID) -> AlarmConfigurationAcceptanceReport:
@@ -303,3 +294,17 @@ def _json_value(value: Any) -> Any:
 def _digest(value: Any) -> str:
     canonical = json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _report_payload(report: AlarmConfigurationAcceptanceReport) -> dict[str, Any]:
+    return {
+        "id": report.id,
+        "application_id": report.application_id,
+        "installation_id": report.installation_id,
+        "site_configuration_version": report.site_configuration_version,
+        "actor": report.actor,
+        "status": report.status,
+        "items": report.items,
+        "started_at": report.started_at,
+        "finished_at": report.finished_at,
+    }

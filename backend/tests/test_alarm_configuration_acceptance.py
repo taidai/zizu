@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import unittest
 from uuid import UUID
 
@@ -303,6 +305,23 @@ class AlarmConfigurationAcceptanceTest(unittest.TestCase):
             with self.subTest(applied=applied):
                 with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID"):
                     self.run_acceptance(self.acceptance(), applied)
+
+    def test_report_digest_is_recomputable_from_public_report_content(self) -> None:
+        self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
+        report = self.run_acceptance(self.acceptance(), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]), key="request-only")
+
+        def value(item):
+            if isinstance(item, UUID): return str(item)
+            if isinstance(item, datetime): return item.astimezone(timezone.utc).isoformat()
+            if hasattr(item, "__dataclass_fields__"):
+                return {name: value(getattr(item, name)) for name in item.__dataclass_fields__ if name != "digest"}
+            if isinstance(item, dict): return {str(key): value(value_) for key, value_ in sorted(item.items())}
+            if isinstance(item, (tuple, list)): return [value(value_) for value_ in item]
+            return item
+
+        payload = value(report)
+        recomputed = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(report.digest, recomputed)
 
 
 if __name__ == "__main__":
