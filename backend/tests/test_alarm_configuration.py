@@ -70,6 +70,26 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         )
         return service, repository, revision
 
+    def test_rule_set_revisions_are_listed_in_stable_immutable_order(self) -> None:
+        service, repository = configured_service(entity_count=1)
+        first = service.create_rule_set(
+            key="visible-rules",
+            name="Visible rules",
+            rules=(rule("major", "MAJOR", "gt", 80, "lte", 70),),
+            actor="user:engineer",
+        )
+        second = service.create_rule_set_revision(
+            rule_set_id=first.rule_set_id,
+            rules=(rule("critical", "CRITICAL", "gt", 90, "lte", 80),),
+            actor="user:engineer",
+        )
+
+        revisions = service.list_rule_set_revisions()
+
+        self.assertEqual(revisions, (first, second))
+        with self.assertRaises(TypeError):
+            revisions[0].rules[0].trigger["value"] = 999
+
     def test_plan_requires_nonblank_planner_and_binds_it_to_the_digest(self) -> None:
         service, repository, revision = self._configuration(entity_count=1)
         with self.assertRaisesRegex(

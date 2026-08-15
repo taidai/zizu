@@ -135,6 +135,7 @@ class AppliedAlarmConfiguration:
 
 class AlarmConfigurationRepository(Protocol):
     def save_rule_set_revision(self, *, key: str, name: str, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision: ...
+    def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]: ...
     def get_rule_set_revision(self, rule_set_id: UUID, revision: int) -> AlarmRuleSetRevision | None: ...
     def resolve_entities(self, installation_id: UUID, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]: ...
     def current_site_version(self) -> int: ...
@@ -290,6 +291,14 @@ class InMemoryAlarmConfigurationRepository:
         rule_set = self._rule_sets.get(rule_set_id)
         return None if rule_set is None else rule_set["revisions"].get(revision)
 
+    def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
+        revisions = (
+            revision
+            for rule_set in self._rule_sets.values()
+            for revision in rule_set["revisions"].values()
+        )
+        return tuple(sorted(revisions, key=lambda item: (item.key, item.revision)))
+
     def resolve_entities(self, installation_id: UUID, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]:
         if installation_id != self.current_installation_id:
             return ()
@@ -396,12 +405,22 @@ class AlarmConfiguration:
         _validate_rules(rules)
         previous = self.repository.get_rule_set_revision(rule_set_id, 1)
         if previous is None:
-            raise AlarmConfigurationError(f"unknown rule set: {rule_set_id}")
+            raise AlarmConfigurationError("ALARM_RULE_SET_NOT_FOUND")
         return self.repository.save_rule_set_revision(key=previous.key, name=previous.name, rules=rules, actor=actor)
+
+    def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
+        return self.repository.list_rule_set_revisions()
 
     def plan(self, command: PlanAlarmConfiguration) -> AlarmConfigurationPlan:
         if not command.planned_by.strip():
             raise AlarmConfigurationError("ALARM_PLAN_ACTOR_INVALID")
+        selection_values = (
+            command.selection.entity_instance_ids,
+            command.selection.device_instance_ids,
+            command.selection.entity_definition_ids,
+        )
+        if any(len(values) != len(set(values)) for values in selection_values):
+            raise AlarmConfigurationError("ALARM_RULE_CONFLICT")
         revision = self.repository.get_rule_set_revision(command.rule_set_id, command.rule_set_revision)
         if revision is None:
             raise AlarmConfigurationError("rule set revision not found")

@@ -4,7 +4,10 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import CONFIGURATION_READ, CONFIGURATION_WRITE, capability_metadata, principal_for, protected
@@ -12,7 +15,30 @@ from app.services.alarm_configuration import AlarmConfiguration, AlarmConfigurat
 from app.services.identity import Principal
 
 
-router = APIRouter()
+class AlarmConfigurationRoute(APIRoute):
+    """Give only this router a stable validation-error envelope."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def stable_validation_handler(request: Request):
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": {
+                            "code": "ALARM_CONFIGURATION_REQUEST_INVALID",
+                            "message": "Alarm configuration request is invalid",
+                        }
+                    },
+                )
+
+        return stable_validation_handler
+
+
+router = APIRouter(route_class=AlarmConfigurationRoute)
 _configuration: AlarmConfiguration | None = None
 
 
@@ -122,22 +148,36 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
         response_status = status.HTTP_404_NOT_FOUND
     elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED"}:
         response_status = status.HTTP_409_CONFLICT
-    elif code in {"AUDIT_UNAVAILABLE", "ALARM_PERSISTENCE_UNAVAILABLE"}:
+    elif (
+        code == "AUDIT_UNAVAILABLE"
+        or code.endswith("_PERSISTENCE_FAILED")
+        or code.endswith("_PERSISTENCE_UNAVAILABLE")
+    ):
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE
     return HTTPException(status_code=response_status, detail={"code": code, "message": raw_code})
 
 
 @router.get("/alarm-configurations", **protected(CONFIGURATION_READ))
 async def current_alarm_configuration(configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
-    context = configuration.repository.current_site_context()
+    try:
+        context = configuration.repository.current_site_context()
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
     return {"site_configuration_version": context["site_configuration_version"], "definitions": [{"definition_key": key, "id": str(record["id"]), "configuration": record["payload"]} for key, record in sorted(context["definitions"].items())]}
 
 
 @router.get("/alarm-rule-sets", **protected(CONFIGURATION_READ))
-async def list_alarm_rule_sets() -> dict[str, list[dict[str, Any]]]:
-    # Enumeration is deliberately deferred until the persistence migration adds
-    # a repository method; this secured route prevents a legacy read bypass.
-    return {"items": []}
+async def list_alarm_rule_sets(
+    configuration: AlarmConfiguration = Depends(get_alarm_configuration),
+) -> dict[str, list[dict[str, Any]]]:
+    try:
+        return {
+            "items": [
+                _revision(item) for item in configuration.list_rule_set_revisions()
+            ]
+        }
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
 
 
 @router.post("/alarm-rule-sets", status_code=status.HTTP_201_CREATED, openapi_extra=capability_metadata(CONFIGURATION_WRITE))

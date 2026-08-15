@@ -155,26 +155,35 @@ class PostgresAlarmConfigurationRepository:
 
     @contextmanager
     def _connection(self) -> Iterator[Any]:
-        if self._connection_factory is None:
-            from app.services.telemetry_store import get_connection
-
-            with get_connection() as connection:
-                try:
-                    yield connection
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
-            return
-        connection = self._connection_factory()
         try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
+            if self._connection_factory is None:
+                from app.services.telemetry_store import get_connection
+
+                with get_connection() as connection:
+                    try:
+                        yield connection
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                return
+            connection = self._connection_factory()
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        except AlarmConfigurationError:
             raise
-        finally:
-            connection.close()
+        except psycopg2.IntegrityError:
+            raise
+        except (psycopg2.Error, OSError) as error:
+            raise AlarmConfigurationError(
+                "ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE"
+            ) from error
 
     def save_rule_set_revision(
         self,
@@ -288,6 +297,31 @@ class PostgresAlarmConfigurationRepository:
             revision=revision,
             rules=tuple(_rule_from_json(value) for value in row[2]),
             digest=row[3].strip(),
+        )
+
+    def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT revision.rule_set_id, revision.rule_set_key,
+                           revision.rule_set_name, revision.revision,
+                           revision.rules, revision.digest
+                    FROM t_alarm_rule_set_revisions revision
+                    ORDER BY revision.rule_set_key, revision.revision
+                    """
+                )
+                rows = cursor.fetchall()
+        return tuple(
+            AlarmRuleSetRevision(
+                rule_set_id=row[0],
+                key=row[1],
+                name=row[2],
+                revision=int(row[3]),
+                rules=tuple(_rule_from_json(value) for value in row[4]),
+                digest=row[5].strip(),
+            )
+            for row in rows
         )
 
     def resolve_entities(

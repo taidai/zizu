@@ -17,6 +17,7 @@ from app.api.auth import router as auth_router
 from app.api.security import get_identity
 from app.services.alarm_configuration import (
     AlarmConfiguration,
+    AlarmConfigurationError,
     InMemoryAlarmConfigurationRepository,
     ResolvedAlarmEntity,
 )
@@ -162,6 +163,12 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(revision.status_code, 201, revision.text)
             self.assertEqual(revision.json()["revision"], 2)
+            listed = await client.get("/api/v1/alarm-rule-sets", headers=headers)
+            self.assertEqual(listed.status_code, 200, listed.text)
+            self.assertEqual(
+                [(item["key"], item["revision"]) for item in listed.json()["items"]],
+                [("power-high", 1), ("power-high", 2)],
+            )
             planned = await client.post(
                 "/api/v1/alarm-configuration-plans",
                 headers=headers,
@@ -199,6 +206,20 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("planned_by", current.text)
         self.assertNotIn("actor", current.text)
 
+    async def test_unknown_rule_set_revision_has_a_stable_not_found_error(self) -> None:
+        app, _identity_repository, _configuration = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            response = await client.post(
+                "/api/v1/alarm-rule-sets/40000000-0000-0000-0000-000000000099/revisions",
+                headers=headers,
+                json={"rules": []},
+            )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "ALARM_RULE_SET_NOT_FOUND")
+
     async def test_apply_requires_idempotency_key_and_rejects_reuse(self) -> None:
         app, _identity_repository, configuration = self.build_app()
         transport = httpx.ASGITransport(app=app)
@@ -225,10 +246,80 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             reused = await client.post(f"/api/v1/alarm-configuration-plans/{other_plan.json()['id']}/apply", headers={**headers, "Idempotency-Key": "shared-key"}, json={"plan_digest": other_plan.json()["digest"]})
 
         self.assertEqual(missing_key.status_code, 422, missing_key.text)
+        self.assertEqual(missing_key.json()["detail"]["code"], "ALARM_CONFIGURATION_REQUEST_INVALID")
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(reused.status_code, 409, reused.text)
         self.assertEqual(reused.json()["detail"]["code"], "IDEMPOTENCY_KEY_REUSED")
         self.assertEqual(configuration.repository.applied_count, 1)
+
+    async def test_request_validation_uses_the_stable_error_envelope(self) -> None:
+        app, _identity_repository, _configuration = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            response = await client.post(
+                "/api/v1/alarm-configuration-plans/40000000-0000-0000-0000-000000000099/apply",
+                headers={**headers, "Idempotency-Key": "validation"},
+                json={"plan_digest": "not-a-digest", "actor": "forged"},
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "detail": {
+                    "code": "ALARM_CONFIGURATION_REQUEST_INVALID",
+                    "message": "Alarm configuration request is invalid",
+                }
+            },
+        )
+
+    async def test_persistence_unavailability_has_a_stable_503_envelope(self) -> None:
+        app, _identity_repository, configuration = self.build_app()
+
+        def unavailable_context():
+            raise AlarmConfigurationError("ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE")
+
+        configuration.repository.current_site_context = unavailable_context
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            response = await client.get("/api/v1/alarm-configurations", headers=headers)
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE",
+        )
+
+    async def test_duplicate_selection_is_rejected_without_creating_a_plan(self) -> None:
+        app, _identity_repository, configuration = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        rule = {
+            "id": "duplicate", "name": "Duplicate", "severity": "MAJOR",
+            "trigger": {"operator": "gte", "value": 80}, "trigger_duration_seconds": 0,
+            "recovery": {"operator": "lte", "value": 70}, "recovery_duration_seconds": 0,
+            "notification_throttle_seconds": 0, "unit": "kW",
+        }
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            created = await client.post(
+                "/api/v1/alarm-rule-sets", headers=headers,
+                json={"key": "duplicate", "name": "Duplicate", "rules": [rule]},
+            )
+            response = await client.post(
+                "/api/v1/alarm-configuration-plans", headers=headers,
+                json={
+                    "installation_id": str(INSTALLATION_ID),
+                    "selection": {"entity_instance_ids": [str(ENTITY_IDS[0]), str(ENTITY_IDS[0])]},
+                    "rule_set_id": created.json()["rule_set_id"],
+                    "rule_set_revision": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "ALARM_RULE_CONFLICT")
+        self.assertEqual(configuration.repository.plans, [])
 
     async def test_plan_blocks_with_literal_stable_codes_without_apply_writes(self) -> None:
         cases = (
