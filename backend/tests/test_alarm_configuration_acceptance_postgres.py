@@ -374,7 +374,7 @@ class AlarmConfigurationAcceptancePostgresPublicTest(unittest.TestCase):
                 active_response.json()["summary"]["by_severity"],
             )
 
-            acknowledgement_ids = set()
+            acknowledgement_audit_by_event = {}
             for event in active_events:
                 acknowledgement = client.post(
                     f"/api/v1/alarm-events/{event['id']}/acknowledgements",
@@ -383,9 +383,12 @@ class AlarmConfigurationAcceptancePostgresPublicTest(unittest.TestCase):
                 )
                 self.assertEqual(200, acknowledgement.status_code, acknowledgement.text)
                 self.assertEqual("active_acknowledged", acknowledgement.json()["state"])
-                acknowledgement_ids.add(acknowledgement.json()["audit_event_id"])
-            self.assertEqual(6, len(acknowledgement_ids))
-            self.assertNotIn(None, acknowledgement_ids)
+                self.assertEqual(event["id"], acknowledgement.json()["event_id"])
+                acknowledgement_audit_by_event[event["id"]] = (
+                    acknowledgement.json()["audit_event_id"]
+                )
+            self.assertEqual(6, len(acknowledgement_audit_by_event))
+            self.assertNotIn(None, acknowledgement_audit_by_event.values())
 
             recovery_ms = round(time.time() * 1000) + 100
             for offset in (0, 2_100):
@@ -428,6 +431,15 @@ class AlarmConfigurationAcceptancePostgresPublicTest(unittest.TestCase):
                     ],
                     [item["code"] for item in timeline.json()["items"]],
                 )
+                acknowledgement_transition = next(
+                    item
+                    for item in timeline.json()["items"]
+                    if item["code"] == "ALARM_ACKNOWLEDGED"
+                )
+                self.assertEqual(
+                    acknowledgement_audit_by_event[event["id"]],
+                    acknowledgement_transition["audit_event_id"],
+                )
 
             acceptance_response = client.post(
                 f"/api/v1/alarm-configuration-applications/{applied['id']}/acceptance",
@@ -441,10 +453,44 @@ class AlarmConfigurationAcceptancePostgresPublicTest(unittest.TestCase):
                 {"ALARM_ACCEPTANCE_PASSED"},
                 {item["code"] for item in report["items"]},
             )
+            recovered_by_definition = {
+                event["definition_id"]: event for event in recovered_events
+            }
+            self.assertEqual(6, len(recovered_by_definition))
+            report_by_definition = {
+                item["definition_id"]: item for item in report["items"]
+            }
+            self.assertEqual(6, len(report_by_definition))
             self.assertEqual(
-                set(applied["definition_ids"]),
-                {item["definition_id"] for item in report["items"]},
+                sorted(applied["definition_ids"]),
+                sorted(report_by_definition),
             )
+            self.assertEqual(
+                sorted(recovered_by_definition),
+                sorted(report_by_definition),
+            )
+            for definition_id, event in recovered_by_definition.items():
+                item = report_by_definition[definition_id]
+                self.assertEqual(event["id"], item["event_id"])
+                self.assertEqual("recovered", item["event_state"])
+                self.assertEqual(
+                    [
+                        "ALARM_ACTIVATED",
+                        "ALARM_ACKNOWLEDGED",
+                        "ALARM_RECOVERED",
+                    ],
+                    item["transition_codes"],
+                )
+                self.assertEqual(
+                    acknowledgement_audit_by_event[event["id"]],
+                    item["acknowledgement_audit_event_id"],
+                )
+            immediate_replay = client.post(
+                f"/api/v1/alarm-configuration-applications/{applied['id']}/acceptance",
+                headers={**engineer, "Idempotency-Key": "public-six-acceptance"},
+            )
+            self.assertEqual(200, immediate_replay.status_code, immediate_replay.text)
+            self.assertEqual(report, immediate_replay.json())
 
         self._stop_server()
         self._start_server()
@@ -454,6 +500,13 @@ class AlarmConfigurationAcceptancePostgresPublicTest(unittest.TestCase):
             trust_env=False,
         ) as restarted:
             operator = self._login(restarted, "acceptance-operator")
+            engineer = self._login(restarted, "acceptance-engineer")
+            restarted_replay = restarted.post(
+                f"/api/v1/alarm-configuration-applications/{applied['id']}/acceptance",
+                headers={**engineer, "Idempotency-Key": "public-six-acceptance"},
+            )
+            self.assertEqual(200, restarted_replay.status_code, restarted_replay.text)
+            self.assertEqual(report, restarted_replay.json())
             persisted_report = restarted.get(
                 f"/api/v1/alarm-configuration-reports/{report['id']}",
                 headers=operator,
