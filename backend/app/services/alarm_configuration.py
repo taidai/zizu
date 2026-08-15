@@ -611,7 +611,24 @@ class InMemoryAlarmConfigurationRepository:
         return self._plans_by_id.get(plan_id)
 
     def current_site_context(self) -> dict[str, Any]:
-        return {"site_configuration_version": self._site_version, "definitions": deepcopy(self._definitions)}
+        entities = {str(entity.id): entity for entity in self._entities}
+        definitions = deepcopy(self._definitions)
+        for record in definitions.values():
+            payload = record["payload"]
+            entity = entities.get(payload["entity_instance_id"])
+            rule = payload["rule"]
+            record.update({
+                "entity_display_name": entity.display_name if entity else "已确认实体实例",
+                "rule_name": rule["name"],
+                "severity": rule["severity"],
+                "trigger": rule["trigger"],
+                "recovery": rule["recovery"],
+                "source": "规则集",
+                "definition_version": f"site-{self._site_version}",
+                "enabled": True,
+                "status": "current",
+            })
+        return {"site_configuration_version": self._site_version, "definitions": definitions}
 
     def find_idempotency(self, actor: str, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None:
         return self._idempotency.get((actor, idempotency_key))

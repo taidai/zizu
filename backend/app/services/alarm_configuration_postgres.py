@@ -484,7 +484,7 @@ class PostgresAlarmConfigurationRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT definition.asset_id, definition.id,
+                    SELECT definition.asset_id, definition.id, definition.definition_version,
                            definition.entity_instance_id,
                            definition.trigger_condition,
                            definition.trigger_duration_seconds,
@@ -492,7 +492,7 @@ class PostgresAlarmConfigurationRepository:
                            definition.recovery_duration_seconds,
                            definition.severity,
                            definition.notification_throttle_seconds,
-                           entity.unit, origin.details
+                            entity.unit, entity.display_name, origin.origin_type, origin.details
                     FROM t_alarm_definition_current current_definition
                     JOIN t_alarm_definitions definition
                       ON definition.id = current_definition.definition_id
@@ -509,25 +509,34 @@ class PostgresAlarmConfigurationRepository:
                 )
                 site_version = int(cursor.fetchone()[0])
         for row in rows:
-            origin_rule = (row[10] or {}).get("rule")
+            origin_rule = (row[13] or {}).get("rule")
             rule = origin_rule or {
                 "id": row[0].rsplit(".", 1)[-1],
                 "name": row[0],
-                "severity": row[7],
-                "trigger": row[3],
-                "trigger_duration_seconds": row[4],
-                "recovery": row[5],
-                "recovery_duration_seconds": row[6],
-                "notification_throttle_seconds": row[8],
-                "unit": row[9],
+                "severity": row[8],
+                "trigger": row[4],
+                "trigger_duration_seconds": row[5],
+                "recovery": row[6],
+                "recovery_duration_seconds": row[7],
+                "notification_throttle_seconds": row[9],
+                "unit": row[10],
                 "fault_map_id": None,
             }
             definitions[row[0]] = {
                 "id": row[1],
                 "payload": {
                     "rule": rule,
-                    "entity_instance_id": str(row[2]),
+                    "entity_instance_id": str(row[3]),
                 },
+                "entity_display_name": row[11],
+                "rule_name": rule["name"],
+                "severity": rule["severity"],
+                "trigger": rule["trigger"],
+                "recovery": rule["recovery"],
+                "source": row[12],
+                "definition_version": row[2],
+                "enabled": True,
+                "status": "current",
             }
         return {
             "site_configuration_version": site_version,

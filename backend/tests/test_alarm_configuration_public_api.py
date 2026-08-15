@@ -240,6 +240,12 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(configuration.repository.applied_count, 1)
         self.assertEqual(current.status_code, 200, current.text)
         self.assertEqual(len(current.json()["definitions"]), 4)
+        definition = current.json()["definitions"][0]
+        self.assertTrue(definition["entity_display_name"].startswith("PCS "))
+        self.assertTrue(definition["rule_name"])
+        self.assertIn(definition["severity"], {"CRITICAL", "MAJOR"})
+        self.assertEqual(definition["status"], "current")
+        self.assertNotIn("configuration", definition)
         self.assertNotIn("planned_by", current.text)
         self.assertNotIn("actor", current.text)
 
@@ -508,6 +514,10 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(items[("tag_alarm", "tag-ready")]["status"], "ready")
         self.assertEqual(items[("tag_alarm", "tag-ready")]["severity"], "CRITICAL")
+        self.assertIn(
+            items[("tag_alarm", "tag-ready")]["proposed_rule"]["trigger"]["operator"],
+            {"eq", "ne", "gt", "gte", "lt", "lte"},
+        )
         self.assertEqual(
             items[("tag_alarm", "tag-unresolved")]["blockers"][0]["code"],
             "ALARM_ENTITY_UNRESOLVED",

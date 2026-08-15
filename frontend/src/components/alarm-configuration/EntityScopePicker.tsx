@@ -20,14 +20,15 @@ function toggle(values: string[], value: string): string[] {
 
 export default function EntityScopePicker({ entities, value, onChange, disabled }: Props) {
   const [query, setQuery] = useState('')
+  const confirmedEntities = useMemo(() => entities.filter((entity) => entity.confirmed), [entities])
   const visibleEntities = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase('zh-CN')
-    if (!normalized) return entities
-    return entities.filter((item) => [item.display_name, item.device_display_name, item.definition_id, item.instance_key]
+    if (!normalized) return confirmedEntities
+    return confirmedEntities.filter((item) => [item.display_name, item.device_display_name, item.definition_id, item.instance_key]
       .filter(Boolean).some((text) => text.toLocaleLowerCase('zh-CN').includes(normalized)))
-  }, [entities, query])
-  const devices = useMemo(() => Array.from(new Map(entities.map((item) => [item.device_instance_id, item.device_display_name])).entries()), [entities])
-  const definitions = useMemo(() => Array.from(new Map(entities.map((item) => [item.definition_id, item.display_name])).entries()).sort((left, right) => left[1].localeCompare(right[1], 'zh-CN')), [entities])
+  }, [confirmedEntities, query])
+  const devices = useMemo(() => Array.from(new Map(confirmedEntities.map((item) => [item.device_instance_id, item.device_display_name])).entries()), [confirmedEntities])
+  const definitions = useMemo(() => Array.from(new Map(confirmedEntities.map((item) => [item.definition_id, item.display_name])).entries()).sort((left, right) => left[1].localeCompare(right[1], 'zh-CN')), [confirmedEntities])
 
   const update = (patch: Partial<AlarmEntityScope>) => onChange({ ...value, ...patch })
   const selectedCount = new Set(value.entity_instance_ids).size + new Set(value.device_instance_ids).size + new Set(value.entity_definition_ids).size

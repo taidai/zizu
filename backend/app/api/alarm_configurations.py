@@ -151,6 +151,7 @@ def _plan(plan: AlarmConfigurationPlan) -> dict[str, Any]:
 
 
 def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any]:
+    proposed = candidate.definitions[0] if candidate.definitions else None
     return {
         "source_kind": candidate.source_kind,
         "source_key": candidate.source_key,
@@ -169,6 +170,12 @@ def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any
         "target_definition_ids": [
             str(value) for value in candidate.target_definition_ids
         ],
+        "proposed_rule": None if proposed is None else {
+            "name": candidate.display_name,
+            "severity": proposed.severity,
+            "trigger": {"operator": proposed.trigger["op"], "value": proposed.trigger["value"]},
+            "recovery": {"operator": proposed.recovery["op"], "value": proposed.recovery["value"]},
+        },
     }
 
 
@@ -208,7 +215,20 @@ async def current_alarm_configuration(configuration: AlarmConfiguration = Depend
         context = configuration.repository.current_site_context()
     except AlarmConfigurationError as error:
         raise _error(error) from error
-    return {"site_configuration_version": context["site_configuration_version"], "definitions": [{"definition_key": key, "id": str(record["id"]), "configuration": record["payload"]} for key, record in sorted(context["definitions"].items())]}
+    return {"site_configuration_version": context["site_configuration_version"], "definitions": [
+        {
+            "entity_display_name": record["entity_display_name"],
+            "rule_name": record["rule_name"],
+            "severity": record["severity"],
+            "trigger": record["trigger"],
+            "recovery": record["recovery"],
+            "source": record["source"],
+            "definition_version": record["definition_version"],
+            "enabled": record["enabled"],
+            "status": record["status"],
+        }
+        for _key, record in sorted(context["definitions"].items())
+    ]}
 
 
 @router.get("/alarm-rule-sets", **protected(CONFIGURATION_READ))

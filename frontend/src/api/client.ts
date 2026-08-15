@@ -140,10 +140,6 @@ export interface Tag {
   formula: string | null
   formula_type: string | null
   sources: string[] | null
-  alarm_level: string | null
-  alarm_type: string | null
-  alarm_threshold: number | null
-  fault_map_id: string | null
   fault_map_name: string | null
 }
 
@@ -890,8 +886,6 @@ export interface Alarm {
   source_topic?: string | null
   source_key?: string | null
   external_id?: string | null
-  alarm_type?: string | null
-  alarm_threshold?: number | null
   alarm_source?: string | null
   alarm_count?: number | null
   alarm_code?: string | null
@@ -1040,14 +1034,18 @@ export interface AlarmRuleSetRevision {
   digest: string
 }
 
+export interface AlarmBlocker { code: string; message: string }
+export type AlarmPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
+export type AlarmPlanStatus = 'ready' | 'blocked' | 'applied'
+
 export interface AlarmConfigurationPlanItem {
   definition_key: string
   entity_instance_id: string
   rule_id: string
-  action: 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block' | string
+  action: AlarmPlanAction
   before: unknown
   after: unknown
-  blockers: string[]
+  blockers: AlarmBlocker[]
 }
 
 export interface AlarmConfigurationPlan {
@@ -1055,9 +1053,9 @@ export interface AlarmConfigurationPlan {
   installation_id: string
   base_site_configuration_version: number
   rule_set_revision: AlarmRuleSetRevision
-  status: 'ready' | 'blocked' | string
+  status: AlarmPlanStatus
   items: AlarmConfigurationPlanItem[]
-  blockers: string[]
+  blockers: AlarmBlocker[]
   digest: string
 }
 
@@ -1065,26 +1063,30 @@ export interface LegacyAlarmMigrationCandidate {
   source_kind: 'tag_alarm' | 'entity_alarm_binding'
   source_key: string
   display_name: string
-  status: 'ready' | 'ambiguous' | 'blocked' | string
+  status: 'ready' | 'blocked' | 'migrated'
   severity: AlarmSeverity | null
   entity_instance_id: string | null
   entity_instance_candidates: string[]
-  blockers: string[]
+  blockers: AlarmBlocker[]
   target_definition_ids: string[]
+  proposed_rule: { name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition } | null
 }
 
 export interface LegacyAlarmMigrationPlan {
   installation_id: string
-  status: 'ready' | 'blocked' | string
+  status: 'ready' | 'blocked' | 'migrated'
   items: LegacyAlarmMigrationCandidate[]
-  blockers: string[]
+  blockers: AlarmBlocker[]
   digest: string
   target_definition_ids: string[]
 }
 
 export interface AlarmConfigurationCurrent {
   site_configuration_version: number
-  definitions: { definition_key: string; id: string; configuration: unknown }[]
+  definitions: {
+    entity_display_name: string; rule_name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition
+    source: string; definition_version: string; enabled: boolean; status: 'current'
+  }[]
 }
 
 export interface AlarmConfigurationApplyResult {
@@ -1170,6 +1172,12 @@ export async function createAlarmConfigurationPlan(input: {
   return response.json()
 }
 
+export async function getAlarmConfigurationPlan(planId: string): Promise<AlarmConfigurationPlan> {
+  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取配置计划失败：${response.status}`)
+  return response.json()
+}
+
 export async function applyAlarmConfigurationPlan(planId: string, planDigest: string, idempotencyKey: string): Promise<AlarmConfigurationApplyResult> {
   const response = await apiFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}/apply`, {
     method: 'POST',
@@ -1212,6 +1220,7 @@ export interface EntityInstance {
   unit: string | null
   direction: 'R' | 'W' | 'RW'
   freshness_seconds: number
+  confirmed: boolean
 }
 
 export interface ControlCommand {

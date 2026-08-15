@@ -24,7 +24,7 @@ export function ruleValidation(rules: AlarmRule[]): string | null {
   if (ids.some((id) => !id)) return '每条规则都需要稳定标识。'
   if (new Set(ids).size !== ids.length) return '规则稳定标识不能重复。'
   if (rules.some((rule) => !rule.name.trim())) return '每条规则都需要名称。'
-  if (rules.some((rule) => [rule.trigger.value, rule.recovery.value, rule.trigger_duration_seconds, rule.recovery_duration_seconds, rule.notification_throttle_seconds].some((value) => !Number.isFinite(value) || value < 0))) return '阈值和持续时间必须为非负数字。'
+  if (rules.some((rule) => [rule.trigger.value, rule.recovery.value].some((value) => !Number.isFinite(value)) || [rule.trigger_duration_seconds, rule.recovery_duration_seconds, rule.notification_throttle_seconds].some((value) => !Number.isFinite(value) || value < 0))) return '阈值必须为有限数字，持续时间和通知间隔必须为非负数字。'
   return null
 }
 

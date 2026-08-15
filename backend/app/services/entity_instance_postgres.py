@@ -410,12 +410,13 @@ class PostgresEntityInstanceRepository:
                            ei.freshness_seconds
                     FROM t_entity_instances ei
                     JOIN t_device_instances di ON di.id = ei.device_instance_id
+                    JOIN t_entity_instance_bindings binding
+                      ON binding.entity_instance_id = ei.id AND binding.active = TRUE
+                    JOIN t_entity_binding_confirmations confirmation
+                      ON confirmation.id = binding.confirmation_audit_id
+                     AND confirmation.entity_instance_id = binding.entity_instance_id
+                     AND confirmation.binding_id = binding.id
                     WHERE ei.active = TRUE AND di.active = TRUE
-                      AND EXISTS (
-                        SELECT 1 FROM t_entity_instance_bindings binding
-                        WHERE binding.entity_instance_id = ei.id
-                          AND binding.active = TRUE
-                      )
                     ORDER BY di.instance_key, ei.definition_id
                     """
                 )

@@ -31,6 +31,7 @@ class EntityInstanceDescriptor:
         value = asdict(self)
         value["id"] = str(self.id)
         value["device_instance_id"] = str(self.device_instance_id)
+        value["confirmed"] = True
         return value
 
 
