@@ -10,6 +10,23 @@ from uuid import UUID, uuid4
 Severity = Literal["CRITICAL", "MAJOR", "WARNING", "INFO"]
 
 
+class _FrozenDict(dict[str, Any]):
+    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("mapping is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenDict({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
 class AlarmConfigurationError(ValueError):
     """Raised when an alarm configuration cannot be planned safely."""
 
@@ -28,8 +45,8 @@ class AlarmRule:
     fault_map_id: UUID | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "trigger", deepcopy(self.trigger))
-        object.__setattr__(self, "recovery", deepcopy(self.recovery))
+        object.__setattr__(self, "trigger", _freeze(deepcopy(self.trigger)))
+        object.__setattr__(self, "recovery", _freeze(deepcopy(self.recovery)))
 
 
 @dataclass(frozen=True)
@@ -124,7 +141,18 @@ def _rule_payload(rule: AlarmRule) -> dict[str, Any]:
 
 
 def _clone_rule(rule: AlarmRule) -> AlarmRule:
-    return AlarmRule(**deepcopy(asdict(rule)))
+    return AlarmRule(
+        id=rule.id,
+        name=rule.name,
+        severity=rule.severity,
+        trigger=deepcopy(dict(rule.trigger)),
+        trigger_duration_seconds=rule.trigger_duration_seconds,
+        recovery=deepcopy(dict(rule.recovery)),
+        recovery_duration_seconds=rule.recovery_duration_seconds,
+        notification_throttle_seconds=rule.notification_throttle_seconds,
+        unit=rule.unit,
+        fault_map_id=rule.fault_map_id,
+    )
 
 
 def _validate_rules(rules: tuple[AlarmRule, ...]) -> None:
@@ -201,9 +229,11 @@ class AlarmConfiguration:
         self.repository = repository
 
     def create_rule_set(self, *, key: str, name: str, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision:
+        _validate_rules(rules)
         return self.repository.save_rule_set_revision(key=key, name=name, rules=rules, actor=actor)
 
     def create_rule_set_revision(self, *, rule_set_id: UUID, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision:
+        _validate_rules(rules)
         previous = self.repository.get_rule_set_revision(rule_set_id, 1)
         if previous is None:
             raise AlarmConfigurationError(f"unknown rule set: {rule_set_id}")

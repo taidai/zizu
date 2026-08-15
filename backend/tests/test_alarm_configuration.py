@@ -13,6 +13,11 @@ from app.services.alarm_configuration import (
 )
 
 
+class UncheckedRepository(InMemoryAlarmConfigurationRepository):
+    def save_rule_set_revision(self, *, key, name, rules, actor):
+        raise AssertionError("service must reject invalid rules before repository")
+
+
 def rule(rule_id: str, severity: str, trigger_operator: str, trigger_value: float, recovery_operator: str, recovery_value: float) -> AlarmRule:
     return AlarmRule(
         id=rule_id,
@@ -189,6 +194,26 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         ),), actor="user:engineer")
         trigger["value"] = 999
         self.assertEqual(450, created.rules[0].trigger["value"])
+
+    def test_service_seam_validates_rules_even_when_repository_does_not(self) -> None:
+        service, _ = configured_service()
+        service.repository = UncheckedRepository(installation_id=uuid4(), entities=())
+        invalid = (
+            (rule("", "WARNING", "gt", 1, "lte", 0),),
+            (rule("same", "WARNING", "gt", 1, "lte", 0), rule("same", "MAJOR", "gt", 2, "lte", 1)),
+            (rule("bad", "INVALID", "gt", 1, "lte", 0),),
+        )
+        for rules in invalid:
+            with self.assertRaises(ValueError):
+                service.create_rule_set(key="service-check", name="Invalid", rules=rules, actor="user:engineer")
+
+    def test_nested_revision_conditions_are_truly_immutable(self) -> None:
+        service, _ = configured_service()
+        revision = service.create_rule_set(
+            key="frozen", name="Frozen", rules=(rule("warning", "WARNING", "gt", 450, "lte", 430),), actor="user:engineer"
+        )
+        with self.assertRaises(TypeError):
+            revision.rules[0].trigger["value"] = 999
 
 
 if __name__ == "__main__":
