@@ -1461,9 +1461,15 @@ class PostgresAlarmConfigurationRepository:
                     site_configuration_version=next_version,
                     entity_instance_id=item.entity_instance_id,
                     entity_definition_id=entity_definitions[item.entity_instance_id],
-                    trigger=dict(rule["trigger"]),
+                    trigger={
+                        "op": rule["trigger"]["operator"],
+                        "value": rule["trigger"]["value"],
+                    },
                     trigger_duration_seconds=rule["trigger_duration_seconds"],
-                    recovery=dict(rule["recovery"]),
+                    recovery={
+                        "op": rule["recovery"]["operator"],
+                        "value": rule["recovery"]["value"],
+                    },
                     recovery_duration_seconds=rule["recovery_duration_seconds"],
                     severity=rule["severity"],
                     notification_throttle_seconds=rule[

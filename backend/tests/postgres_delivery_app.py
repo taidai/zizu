@@ -9,6 +9,7 @@ from app.api.health import router as health_router
 from app.api.solution_delivery import router as solution_delivery_router
 from app.api.entity_instances import router as entity_instances_router
 from app.api.alarm_events import router as alarm_events_router
+from app.api.alarm_configurations import router as alarm_configurations_router
 from app.api.control_commands import router as control_commands_router
 from app.api.neuron import router as neuron_router
 from app.api.rpc import router as rpc_router
@@ -26,6 +27,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(solution_delivery_router, prefix="/api/v1")
 app.include_router(entity_instances_router, prefix="/api/v1")
 app.include_router(alarm_events_router, prefix="/api/v1")
+app.include_router(alarm_configurations_router, prefix="/api/v1")
 app.include_router(control_commands_router, prefix="/api/v1")
 app.include_router(neuron_router, prefix="/api/v1")
 app.include_router(rpc_router, prefix="/api/v1")
