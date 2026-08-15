@@ -20,7 +20,7 @@ FROM node:22-alpine AS frontend-builder
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --prefer-offline
+RUN npm ci --prefer-offline --no-audit --no-fund --fetch-retries=2 --fetch-timeout=120000
 
 COPY VERSION /app/VERSION
 COPY frontend/ ./

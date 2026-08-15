@@ -24,6 +24,10 @@ class ReleaseImageBuildTest(unittest.TestCase):
             dockerfile.index("COPY VERSION /app/VERSION"),
             dockerfile.index("RUN npm run build"),
         )
+        self.assertIn(
+            "RUN npm ci --prefer-offline --no-audit --no-fund --fetch-retries=2 --fetch-timeout=120000",
+            dockerfile,
+        )
         self.assertIn("COPY init-db ./init-db", dockerfile)
         migration = REPO_ROOT / "init-db" / "migration_032_release_locks.sql"
         self.assertTrue(migration.exists())
