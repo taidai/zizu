@@ -1,5 +1,32 @@
 ---
 
+## Session 2026-08-16 — 统一告警配置实现停在安全断路门
+
+### 已完成
+
+- 维护者确认“告警等级融合到告警配置”的统一模型与可视化方案：固定四级严重度、批量实体范围、
+  批量规则、最多 2,000 条展开定义、计划预览、原子幂等应用和旧配置显式迁移。
+- 独立分支 `ticket/unified-alarm-configuration` 已完成纯领域编译器、计划 diff、PostgreSQL
+  migration 034/035、事务/并发/重启、九条 RBAC API、legacy 只读迁移与 contract gate，以及单一
+  前端告警配置工作台。没有合并、推送或部署。
+- 完整后端在 Task 5 收口时为 281 passed、23 skipped、189 subtests；后续前端修复定向后端
+  59/59、Node 契约 3/3、TypeScript、Vite build、compileall 与 diff-check 均通过。
+
+### 当前阻断
+
+- Task 6 经 5 轮独立复审仍有一个 load-bearing 安全缺口：legacy `eq/ne` 规则的 value 若为
+  dict/list/null，服务端仍会把对象条件标为可迁移并写入统一定义。必须只接受 finite number、
+  string 或 boolean；其他值稳定返回 `ALARM_LEGACY_RULE_UNSUPPORTED` 且零写。
+- 按 SDD 五轮断路规则已停止继续修改，等待维护者授权一次专门安全修复。修复并复审通过后才能
+  继续 Task 7 文档/全量门禁和 companion alarm acceptance plan。验收迁移编号已顺延为 036。
+
+### 位置
+
+- 工作树：`C:\Users\chent\Documents\zizu-alarm-config`
+- 设计：`docs/superpowers/specs/2026-08-15-unified-alarm-configuration-design.md`
+- 实施计划：`docs/superpowers/plans/2026-08-15-unified-alarm-configuration-implementation.md`
+- SDD ledger：`.superpowers/sdd/2026-08-15-unified-alarm-configuration-implementation/progress.md`
+
 ## Session 2026-08-15 — 交付试验向导规格已确认
 
 ### 已完成
