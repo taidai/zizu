@@ -80,7 +80,15 @@ class _InMemoryApplicationAcceptance:
         applied = self._applications.get(command.application_id)
         if applied is None:
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND")
-        return self._acceptance.run(command, applied)
+        latest = max(
+            self._applications.values(),
+            key=lambda application: (application.applied_at, str(application.id)),
+        )
+        return self._acceptance.run(
+            command,
+            applied,
+            latest_application_id=latest.id,
+        )
 
     def get(self, report_id: UUID):
         return self._acceptance.get(report_id)
@@ -221,7 +229,7 @@ class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase
     async def test_authorization_and_public_report_contract(self) -> None:
         app, _acceptance = self.build_app()
         transport = httpx.ASGITransport(app=app)
-        first_path = f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[0]}/acceptance"
+        first_path = f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[1]}/acceptance"
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
             anonymous_post = await client.post(first_path, headers={"Idempotency-Key": "anonymous"})
             anonymous_get = await client.get(f"/api/v1/alarm-configuration-reports/{UUID(int=900)}")
@@ -266,7 +274,7 @@ class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase
         for response in (engineer, operator_get, engineer_get, admin, admin_get):
             self.assertEqual(200, response.status_code, response.text)
         report = operator_get.json()
-        self.assertEqual(str(APPLICATION_IDS[0]), report["application_id"])
+        self.assertEqual(str(APPLICATION_IDS[1]), report["application_id"])
         self.assertEqual("passed", report["status"])
         self.assertEqual("ALARM_ACCEPTANCE_PASSED", report["items"][0]["code"])
         self.assertEqual(64, len(report["digest"]))
@@ -283,15 +291,15 @@ class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
             headers = await self.login(client, "engineer")
             first = await client.post(
-                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[0]}/acceptance",
+                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[1]}/acceptance",
                 headers={**headers, "Idempotency-Key": "shared-acceptance-key"},
             )
             replay = await client.post(
-                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[0]}/acceptance",
+                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[1]}/acceptance",
                 headers={**headers, "Idempotency-Key": "shared-acceptance-key"},
             )
             reused = await client.post(
-                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[1]}/acceptance",
+                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[0]}/acceptance",
                 headers={**headers, "Idempotency-Key": "shared-acceptance-key"},
             )
 
@@ -327,6 +335,46 @@ class AlarmConfigurationAcceptancePublicApiTest(unittest.IsolatedAsyncioTestCase
         self.assertNotIn("id", progress)
         self.assertNotIn("digest", progress)
         self.assertEqual(0, acceptance.run_calls)
+
+    async def test_latest_progress_references_existing_immutable_report(self) -> None:
+        app, _acceptance = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        path = "/api/v1/alarm-configuration-applications/latest/acceptance-progress"
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            created = await client.post(
+                f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[1]}/acceptance",
+                headers={**headers, "Idempotency-Key": "progress-report-reference"},
+            )
+            progress = await client.get(path, headers=headers)
+
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(200, progress.status_code, progress.text)
+        self.assertEqual(created.json()["id"], progress.json()["report_id"])
+        self.assertEqual("passed", progress.json()["report_status"])
+        self.assertEqual(created.json()["digest"], progress.json()["report_digest"])
+
+    async def test_stale_application_is_rejected_without_creating_report(self) -> None:
+        app, _acceptance = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        path = f"/api/v1/alarm-configuration-applications/{APPLICATION_IDS[0]}/acceptance"
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            stale = await client.post(
+                path,
+                headers={**headers, "Idempotency-Key": "stale-public-application"},
+            )
+            progress = await client.get(
+                "/api/v1/alarm-configuration-applications/latest/acceptance-progress",
+                headers=headers,
+            )
+
+        self.assertEqual(422, stale.status_code, stale.text)
+        self.assertEqual(
+            "ALARM_ACCEPTANCE_APPLICATION_STALE",
+            stale.json()["detail"]["code"],
+        )
+        self.assertIsNone(progress.json()["report_id"])
 
 
 @unittest.skipUnless(
@@ -544,7 +592,12 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
                 )
                 canonical, applied = cursor.fetchone()
                 canonical.update({"id": str(clone_plan_id), "digest": "f" * 64})
-                applied.update({"id": str(clone_application_id), "plan_id": str(clone_plan_id)})
+                clone_applied_at = result.applied_at + timedelta(seconds=1)
+                applied.update({
+                    "id": str(clone_application_id),
+                    "plan_id": str(clone_plan_id),
+                    "applied_at": clone_applied_at.isoformat(),
+                })
                 cursor.execute(
                     """
                     INSERT INTO t_alarm_configuration_plans
@@ -553,12 +606,12 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
                        planned_by, applied_by, applied_result, applied_at, application_id)
                     SELECT %s, source_installation_id, base_site_configuration_version,
                            rule_set_id, rule_set_revision, %s, %s, 'applied',
-                           planned_by, applied_by, %s, applied_at, %s
+                           planned_by, applied_by, %s, %s, %s
                     FROM t_alarm_configuration_plans WHERE id = %s
                     """,
                     (
                         clone_plan_id, Json(canonical), "f" * 64,
-                        Json(applied), clone_application_id, plan.id,
+                        Json(applied), clone_applied_at, clone_application_id, plan.id,
                     ),
                 )
         return clone_application_id
@@ -654,7 +707,7 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
             connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
         )
         command = RunAlarmConfigurationAcceptance(
-            result.id, "user:engineer", "shared-real-key"
+            other_application_id, "user:engineer", "shared-real-key"
         )
         start = Barrier(2)
 
@@ -667,7 +720,7 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
         self.assertEqual(reports[0], reports[1])
         with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "IDEMPOTENCY_KEY_REUSED"):
             service.run(RunAlarmConfigurationAcceptance(
-                other_application_id, "user:engineer", "shared-real-key"
+                result.id, "user:engineer", "shared-real-key"
             ))
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -694,6 +747,105 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first.ready_to_report)
         self.assertEqual("passed", first.items[0].stage)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_alarm_configuration_reports")
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_alarm_configuration_acceptance_idempotency")
+                self.assertEqual(0, cursor.fetchone()[0])
+
+        from app.services.alarm_configuration_acceptance import (
+            RunAlarmConfigurationAcceptance,
+        )
+
+        report = service.run(RunAlarmConfigurationAcceptance(
+            result.id,
+            "user:engineer",
+            "progress-report-reference",
+        ))
+        linked = service.progress()
+        self.assertEqual(report.id, linked.report_id)
+        self.assertEqual(report.status, linked.report_status)
+        self.assertEqual(report.digest, linked.report_digest)
+
+    def test_concurrent_newer_application_makes_old_run_stale_without_writes(self) -> None:
+        self._apply_036()
+        plan, result = self._create_applied_configuration()
+        self._insert_recovered_evidence(result)
+        from app.services.alarm_configuration_acceptance import (
+            AlarmConfigurationAcceptanceError,
+            RunAlarmConfigurationAcceptance,
+        )
+        from app.services.alarm_configuration_acceptance_postgres import (
+            PostgresAlarmConfigurationAcceptance,
+        )
+
+        blocker = psycopg2.connect(**self.connection_kwargs)
+        blocker.autocommit = False
+        try:
+            with blocker.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_version FROM t_site_configuration_state WHERE singleton = TRUE FOR UPDATE"
+                )
+                cursor.execute(
+                    "SELECT canonical_plan, applied_result FROM t_alarm_configuration_plans WHERE id = %s",
+                    (plan.id,),
+                )
+                canonical, applied = cursor.fetchone()
+                clone_plan_id = uuid4()
+                clone_application_id = uuid4()
+                canonical.update({"id": str(clone_plan_id), "digest": "d" * 64})
+                applied.update({
+                    "id": str(clone_application_id),
+                    "plan_id": str(clone_plan_id),
+                    "applied_at": (result.applied_at + timedelta(seconds=1)).isoformat(),
+                })
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_configuration_plans
+                      (id, source_installation_id, base_site_configuration_version,
+                       rule_set_id, rule_set_revision, canonical_plan, digest, status,
+                       planned_by, applied_by, applied_result, applied_at, application_id)
+                    SELECT %s, source_installation_id, base_site_configuration_version,
+                           rule_set_id, rule_set_revision, %s, %s, 'applied',
+                           planned_by, applied_by, %s, %s, %s
+                    FROM t_alarm_configuration_plans WHERE id = %s
+                    """,
+                    (
+                        clone_plan_id,
+                        Json(canonical),
+                        "d" * 64,
+                        Json(applied),
+                        result.applied_at + timedelta(seconds=1),
+                        clone_application_id,
+                        plan.id,
+                    ),
+                )
+
+            service = PostgresAlarmConfigurationAcceptance(
+                connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    service.run,
+                    RunAlarmConfigurationAcceptance(
+                        result.id,
+                        "user:engineer",
+                        "concurrent-stale-application",
+                    ),
+                )
+                with self.assertRaises(TimeoutError):
+                    future.result(timeout=0.2)
+                blocker.commit()
+                with self.assertRaisesRegex(
+                    AlarmConfigurationAcceptanceError,
+                    "ALARM_ACCEPTANCE_APPLICATION_STALE",
+                ):
+                    future.result(timeout=5)
+        finally:
+            blocker.rollback()
+            blocker.close()
+
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT count(*) FROM t_alarm_configuration_reports")

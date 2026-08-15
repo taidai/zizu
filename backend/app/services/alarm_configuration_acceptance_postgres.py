@@ -244,6 +244,24 @@ class PostgresAlarmConfigurationAcceptanceRepository:
         item = next(item for item in report.items if item.definition_id == definition_id)
         return report, item
 
+    def latest_for_application(
+        self,
+        application_id: UUID,
+    ) -> AlarmConfigurationAcceptanceReport | None:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT report
+                FROM t_alarm_configuration_reports
+                WHERE application_id = %s
+                ORDER BY finished_at DESC, id DESC
+                LIMIT 1
+                """,
+                (application_id,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else _report_from_json(row[0])
+
 
 class PostgresAlarmConfigurationAcceptance:
     """Load, observe, classify, and persist through one database transaction."""
@@ -283,6 +301,14 @@ class PostgresAlarmConfigurationAcceptance:
             with self._connection() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
+                        """
+                        SELECT current_version
+                        FROM t_site_configuration_state
+                        WHERE singleton = TRUE
+                        FOR UPDATE
+                        """
+                    )
+                    cursor.execute(
                         "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
                         (command.actor, command.idempotency_key),
                     )
@@ -294,11 +320,20 @@ class PostgresAlarmConfigurationAcceptance:
                     raise AlarmConfigurationAcceptanceError(
                         "ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND"
                     )
+                latest = load_latest_applied_alarm_configuration(connection)
+                if latest is None:
+                    raise AlarmConfigurationAcceptanceError(
+                        "ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND"
+                    )
                 observer = AlarmConfigurationAcceptance(
                     runtime=_PostgresAcceptanceRuntime(connection),
                     repository=PostgresAlarmConfigurationAcceptanceRepository(connection),
                 )
-                return observer.run(command, applied)
+                return observer.run(
+                    command,
+                    applied,
+                    latest_application_id=latest.id,
+                )
         except AlarmConfigurationAcceptanceError:
             raise
         except (psycopg2.Error, OSError) as error:

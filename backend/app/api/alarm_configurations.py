@@ -265,6 +265,9 @@ def _acceptance_progress(progress: AlarmConfigurationAcceptanceProgress) -> dict
         "site_configuration_version": progress.site_configuration_version,
         "applied_at": progress.applied_at.isoformat(),
         "ready_to_report": progress.ready_to_report,
+        "report_id": None if progress.report_id is None else str(progress.report_id),
+        "report_status": progress.report_status,
+        "report_digest": progress.report_digest,
         "items": [
             {
                 "definition_id": str(item.definition_id),

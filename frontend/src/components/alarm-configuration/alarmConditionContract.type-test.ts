@@ -67,6 +67,13 @@ const reportRequest: (reportId: string) => Promise<AlarmConfigurationAcceptanceR
 const runRequest: (applicationId: string, idempotencyKey: string) => Promise<AlarmConfigurationAcceptanceReport> =
   runAlarmConfigurationAcceptance
 
+const immutableReportReference: Pick<AlarmConfigurationAcceptanceProgress, 'report_id' | 'report_status' | 'report_digest'> = {
+  report_id: null,
+  report_status: null,
+  report_digest: null,
+}
+
 void progressRequest
 void reportRequest
 void runRequest
+void immutableReportReference

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import unittest
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.services.alarm_configuration import (
     AlarmConfigurationPlanItem,
@@ -193,6 +193,29 @@ class AlarmConfigurationAcceptanceTest(unittest.TestCase):
         self.assertEqual("有功功率越限", passed.items[0].rule_name)
         self.assertTrue(passed.ready_to_report)
         self.assertIsNone(repository.find_idempotency("user:engineer", "acceptance"))
+
+    def test_stale_application_is_rejected_without_report_or_idempotency_write(self) -> None:
+        repository = InMemoryAlarmConfigurationAcceptanceRepository()
+        acceptance = self.acceptance(repository=repository)
+        latest_application_id = uuid4()
+
+        with self.assertRaisesRegex(
+            AlarmConfigurationAcceptanceError,
+            "ALARM_ACCEPTANCE_APPLICATION_STALE",
+        ):
+            acceptance.run(
+                RunAlarmConfigurationAcceptance(
+                    self.applied.id,
+                    "user:engineer",
+                    "stale-application",
+                ),
+                self.applied,
+                latest_application_id=latest_application_id,
+            )
+
+        self.assertIsNone(
+            repository.find_idempotency("user:engineer", "stale-application")
+        )
 
     def test_missing_event_fails_with_literal_code(self) -> None:
         report = self.run_acceptance(self.acceptance(), self.applied)

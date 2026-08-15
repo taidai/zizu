@@ -1145,6 +1145,9 @@ export interface AlarmConfigurationAcceptanceProgress {
   site_configuration_version: number
   applied_at: string
   ready_to_report: boolean
+  report_id: string | null
+  report_status: 'passed' | 'failed' | null
+  report_digest: string | null
   items: AlarmConfigurationAcceptanceProgressItem[]
 }
 
@@ -1196,6 +1199,7 @@ const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_RULE_CONFLICT: '规则稳定标识冲突。',
   ALARM_BATCH_LIMIT_EXCEEDED: '单次配置范围超过系统上限。',
   ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND: '当前没有可验收的已应用告警配置。',
+  ALARM_ACCEPTANCE_APPLICATION_STALE: '该配置已不是最新应用版本，验收证据已刷新。',
   ALARM_ACCEPTANCE_REPORT_NOT_FOUND: '未找到该验收报告。',
   ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID: '已应用配置的验收范围不完整。',
   ALARM_ACCEPTANCE_PERSISTENCE_UNAVAILABLE: '验收证据暂时不可用，请稍后重试。',

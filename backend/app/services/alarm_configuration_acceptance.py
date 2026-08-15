@@ -89,6 +89,9 @@ class AlarmConfigurationAcceptanceProgress:
     site_configuration_version: int
     applied_at: datetime
     ready_to_report: bool
+    report_id: UUID | None
+    report_status: str | None
+    report_digest: str | None
     items: tuple[AlarmConfigurationAcceptanceProgressItem, ...]
 
 
@@ -116,6 +119,10 @@ class AlarmConfigurationAcceptanceRepository(Protocol):
     def latest_passed_item(
         self, definition_id: UUID,
     ) -> tuple[AlarmConfigurationAcceptanceReport, AlarmConfigurationAcceptanceItem] | None: ...
+
+    def latest_for_application(
+        self, application_id: UUID,
+    ) -> AlarmConfigurationAcceptanceReport | None: ...
 
 
 class InMemoryAlarmConfigurationAcceptanceRepository:
@@ -155,6 +162,19 @@ class InMemoryAlarmConfigurationAcceptanceRepository:
         )
         return max(candidates, key=lambda value: (value[0].finished_at, str(value[0].id)), default=None)
 
+    def latest_for_application(
+        self, application_id: UUID,
+    ) -> AlarmConfigurationAcceptanceReport | None:
+        return max(
+            (
+                report
+                for report in self._reports.values()
+                if report.application_id == application_id
+            ),
+            key=lambda report: (report.finished_at, str(report.id)),
+            default=None,
+        )
+
 
 class AlarmConfigurationAcceptance:
     """Classifies installed definitions from existing lifecycle evidence only."""
@@ -172,6 +192,8 @@ class AlarmConfigurationAcceptance:
         self,
         command: RunAlarmConfigurationAcceptance,
         applied: AppliedAlarmConfiguration,
+        *,
+        latest_application_id: UUID | None = None,
     ) -> AlarmConfigurationAcceptanceReport:
         if not command.actor.strip() or not command.idempotency_key.strip():
             raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_COMMAND_INVALID")
@@ -185,6 +207,10 @@ class AlarmConfigurationAcceptance:
             if existing_digest != request_digest:
                 raise AlarmConfigurationAcceptanceError("ALARM_ACCEPTANCE_IDEMPOTENCY_KEY_REUSED")
             return existing_report
+        if latest_application_id is not None and applied.id != latest_application_id:
+            raise AlarmConfigurationAcceptanceError(
+                "ALARM_ACCEPTANCE_APPLICATION_STALE"
+            )
 
         started_at = datetime.now(timezone.utc)
         events = {event.definition_id: event for event in self._runtime.list()}
@@ -237,11 +263,15 @@ class AlarmConfigurationAcceptance:
             )
             for plan_item, result in zip(applied.items, classified, strict=True)
         )
+        report = self._repository.latest_for_application(applied.id)
         return AlarmConfigurationAcceptanceProgress(
             application_id=applied.id,
             site_configuration_version=applied.site_configuration_version,
             applied_at=applied.applied_at,
             ready_to_report=all(item.status == "passed" for item in classified),
+            report_id=None if report is None else report.id,
+            report_status=None if report is None else report.status,
+            report_digest=None if report is None else report.digest,
             items=items,
         )
 

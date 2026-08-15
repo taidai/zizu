@@ -1,5 +1,31 @@
 ---
 
+## Session 2026-08-16 — Task 4 fix round 1
+
+### 已修复
+
+- latest progress 现在返回该 application 已有不可变报告的 `report_id/status/digest` 引用。页面挂载、
+  从告警中心返回和刷新时自动通过报告 GET 恢复完整展示；已有报告时禁止重复生成。
+- 验收重试键按 application 安全保存在 `sessionStorage`，不保存令牌或 URL 参数；切换 application、
+  读取到报告或成功确认报告后清除。
+- progress 从核心配置/规则集/实体/迁移加载的 `Promise.all` 完全拆出，拥有独立 loading/error；其
+  503 或损坏响应不再阻断计划工作台。
+- acceptance POST 与 alarm configuration apply 共锁 `t_site_configuration_state`，在同一事务内重读
+  latest applied application。竞态中旧 application 返回 `ALARM_ACCEPTANCE_APPLICATION_STALE`，
+  且报告和幂等表保持零写；同请求既有成功绑定仍优先稳定重放。
+
+### 本轮验证
+
+- TDD RED：domain/public 因缺少 latest application 参数和 report reference 字段按预期失败；GREEN
+  后 PG 竞态测试证明 run 会等待未提交的新 application，并在提交后判 stale。
+- 非 PG acceptance：22 passed、9 个 PG 环境门控 skipped；相关 Task 1 至 Task 4 后端：75 passed、
+  9 skipped；`compileall` 通过。
+- 隔离容器/数据库 `zizu_alarm_task4_fix1_test`：PG repository + Task 3 公开协议重启主缝 10/10；
+  容器和匿名 volume 已按精确名称清理。
+- 前端最终 `tsc -b` 与 production build 通过，8183 modules，55.53s；仅既有大 chunk warning。
+- 完整后端最终为 **308 passed、35 skipped、199 subtests passed**（141.26s）；仅有既有
+  Starlette/httpx 弃用和重复 ZIP 成员警告。
+
 ## Session 2026-08-16 — Task 4 告警配置引导验收与最终门禁
 
 ### 已完成
