@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from tests.test_delivery_public_api import (
     AsgiPublicApiProbe,
     AuthenticatedDeliveryClient,
+    CURRENT_PLATFORM_VERSION,
     build_minimal_package,
 )
 
@@ -489,7 +490,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(rules_router, prefix="/api/v1")
         delivery = SolutionDelivery(
             delivery_repository,
-            platform_version="0.4.78",
+            platform_version=CURRENT_PLATFORM_VERSION,
             public_api_probe=AsgiPublicApiProbe(app),
             entity_instance_registry=registry,
             entity_instance_runtime=runtime,

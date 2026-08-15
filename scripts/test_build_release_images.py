@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 class BuildReleaseImagesTest(unittest.TestCase):
@@ -30,7 +31,7 @@ class BuildReleaseImagesTest(unittest.TestCase):
             output = Path(directory) / "release.json"
             release = build_release_images(
                 repository="registry.example/zizu",
-                platform_version="0.4.78",
+                platform_version=SOURCE_VERSION,
                 edge_proxy_image="registry.example/caddy@sha256:" + "c" * 64,
                 output=output,
                 migrations_dir=REPO_ROOT / "init-db",
@@ -53,7 +54,8 @@ class BuildReleaseImagesTest(unittest.TestCase):
         self.assertTrue(all("--metadata-file" in command for command in calls))
         self.assertTrue(
             all(
-                command[command.index("--build-arg") + 1] == "ZIZU_VERSION=0.4.78"
+                command[command.index("--build-arg") + 1]
+                == f"ZIZU_VERSION={SOURCE_VERSION}"
                 for command in calls
             )
         )
@@ -74,7 +76,7 @@ class BuildReleaseImagesTest(unittest.TestCase):
             with self.assertRaises(ReleaseBuildError):
                 build_release_images(
                     repository="registry.example/zizu",
-                    platform_version="0.4.78",
+                    platform_version=SOURCE_VERSION,
                     edge_proxy_image="registry.example/caddy@sha256:" + "c" * 64,
                     output=output,
                     migrations_dir=REPO_ROOT / "init-db",
@@ -107,7 +109,7 @@ class BuildReleaseImagesTest(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseBuildError, "source VERSION"):
                 build_release_images(
                     repository="registry.example/zizu",
-                    platform_version="0.4.77",
+                    platform_version="0.0.0",
                     edge_proxy_image="registry.example/caddy@sha256:" + "c" * 64,
                     output=Path(directory) / "release.json",
                     migrations_dir=REPO_ROOT / "init-db",

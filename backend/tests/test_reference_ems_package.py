@@ -9,7 +9,10 @@ import unittest
 from uuid import UUID
 
 from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
-from tests.test_delivery_public_api import AuthenticatedDeliveryClient
+from tests.test_delivery_public_api import (
+    AuthenticatedDeliveryClient,
+    CURRENT_PLATFORM_VERSION,
+)
 from tests.test_control_command_public_api import ControlCommandPublicApiTest
 
 
@@ -238,7 +241,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "status": "locked",
                     "id": "70000000-0000-0000-0000-000000000099",
-                    "platform_version": "0.4.78",
+                    "platform_version": CURRENT_PLATFORM_VERSION,
                     "architecture": "linux/amd64",
                     "site_configuration_version": installed.json()["site_configuration_version"],
                     "package": {
