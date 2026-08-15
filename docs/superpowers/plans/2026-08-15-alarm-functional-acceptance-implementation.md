@@ -29,7 +29,7 @@
 - Modify: `backend/app/api/alarm_configurations.py` — acceptance start/read routes.
 - Modify: `backend/app/services/alarm_configuration.py` — expose applied-plan definition IDs and actions.
 - Modify: `backend/app/services/alarm_configuration_postgres.py` — load applied-plan evidence.
-- Create: `init-db/migration_035_alarm_configuration_acceptance.sql` — immutable report/idempotency tables.
+- Create: `init-db/migration_036_alarm_configuration_acceptance.sql` — immutable report/idempotency tables.
 - Create: `backend/tests/test_alarm_configuration_acceptance.py` — pure observer tests.
 - Create: `backend/tests/test_alarm_configuration_acceptance_public_api.py` — public HTTP report tests.
 - Create: `backend/tests/test_alarm_configuration_acceptance_postgres.py` — protocol-to-report restart seam.
@@ -147,7 +147,7 @@ git commit -m "feat: verify configured alarm lifecycles"
 ### Task 2: Immutable PostgreSQL Reports and Public API
 
 **Files:**
-- Create: `init-db/migration_035_alarm_configuration_acceptance.sql`
+- Create: `init-db/migration_036_alarm_configuration_acceptance.sql`
 - Create: `backend/app/services/alarm_configuration_acceptance_postgres.py`
 - Modify: `backend/app/api/alarm_configurations.py`
 - Modify: `backend/app/services/alarm_configuration_postgres.py`
@@ -177,7 +177,7 @@ Assert:
 
 Expected: 404 for acceptance routes.
 
-- [ ] **Step 3: Add migration 035**
+- [ ] **Step 3: Add migration 036**
 
 Create:
 
@@ -206,7 +206,7 @@ Expected: all authorization, report behavior, redaction, and idempotency tests p
 - [ ] **Step 7: Commit Task 2**
 
 ```powershell
-git add init-db/migration_035_alarm_configuration_acceptance.sql backend/app/services/alarm_configuration_acceptance_postgres.py backend/app/api/alarm_configurations.py backend/app/services/alarm_configuration_postgres.py backend/tests/test_alarm_configuration_acceptance_public_api.py backend/tests/test_business_rest_authorization.py
+git add init-db/migration_036_alarm_configuration_acceptance.sql backend/app/services/alarm_configuration_acceptance_postgres.py backend/app/api/alarm_configurations.py backend/app/services/alarm_configuration_postgres.py backend/tests/test_alarm_configuration_acceptance_public_api.py backend/tests/test_business_rest_authorization.py
 git commit -m "feat: persist alarm configuration reports"
 ```
 
@@ -372,4 +372,3 @@ Before claiming the user goal complete, map every design requirement to current 
 - no unverified deployment claim.
 
 Only when every line is proven by a test, runtime artifact, or inspected persisted record may the active goal be marked complete.
-
