@@ -267,7 +267,8 @@ class PostgresEntityInstanceRepository:
                             binding_id,
                             actor,
                             item["matcher_id"],
-                            next(
+                            item.get("selection_reason")
+                            or next(
                                 candidate["reason"]
                                 for candidate in item["candidates"]
                                 if candidate["tag_id"] == item["selected_tag_id"]

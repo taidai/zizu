@@ -343,8 +343,8 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                        source_type, source_path)
                     VALUES ('40000000-0000-0000-0000-000000000002',
                             '40000000-0000-0000-0000-000000000001',
-                            'ActivePower', 'FLOAT', 'kW', 'R', TRUE,
-                            'neuron', 'PCS-01/default/ActivePower');
+                            'LegacyActivePower', 'FLOAT', 'kW', 'R', TRUE,
+                            'neuron', 'PCS-01/default/LegacyActivePower');
                     INSERT INTO t_tags
                       (id, node_id, name, data_type, unit, read_write, enabled)
                     VALUES ('40000000-0000-0000-0000-000000000004',
@@ -697,6 +697,45 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 },
             )
             self.assertEqual(entity_import.status_code, 201, entity_import.text)
+            missing_binding_plan = client.post(
+                f"/api/v1/solution-packages/{entity_import.json()['id']}/install-plans",
+                headers=engineer_auth,
+                json={
+                    "parameters": {
+                        "pcs.instances": [
+                            {
+                                "instance_key": "PCS-01",
+                                "device_key": "PCS-01",
+                                "standby_device_key": "PCS-01-BACKUP",
+                            }
+                        ],
+                    },
+                },
+            )
+            self.assertEqual(
+                missing_binding_plan.status_code,
+                201,
+                missing_binding_plan.text,
+            )
+            self.assertEqual("blocked", missing_binding_plan.json()["status"])
+            missing_binding = next(
+                item
+                for item in missing_binding_plan.json()["items"]
+                if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("ENTITY_BINDING_MISSING", missing_binding["code"])
+            self.assertEqual(
+                {
+                    "40000000-0000-0000-0000-000000000002",
+                    "40000000-0000-0000-0000-000000000007",
+                    "40000000-0000-0000-0000-000000000008",
+                    "40000000-0000-0000-0000-000000000010",
+                },
+                {
+                    item["tag_id"]
+                    for item in missing_binding["override_candidates"]
+                },
+            )
             entity_plan_response = client.post(
                 f"/api/v1/solution-packages/{entity_import.json()['id']}/install-plans",
                 headers=engineer_auth,
@@ -709,12 +748,23 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                                 "standby_device_key": "PCS-01-BACKUP",
                             }
                         ],
-                    }
+                    },
+                    "binding_overrides": {
+                        "slot.pcs-primary/PCS-01/pcs.activePower": (
+                            "40000000-0000-0000-0000-000000000002"
+                        )
+                    },
                 },
             )
             self.assertEqual(entity_plan_response.status_code, 201, entity_plan_response.text)
             entity_plan = entity_plan_response.json()
             self.assertEqual("ready", entity_plan["status"])
+            selected_binding = next(
+                item
+                for item in entity_plan["items"]
+                if item["kind"] == "entity_binding"
+            )
+            self.assertEqual("engineer_override", selected_binding["selection_source"])
             entity_install = client.post(
                 f"/api/v1/install-plans/{entity_plan['id']}/apply",
                 headers={
@@ -732,7 +782,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "node": "PCS-01",
                     "group": "default",
                     "timestamp": round(time.time() * 1000),
-                    "values": {"ActivePower": 88.5},
+                    "values": {"LegacyActivePower": 88.5},
                 },
             )
             self.assertEqual(protocol_publish.status_code, 200, protocol_publish.text)
@@ -824,6 +874,17 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             )
             self.assertEqual(entity_acceptance.status_code, 201, entity_acceptance.text)
             self.assertEqual(entity_acceptance.json()["status"], "passed")
+            returned_primary = client.post(
+                f"/api/v1/entity-instances/{entity_instance_id}/source-failover",
+                headers=engineer_auth,
+                json={
+                    "expected_current_role": "standby",
+                    "target_role": "primary",
+                    "reason": "Complete the Postgres failover seam before alarm validation",
+                },
+            )
+            self.assertEqual(returned_primary.status_code, 200, returned_primary.text)
+            self.assertEqual("primary", returned_primary.json()["current_role"])
 
             alarm_import = client.post(
                 "/api/v1/solution-packages/import",
@@ -849,7 +910,12 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                                 "standby_device_key": "PCS-01-BACKUP",
                             }
                         ],
-                    }
+                    },
+                    "binding_overrides": {
+                        "slot.pcs-primary/PCS-01/pcs.activePower": (
+                            "40000000-0000-0000-0000-000000000002"
+                        )
+                    },
                 },
             )
             self.assertEqual(alarm_plan_response.status_code, 201, alarm_plan_response.text)
@@ -874,8 +940,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "/protocol-simulator/neuron",
                     json={
                         "node": "PCS-01",
+                        "group": "default",
                         "timestamp": alarm_started_at + offset_ms,
-                        "values": {"ActivePower": value},
+                        "values": {"LegacyActivePower": value},
                     },
                 )
                 self.assertEqual(published_alarm.status_code, 200, published_alarm.text)
@@ -896,8 +963,9 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                     "/protocol-simulator/neuron",
                     json={
                         "node": "PCS-01",
+                        "group": "default",
                         "timestamp": alarm_started_at + offset_ms,
-                        "values": {"ActivePower": value},
+                        "values": {"LegacyActivePower": value},
                     },
                 )
                 self.assertEqual(published_recovery.status_code, 200, published_recovery.text)
@@ -1003,7 +1071,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             [(0, None), (1, 0), (2, 1), (3, 2), (4, 3)],
         )
         self.assertEqual(audit_count, 4)
-        self.assertEqual(plan_count, 4)
+        self.assertEqual(plan_count, 5)
 
         self._stop_server()
         self._start_server()
@@ -1094,6 +1162,31 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             self.assertEqual(control_plan_response.status_code, 201, control_plan_response.text)
             control_plan = control_plan_response.json()
             self.assertEqual("ready", control_plan["status"], control_plan)
+            # Simulate an exact-match plan persisted by v0.4.78 before
+            # selection_reason became an explicit immutable field.
+            with psycopg2.connect(
+                host=os.environ["DB_HOST"],
+                port=int(os.environ["DB_PORT"]),
+                dbname=self.db_name,
+                user=os.environ["DB_USER"],
+                password=os.environ["DB_PASSWORD"],
+            ) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE t_solution_install_plans
+                        SET entity_plan = jsonb_set(
+                          entity_plan,
+                          '{items}',
+                          (
+                            SELECT jsonb_agg(item - 'selection_reason')
+                            FROM jsonb_array_elements(entity_plan->'items') AS item
+                          )
+                        )
+                        WHERE id = %s
+                        """,
+                        (control_plan["id"],),
+                    )
             control_install = client.post(
                 f"/api/v1/install-plans/{control_plan['id']}/apply",
                 headers={
@@ -1196,11 +1289,11 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
         self.assertEqual(persisted_plan.status_code, 200, persisted_plan.text)
         self.assertEqual(persisted_plan.json(), plan)
         self.assertEqual(persisted_entity.status_code, 200, persisted_entity.text)
-        self.assertEqual(persisted_entity.json()["value"], 77.5)
+        self.assertEqual(persisted_entity.json()["value"], 90.0)
         self.assertEqual(persisted_failover.status_code, 200, persisted_failover.text)
-        self.assertEqual("standby", persisted_failover.json()["current_role"])
-        self.assertEqual(1, persisted_failover.json()["switch_count"])
-        self.assertEqual(1, len(persisted_failover.json()["audit"]))
+        self.assertEqual("primary", persisted_failover.json()["current_role"])
+        self.assertEqual(2, persisted_failover.json()["switch_count"])
+        self.assertEqual(2, len(persisted_failover.json()["audit"]))
         self.assertEqual(repeated_entity_install.json(), entity_installation)
         persisted_packages = packages.json()
         self.assertEqual(persisted_packages["total"], 4)

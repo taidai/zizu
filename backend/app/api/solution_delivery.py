@@ -160,6 +160,7 @@ class CreateInstallationPlanRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     secret_references: dict[str, str] = Field(default_factory=dict)
     binding_selections: dict[str, UUID] = Field(default_factory=dict)
+    binding_overrides: dict[str, UUID] = Field(default_factory=dict)
     upgrade_risk_resolutions: dict[str, str] = Field(default_factory=dict)
 
 
@@ -208,6 +209,7 @@ async def create_installation_plan(
             parameters=plan_request.parameters,
             secret_references=plan_request.secret_references,
             binding_selections=plan_request.binding_selections,
+            binding_overrides=plan_request.binding_overrides,
             upgrade_risk_resolutions=plan_request.upgrade_risk_resolutions,
             actor=principal.actor,
         ).public_dict()

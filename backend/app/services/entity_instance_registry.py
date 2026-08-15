@@ -1,7 +1,7 @@
 """设备/实体实例的确定性计划、应用与运行解析深模块。"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -49,6 +49,7 @@ class PlanEntityInstances:
     slots: tuple[dict[str, Any], ...]
     selections: dict[str, UUID]
     actor: str
+    overrides: dict[str, UUID] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -532,6 +533,7 @@ class EntityInstanceRegistry:
                     definition,
                     sources,
                     request.selections,
+                    request.overrides,
                     self._repository.resolve,
                 )
                 items.append(item)
@@ -643,6 +645,7 @@ def _plan_definition(
     definition: dict[str, Any],
     sources: tuple[SourceDescriptor, ...],
     selections: dict[str, UUID],
+    overrides: dict[str, UUID],
     resolve_existing: Callable[[UUID], ResolvedEntitySource | None],
 ) -> tuple[dict[str, Any], dict[str, str] | None]:
     matcher = definition["matcher"]
@@ -686,6 +689,28 @@ def _plan_definition(
         source.public_dict(matcher_id=matcher["id"], reason=reason)
         for source in sorted(matches, key=lambda item: str(item.tag_id))
     )
+    override_matches = (
+        [
+            source
+            for source in sources
+            if source.enabled
+            and source.device_key == matcher["device_key"]
+            and _compatibility_code(definition, source) == "ENTITY_BINDING_READY"
+        ]
+        if not matches
+        else []
+    )
+    override_candidates = tuple(
+        source.public_dict(
+            matcher_id=matcher["id"],
+            reason=(
+                f"{matcher['id']}: engineer override from expected "
+                f"tag_name={matcher['tag_name']} to tag_name={source.tag_name} "
+                f"on device_key={matcher['device_key']}"
+            ),
+        )
+        for source in sorted(override_matches, key=lambda item: str(item.tag_id))
+    )
     standby_candidates = tuple(
         source.public_dict(
             matcher_id=matcher["id"],
@@ -697,10 +722,34 @@ def _plan_definition(
         for source in sorted(standby_matches, key=lambda item: str(item.tag_id))
     )
     selected_id = selections.get(key)
+    override_id = overrides.get(key)
     selected = next((item for item in matches if item.tag_id == selected_id), None)
+    override_selected = next(
+        (item for item in sources if item.enabled and item.tag_id == override_id),
+        None,
+    )
     selection_source = "engineer_selection" if selected is not None else "unique_match"
+    selection_reason: str | None = None
     code: str
-    if selected_id is not None and selected is None:
+    if selected_id is not None and override_id is not None:
+        code = "ENTITY_BINDING_OVERRIDE_CONFLICT"
+    elif override_id is not None:
+        if (
+            matches
+            or override_selected is None
+            or override_selected.device_key != matcher["device_key"]
+        ):
+            code = "ENTITY_BINDING_OVERRIDE_INVALID"
+        else:
+            selected = override_selected
+            code = _compatibility_code(definition, selected)
+            selection_source = "engineer_override"
+            selection_reason = (
+                f"{matcher['id']}: engineer override from expected "
+                f"tag_name={matcher['tag_name']} to tag_name={selected.tag_name} "
+                f"on device_key={matcher['device_key']}"
+            )
+    elif selected_id is not None and selected is None:
         code = "ENTITY_BINDING_SELECTION_INVALID"
     elif selected is None and not matches:
         code = "ENTITY_BINDING_MISSING"
@@ -709,6 +758,10 @@ def _plan_definition(
     else:
         selected = selected or matches[0]
         code = _compatibility_code(definition, selected)
+    if code == "ENTITY_BINDING_READY" and selection_reason is None and selected is not None:
+        selection_reason = next(
+            item["reason"] for item in candidates if item["tag_id"] == str(selected.tag_id)
+        )
     standby = standby_matches[0] if len(standby_matches) == 1 else None
     if code == "ENTITY_BINDING_READY" and matcher.get("failover_policy") == "manual":
         if standby is None:
@@ -747,12 +800,15 @@ def _plan_definition(
         "device_instance_id": str(device_id),
         "entity_instance_id": str(entity_id),
         "matcher_id": matcher["id"],
+        "expected_tag_name": matcher["tag_name"],
         "candidates": candidates,
+        "override_candidates": override_candidates,
         "standby_candidates": standby_candidates,
         "selected_tag_id": str(selected.tag_id) if ready else None,
         "failover_policy": matcher.get("failover_policy"),
         "standby_tag_id": str(standby.tag_id) if ready and standby is not None else None,
         "selection_source": selection_source if ready else None,
+        "selection_reason": selection_reason if ready else None,
         "binding_id": str(binding_id) if binding_id else None,
         "confirmation_audit_id": str(audit_id) if audit_id else None,
         "data_type": definition["data_type"],

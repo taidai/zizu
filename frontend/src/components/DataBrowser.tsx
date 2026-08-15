@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import {
   fetchNodes, fetchTags, fetchTelemetry,
   exportTelemetryCsv,
@@ -17,10 +17,12 @@ export default function DataBrowser() {
   const [range, setRange] = useState<TimeRange>('1h')
 
   const [rows, setRows] = useState<TelemetryPoint[]>([])
-  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
-  const [totalPages, setTotalPages] = useState(0)
+  const [cursors, setCursors] = useState<(string | null)[]>([null])
+  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
+  const pageCursor = cursors[page - 1] || null
+  const requestSequence = useRef(0)
 
   useEffect(() => {
     fetchNodes().then(setNodes).catch(() => {})
@@ -36,30 +38,36 @@ export default function DataBrowser() {
   }, [selectedNode])
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestSequence.current
     setLoading(true)
     try {
       const r = await fetchTelemetry(
         selectedTag || undefined,
         range,
-        page,
+        pageCursor,
         PAGE_SIZE,
         selectedNode || undefined,
       )
+      if (requestId !== requestSequence.current) return
       setRows(r.points)
-      setTotal(r.total)
-      setTotalPages(r.total_pages)
+      setHasMore(r.has_more)
+      setCursors((current) => {
+        const next = current.slice(0, page)
+        if (r.has_more && r.next_cursor) next[page] = r.next_cursor
+        return next
+      })
     } catch {
+      if (requestId !== requestSequence.current) return
       setRows([])
-      setTotal(0)
-      setTotalPages(0)
+      setHasMore(false)
     } finally {
-      setLoading(false)
+      if (requestId === requestSequence.current) setLoading(false)
     }
-  }, [selectedNode, selectedTag, range, page])
+  }, [selectedNode, selectedTag, range, page, pageCursor])
 
   useEffect(() => {
-    setPage(1)
-  }, [selectedNode, selectedTag, range])
+    void loadData()
+  }, [loadData])
 
   const handleExport = () => {
     exportTelemetryCsv(selectedTag || undefined, range, selectedNode || undefined)
@@ -73,7 +81,7 @@ export default function DataBrowser() {
         <span className="text-xs text-gray-600">节点:</span>
         <select
           value={selectedNode}
-          onChange={(e) => setSelectedNode(e.target.value)}
+          onChange={(e) => { setSelectedNode(e.target.value); setPage(1); setCursors([null]) }}
           className="neu-input px-2 py-1 text-xs bg-transparent min-w-[120px]"
         >
           <option value="">全部节点</option>
@@ -88,7 +96,7 @@ export default function DataBrowser() {
         <span className="text-xs text-gray-600">点位:</span>
         <select
           value={selectedTag}
-          onChange={(e) => setSelectedTag(e.target.value)}
+          onChange={(e) => { setSelectedTag(e.target.value); setPage(1); setCursors([null]) }}
           disabled={!selectedNode}
           className="neu-input px-2 py-1 text-xs bg-transparent min-w-[140px] disabled:opacity-50"
         >
@@ -104,7 +112,7 @@ export default function DataBrowser() {
         <span className="text-xs text-gray-600">时间:</span>
         <select
           value={range}
-          onChange={(e) => setRange(e.target.value as TimeRange)}
+          onChange={(e) => { setRange(e.target.value as TimeRange); setPage(1); setCursors([null]) }}
           className="neu-input px-2 py-1 text-xs bg-transparent"
         >
           <option value="1h">最近 1 小时</option>
@@ -183,7 +191,7 @@ export default function DataBrowser() {
 
       <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
         <span>
-          共 {total} 条 · 第 {page}/{totalPages || 1} 页
+          第 {page} 页 · 本页 {rows.length} 条
         </span>
         <div className="flex items-center gap-2">
           <button
@@ -194,8 +202,8 @@ export default function DataBrowser() {
             ← 上一页
           </button>
           <button
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            disabled={page >= totalPages || loading}
+            onClick={() => setPage((p) => p + 1)}
+            disabled={!hasMore || loading}
             className="neu-btn px-3 py-1 text-xs font-medium text-gray-600 hover:text-[#389e0d] disabled:opacity-40"
           >
             下一页 →
