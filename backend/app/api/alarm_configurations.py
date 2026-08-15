@@ -11,7 +11,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import CONFIGURATION_READ, CONFIGURATION_WRITE, capability_metadata, principal_for, protected
-from app.services.alarm_configuration import AlarmConfiguration, AlarmConfigurationError, AlarmConfigurationPlan, AlarmConfigurationPlanItem, AlarmRule, AlarmRuleSetRevision, ApplyAlarmConfigurationPlan, EntitySelection, PlanAlarmConfiguration
+from app.services.alarm_configuration import AlarmConfiguration, AlarmConfigurationError, AlarmConfigurationPlan, AlarmConfigurationPlanItem, AlarmRule, AlarmRuleSetRevision, ApplyAlarmConfigurationPlan, EntitySelection, LegacyAlarmMigrationCandidate, LegacyAlarmMigrationPlan, PlanAlarmConfiguration
 from app.services.identity import Principal
 
 
@@ -118,10 +118,20 @@ class ApplyPlanRequest(BaseModel):
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
 
 
+class LegacyMigrationSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_kind: Literal["tag_alarm", "entity_alarm_binding"]
+    source_key: str = Field(min_length=1, max_length=200)
+    entity_instance_id: UUID
+
+
 class LegacyMigrationPlanRequest(BaseModel):
-    """Reserved strict shape; legacy migration is outside this task."""
     model_config = ConfigDict(extra="forbid")
     installation_id: UUID
+    selections: list[LegacyMigrationSelectionRequest] = Field(
+        default_factory=list,
+        max_length=2000,
+    )
 
 
 def _rule(rule: AlarmRule) -> dict[str, Any]:
@@ -140,13 +150,48 @@ def _plan(plan: AlarmConfigurationPlan) -> dict[str, Any]:
     return {"id": str(plan.id), "installation_id": str(plan.installation_id), "base_site_configuration_version": plan.base_site_configuration_version, "rule_set_revision": _revision(plan.rule_set_revision), "status": plan.status, "items": [_item(item) for item in plan.items], "blockers": list(plan.blockers), "digest": plan.digest}
 
 
+def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any]:
+    return {
+        "source_kind": candidate.source_kind,
+        "source_key": candidate.source_key,
+        "display_name": candidate.display_name,
+        "status": candidate.status,
+        "severity": candidate.severity,
+        "entity_instance_id": (
+            str(candidate.entity_instance_id)
+            if candidate.entity_instance_id is not None
+            else None
+        ),
+        "entity_instance_candidates": [
+            str(value) for value in candidate.entity_instance_candidates
+        ],
+        "blockers": list(candidate.blockers),
+        "target_definition_ids": [
+            str(value) for value in candidate.target_definition_ids
+        ],
+    }
+
+
+def _legacy_plan(plan: LegacyAlarmMigrationPlan) -> dict[str, Any]:
+    return {
+        "installation_id": str(plan.installation_id),
+        "status": plan.status,
+        "items": [_legacy_candidate(item) for item in plan.items],
+        "blockers": list(plan.blockers),
+        "digest": plan.digest,
+        "target_definition_ids": [
+            str(value) for value in plan.target_definition_ids
+        ],
+    }
+
+
 def _error(error: AlarmConfigurationError) -> HTTPException:
     raw_code = str(error)
     code = {"ALARM_AUDIT_FAILED": "AUDIT_UNAVAILABLE", "rule ids must be unique": "ALARM_RULE_CONFLICT", "rule id must be non-empty": "ALARM_RULE_CONFLICT", "rule count must not exceed 20": "ALARM_BATCH_LIMIT_EXCEEDED", "entity count must not exceed 200": "ALARM_BATCH_LIMIT_EXCEEDED", "expanded definition count must not exceed 2000": "ALARM_BATCH_LIMIT_EXCEEDED", "rule set revision not found": "ALARM_RULE_SET_NOT_FOUND"}.get(raw_code, raw_code)
     response_status = 422
     if code in {"ALARM_PLAN_NOT_FOUND", "ALARM_RULE_SET_NOT_FOUND"}:
         response_status = status.HTTP_404_NOT_FOUND
-    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED"}:
+    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_MIGRATION_AMBIGUOUS", "ALARM_ENTITY_UNRESOLVED", "ALARM_FAULT_MAP_UNRESOLVED", "ALARM_MIGRATION_SELECTION_INVALID", "ALARM_MIGRATION_INSTALLATION_STALE"}:
         response_status = status.HTTP_409_CONFLICT
     elif (
         code == "AUDIT_UNAVAILABLE"
@@ -225,11 +270,39 @@ async def apply_alarm_configuration_plan(plan_id: UUID, body: ApplyPlanRequest, 
 
 
 @router.get("/alarm-configuration-migrations/legacy", **protected(CONFIGURATION_READ))
-async def list_legacy_alarm_configuration_migrations() -> dict[str, Any]:
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail={"code": "ALARM_MIGRATION_NOT_IMPLEMENTED", "message": "Legacy alarm migration is deferred until its domain seam is available"})
+async def list_legacy_alarm_configuration_migrations(
+    configuration: AlarmConfiguration = Depends(get_alarm_configuration),
+) -> dict[str, Any]:
+    try:
+        installation_id, _sources = configuration.repository.list_legacy_alarm_sources()
+        items = configuration.preview_legacy_migration()
+        return {
+            "installation_id": str(installation_id),
+            "items": [_legacy_candidate(item) for item in items],
+        }
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
 
 
 @router.post("/alarm-configuration-migrations/legacy/plans", openapi_extra=capability_metadata(CONFIGURATION_WRITE))
-async def create_legacy_alarm_configuration_migration_plan(body: LegacyMigrationPlanRequest, principal: Principal = Depends(principal_for(CONFIGURATION_WRITE))) -> dict[str, Any]:
-    del body, principal
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail={"code": "ALARM_MIGRATION_NOT_IMPLEMENTED", "message": "Legacy alarm migration is deferred until its domain seam is available"})
+async def create_legacy_alarm_configuration_migration_plan(
+    body: LegacyMigrationPlanRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    configuration: AlarmConfiguration = Depends(get_alarm_configuration),
+) -> dict[str, Any]:
+    keys = [(item.source_kind, item.source_key) for item in body.selections]
+    if len(keys) != len(set(keys)):
+        raise _error(AlarmConfigurationError("ALARM_MIGRATION_SELECTION_INVALID"))
+    try:
+        return _legacy_plan(
+            configuration.apply_legacy_migration(
+                installation_id=body.installation_id,
+                selections={
+                    (item.source_kind, item.source_key): item.entity_instance_id
+                    for item in body.selections
+                },
+                actor=principal.actor,
+            )
+        )
+    except AlarmConfigurationError as error:
+        raise _error(error) from error

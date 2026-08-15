@@ -17,6 +17,25 @@ from app.api.business_security import (
 )
 
 router = APIRouter()
+_LEGACY_REPLACEMENT = "/api/v1/alarm-configurations"
+
+
+def _migration_required() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
+            "message": "Legacy alarm configuration is read-only; use an explicit migration plan",
+        },
+    )
+
+
+def _legacy_read(items: dict) -> dict:
+    return {
+        **items,
+        "deprecated": True,
+        "replacement": _LEGACY_REPLACEMENT,
+    }
 
 
 # ── Models ──
@@ -110,7 +129,7 @@ async def list_alarm_levels(enabled_only: bool = Query(False)) -> dict:
                 cur.execute(query)
                 columns = [desc[0] for desc in cur.description]
                 rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"items": [_serialize_level(r) for r in rows]}
+        return _legacy_read({"items": [_serialize_level(r) for r in rows]})
     except Exception as e:
         logger.error("[API/alarm-levels] list failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -122,6 +141,7 @@ async def list_alarm_levels(enabled_only: bool = Query(False)) -> dict:
     **protected(CONFIGURATION_WRITE),
 )
 async def create_alarm_level(req: AlarmLevelCreateRequest) -> dict:
+    _migration_required()
     from app.services.telemetry_store import get_connection
 
     try:
@@ -166,11 +186,12 @@ async def get_alarm_level(level_id: UUID) -> dict:
             if not row:
                 raise HTTPException(status_code=404, detail="Alarm level not found")
             columns = [desc[0] for desc in cur.description]
-    return {"item": _serialize_level(dict(zip(columns, row)))}
+    return _legacy_read({"item": _serialize_level(dict(zip(columns, row)))})
 
 
 @router.put("/alarm-levels/{level_id}", **protected(CONFIGURATION_WRITE))
 async def update_alarm_level(level_id: UUID, req: AlarmLevelUpdateRequest) -> dict:
+    _migration_required()
     from app.services.telemetry_store import get_connection
 
     updates = []
@@ -231,6 +252,7 @@ async def update_alarm_level(level_id: UUID, req: AlarmLevelUpdateRequest) -> di
 
 @router.delete("/alarm-levels/{level_id}", **protected(CONFIGURATION_WRITE))
 async def delete_alarm_level(level_id: UUID) -> dict:
+    _migration_required()
     from app.services.telemetry_store import get_connection
 
     try:
@@ -278,7 +300,7 @@ async def list_level_entities(level_id: UUID) -> dict:
             )
             columns = [desc[0] for desc in cur.description]
             rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-    return {"items": [_serialize_binding(r) for r in rows]}
+    return _legacy_read({"items": [_serialize_binding(r) for r in rows]})
 
 
 @router.post(
@@ -286,6 +308,7 @@ async def list_level_entities(level_id: UUID) -> dict:
     **protected(CONFIGURATION_WRITE),
 )
 async def batch_bind_entities(level_id: UUID, req: BatchEntityBindRequest) -> dict:
+    _migration_required()
     from app.services.telemetry_store import get_connection
 
     try:
@@ -349,6 +372,7 @@ async def batch_bind_entities(level_id: UUID, req: BatchEntityBindRequest) -> di
     **protected(CONFIGURATION_WRITE),
 )
 async def unbind_entity(level_id: UUID, binding_id: UUID) -> dict:
+    _migration_required()
     from app.services.telemetry_store import get_connection
 
     try:
@@ -401,4 +425,4 @@ async def list_entity_alarm_levels(entity_id: UUID) -> dict:
             )
             columns = [desc[0] for desc in cur.description]
             rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-    return {"items": [_serialize_binding(r) for r in rows]}
+    return _legacy_read({"items": [_serialize_binding(r) for r in rows]})

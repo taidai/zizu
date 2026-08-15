@@ -462,6 +462,48 @@ CREATE CONSTRAINT TRIGGER trg_legacy_alarm_migration_requires_target
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION require_legacy_alarm_migration_target();
 
+CREATE OR REPLACE FUNCTION reject_legacy_alarm_configuration_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'legacy alarm configuration is read-only; use alarm configuration migration';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_alarm_levels_read_only ON t_alarm_levels;
+CREATE TRIGGER trg_alarm_levels_read_only
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON t_alarm_levels
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_legacy_alarm_configuration_mutation();
+
+DROP TRIGGER IF EXISTS trg_entity_alarm_bindings_read_only
+    ON t_entity_alarm_bindings;
+CREATE TRIGGER trg_entity_alarm_bindings_read_only
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON t_entity_alarm_bindings
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_legacy_alarm_configuration_mutation();
+
+CREATE OR REPLACE FUNCTION reject_new_legacy_tag_alarm_configuration()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.alarm_level IS NOT NULL
+       OR NEW.alarm_type IS NOT NULL
+       OR NEW.alarm_threshold IS NOT NULL
+       OR NEW.fault_map_id IS NOT NULL THEN
+        RAISE EXCEPTION 'legacy tag alarm configuration is read-only; use alarm configuration migration';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_tags_reject_legacy_alarm_insert ON t_tags;
+CREATE TRIGGER trg_tags_reject_legacy_alarm_insert
+    BEFORE INSERT ON t_tags
+    FOR EACH ROW EXECUTE FUNCTION reject_new_legacy_tag_alarm_configuration();
+
+DROP TRIGGER IF EXISTS trg_tags_legacy_alarm_columns_read_only ON t_tags;
+CREATE TRIGGER trg_tags_legacy_alarm_columns_read_only
+    BEFORE UPDATE OF alarm_level, alarm_type, alarm_threshold, fault_map_id
+    ON t_tags
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_legacy_alarm_configuration_mutation();
+
 COMMENT ON TABLE t_alarm_configuration_plans IS
     'Complete canonical alarm plans; ready plans become immutable applied evidence';
 COMMENT ON TABLE t_legacy_alarm_migrations IS

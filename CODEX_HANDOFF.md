@@ -3886,3 +3886,12 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 实现规则集修订、内存仓储、实体选择、确定性实体×规则展开、稳定定义键和规范摘要。
 - `python -m unittest tests.test_alarm_configuration -v`：2 passed；`compileall` 与 `git diff --check` 通过。
 - 工作树没有 brief 指定 `.venv`，测试报告记录了这一环境限制；未引入依赖，未触碰仓储/API/UI。
+
+### 2026-08-16 — Task 5 旧告警显式迁移与 contract gate
+
+- 用真实只读 preview 和 Principal 驱动的显式应用替换两个 501：候选只认 active、confirmed 且 confirmation 与 entity/binding/tag 一致的新实体绑定；0/1/多候选稳定判定 unresolved/ready/ambiguous，多候选仅显式选择可继续。
+- 固定迁移 `error1/error2/error3 → CRITICAL/MAJOR/WARNING`，保留自定义 severity；任一缺失 fault-map 阻断，整批零写；已迁移来源复用原 FK target。
+- 事务内写统一定义、origin、append-only migration evidence 与 FK target 子表；证据含 actor、摘要、installation、候选、选择、confirmation 与理由，旧 tag/entity alarm 源不变。
+- legacy GET 标记 deprecated/replacement；alarm-level/binding 和 tag legacy 字段 HTTP 写口统一 409，migration 034 同时提供无 owner 例外的数据库写门禁；startup seed 与旧模板模块已删除。
+- Task5 公共 HTTP + 真实 PG 为 35 passed/10 subtests；Task1–4 与业务授权为 37 passed/100 subtests；完整后端最终回归为 278 passed/20 skipped/189 subtests。隔离 `_test` PostgreSQL 容器及匿名 volume 已安全清理。
+- 有效旧 `fault` 规则因旧 schema 不足以无损表达统一 trigger/recovery，保持显式 `ALARM_LEGACY_RULE_UNSUPPORTED`，不做推测迁移。

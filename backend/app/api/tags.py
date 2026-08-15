@@ -8,6 +8,7 @@ PUT    /api/v1/tags/{tag_id}     → 修改 scale_factor / value_offset / unit �
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -26,6 +27,20 @@ from app.api.business_security import (
 from app.services.identity import Principal
 
 router = APIRouter()
+_LEGACY_ALARM_FIELDS = frozenset(
+    {"alarm_level", "alarm_type", "alarm_threshold", "fault_map_id"}
+)
+
+
+def _reject_legacy_alarm_fields(request: BaseModel) -> None:
+    if request.model_fields_set & _LEGACY_ALARM_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
+                "message": "Legacy tag alarm fields are read-only; use /api/v1/alarm-configurations",
+            },
+        )
 
 
 # ══════════════════════════════════════
@@ -77,10 +92,10 @@ class TagUpdateRequest(BaseModel):
     formula: str | None = Field(None, description="表达式或聚合来源引用")
     formula_type: str | None = Field(None, description="expression/aggregate/condition")
     sources: list[str] | None = Field(None, description="来源点位 UUID 列表")
-    alarm_level: str | None = Field(None, pattern="^(error1|error2|error3)?$", description="告警级别 error1/error2/error3")
-    alarm_type: str | None = None
-    alarm_threshold: float | None = None
-    fault_map_id: str | None = Field(None, description="故障码映射表 UUID")
+    alarm_level: Any = None
+    alarm_type: Any = None
+    alarm_threshold: Any = None
+    fault_map_id: Any = None
 
 
 class TagResponse(BaseModel):
@@ -431,7 +446,12 @@ async def list_alarm_configured_tags() -> dict:
             row["node_id"] = str(row["node_id"])
             if row.get("fault_map_id"):
                 row["fault_map_id"] = str(row["fault_map_id"])
-        return {"tags": rows, "total": len(rows)}
+        return {
+            "tags": rows,
+            "total": len(rows),
+            "deprecated": True,
+            "replacement": "/api/v1/alarm-configurations",
+        }
     except Exception as e:
         logger.error("[API/tags/alarm-config] failed: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -578,8 +598,10 @@ class BatchUpdateRequest(BaseModel):
     read_write: str | None = Field(None, pattern="^[RrWw]+$", description="统一读写权限")
     enabled: bool | None = Field(None, description="统一启用状态")
     node_id: str | None = Field(None, description="统一移动到目标节点 UUID")
-    alarm_level: str | None = Field(None, pattern="^(error1|error2|error3)?$", description="统一告警级别 error1/error2/error3，空字符串表示清除")
-    fault_map_id: str | None = Field(None, description="统一故障码映射表 UUID，空字符串表示清除")
+    alarm_level: Any = None
+    alarm_type: Any = None
+    alarm_threshold: Any = None
+    fault_map_id: Any = None
 
 
 
@@ -589,6 +611,7 @@ async def batch_update_tags(req: BatchUpdateRequest) -> dict:
     批量更新点位的 scale_factor / value_offset / unit / read_write / enabled，
     或批量移动到新的 node_id。
     """
+    _reject_legacy_alarm_fields(req)
     from app.services.telemetry_store import get_connection
 
     if not req.tag_ids:
@@ -729,6 +752,7 @@ async def update_tag(tag_id: UUID, req: TagUpdateRequest) -> dict:
 
     只更新 req 中非 None 的字段（部分更新）。
     """
+    _reject_legacy_alarm_fields(req)
     from app.services.telemetry_store import get_connection
 
     data = req.model_dump(exclude_none=True)
@@ -919,10 +943,10 @@ class TagCreateRequest(BaseModel):
     formula: str | None = Field(None, description="表达式或聚合来源引用")
     formula_type: str | None = Field("expression", description="expression/aggregate/condition")
     sources: list[str] = Field(default_factory=list, description="来源点位 UUID 列表")
-    alarm_level: str | None = Field(None, pattern="^(error1|error2|error3)?$", description="告警级别 error1/error2/error3")
-    alarm_type: str | None = None
-    alarm_threshold: float | None = None
-    fault_map_id: str | None = Field(None, description="故障码映射表 UUID")
+    alarm_level: Any = None
+    alarm_type: Any = None
+    alarm_threshold: Any = None
+    fault_map_id: Any = None
 
 
 @router.post(
@@ -938,6 +962,7 @@ async def create_tag(req: TagCreateRequest) -> dict:
     - formula_type="aggregate" + aggregate_fn=SUM/AVG/... + sources=[子点位UUID...]
     - 聚合器按 aggregate_fn 汇总 sources 的最新值，写回本点位 (is_virtual=True)
     """
+    _reject_legacy_alarm_fields(req)
     from app.services.telemetry_store import get_connection
 
     # 1) 校验

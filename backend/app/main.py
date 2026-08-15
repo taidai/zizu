@@ -139,12 +139,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("[Main] Standard device templates: {}", _dt_res)
         except Exception as _de:
             logger.warning("[Main] Standard device template seed (non-fatal): {}", _de)
-        try:
-            from app.core.standard_alarm_templates import seed_standard_alarm_templates
-            _al_res = seed_standard_alarm_templates()
-            logger.info("[Main] Standard alarm templates: {}", _al_res)
-        except Exception as _ae:
-            logger.warning("[Main] Standard alarm template seed (non-fatal): {}", _ae)
         # 若当前没有任何实体绑定，自动执行一次国标映射绑定，提升开箱即用性
         try:
             from app.services.entity_binder import auto_bind_standard_entities

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import inspect
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 
@@ -35,6 +39,33 @@ ENTITY_IDS = (
     UUID("40000000-0000-0000-0000-000000000003"),
     UUID("40000000-0000-0000-0000-000000000004"),
 )
+LEGACY_TARGET_ID = UUID("40000000-0000-0000-0000-000000000090")
+
+
+def _legacy_source(
+    source_kind: str,
+    source_key: str,
+    *,
+    entities: tuple[ResolvedAlarmEntity, ...],
+    level_code: str,
+    severity: str | None = None,
+    trigger_rules: tuple[dict, ...] = ({"op": "active"},),
+    fault_map_id: UUID | None = None,
+    fault_map_exists: bool = True,
+    target_definition_ids: tuple[UUID, ...] = (),
+):
+    return SimpleNamespace(
+        source_kind=source_kind,
+        source_key=source_key,
+        display_name=f"Legacy {source_key}",
+        entity_candidates=entities,
+        level_code=level_code,
+        stored_severity=severity,
+        trigger_rules=trigger_rules,
+        fault_map_id=fault_map_id,
+        fault_map_exists=fault_map_exists,
+        target_definition_ids=target_definition_ids,
+    )
 
 
 class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +80,7 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         entities: tuple[ResolvedAlarmEntity, ...] | None = None,
+        legacy_sources: tuple[object, ...] = (),
     ) -> tuple[FastAPI, InMemoryIdentityRepository, AlarmConfiguration]:
         identity_repository = InMemoryIdentityRepository(
             [
@@ -57,7 +89,7 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
                 UserIdentity(UUID("00000000-0000-0000-0000-000000000003"), "operator", self.password_hash, "operator", "active"),
             ]
         )
-        configuration_repository = InMemoryAlarmConfigurationRepository(
+        repository_arguments = dict(
             installation_id=INSTALLATION_ID,
             entities=entities or tuple(
                 ResolvedAlarmEntity(
@@ -71,6 +103,11 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
                 )
                 for index, entity_id in enumerate(ENTITY_IDS)
             ),
+        )
+        if legacy_sources:
+            repository_arguments["legacy_sources"] = legacy_sources
+        configuration_repository = InMemoryAlarmConfigurationRepository(
+            **repository_arguments
         )
         configuration = AlarmConfiguration(configuration_repository)
         app = FastAPI()
@@ -402,26 +439,303 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale.json()["detail"]["code"], "ALARM_PLAN_STALE")
         self.assertEqual(configuration.repository.applied_count, 1)
 
-    async def test_legacy_migration_routes_are_explicitly_deferred(self) -> None:
-        app, _identity_repository, _configuration = self.build_app()
+    async def test_legacy_preview_classifies_sources_without_writing(self) -> None:
+        confirmed = ResolvedAlarmEntity(
+            id=ENTITY_IDS[0],
+            device_instance_id=DEVICE_ID,
+            definition_id="pcs.activePower",
+            display_name="PCS active power",
+            data_type="number",
+            unit="kW",
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
+        )
+        second = ResolvedAlarmEntity(
+            **{
+                **confirmed.__dict__,
+                "id": ENTITY_IDS[1],
+                "confirmation_id": UUID(
+                    "40000000-0000-0000-0000-000000000011"
+                ),
+            }
+        )
+        missing_fault_map_id = UUID("40000000-0000-0000-0000-000000000099")
+        sources = (
+            _legacy_source(
+                "tag_alarm", "tag-ready", entities=(confirmed,), level_code="error1"
+            ),
+            _legacy_source(
+                "tag_alarm", "tag-unresolved", entities=(), level_code="error2"
+            ),
+            _legacy_source(
+                "entity_alarm_binding",
+                "binding-ambiguous",
+                entities=(confirmed, second),
+                level_code="custom-info",
+                severity="INFO",
+            ),
+            _legacy_source(
+                "entity_alarm_binding",
+                "binding-missing-map",
+                entities=(confirmed,),
+                level_code="custom-major",
+                severity="MAJOR",
+                trigger_rules=({"op": "fault"},),
+                fault_map_id=missing_fault_map_id,
+                fault_map_exists=False,
+            ),
+            _legacy_source(
+                "tag_alarm",
+                "tag-migrated",
+                entities=(confirmed,),
+                level_code="error3",
+                target_definition_ids=(LEGACY_TARGET_ID,),
+            ),
+        )
+        app, _identity_repository, configuration = self.build_app(
+            legacy_sources=sources
+        )
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
             headers = await self.login(client, "engineer")
             preview = await client.get(
                 "/api/v1/alarm-configuration-migrations/legacy", headers=headers
             )
-            plan = await client.post(
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        items = {
+            (item["source_kind"], item["source_key"]): item
+            for item in preview.json()["items"]
+        }
+        self.assertEqual(items[("tag_alarm", "tag-ready")]["status"], "ready")
+        self.assertEqual(items[("tag_alarm", "tag-ready")]["severity"], "CRITICAL")
+        self.assertEqual(
+            items[("tag_alarm", "tag-unresolved")]["blockers"][0]["code"],
+            "ALARM_ENTITY_UNRESOLVED",
+        )
+        self.assertEqual(
+            items[("entity_alarm_binding", "binding-ambiguous")]["severity"],
+            "INFO",
+        )
+        self.assertEqual(
+            items[("entity_alarm_binding", "binding-ambiguous")]["blockers"][0]["code"],
+            "ALARM_MIGRATION_AMBIGUOUS",
+        )
+        self.assertEqual(
+            items[("entity_alarm_binding", "binding-missing-map")]["blockers"][0]["code"],
+            "ALARM_FAULT_MAP_UNRESOLVED",
+        )
+        self.assertEqual(items[("tag_alarm", "tag-migrated")]["status"], "migrated")
+        self.assertEqual(
+            items[("tag_alarm", "tag-migrated")]["target_definition_ids"],
+            [str(LEGACY_TARGET_ID)],
+        )
+        self.assertEqual(configuration.repository.legacy_migration_write_count, 0)
+
+    async def test_legacy_plan_is_zero_write_until_ambiguity_is_explicitly_selected(self) -> None:
+        first = ResolvedAlarmEntity(
+            id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,
+            definition_id="pcs.activePower", display_name="PCS 1 active power",
+            data_type="number", unit="kW",
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
+        )
+        second = ResolvedAlarmEntity(
+            **{**first.__dict__, "id": ENTITY_IDS[1], "confirmation_id": UUID("40000000-0000-0000-0000-000000000011")}
+        )
+        source = _legacy_source(
+            "entity_alarm_binding", "binding-ambiguous",
+            entities=(first, second), level_code="custom-major", severity="MAJOR",
+            trigger_rules=({"op": "gte", "threshold": 80},),
+        )
+        app, _identity_repository, configuration = self.build_app(
+            legacy_sources=(source,)
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            blocked = await client.post(
                 "/api/v1/alarm-configuration-migrations/legacy/plans",
                 headers=headers,
                 json={"installation_id": str(INSTALLATION_ID)},
             )
-
-        for response in (preview, plan):
-            self.assertEqual(response.status_code, 501, response.text)
-            self.assertEqual(
-                response.json()["detail"]["code"],
-                "ALARM_MIGRATION_NOT_IMPLEMENTED",
+            selected = await client.post(
+                "/api/v1/alarm-configuration-migrations/legacy/plans",
+                headers=headers,
+                json={
+                    "installation_id": str(INSTALLATION_ID),
+                    "selections": [
+                        {
+                            "source_kind": "entity_alarm_binding",
+                            "source_key": "binding-ambiguous",
+                            "entity_instance_id": str(ENTITY_IDS[1]),
+                        }
+                    ],
+                },
             )
+
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()["detail"]["code"], "ALARM_MIGRATION_AMBIGUOUS")
+        self.assertEqual(selected.status_code, 200, selected.text)
+        self.assertEqual(selected.json()["status"], "migrated")
+        self.assertEqual(selected.json()["items"][0]["entity_instance_id"], str(ENTITY_IDS[1]))
+        self.assertEqual(configuration.repository.legacy_migration_write_count, 1)
+        self.assertEqual(
+            configuration.repository.last_legacy_migration_actor,
+            "user:00000000-0000-0000-0000-000000000002",
+        )
+
+    async def test_already_migrated_source_ignores_an_unrelated_selection(self) -> None:
+        confirmed = ResolvedAlarmEntity(
+            id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,
+            definition_id="pcs.activePower", display_name="PCS 1 active power",
+            data_type="number", unit="kW",
+            confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
+        )
+        source = _legacy_source(
+            "tag_alarm", "tag-migrated", entities=(confirmed,),
+            level_code="error3", target_definition_ids=(LEGACY_TARGET_ID,),
+        )
+        app, _identity_repository, configuration = self.build_app(
+            legacy_sources=(source,)
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            response = await client.post(
+                "/api/v1/alarm-configuration-migrations/legacy/plans",
+                headers=headers,
+                json={
+                    "installation_id": str(INSTALLATION_ID),
+                    "selections": [{
+                        "source_kind": "tag_alarm",
+                        "source_key": "tag-migrated",
+                        "entity_instance_id": str(ENTITY_IDS[1]),
+                    }],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()["items"][0]["entity_instance_id"])
+        self.assertEqual(
+            response.json()["target_definition_ids"], [str(LEGACY_TARGET_ID)]
+        )
+        self.assertEqual(configuration.repository.legacy_migration_write_count, 0)
+
+    async def test_legacy_compatibility_reads_are_deprecated_and_writes_are_gated(self) -> None:
+        app, _identity_repository, _configuration = self.build_app()
+        from app.api.alarm_levels import router as alarm_levels_router
+        from app.api.tags import router as tags_router
+        from app.services import telemetry_store
+
+        app.include_router(alarm_levels_router, prefix="/api/v1")
+        app.include_router(tags_router, prefix="/api/v1")
+        level_id = UUID("40000000-0000-0000-0000-000000000020")
+        tag_id = UUID("40000000-0000-0000-0000-000000000021")
+
+        class FakeCursor:
+            description = (
+                ("id",), ("code",), ("name",), ("severity",), ("color",),
+                ("trigger_rules",), ("enabled",), ("sort_order",),
+                ("is_system",), ("created_at",), ("updated_at",),
+            )
+
+            def __init__(self):
+                self._rows = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, query, _parameters=None):
+                if "FROM t_alarm_levels" in query:
+                    self._rows = [(level_id, "error1", "Critical", "CRITICAL", "#f00", [], True, 0, True, None, None)]
+                elif "WHERE t.alarm_level IS NOT NULL" in query:
+                    self.description = (
+                        ("id",), ("name",), ("display_name",), ("node_id",),
+                        ("node_name",), ("node_type",), ("alarm_level",),
+                        ("alarm_type",), ("alarm_threshold",), ("fault_map_id",),
+                        ("fault_map_name",),
+                    )
+                    self._rows = [(
+                        tag_id, "active-power", "Active power", DEVICE_ID,
+                        "PCS", "device", "error1", "threshold", 100.0, None, None,
+                    )]
+                elif "UPDATE t_tags" in query:
+                    self._rows = [(tag_id, "active-power", 1.0, 0.0, "kW")]
+                else:
+                    raise AssertionError(f"unexpected SQL: {query}")
+
+            def fetchall(self):
+                return list(self._rows)
+
+            def fetchone(self):
+                return self._rows[0] if self._rows else None
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                pass
+
+        transport = httpx.ASGITransport(app=app)
+        with patch.object(telemetry_store, "get_connection", return_value=FakeConnection()):
+            async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+                headers = await self.login(client, "engineer")
+                legacy_read = await client.get("/api/v1/alarm-levels", headers=headers)
+                legacy_tag_read = await client.get(
+                    "/api/v1/tags/alarm-config", headers=headers,
+                )
+                alarm_level_writes = (
+                    await client.post("/api/v1/alarm-levels", headers=headers, json={"code": "custom", "name": "Custom", "severity": "INFO"}),
+                    await client.put(f"/api/v1/alarm-levels/{level_id}", headers=headers, json={"name": "Changed"}),
+                    await client.delete(f"/api/v1/alarm-levels/{level_id}", headers=headers),
+                    await client.post(f"/api/v1/alarm-levels/{level_id}/entities", headers=headers, json={"entity_ids": [str(ENTITY_IDS[0])]}),
+                )
+                tag_writes = (
+                    await client.post("/api/v1/tags", headers=headers, json={"node_id": str(DEVICE_ID), "name": "legacy", "alarm_level": "error1"}),
+                    await client.put(f"/api/v1/tags/{tag_id}", headers=headers, json={"alarm_type": None}),
+                    await client.put("/api/v1/tags/batch", headers=headers, json={"tag_ids": [str(tag_id)], "fault_map_id": ""}),
+                    await client.post("/api/v1/tags", headers=headers, json={"node_id": str(DEVICE_ID), "name": "invalid-legacy", "alarm_level": {"old": "shape"}}),
+                    await client.put(f"/api/v1/tags/{tag_id}", headers=headers, json={"alarm_threshold": "not-a-number"}),
+                    await client.put("/api/v1/tags/batch", headers=headers, json={"tag_ids": [str(tag_id)], "fault_map_id": ["bad"]}),
+                )
+                ordinary = await client.put(
+                    f"/api/v1/tags/{tag_id}", headers=headers,
+                    json={"display_name": "Renamed"},
+                )
+
+        self.assertEqual(legacy_read.status_code, 200, legacy_read.text)
+        self.assertTrue(legacy_read.json()["deprecated"])
+        self.assertEqual(legacy_read.json()["replacement"], "/api/v1/alarm-configurations")
+        self.assertEqual(legacy_tag_read.status_code, 200, legacy_tag_read.text)
+        self.assertTrue(legacy_tag_read.json()["deprecated"])
+        self.assertEqual(
+            legacy_tag_read.json()["replacement"],
+            "/api/v1/alarm-configurations",
+        )
+        for response in (*alarm_level_writes, *tag_writes):
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "ALARM_CONFIGURATION_MIGRATION_REQUIRED")
+        self.assertEqual(ordinary.status_code, 200, ordinary.text)
+        self.assertEqual(ordinary.json()["tag"]["id"], str(tag_id))
+
+    def test_startup_has_no_legacy_alarm_level_seed_path(self) -> None:
+        from app import main
+
+        source = inspect.getsource(main.lifespan)
+        self.assertNotIn("seed_standard_alarm_templates", source)
+        self.assertNotIn("t_alarm_levels", source)
+        self.assertFalse(
+            (Path(main.__file__).parent / "core" / "standard_alarm_templates.py").exists()
+        )
 
     async def test_rule_batch_limit_uses_the_stable_machine_code(self) -> None:
         app, _identity_repository, _configuration = self.build_app()
