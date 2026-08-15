@@ -10,8 +10,9 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.business_security import CONFIGURATION_READ, CONFIGURATION_WRITE, capability_metadata, principal_for, protected
+from app.api.business_security import CONFIGURATION_READ, CONFIGURATION_WRITE, RUNTIME_READ, capability_metadata, principal_for, protected
 from app.services.alarm_configuration import AlarmConfiguration, AlarmConfigurationError, AlarmConfigurationPlan, AlarmConfigurationPlanItem, AlarmRule, AlarmRuleSetRevision, ApplyAlarmConfigurationPlan, EntitySelection, LegacyAlarmMigrationCandidate, LegacyAlarmMigrationPlan, PlanAlarmConfiguration
+from app.services.alarm_configuration_acceptance import AlarmConfigurationAcceptanceError, AlarmConfigurationAcceptanceReport, RunAlarmConfigurationAcceptance
 from app.services.identity import Principal
 
 
@@ -40,6 +41,7 @@ class AlarmConfigurationRoute(APIRoute):
 
 router = APIRouter(route_class=AlarmConfigurationRoute)
 _configuration: AlarmConfiguration | None = None
+_configuration_acceptance: Any | None = None
 
 
 def get_alarm_configuration() -> AlarmConfiguration:
@@ -49,6 +51,18 @@ def get_alarm_configuration() -> AlarmConfiguration:
         from app.services.alarm_configuration_postgres import PostgresAlarmConfigurationRepository
         _configuration = AlarmConfiguration(PostgresAlarmConfigurationRepository())
     return _configuration
+
+
+def get_alarm_configuration_acceptance() -> Any:
+    """Resolve the one-transaction PostgreSQL acceptance application service."""
+    global _configuration_acceptance
+    if _configuration_acceptance is None:
+        from app.services.alarm_configuration_acceptance_postgres import (
+            PostgresAlarmConfigurationAcceptance,
+        )
+
+        _configuration_acceptance = PostgresAlarmConfigurationAcceptance()
+    return _configuration_acceptance
 
 
 class AlarmConditionRequest(BaseModel):
@@ -212,6 +226,39 @@ def _legacy_plan(plan: LegacyAlarmMigrationPlan) -> dict[str, Any]:
     }
 
 
+def _acceptance_report(report: AlarmConfigurationAcceptanceReport) -> dict[str, Any]:
+    return {
+        "id": str(report.id),
+        "application_id": str(report.application_id),
+        "installation_id": str(report.installation_id),
+        "site_configuration_version": report.site_configuration_version,
+        "actor": report.actor,
+        "status": report.status,
+        "items": [
+            {
+                "definition_id": str(item.definition_id),
+                "definition_key": item.definition_key,
+                "action": item.action,
+                "status": item.status,
+                "code": item.code,
+                "event_id": None if item.event_id is None else str(item.event_id),
+                "event_state": item.event_state,
+                "transition_codes": list(item.transition_codes),
+                "acknowledgement_audit_event_id": (
+                    None
+                    if item.acknowledgement_audit_event_id is None
+                    else str(item.acknowledgement_audit_event_id)
+                ),
+                "evidence": dict(item.evidence),
+            }
+            for item in report.items
+        ],
+        "started_at": report.started_at.isoformat(),
+        "finished_at": report.finished_at.isoformat(),
+        "digest": report.digest,
+    }
+
+
 def _error(error: AlarmConfigurationError) -> HTTPException:
     raw_code = str(error)
     code = {"ALARM_AUDIT_FAILED": "AUDIT_UNAVAILABLE", "rule ids must be unique": "ALARM_RULE_CONFLICT", "rule id must be non-empty": "ALARM_RULE_CONFLICT", "rule count must not exceed 20": "ALARM_BATCH_LIMIT_EXCEEDED", "entity count must not exceed 200": "ALARM_BATCH_LIMIT_EXCEEDED", "expanded definition count must not exceed 2000": "ALARM_BATCH_LIMIT_EXCEEDED", "rule set revision not found": "ALARM_RULE_SET_NOT_FOUND"}.get(raw_code, raw_code)
@@ -227,6 +274,29 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
     ):
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE
     return HTTPException(status_code=response_status, detail={"code": code, "message": raw_code})
+
+
+def _acceptance_error(error: AlarmConfigurationAcceptanceError) -> HTTPException:
+    raw_code = str(error)
+    code = {
+        "ALARM_ACCEPTANCE_IDEMPOTENCY_KEY_REUSED": "IDEMPOTENCY_KEY_REUSED",
+    }.get(raw_code, raw_code)
+    response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    if code in {
+        "ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND",
+        "ALARM_ACCEPTANCE_REPORT_NOT_FOUND",
+    }:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code == "IDEMPOTENCY_KEY_REUSED":
+        response_status = status.HTTP_409_CONFLICT
+    elif code.endswith("_PERSISTENCE_FAILED") or code.endswith(
+        "_PERSISTENCE_UNAVAILABLE"
+    ):
+        response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    return HTTPException(
+        status_code=response_status,
+        detail={"code": code, "message": raw_code},
+    )
 
 
 @router.get("/alarm-configurations", **protected(CONFIGURATION_READ))
@@ -307,6 +377,45 @@ async def apply_alarm_configuration_plan(plan_id: UUID, body: ApplyPlanRequest, 
         return {"id": str(result.id), "plan_id": str(result.plan_id), "installation_id": str(result.installation_id), "site_configuration_version": result.site_configuration_version, "definition_ids": [str(definition_id) for definition_id in result.definition_ids], "audit_event_id": str(result.audit_event_id), "applied_at": result.applied_at.isoformat()}
     except AlarmConfigurationError as error:
         raise _error(error) from error
+
+
+@router.post(
+    "/alarm-configuration-applications/{application_id}/acceptance",
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def run_alarm_configuration_acceptance(
+    application_id: UUID,
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=200,
+    ),
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    acceptance: Any = Depends(get_alarm_configuration_acceptance),
+) -> dict[str, Any]:
+    try:
+        return _acceptance_report(acceptance.run(RunAlarmConfigurationAcceptance(
+            application_id=application_id,
+            actor=principal.actor,
+            idempotency_key=idempotency_key,
+        )))
+    except AlarmConfigurationAcceptanceError as error:
+        raise _acceptance_error(error) from error
+
+
+@router.get(
+    "/alarm-configuration-reports/{report_id}",
+    **protected(RUNTIME_READ),
+)
+async def get_alarm_configuration_acceptance_report(
+    report_id: UUID,
+    acceptance: Any = Depends(get_alarm_configuration_acceptance),
+) -> dict[str, Any]:
+    try:
+        return _acceptance_report(acceptance.get(report_id))
+    except AlarmConfigurationAcceptanceError as error:
+        raise _acceptance_error(error) from error
 
 
 @router.get("/alarm-configuration-migrations/legacy", **protected(CONFIGURATION_READ))

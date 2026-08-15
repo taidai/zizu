@@ -124,29 +124,25 @@ def _plan_from_json(
     applied_result: dict[str, Any] | None = None,
     planned_by: str | None = None,
 ) -> AlarmConfigurationPlan:
+    items = tuple(_plan_item_from_json(item) for item in value["items"])
     return AlarmConfigurationPlan(
         id=UUID(value["id"]),
         installation_id=UUID(value["installation_id"]),
         base_site_configuration_version=int(value["base_site_configuration_version"]),
         rule_set_revision=_revision_from_json(value["rule_set_revision"]),
         status=lifecycle_status or value["status"],
-        items=tuple(
-            AlarmConfigurationPlanItem(
-                definition_key=item["definition_key"],
-                entity_instance_id=UUID(item["entity_instance_id"]),
-                rule_id=item["rule_id"],
-                action=item["action"],
-                before=item.get("before"),
-                after=item.get("after"),
-                blockers=tuple(item["blockers"]),
-            )
-            for item in value["items"]
-        ),
+        items=items,
         blockers=tuple(value["blockers"]),
         digest=value["digest"],
         planned_by=planned_by or value["planned_by"],
         applied_result=(
-            _result_from_json(applied_result)
+            _result_from_json(
+                applied_result,
+                items=tuple(
+                    item for item in items
+                    if item.action in {"add", "update", "preserve"}
+                ),
+            )
             if applied_result is not None
             else None
         ),
@@ -157,7 +153,23 @@ def _result_json(result: AppliedAlarmConfiguration) -> dict[str, Any]:
     return _json_value(result)
 
 
-def _result_from_json(value: dict[str, Any]) -> AppliedAlarmConfiguration:
+def _plan_item_from_json(value: dict[str, Any]) -> AlarmConfigurationPlanItem:
+    return AlarmConfigurationPlanItem(
+        definition_key=value["definition_key"],
+        entity_instance_id=UUID(value["entity_instance_id"]),
+        rule_id=value["rule_id"],
+        action=value["action"],
+        before=value.get("before"),
+        after=value.get("after"),
+        blockers=tuple(value["blockers"]),
+    )
+
+
+def _result_from_json(
+    value: dict[str, Any],
+    *,
+    items: tuple[AlarmConfigurationPlanItem, ...] = (),
+) -> AppliedAlarmConfiguration:
     return AppliedAlarmConfiguration(
         id=UUID(value["id"]),
         plan_id=UUID(value["plan_id"]),
@@ -166,7 +178,35 @@ def _result_from_json(value: dict[str, Any]) -> AppliedAlarmConfiguration:
         definition_ids=tuple(UUID(item) for item in value["definition_ids"]),
         audit_event_id=UUID(value["audit_event_id"]),
         applied_at=datetime.fromisoformat(value["applied_at"]),
+        items=tuple(
+            _plan_item_from_json(item) for item in value.get("items", ())
+        ) or items,
     )
+
+
+def load_applied_alarm_configuration(
+    connection: Any,
+    application_id: UUID,
+) -> AppliedAlarmConfiguration | None:
+    """Load one immutable application and its exact ordered plan evidence."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT plan.canonical_plan, plan.applied_result, plan.planned_by
+            FROM t_alarm_configuration_plans plan
+            WHERE plan.application_id = %s AND plan.status = 'applied'
+            """,
+            (application_id,),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    plan = _plan_from_json(row[0], lifecycle_status="applied", planned_by=row[2])
+    items = tuple(
+        item for item in plan.items
+        if item.action in {"add", "update", "preserve"}
+    )
+    return _result_from_json(row[1], items=items)
 
 
 class PostgresAlarmConfigurationRepository:
@@ -476,6 +516,14 @@ class PostgresAlarmConfigurationRepository:
             if row
             else None
         )
+
+    @_persistence_operation
+    def get_application(
+        self,
+        application_id: UUID,
+    ) -> AppliedAlarmConfiguration | None:
+        with self._connection() as connection:
+            return load_applied_alarm_configuration(connection, application_id)
 
     @_persistence_operation
     def current_site_context(self) -> dict[str, Any]:
@@ -1217,11 +1265,17 @@ class PostgresAlarmConfigurationRepository:
                 cursor.execute(
                     """
                     UPDATE t_alarm_configuration_plans
-                    SET status = 'applied', applied_by = %s,
+                    SET status = 'applied', application_id = %s, applied_by = %s,
                         applied_result = %s, applied_at = %s
                     WHERE id = %s
                     """,
-                    (actor, Json(result_value), result.applied_at, stored_plan.id),
+                    (
+                        result.id,
+                        actor,
+                        Json(result_value),
+                        result.applied_at,
+                        stored_plan.id,
+                    ),
                 )
                 cursor.execute(
                     "UPDATE t_site_configuration_state SET current_version = %s WHERE singleton = TRUE",
@@ -1526,4 +1580,5 @@ class PostgresAlarmConfigurationRepository:
             definition_ids=definition_ids,
             audit_event_id=audit_event_id,
             applied_at=datetime.now(timezone.utc),
+            items=installable,
         )
