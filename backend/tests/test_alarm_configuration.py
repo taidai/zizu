@@ -214,6 +214,8 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             revision.rules[0].trigger["value"] = 999
+        with self.assertRaises(TypeError):
+            revision.rules[0].trigger.__ior__({"value": 999})
 
 
 if __name__ == "__main__":

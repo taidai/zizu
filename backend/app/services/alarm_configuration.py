@@ -14,7 +14,7 @@ class _FrozenDict(dict[str, Any]):
     def _immutable(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError("mapping is immutable")
 
-    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
 
 
 def _freeze(value: Any) -> Any:
