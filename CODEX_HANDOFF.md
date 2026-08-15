@@ -3752,3 +3752,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 当前绝不可把“候选已构建”称为“已交付”：目标仍需 DNS 指向、TLS/80/443 防火墙、受控维护窗、
   owner migration/最小权限收敛、受限 runtime Secret 文件、目标 compose 切换、HTTPS liveness 与
   release lock；随后才可让独立实施工程师开始计时交付试验。
+
+### 2026-08-15 续：候选 1 号机 TLS 只读预检
+
+- `e606.hlszh.com` 当前解析至既有 1 号机；HTTPS 握手失败，旧 `http://…:9000` 的
+  `/api/v1/health/live` 返回 404（HEAD 为 405，因该旧应用不接受 HEAD）。因此它仍是旧
+  v0.4.77 发布面，不能作为认证版本 HTTPS 入口、存活验收或 release lock 的运行证据。
+- 这不是 DNS 修改授权或目标部署失败；只有在维护窗口按 e606 release compose 使用固定摘要的
+  Caddy TLS 入口、公开 GET liveness 和 release lock 全部完成后，才可替换该结论。
