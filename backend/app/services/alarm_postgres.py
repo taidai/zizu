@@ -91,6 +91,10 @@ class PostgresAlarmDefinitionCatalog:
         plan: AlarmDefinitionPlan,
         transaction: Any | None = None,
     ) -> tuple[UUID, ...]:
+        if transaction is None:
+            raise RuntimeError(
+                "alarm definition installation requires an outer transaction"
+            )
         with _connection(transaction) as conn:
             with conn.cursor() as cur:
                 for definition in plan.definitions:
@@ -99,8 +103,6 @@ class PostgresAlarmDefinitionCatalog:
                             {
                                 "asset_id": definition.asset_id,
                                 "version": definition.version,
-                                "installation_id": str(definition.installation_id),
-                                "site_configuration_version": definition.site_configuration_version,
                                 "entity_instance_id": str(definition.entity_instance_id),
                                 "entity_definition_id": definition.entity_definition_id,
                                 "trigger": definition.trigger,
