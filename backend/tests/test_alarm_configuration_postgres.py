@@ -23,6 +23,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_ROOT = BACKEND_ROOT.parent / "init-db"
 MIGRATION_034 = MIGRATIONS_ROOT / "migration_034_unified_alarm_configuration.sql"
 MIGRATION_035 = MIGRATIONS_ROOT / "migration_035_legacy_alarm_contract_gate.sql"
+MIGRATION_036 = MIGRATIONS_ROOT / "migration_036_alarm_configuration_acceptance.sql"
 BASE_MIGRATIONS = tuple(
     MIGRATIONS_ROOT / f"migration_{version:03d}{suffix}"
     for version, suffix in (
@@ -109,9 +110,11 @@ class _PostgresAlarmConfigurationTestBase:
                     cursor.execute(migration.read_text(encoding="utf-8"))
 
     @staticmethod
-    def _apply_alarm_migrations(cursor) -> None:
+    def _apply_alarm_migrations(cursor, *, include_acceptance: bool = True) -> None:
         cursor.execute(MIGRATION_034.read_text(encoding="utf-8"))
         cursor.execute(MIGRATION_035.read_text(encoding="utf-8"))
+        if include_acceptance:
+            cursor.execute(MIGRATION_036.read_text(encoding="utf-8"))
 
     @staticmethod
     def _insert_installed_site(cursor) -> tuple[str, str]:
@@ -273,7 +276,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
             actor="user:engineer",
         )
 
-    def test_runner_applies_035_after_recorded_034_and_enforces_legacy_gate(self) -> None:
+    def test_runner_applies_035_and_036_after_recorded_034_and_enforces_legacy_gate(self) -> None:
         from app.core.migrations import run_migrations
         from app.services import telemetry_store
 
@@ -322,7 +325,7 @@ class AlarmConfigurationMigrationTest(_PostgresAlarmConfigurationTestBase, unitt
         finally:
             runner_connection.close()
 
-        self.assertEqual(["035"], result["applied"])
+        self.assertEqual(["035", "036"], result["applied"])
         self.assertEqual(0, result["errors"])
         rejected = (
             "INSERT INTO t_alarm_levels (code, name, severity) VALUES ('blocked', 'Blocked', 'INFO')",

@@ -3,11 +3,40 @@ BEGIN;
 ALTER TABLE t_alarm_configuration_plans
     ADD COLUMN IF NOT EXISTS application_id UUID;
 
+-- migration_034 permits exactly ready -> applied. Validate the immutable
+-- evidence before temporarily removing that guard for this one-time backfill.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM t_alarm_configuration_plans
+        WHERE status = 'applied'
+          AND (
+              jsonb_typeof(applied_result) IS DISTINCT FROM 'object'
+              OR jsonb_typeof(applied_result->'id') IS DISTINCT FROM 'string'
+              OR jsonb_typeof(applied_result->'plan_id') IS DISTINCT FROM 'string'
+              OR (applied_result->>'id') !~
+                 '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+              OR applied_result->>'plan_id' IS DISTINCT FROM id::text
+              OR (
+                  application_id IS NOT NULL
+                  AND applied_result->>'id' IS DISTINCT FROM application_id::text
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'invalid existing applied alarm configuration evidence';
+    END IF;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_alarm_configuration_plans_append_only
+    ON t_alarm_configuration_plans;
+
 UPDATE t_alarm_configuration_plans
 SET application_id = (applied_result->>'id')::uuid
 WHERE status = 'applied'
-  AND application_id IS NULL
-  AND applied_result ? 'id';
+  AND application_id IS NULL;
 
 DO $$
 BEGIN
@@ -25,9 +54,16 @@ $$;
 ALTER TABLE t_alarm_configuration_plans
     DROP CONSTRAINT IF EXISTS chk_alarm_configuration_plan_application,
     ADD CONSTRAINT chk_alarm_configuration_plan_application CHECK (
-        (status = 'applied' AND application_id IS NOT NULL)
+        (status = 'applied'
+         AND application_id IS NOT NULL
+         AND application_id = (applied_result->>'id')::uuid
+         AND id = (applied_result->>'plan_id')::uuid)
         OR (status <> 'applied' AND application_id IS NULL)
     );
+
+CREATE TRIGGER trg_alarm_configuration_plans_append_only
+    BEFORE UPDATE OR DELETE ON t_alarm_configuration_plans
+    FOR EACH ROW EXECUTE FUNCTION enforce_alarm_configuration_plan_append_only();
 
 CREATE TABLE IF NOT EXISTS t_alarm_configuration_reports (
     id UUID PRIMARY KEY,
