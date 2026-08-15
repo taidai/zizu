@@ -151,7 +151,6 @@ def _plan(plan: AlarmConfigurationPlan) -> dict[str, Any]:
 
 
 def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any]:
-    proposed = candidate.definitions[0] if candidate.definitions else None
     return {
         "source_kind": candidate.source_kind,
         "source_key": candidate.source_key,
@@ -170,22 +169,30 @@ def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any
         "target_definition_ids": [
             str(value) for value in candidate.target_definition_ids
         ],
-        "proposed_rule": None if proposed is None else {
-            "name": candidate.display_name,
-            "severity": proposed.severity,
-            "trigger": {"operator": proposed.trigger["op"], "value": proposed.trigger["value"]},
-            "recovery": {"operator": proposed.recovery["op"], "value": proposed.recovery["value"]},
-        },
         "proposed_rules": [
             {
                 "entity_instance_id": str(item.entity_instance_id),
                 "display_name": item.display_name,
-                "proposed_rule": {
-                    "name": item.display_name,
-                    "severity": item.severity,
-                    "trigger": {"operator": item.trigger["op"], "value": item.trigger["value"]},
-                    "recovery": {"operator": item.recovery["op"], "value": item.recovery["value"]},
-                },
+                "blockers": list(item.blockers),
+                "proposed_definitions": [
+                    {
+                        "name": definition.name,
+                        "severity": definition.severity,
+                        "trigger": None if definition.trigger is None else {
+                            "operator": definition.trigger["op"],
+                            "value": definition.trigger["value"],
+                        },
+                        "trigger_duration_seconds": definition.trigger_duration_seconds,
+                        "recovery": None if definition.recovery is None else {
+                            "operator": definition.recovery["op"],
+                            "value": definition.recovery["value"],
+                        },
+                        "recovery_duration_seconds": definition.recovery_duration_seconds,
+                        "notification_throttle_seconds": definition.notification_throttle_seconds,
+                        "blockers": list(definition.blockers),
+                    }
+                    for definition in item.proposed_definitions
+                ],
             }
             for item in candidate.proposed_rules
         ],
@@ -236,7 +243,7 @@ async def current_alarm_configuration(configuration: AlarmConfiguration = Depend
             "trigger": record["trigger"],
             "recovery": record["recovery"],
             "source": record["source"],
-            "definition_version": record["definition_version"],
+            "version_description": record["version_description"],
             "enabled": record["enabled"],
             "status": record["status"],
         }

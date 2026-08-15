@@ -150,6 +150,7 @@ class LegacyAlarmSource:
 @dataclass(frozen=True)
 class LegacyAlarmDefinitionSpec:
     definition_key: str
+    name: str
     source_kind: str
     source_key: str
     entity: ResolvedAlarmEntity
@@ -161,14 +162,29 @@ class LegacyAlarmDefinitionSpec:
 
 
 @dataclass(frozen=True)
+class LegacyAlarmProposedDefinition:
+    """一条旧规则针对某个实体候选的完整、只读编译结果。"""
+
+    name: str
+    severity: Severity | None
+    trigger: dict[str, Any] | None
+    recovery: dict[str, Any] | None
+    blockers: tuple[dict[str, Any], ...]
+    legacy_rule: dict[str, Any]
+    fault_map_id: UUID | None = None
+    trigger_duration_seconds: float = 0
+    recovery_duration_seconds: float = 0
+    notification_throttle_seconds: float = 0
+
+
+@dataclass(frozen=True)
 class LegacyAlarmProposedRule:
-    """只读迁移摘要，逐个候选实体保留其自身的语义。"""
+    """逐个实体候选编译全部旧规则，阻断只作用于该候选。"""
 
     entity_instance_id: UUID
     display_name: str
-    severity: Severity
-    trigger: dict[str, Any]
-    recovery: dict[str, Any]
+    blockers: tuple[dict[str, Any], ...]
+    proposed_definitions: tuple[LegacyAlarmProposedDefinition, ...]
 
 
 @dataclass(frozen=True)
@@ -354,6 +370,8 @@ def _legacy_condition_pair(
     if operator in {"active", "fault"}:
         raise AlarmConfigurationError("ALARM_LEGACY_RULE_UNSUPPORTED")
     if operator in {"gte", "gt", "lte", "lt"}:
+        if normalized_type not in _NUMERIC_DATA_TYPES:
+            raise AlarmConfigurationError("ALARM_LEGACY_RULE_UNSUPPORTED")
         value = rule.get("threshold")
         if (
             not isinstance(value, (int, float))
@@ -380,6 +398,10 @@ def _legacy_fault_map_id(
         return UUID(str(reference))
     except ValueError as error:
         raise AlarmConfigurationError("ALARM_FAULT_MAP_UNRESOLVED") from error
+
+
+def _legacy_definition_name(display_name: str, index: int, count: int) -> str:
+    return display_name if count == 1 else f"{display_name}（规则 {index}）"
 
 
 def _legacy_candidate(
@@ -451,52 +473,106 @@ def _legacy_candidate(
 
     rules = tuple(source.trigger_rules) or ({"op": "active"},)
     proposed_rules: list[LegacyAlarmProposedRule] = []
-    if severity is not None:
-        for entity in entity_candidates:
+    for entity in entity_candidates:
+        proposed_definitions: list[LegacyAlarmProposedDefinition] = []
+        proposal_blockers: list[dict[str, Any]] = []
+        if severity not in {"CRITICAL", "MAJOR", "WARNING", "INFO"}:
+            proposal_blockers.append(
+                _blocker("ALARM_SEVERITY_INVALID", "legacy severity is invalid")
+            )
+        if not source.fault_map_exists:
+            proposal_blockers.append(
+                _blocker(
+                    "ALARM_FAULT_MAP_UNRESOLVED",
+                    "legacy fault-map reference does not exist",
+                )
+            )
+        for index, legacy_rule in enumerate(rules, start=1):
+            definition_blockers: list[dict[str, Any]] = []
+            trigger: dict[str, Any] | None = None
+            recovery: dict[str, Any] | None = None
+            fault_map_id: UUID | None = None
             try:
                 trigger, recovery = _legacy_condition_pair(
-                    rules[0], data_type=entity.data_type
+                    legacy_rule, data_type=entity.data_type
                 )
-            except AlarmConfigurationError:
-                continue
-            proposed_rules.append(
-                LegacyAlarmProposedRule(
-                    entity_instance_id=entity.id,
-                    display_name=entity.display_name,
+                fault_map_id = _legacy_fault_map_id(
+                    legacy_rule, source.fault_map_id
+                )
+            except AlarmConfigurationError as error:
+                definition_blockers.append(_blocker(str(error), str(error)))
+            existing_proposal_codes = {
+                blocker["code"] for blocker in proposal_blockers
+            }
+            proposal_blockers.extend(
+                blocker
+                for blocker in definition_blockers
+                if blocker["code"] not in existing_proposal_codes
+            )
+            proposed_definitions.append(
+                LegacyAlarmProposedDefinition(
+                    name=_legacy_definition_name(
+                        source.display_name, index, len(rules)
+                    ),
                     severity=severity,
                     trigger=trigger,
                     recovery=recovery,
+                    blockers=tuple(definition_blockers),
+                    legacy_rule=dict(legacy_rule),
+                    fault_map_id=fault_map_id,
                 )
             )
+        proposed_rules.append(
+            LegacyAlarmProposedRule(
+                entity_instance_id=entity.id,
+                display_name=entity.display_name,
+                blockers=tuple(proposal_blockers),
+                proposed_definitions=tuple(proposed_definitions),
+            )
+        )
 
     definitions: list[LegacyAlarmDefinitionSpec] = []
-    if selected_entity is not None and severity is not None:
-        for index, legacy_rule in enumerate(rules, start=1):
-            try:
-                trigger, recovery = _legacy_condition_pair(
-                    legacy_rule,
-                    data_type=selected_entity.data_type,
-                )
-            except AlarmConfigurationError as error:
-                blockers.append(_blocker(str(error), str(error)))
-                definitions = []
-                break
+    selected_proposal = next(
+        (
+            proposal
+            for proposal in proposed_rules
+            if selected_entity is not None
+            and proposal.entity_instance_id == selected_entity.id
+        ),
+        None,
+    )
+    if selected_proposal is not None:
+        existing_codes = {blocker["code"] for blocker in blockers}
+        blockers.extend(
+            blocker
+            for blocker in selected_proposal.blockers
+            if blocker["code"] not in existing_codes
+        )
+    if selected_entity is not None and selected_proposal is not None and not blockers:
+        for index, proposed in enumerate(
+            selected_proposal.proposed_definitions, start=1
+        ):
+            if (
+                proposed.severity is None
+                or proposed.trigger is None
+                or proposed.recovery is None
+            ):
+                raise AlarmConfigurationError("ALARM_LEGACY_RULE_UNSUPPORTED")
             definitions.append(
                 LegacyAlarmDefinitionSpec(
                     definition_key=(
                         f"site.alarm.legacy.{source.source_kind}."
                         f"{source.source_key}.{index}"
                     ),
+                    name=proposed.name,
                     source_kind=source.source_kind,
                     source_key=source.source_key,
                     entity=selected_entity,
-                    severity=severity,
-                    trigger=trigger,
-                    recovery=recovery,
-                    fault_map_id=_legacy_fault_map_id(
-                        legacy_rule, source.fault_map_id
-                    ),
-                    legacy_rule=dict(legacy_rule),
+                    severity=proposed.severity,
+                    trigger=proposed.trigger,
+                    recovery=proposed.recovery,
+                    fault_map_id=proposed.fault_map_id,
+                    legacy_rule=proposed.legacy_rule,
                 )
             )
     return LegacyAlarmMigrationCandidate(
@@ -655,8 +731,10 @@ class InMemoryAlarmConfigurationRepository:
                 "severity": rule["severity"],
                 "trigger": rule["trigger"],
                 "recovery": rule["recovery"],
-                "source": "规则集",
-                "definition_version": f"site-{self._site_version}",
+                "source": record.get("origin_type", "rule_set"),
+                "version_description": (
+                    f"规则集第 {record.get('rule_set_revision', 1)} 版"
+                ),
                 "enabled": True,
                 "status": "current",
             })
@@ -674,7 +752,12 @@ class InMemoryAlarmConfigurationRepository:
                 continue
             existing = definitions.get(item.definition_key)
             definition_id = existing["id"] if existing is not None else uuid4()
-            definitions[item.definition_key] = {"id": definition_id, "payload": deepcopy(item.after)}
+            definitions[item.definition_key] = {
+                "id": definition_id,
+                "payload": deepcopy(item.after),
+                "origin_type": "rule_set",
+                "rule_set_revision": plan.rule_set_revision.revision,
+            }
             pointers[item.definition_key] = definition_id
             definition_ids.append(definition_id)
         audit_event_id = uuid4()

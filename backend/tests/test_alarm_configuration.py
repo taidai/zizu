@@ -13,8 +13,10 @@ from app.services.alarm_configuration import (
     ApplyAlarmConfigurationPlan,
     EntitySelection,
     InMemoryAlarmConfigurationRepository,
+    LegacyAlarmSource,
     PlanAlarmConfiguration,
     ResolvedAlarmEntity,
+    compile_legacy_migration_plan,
 )
 
 
@@ -313,6 +315,67 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
 
 
 class AlarmConfigurationValidationTest(unittest.TestCase):
+    def test_legacy_entity_candidates_compile_every_rule_and_block_incompatible_choices(self) -> None:
+        installation_id = UUID(int=700)
+        numeric = ResolvedAlarmEntity(
+            id=UUID(int=701), device_instance_id=UUID(int=711),
+            definition_id="pcs.activePower", display_name="PCS 一号有功功率",
+            data_type="number", unit="kW", confirmation_id=UUID(int=721),
+        )
+        text = ResolvedAlarmEntity(
+            id=UUID(int=702), device_instance_id=UUID(int=712),
+            definition_id="pcs.statusText", display_name="PCS 二号状态文本",
+            data_type="text", unit=None, confirmation_id=UUID(int=722),
+        )
+        source = LegacyAlarmSource(
+            source_kind="entity_alarm_binding",
+            source_key="legacy-high-power",
+            display_name="旧版 PCS 高功率告警",
+            entity_candidates=(numeric, text),
+            level_code="error1",
+            stored_severity=None,
+            trigger_rules=(
+                {"op": "active"},
+                {"op": "gte", "threshold": 500},
+            ),
+        )
+
+        preview = compile_legacy_migration_plan(
+            installation_id=installation_id,
+            sources=(source,),
+            selections={},
+            actor="user:engineer",
+        ).items[0]
+        proposals = {
+            proposal.entity_instance_id: proposal
+            for proposal in preview.proposed_rules
+        }
+
+        self.assertEqual(2, len(proposals[numeric.id].proposed_definitions))
+        self.assertEqual((), proposals[numeric.id].blockers)
+        self.assertEqual(
+            ["旧版 PCS 高功率告警（规则 1）", "旧版 PCS 高功率告警（规则 2）"],
+            [item.name for item in proposals[numeric.id].proposed_definitions],
+        )
+        self.assertEqual(2, len(proposals[text.id].proposed_definitions))
+        self.assertIn(
+            "ALARM_LEGACY_RULE_UNSUPPORTED",
+            {blocker["code"] for blocker in proposals[text.id].blockers},
+        )
+
+        selected_bad = compile_legacy_migration_plan(
+            installation_id=installation_id,
+            sources=(source,),
+            selections={(source.source_kind, source.source_key): text.id},
+            actor="user:engineer",
+        ).items[0]
+        self.assertEqual("blocked", selected_bad.status)
+        self.assertIn(
+            "ALARM_LEGACY_RULE_UNSUPPORTED",
+            {blocker["code"] for blocker in selected_bad.blockers},
+        )
+        self.assertEqual((), selected_bad.definitions)
+
     def test_invalid_entity_and_rule_inputs_block_the_plan_without_applying(self) -> None:
         def entity(*, data_type: str = "number", unit: str | None = "kW", confirmed: bool = True) -> ResolvedAlarmEntity:
             return ResolvedAlarmEntity(

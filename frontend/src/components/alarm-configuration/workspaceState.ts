@@ -34,6 +34,10 @@ export function clearWorkspaceContext(storage: Storage = sessionStorage): void {
   storage.removeItem(APPLY_CONTEXT_KEY)
 }
 
+export function clearApplyContext(storage: Storage = sessionStorage): void {
+  storage.removeItem(APPLY_CONTEXT_KEY)
+}
+
 export function canReplaySavedApply(context: WorkspaceContext, plan: AlarmConfigurationPlan): boolean {
   return context.plan?.id === plan.id && context.plan.digest === plan.digest && context.apply?.planId === plan.id && context.apply.digest === plan.digest
 }

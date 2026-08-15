@@ -1069,11 +1069,20 @@ export interface LegacyAlarmMigrationCandidate {
   entity_instance_candidates: string[]
   blockers: AlarmBlocker[]
   target_definition_ids: string[]
-  proposed_rule: { name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition } | null
   proposed_rules: {
     entity_instance_id: string
     display_name: string
-    proposed_rule: { name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition } | null
+    blockers: AlarmBlocker[]
+    proposed_definitions: {
+      name: string
+      severity: AlarmSeverity | null
+      trigger: { operator: AlarmConditionOperator; value: unknown } | null
+      trigger_duration_seconds: number
+      recovery: { operator: AlarmConditionOperator; value: unknown } | null
+      recovery_duration_seconds: number
+      notification_throttle_seconds: number
+      blockers: AlarmBlocker[]
+    }[]
   }[]
 }
 
@@ -1090,7 +1099,7 @@ export interface AlarmConfigurationCurrent {
   site_configuration_version: number
   definitions: {
     entity_display_name: string; rule_name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition
-    source: string; definition_version: string; enabled: boolean; status: 'current'
+    source: string; version_description: string; enabled: boolean; status: 'current'
   }[]
 }
 
@@ -1108,6 +1117,13 @@ export class AlarmConfigurationApiError extends Error {
   constructor(message: string, readonly code: string | null, readonly status: number) {
     super(message)
     this.name = 'AlarmConfigurationApiError'
+  }
+}
+
+export class AlarmConfigurationResultUnknownError extends Error {
+  constructor(readonly cause: unknown) {
+    super('Alarm configuration request result is unknown')
+    this.name = 'AlarmConfigurationResultUnknownError'
   }
 }
 
@@ -1136,20 +1152,28 @@ async function alarmConfigurationError(response: Response, fallback: string): Pr
   return new AlarmConfigurationApiError(code ? ALARM_CONFIGURATION_MESSAGES[code] || '告警配置请求未完成，请检查当前配置后重试。' : fallback, code, response.status)
 }
 
+async function alarmConfigurationFetch(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await apiFetch(input, init)
+  } catch (cause) {
+    throw new AlarmConfigurationResultUnknownError(cause)
+  }
+}
+
 export async function getUnifiedAlarmConfiguration(): Promise<AlarmConfigurationCurrent> {
-  const response = await apiFetch(`${API_BASE}/alarm-configurations`)
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configurations`)
   if (!response.ok) throw await alarmConfigurationError(response, `读取告警配置失败：${response.status}`)
   return response.json()
 }
 
 export async function fetchAlarmRuleSets(): Promise<AlarmRuleSetRevision[]> {
-  const response = await apiFetch(`${API_BASE}/alarm-rule-sets`)
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-sets`)
   if (!response.ok) throw await alarmConfigurationError(response, `读取规则集失败：${response.status}`)
   return (await response.json() as { items: AlarmRuleSetRevision[] }).items
 }
 
 export async function createAlarmRuleSet(input: Pick<AlarmRuleSetRevision, 'key' | 'name' | 'rules'>): Promise<AlarmRuleSetRevision> {
-  const response = await apiFetch(`${API_BASE}/alarm-rule-sets`, {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-sets`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
   if (!response.ok) throw await alarmConfigurationError(response, `创建规则集失败：${response.status}`)
@@ -1157,7 +1181,7 @@ export async function createAlarmRuleSet(input: Pick<AlarmRuleSetRevision, 'key'
 }
 
 export async function createAlarmRuleSetRevision(ruleSetId: string, rules: AlarmRule[]): Promise<AlarmRuleSetRevision> {
-  const response = await apiFetch(`${API_BASE}/alarm-rule-sets/${encodeURIComponent(ruleSetId)}/revisions`, {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-sets/${encodeURIComponent(ruleSetId)}/revisions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rules }),
   })
   if (!response.ok) throw await alarmConfigurationError(response, `保存规则修订失败：${response.status}`)
@@ -1170,7 +1194,7 @@ export async function createAlarmConfigurationPlan(input: {
   rule_set_id: string
   rule_set_revision: number
 }): Promise<AlarmConfigurationPlan> {
-  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans`, {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-plans`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
   if (!response.ok) throw await alarmConfigurationError(response, `生成配置计划失败：${response.status}`)
@@ -1178,13 +1202,13 @@ export async function createAlarmConfigurationPlan(input: {
 }
 
 export async function getAlarmConfigurationPlan(planId: string): Promise<AlarmConfigurationPlan> {
-  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}`)
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}`)
   if (!response.ok) throw await alarmConfigurationError(response, `读取配置计划失败：${response.status}`)
   return response.json()
 }
 
 export async function applyAlarmConfigurationPlan(planId: string, planDigest: string, idempotencyKey: string): Promise<AlarmConfigurationApplyResult> {
-  const response = await apiFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}/apply`, {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-plans/${encodeURIComponent(planId)}/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify({ plan_digest: planDigest }),
@@ -1194,7 +1218,7 @@ export async function applyAlarmConfigurationPlan(planId: string, planDigest: st
 }
 
 export async function fetchLegacyAlarmMigrationCandidates(): Promise<{ installation_id: string; items: LegacyAlarmMigrationCandidate[] }> {
-  const response = await apiFetch(`${API_BASE}/alarm-configuration-migrations/legacy`)
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-migrations/legacy`)
   if (!response.ok) throw await alarmConfigurationError(response, `读取旧配置候选失败：${response.status}`)
   return response.json()
 }
@@ -1203,7 +1227,7 @@ export async function createLegacyAlarmMigrationPlan(input: {
   installation_id: string
   selections: { source_kind: LegacyAlarmMigrationCandidate['source_kind']; source_key: string; entity_instance_id: string }[]
 }): Promise<LegacyAlarmMigrationPlan> {
-  const response = await apiFetch(`${API_BASE}/alarm-configuration-migrations/legacy/plans`, {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-migrations/legacy/plans`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
   if (!response.ok) throw await alarmConfigurationError(response, `迁移旧配置失败：${response.status}`)

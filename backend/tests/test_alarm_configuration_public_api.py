@@ -245,6 +245,9 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(definition["rule_name"])
         self.assertIn(definition["severity"], {"CRITICAL", "MAJOR"})
         self.assertEqual(definition["status"], "current")
+        self.assertEqual(definition["version_description"], "规则集第 2 版")
+        self.assertNotIn("asset_id", definition)
+        self.assertNotIn("definition_version", definition)
         self.assertNotIn("configuration", definition)
         self.assertNotIn("planned_by", current.text)
         self.assertNotIn("actor", current.text)
@@ -459,6 +462,9 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             **{
                 **confirmed.__dict__,
                 "id": ENTITY_IDS[1],
+                "display_name": "PCS status text",
+                "data_type": "text",
+                "unit": None,
                 "confirmation_id": UUID(
                     "40000000-0000-0000-0000-000000000011"
                 ),
@@ -478,6 +484,10 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
                 entities=(confirmed, second),
                 level_code="custom-info",
                 severity="INFO",
+                trigger_rules=(
+                    {"op": "active"},
+                    {"op": "gte", "threshold": 500},
+                ),
             ),
             _legacy_source(
                 "entity_alarm_binding",
@@ -515,7 +525,8 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[("tag_alarm", "tag-ready")]["status"], "ready")
         self.assertEqual(items[("tag_alarm", "tag-ready")]["severity"], "CRITICAL")
         self.assertIn(
-            items[("tag_alarm", "tag-ready")]["proposed_rule"]["trigger"]["operator"],
+            items[("tag_alarm", "tag-ready")]["proposed_rules"][0]
+            ["proposed_definitions"][0]["trigger"]["operator"],
             {"eq", "ne", "gt", "gte", "lt", "lte"},
         )
         ambiguous_rules = items[("entity_alarm_binding", "binding-ambiguous")]["proposed_rules"]
@@ -524,7 +535,33 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             {str(confirmed.id), str(second.id)},
         )
         self.assertTrue(all(item["display_name"] for item in ambiguous_rules))
-        self.assertTrue(all(item["proposed_rule"] is not None for item in ambiguous_rules))
+        self.assertTrue(all(len(item["proposed_definitions"]) == 2 for item in ambiguous_rules))
+        confirmed_proposal = next(
+            item for item in ambiguous_rules
+            if item["entity_instance_id"] == str(confirmed.id)
+        )
+        incompatible_proposal = next(
+            item for item in ambiguous_rules
+            if item["entity_instance_id"] == str(second.id)
+        )
+        self.assertEqual([], confirmed_proposal["blockers"])
+        self.assertIn(
+            "ALARM_LEGACY_RULE_UNSUPPORTED",
+            {blocker["code"] for blocker in incompatible_proposal["blockers"]},
+        )
+        self.assertTrue(
+            all(
+                definition["name"].startswith("Legacy binding-ambiguous")
+                for definition in confirmed_proposal["proposed_definitions"]
+            )
+        )
+        self.assertTrue(
+            all(
+                str(confirmed.id) not in definition["name"]
+                and confirmed.display_name not in definition["name"]
+                for definition in confirmed_proposal["proposed_definitions"]
+            )
+        )
         self.assertEqual(
             items[("tag_alarm", "tag-unresolved")]["blockers"][0]["code"],
             "ALARM_ENTITY_UNRESOLVED",

@@ -492,7 +492,8 @@ class PostgresAlarmConfigurationRepository:
                            definition.recovery_duration_seconds,
                            definition.severity,
                            definition.notification_throttle_seconds,
-                            entity.unit, entity.display_name, origin.origin_type, origin.details
+                           entity.unit, entity.display_name, origin.origin_type,
+                           origin.details, origin.rule_set_revision
                     FROM t_alarm_definition_current current_definition
                     JOIN t_alarm_definitions definition
                       ON definition.id = current_definition.definition_id
@@ -509,10 +510,20 @@ class PostgresAlarmConfigurationRepository:
                 )
                 site_version = int(cursor.fetchone()[0])
         for row in rows:
-            origin_rule = (row[13] or {}).get("rule")
+            origin_details = row[13] or {}
+            origin_rule = origin_details.get("rule")
+            severity_name = {
+                "CRITICAL": "严重",
+                "MAJOR": "重要",
+                "WARNING": "警告",
+                "INFO": "提示",
+            }.get(row[8], "告警")
+            readable_name = origin_details.get("rule_name")
+            if not isinstance(readable_name, str) or not readable_name.strip():
+                readable_name = f"{row[11]} · {severity_name}告警"
             rule = origin_rule or {
                 "id": row[0].rsplit(".", 1)[-1],
-                "name": row[0],
+                "name": readable_name,
                 "severity": row[8],
                 "trigger": row[4],
                 "trigger_duration_seconds": row[5],
@@ -522,6 +533,13 @@ class PostgresAlarmConfigurationRepository:
                 "unit": row[10],
                 "fault_map_id": None,
             }
+            origin_type = row[12] or "package"
+            if origin_type == "rule_set" and row[14] is not None:
+                version_description = f"规则集第 {row[14]} 版"
+            elif origin_type == "legacy_migration":
+                version_description = "旧配置迁移版"
+            else:
+                version_description = "配置资产当前版本"
             definitions[row[0]] = {
                 "id": row[1],
                 "payload": {
@@ -533,8 +551,8 @@ class PostgresAlarmConfigurationRepository:
                 "severity": rule["severity"],
                 "trigger": rule["trigger"],
                 "recovery": rule["recovery"],
-                "source": row[12],
-                "definition_version": row[2],
+                "source": origin_type,
+                "version_description": version_description,
                 "enabled": True,
                 "status": "current",
             }
@@ -944,6 +962,7 @@ class PostgresAlarmConfigurationRepository:
                                     {
                                         "source_kind": spec.source_kind,
                                         "source_key": spec.source_key,
+                                        "rule_name": spec.name,
                                         "legacy_rule": _json_value(spec.legacy_rule),
                                         "fault_map_id": (
                                             str(spec.fault_map_id)
