@@ -90,6 +90,35 @@ class AlarmConfigurationPlanTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             revisions[0].rules[0].trigger["value"] = 999
 
+    def test_postgres_driver_integrity_failures_are_normalized(self) -> None:
+        import psycopg2
+
+        from app.services.alarm_configuration_postgres import (
+            PostgresAlarmConfigurationRepository,
+        )
+
+        def failed_connection():
+            raise psycopg2.IntegrityError("unexpected driver failure")
+
+        repository = PostgresAlarmConfigurationRepository(
+            connection_factory=failed_connection
+        )
+        with self.assertRaisesRegex(
+            AlarmConfigurationError,
+            "ALARM_CONFIGURATION_PERSISTENCE_FAILED",
+        ):
+            repository.get_plan(uuid4())
+        with self.assertRaisesRegex(
+            AlarmConfigurationError,
+            "ALARM_RULE_SET_PERSISTENCE_FAILED",
+        ):
+            repository.save_rule_set_revision(
+                key="broken",
+                name="Broken",
+                rules=(),
+                actor="user:engineer",
+            )
+
     def test_plan_requires_nonblank_planner_and_binds_it_to_the_digest(self) -> None:
         service, repository, revision = self._configuration(entity_count=1)
         with self.assertRaisesRegex(

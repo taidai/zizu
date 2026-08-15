@@ -206,7 +206,10 @@ async def create_alarm_configuration_plan(body: CreatePlanRequest, principal: Pr
 
 @router.get("/alarm-configuration-plans/{plan_id}", **protected(CONFIGURATION_READ))
 async def get_alarm_configuration_plan(plan_id: UUID, configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
-    plan = configuration.repository.get_plan(plan_id)
+    try:
+        plan = configuration.repository.get_plan(plan_id)
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
     if plan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "ALARM_PLAN_NOT_FOUND", "message": "Alarm configuration plan was not found"})
     return _plan(plan)

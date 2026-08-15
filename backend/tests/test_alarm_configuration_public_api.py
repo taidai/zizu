@@ -292,6 +292,32 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             "ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE",
         )
 
+    async def test_plan_lookup_persistence_failure_has_a_stable_503_envelope(self) -> None:
+        app, _identity_repository, configuration = self.build_app()
+
+        def unavailable_plan(_plan_id):
+            raise AlarmConfigurationError("ALARM_CONFIGURATION_PERSISTENCE_FAILED")
+
+        configuration.repository.get_plan = unavailable_plan
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+            headers = await self.login(client, "engineer")
+            response = await client.get(
+                "/api/v1/alarm-configuration-plans/40000000-0000-0000-0000-000000000099",
+                headers=headers,
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "detail": {
+                    "code": "ALARM_CONFIGURATION_PERSISTENCE_FAILED",
+                    "message": "ALARM_CONFIGURATION_PERSISTENCE_FAILED",
+                }
+            },
+        )
+
     async def test_duplicate_selection_is_rejected_without_creating_a_plan(self) -> None:
         app, _identity_repository, configuration = self.build_app()
         transport = httpx.ASGITransport(app=app)

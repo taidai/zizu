@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+from functools import wraps
 from typing import Any, Callable, Iterator
 from uuid import UUID, uuid4
 
@@ -30,6 +31,27 @@ from app.services.alarm_postgres import PostgresAlarmDefinitionCatalog
 
 
 ConnectionFactory = Callable[[], Any]
+
+
+def _persistence_operation(method):
+    """Never leak driver exceptions past the repository boundary."""
+
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except AlarmConfigurationError:
+            raise
+        except psycopg2.IntegrityError as error:
+            raise AlarmConfigurationError(
+                "ALARM_CONFIGURATION_PERSISTENCE_FAILED"
+            ) from error
+        except (psycopg2.Error, OSError) as error:
+            raise AlarmConfigurationError(
+                "ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE"
+            ) from error
+
+    return wrapped
 
 
 def _json_value(value: Any) -> Any:
@@ -185,6 +207,7 @@ class PostgresAlarmConfigurationRepository:
                 "ALARM_CONFIGURATION_PERSISTENCE_UNAVAILABLE"
             ) from error
 
+    @_persistence_operation
     def save_rule_set_revision(
         self,
         *,
@@ -271,6 +294,7 @@ class PostgresAlarmConfigurationRepository:
             digest=digest,
         )
 
+    @_persistence_operation
     def get_rule_set_revision(
         self,
         rule_set_id: UUID,
@@ -299,6 +323,7 @@ class PostgresAlarmConfigurationRepository:
             digest=row[3].strip(),
         )
 
+    @_persistence_operation
     def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -324,6 +349,7 @@ class PostgresAlarmConfigurationRepository:
             for row in rows
         )
 
+    @_persistence_operation
     def resolve_entities(
         self,
         installation_id: UUID,
@@ -370,6 +396,7 @@ class PostgresAlarmConfigurationRepository:
                 rows = cursor.fetchall()
         return tuple(ResolvedAlarmEntity(*row) for row in rows)
 
+    @_persistence_operation
     def current_site_version(self) -> int:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -379,6 +406,7 @@ class PostgresAlarmConfigurationRepository:
                 row = cursor.fetchone()
         return int(row[0]) if row else 0
 
+    @_persistence_operation
     def save_plan(self, plan: AlarmConfigurationPlan) -> AlarmConfigurationPlan:
         canonical_plan = _json_value(plan)
         with self._connection() as connection:
@@ -420,6 +448,7 @@ class PostgresAlarmConfigurationRepository:
             raise RuntimeError("Alarm configuration plan conflict row disappeared")
         return _plan_from_json(row[0], planned_by=row[1])
 
+    @_persistence_operation
     def get_plan(self, plan_id: UUID) -> AlarmConfigurationPlan | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -442,6 +471,7 @@ class PostgresAlarmConfigurationRepository:
             else None
         )
 
+    @_persistence_operation
     def current_site_context(self) -> dict[str, Any]:
         definitions: dict[str, dict[str, Any]] = {}
         with self._connection() as connection:
@@ -498,6 +528,7 @@ class PostgresAlarmConfigurationRepository:
             "definitions": definitions,
         }
 
+    @_persistence_operation
     def find_idempotency(
         self,
         actor: str,
@@ -522,6 +553,7 @@ class PostgresAlarmConfigurationRepository:
             return None
         return row[0], row[1].strip(), row[2], _result_from_json(row[3])
 
+    @_persistence_operation
     def apply_plan(
         self,
         plan: AlarmConfigurationPlan,
