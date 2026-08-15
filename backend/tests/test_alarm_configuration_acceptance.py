@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 from uuid import UUID
@@ -10,6 +11,7 @@ from app.services.alarm_configuration import (
 )
 from app.services.alarm_configuration_acceptance import (
     AlarmConfigurationAcceptance,
+    AlarmConfigurationAcceptanceError,
     InMemoryAlarmConfigurationAcceptanceRepository,
     RunAlarmConfigurationAcceptance,
 )
@@ -23,7 +25,7 @@ from app.services.alarm_runtime import (
 )
 
 
-APPLICATION_ID = UUID("81000000-0000-0000-0000-000000000001")
+APPLICATION_ID = UUID("81000000-0000-0000-0000-000000000003")
 INSTALLATION_ID = UUID("81000000-0000-0000-0000-000000000002")
 APPLIED_ID = UUID("81000000-0000-0000-0000-000000000003")
 AUDIT_EVENT_ID = UUID("81000000-0000-0000-0000-000000000004")
@@ -257,6 +259,50 @@ class AlarmConfigurationAcceptanceTest(unittest.TestCase):
         replay = self.run_acceptance(acceptance, applied, key="same-command")
 
         self.assertEqual(first, replay)
+
+    def test_acknowledgement_without_audit_evidence_fails(self) -> None:
+        self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
+
+        class MissingAuditTimeline:
+            def list(_self): return self.runtime.list()
+            def timeline(_self, event_id):
+                return tuple(replace(item, audit_event_id=None) if item.code == "ALARM_ACKNOWLEDGED" else item for item in self.runtime.timeline(event_id))
+
+        report = self.run_acceptance(self.acceptance(runtime=MissingAuditTimeline()), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]))
+        self.assertEqual("ALARM_ACCEPTANCE_ACKNOWLEDGEMENT_MISSING", report.items[0].code)
+
+    def test_same_actor_key_with_different_request_is_rejected(self) -> None:
+        self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
+        acceptance = self.acceptance(repository=InMemoryAlarmConfigurationAcceptanceRepository())
+        self.run_acceptance(acceptance, self.applied_for(DEFINITION_IDS[0], self.plan_items[0]), key="collision")
+        changed = replace(self.applied_for(DEFINITION_IDS[0], self.plan_items[0]), site_configuration_version=9)
+        with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "ALARM_ACCEPTANCE_IDEMPOTENCY_KEY_REUSED"):
+            self.run_acceptance(acceptance, changed, key="collision")
+
+    def test_application_must_match_applied_identity(self) -> None:
+        with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "ALARM_ACCEPTANCE_APPLICATION_MISMATCH"):
+            self.acceptance().run(RunAlarmConfigurationAcceptance(UUID(int=1), "user:engineer", "bad-app"), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]))
+
+    def test_evidence_is_immutable_and_report_digest_binds_identity_and_times(self) -> None:
+        self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
+        report = self.run_acceptance(self.acceptance(), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]), key="immutable")
+        with self.assertRaises(TypeError):
+            report.items[0].evidence["tamper"] = True
+        second = self.run_acceptance(self.acceptance(), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]), key="immutable-2")
+        self.assertNotEqual(report.digest, second.digest)
+
+    def test_repository_rejects_overwrite_of_existing_report_id(self) -> None:
+        self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
+        repository = InMemoryAlarmConfigurationAcceptanceRepository()
+        report = self.run_acceptance(self.acceptance(repository=repository), self.applied_for(DEFINITION_IDS[0], self.plan_items[0]))
+        with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "ALARM_ACCEPTANCE_REPORT_EXISTS"):
+            repository.save(replace(report, status="failed"), idempotency_key="other", request_digest="other")
+
+    def test_mismatched_or_empty_applied_items_are_rejected(self) -> None:
+        for applied in (replace(self.applied, items=self.plan_items[:1]), replace(self.applied, definition_ids=(), items=())):
+            with self.subTest(applied=applied):
+                with self.assertRaisesRegex(AlarmConfigurationAcceptanceError, "ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID"):
+                    self.run_acceptance(self.acceptance(), applied)
 
 
 if __name__ == "__main__":
