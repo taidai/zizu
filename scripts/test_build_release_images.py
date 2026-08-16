@@ -41,7 +41,7 @@ class BuildReleaseImagesTest(unittest.TestCase):
             persisted = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(release, persisted)
-        self.assertEqual("032", release["schema_version"])
+        self.assertEqual("037", release["schema_version"])
         self.assertEqual(
             {
                 "linux/amd64": "registry.example/zizu@sha256:" + "a" * 64,

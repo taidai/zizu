@@ -22,10 +22,14 @@ from app.services.alarm_configuration import (
     AppliedAlarmConfiguration,
     EntitySelection,
     LegacyAlarmDefinitionSpec,
+    LegacyAlarmMigrationCandidate,
     LegacyAlarmMigrationPlan,
+    LegacyAlarmProposedDefinition,
+    LegacyAlarmProposedRule,
     LegacyAlarmSource,
     ResolvedAlarmEntity,
     compile_legacy_migration_plan,
+    legacy_alarm_configuration_items,
     legacy_migration_plan_digest,
     _raise_legacy_blockers,
 )
@@ -117,6 +121,77 @@ def _revision_from_json(value: dict[str, Any]) -> AlarmRuleSetRevision:
     )
 
 
+def _entity_from_json(value: dict[str, Any]) -> ResolvedAlarmEntity:
+    confirmation_id = value.get("confirmation_id")
+    return ResolvedAlarmEntity(
+        id=UUID(value["id"]),
+        device_instance_id=UUID(value["device_instance_id"]),
+        definition_id=value["definition_id"],
+        display_name=value["display_name"],
+        data_type=value["data_type"],
+        unit=value.get("unit"),
+        confirmation_id=UUID(confirmation_id) if confirmation_id else None,
+    )
+
+
+def _legacy_plan_from_json(value: dict[str, Any]) -> LegacyAlarmMigrationPlan:
+    candidates = []
+    for item in value["items"]:
+        definitions = tuple(LegacyAlarmDefinitionSpec(
+            definition_key=definition["definition_key"],
+            name=definition["name"],
+            source_kind=definition["source_kind"],
+            source_key=definition["source_key"],
+            entity=_entity_from_json(definition["entity"]),
+            severity=definition["severity"],
+            trigger=dict(definition["trigger"]),
+            recovery=dict(definition["recovery"]),
+            fault_map_id=(
+                UUID(definition["fault_map_id"])
+                if definition.get("fault_map_id") else None
+            ),
+            legacy_rule=dict(definition["legacy_rule"]),
+        ) for definition in item.get("definitions", ()))
+        proposed_rules = tuple(LegacyAlarmProposedRule(
+            entity_instance_id=UUID(proposal["entity_instance_id"]),
+            display_name=proposal["display_name"],
+            blockers=tuple(proposal["blockers"]),
+            proposed_definitions=tuple(LegacyAlarmProposedDefinition(
+                name=definition["name"],
+                severity=definition.get("severity"),
+                trigger=(dict(definition["trigger"]) if definition.get("trigger") else None),
+                recovery=(dict(definition["recovery"]) if definition.get("recovery") else None),
+                blockers=tuple(definition["blockers"]),
+                legacy_rule=dict(definition["legacy_rule"]),
+                fault_map_id=(UUID(definition["fault_map_id"]) if definition.get("fault_map_id") else None),
+                trigger_duration_seconds=definition.get("trigger_duration_seconds", 0),
+                recovery_duration_seconds=definition.get("recovery_duration_seconds", 0),
+                notification_throttle_seconds=definition.get("notification_throttle_seconds", 0),
+            ) for definition in proposal["proposed_definitions"]),
+        ) for proposal in item.get("proposed_rules", ()))
+        candidates.append(LegacyAlarmMigrationCandidate(
+            source_kind=item["source_kind"],
+            source_key=item["source_key"],
+            display_name=item["display_name"],
+            status=item["status"],
+            severity=item.get("severity"),
+            entity_instance_id=(UUID(item["entity_instance_id"]) if item.get("entity_instance_id") else None),
+            entity_instance_candidates=tuple(UUID(entity_id) for entity_id in item["entity_instance_candidates"]),
+            blockers=tuple(item["blockers"]),
+            target_definition_ids=tuple(UUID(definition_id) for definition_id in item["target_definition_ids"]),
+            definitions=definitions,
+            proposed_rules=proposed_rules,
+        ))
+    return LegacyAlarmMigrationPlan(
+        installation_id=UUID(value["installation_id"]),
+        status=value["status"],
+        items=tuple(candidates),
+        blockers=tuple(value["blockers"]),
+        digest=value["digest"],
+        target_definition_ids=tuple(UUID(definition_id) for definition_id in value.get("target_definition_ids", ())),
+    )
+
+
 def _plan_from_json(
     value: dict[str, Any],
     *,
@@ -129,18 +204,28 @@ def _plan_from_json(
         id=UUID(value["id"]),
         installation_id=UUID(value["installation_id"]),
         base_site_configuration_version=int(value["base_site_configuration_version"]),
-        rule_set_revision=_revision_from_json(value["rule_set_revision"]),
+        rule_set_revision=(
+            _revision_from_json(value["rule_set_revision"])
+            if value.get("rule_set_revision") is not None else None
+        ),
         status=lifecycle_status or value["status"],
         items=items,
         blockers=tuple(value["blockers"]),
         digest=value["digest"],
         planned_by=planned_by or value["planned_by"],
+        kind=value.get("kind", "rule_set"),
+        legacy_migration=(
+            _legacy_plan_from_json(value["legacy_migration"])
+            if value.get("legacy_migration") is not None else None
+        ),
         applied_result=(
             _result_from_json(
                 applied_result,
                 items=tuple(
                     item for item in items
-                    if item.action in {"add", "update", "preserve"}
+                    if item.action in {
+                        "add", "update", "preserve", "delete_candidate",
+                    }
                 ),
             )
             if applied_result is not None
@@ -162,6 +247,11 @@ def _plan_item_from_json(value: dict[str, Any]) -> AlarmConfigurationPlanItem:
         before=value.get("before"),
         after=value.get("after"),
         blockers=tuple(value["blockers"]),
+        before_definition_id=(
+            UUID(value["before_definition_id"])
+            if value.get("before_definition_id")
+            else None
+        ),
     )
 
 
@@ -204,7 +294,7 @@ def load_applied_alarm_configuration(
     plan = _plan_from_json(row[0], lifecycle_status="applied", planned_by=row[2])
     items = tuple(
         item for item in plan.items
-        if item.action in {"add", "update", "preserve"}
+        if item.action in {"add", "update", "preserve", "delete_candidate"}
     )
     return _result_from_json(row[1], items=items)
 
@@ -479,10 +569,10 @@ class PostgresAlarmConfigurationRepository:
                     """
                     INSERT INTO t_alarm_configuration_plans
                       (id, source_installation_id,
-                       base_site_configuration_version, rule_set_id,
+                       base_site_configuration_version, plan_kind, rule_set_id,
                        rule_set_revision, canonical_plan, digest, status,
                        planned_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING canonical_plan, planned_by
                     """,
@@ -490,8 +580,15 @@ class PostgresAlarmConfigurationRepository:
                         plan.id,
                         plan.installation_id,
                         plan.base_site_configuration_version,
-                        plan.rule_set_revision.rule_set_id,
-                        plan.rule_set_revision.revision,
+                        plan.kind,
+                        (
+                            plan.rule_set_revision.rule_set_id
+                            if plan.rule_set_revision is not None else None
+                        ),
+                        (
+                            plan.rule_set_revision.revision
+                            if plan.rule_set_revision is not None else None
+                        ),
                         Json(canonical_plan),
                         plan.digest,
                         plan.status,
@@ -844,287 +941,6 @@ class PostgresAlarmConfigurationRepository:
         )
         return installation_id, sources
 
-    @_persistence_operation
-    def apply_legacy_alarm_migration(
-        self,
-        plan: LegacyAlarmMigrationPlan,
-        *,
-        actor: str,
-    ) -> LegacyAlarmMigrationPlan:
-        if not actor.strip():
-            raise AlarmConfigurationError("ALARM_MIGRATION_ACTOR_INVALID")
-        with self._connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT site.installation_id, site.version,
-                           site.package_digest,
-                           site.entity_identity_installation_id
-                    FROM t_site_configuration_state state
-                    JOIN t_site_configuration_versions site
-                      ON site.version = state.current_version
-                    WHERE state.singleton = TRUE
-                    FOR UPDATE OF state
-                    """
-                )
-                site = cursor.fetchone()
-                if site is None or site[0] != plan.installation_id:
-                    raise AlarmConfigurationError("ALARM_MIGRATION_INSTALLATION_STALE")
-                installation_id, site_version, package_digest, identity_installation_id = site
-                _snapshot_installation_id, snapshot_sources = self._legacy_alarm_sources(
-                    cursor
-                )
-                plan_keys = {
-                    (item.source_kind, item.source_key) for item in plan.items
-                }
-                snapshot_keys = {
-                    (source.source_kind, source.source_key)
-                    for source in snapshot_sources
-                }
-                for source_kind, source_key in sorted(plan_keys | snapshot_keys):
-                    cursor.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"{source_kind}:{source_key}",),
-                    )
-                cursor.execute(
-                    """
-                    LOCK TABLE t_tags,
-                               t_entities,
-                               t_entity_bindings,
-                               t_entity_instance_bindings,
-                               t_entity_binding_confirmations,
-                               t_entity_instances,
-                               t_device_instances
-                    IN SHARE MODE
-                    """
-                )
-                locked_installation_id, locked_sources = self._legacy_alarm_sources(
-                    cursor
-                )
-                if locked_installation_id != installation_id:
-                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
-                locked_keys = {
-                    (source.source_kind, source.source_key)
-                    for source in locked_sources
-                }
-                if plan_keys != locked_keys:
-                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
-                if plan.status != "ready" or plan.blockers:
-                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_BLOCKED")
-                if plan.digest != legacy_migration_plan_digest(
-                    plan.installation_id, plan.items, actor
-                ):
-                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
-                selections = {
-                    (item.source_kind, item.source_key): item.entity_instance_id
-                    for item in plan.items
-                    if len(item.entity_instance_candidates) > 1
-                    and item.entity_instance_id is not None
-                }
-                trusted_plan = compile_legacy_migration_plan(
-                    installation_id=installation_id,
-                    sources=locked_sources,
-                    selections=selections,
-                    actor=actor,
-                )
-                _raise_legacy_blockers(trusted_plan.blockers)
-                supplied_by_source = {
-                    (item.source_kind, item.source_key): item for item in plan.items
-                }
-                for trusted_item in trusted_plan.items:
-                    if trusted_item.status == "migrated":
-                        continue
-                    supplied = supplied_by_source[
-                        (trusted_item.source_kind, trusted_item.source_key)
-                    ]
-                    if supplied != trusted_item:
-                        raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
-                plan = trusted_plan
-                current_items = []
-                pending_specs: list[LegacyAlarmDefinitionSpec] = []
-                target_ids: list[UUID] = []
-                for item in sorted(plan.items, key=lambda value: (value.source_kind, value.source_key)):
-                    cursor.execute(
-                        """
-                        SELECT target.definition_id
-                        FROM t_legacy_alarm_migrations migration
-                        JOIN t_legacy_alarm_migration_targets target
-                          ON target.migration_id = migration.id
-                        WHERE migration.source_kind = %s
-                          AND migration.source_key = %s
-                          AND migration.state = 'migrated'
-                        ORDER BY target.definition_id
-                        """,
-                        (item.source_kind, item.source_key),
-                    )
-                    existing = tuple(row[0] for row in cursor.fetchall())
-                    if existing:
-                        current_items.append(
-                            replace(item, status="migrated", target_definition_ids=existing)
-                        )
-                        target_ids.extend(existing)
-                        continue
-                    if item.status != "ready" or item.blockers or not item.definitions:
-                        raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_BLOCKED")
-                    for definition in item.definitions:
-                        if not self._legacy_target_is_current(
-                            cursor,
-                            definition,
-                            identity_installation_id=identity_installation_id,
-                        ):
-                            raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
-                    pending_specs.extend(item.definitions)
-                    current_items.append(item)
-
-                installed_ids: tuple[UUID, ...] = ()
-                if pending_specs:
-                    definitions = tuple(
-                        InstalledAlarmDefinition(
-                            id=uuid4(),
-                            asset_id=spec.definition_key,
-                            version="legacy-migration:1",
-                            installation_id=installation_id,
-                            site_configuration_version=int(site_version),
-                            entity_instance_id=spec.entity.id,
-                            entity_definition_id=spec.entity.definition_id,
-                            trigger=dict(spec.trigger),
-                            trigger_duration_seconds=0,
-                            recovery=dict(spec.recovery),
-                            recovery_duration_seconds=0,
-                            severity=spec.severity,
-                            notification_throttle_seconds=0,
-                        )
-                        for spec in pending_specs
-                    )
-                    definition_plan = AlarmDefinitionPlan(
-                        installation_id=installation_id,
-                        site_configuration_version=int(site_version),
-                        package_digest=package_digest.strip(),
-                        definitions=definitions,
-                        digest=_digest(
-                            [definition.public_dict() for definition in definitions]
-                        ),
-                    )
-                    installed_ids = self._definition_catalog.install_definitions(
-                        definition_plan,
-                        transaction=connection,
-                    )
-                    installed_by_source: dict[tuple[str, str], list[UUID]] = {}
-                    for spec, definition_id in zip(pending_specs, installed_ids, strict=True):
-                        source = (spec.source_kind, spec.source_key)
-                        installed_by_source.setdefault(source, []).append(definition_id)
-                        cursor.execute(
-                            """
-                            INSERT INTO t_alarm_definition_origins
-                              (definition_id, origin_type, source_kind,
-                               source_key, details, actor)
-                            VALUES (%s, 'legacy_migration', %s, %s, %s, %s)
-                            """,
-                            (
-                                definition_id,
-                                spec.source_kind,
-                                spec.source_key,
-                                Json(
-                                    {
-                                        "source_kind": spec.source_kind,
-                                        "source_key": spec.source_key,
-                                        "rule_name": spec.name,
-                                        "legacy_rule": _json_value(spec.legacy_rule),
-                                        "fault_map_id": (
-                                            str(spec.fault_map_id)
-                                            if spec.fault_map_id is not None
-                                            else None
-                                        ),
-                                        "entity_instance_id": str(spec.entity.id),
-                                        "confirmation_id": (
-                                            str(spec.entity.confirmation_id)
-                                            if spec.entity.confirmation_id is not None
-                                            else None
-                                        ),
-                                    }
-                                ),
-                                actor,
-                            ),
-                        )
-                    for source, source_definition_ids in installed_by_source.items():
-                        candidate = next(
-                            item
-                            for item in current_items
-                            if (item.source_kind, item.source_key) == source
-                        )
-                        migration_id = uuid4()
-                        cursor.execute(
-                            """
-                            INSERT INTO t_legacy_alarm_migrations
-                              (id, source_kind, source_key, state, actor, details)
-                            VALUES (%s, %s, %s, 'migrated', %s, %s)
-                            """,
-                            (
-                                migration_id,
-                                source[0],
-                                source[1],
-                                actor,
-                                Json(
-                                    {
-                                        "plan_digest": plan.digest,
-                                        "installation_id": str(installation_id),
-                                        "selected_entity_instance_id": str(
-                                            candidate.entity_instance_id
-                                        ),
-                                        "entity_instance_candidates": [
-                                            str(value)
-                                            for value in candidate.entity_instance_candidates
-                                        ],
-                                        "confirmation_id": str(
-                                            candidate.definitions[0].entity.confirmation_id
-                                        ),
-                                        "selection_reason": (
-                                            "explicit_selection"
-                                            if len(candidate.entity_instance_candidates) > 1
-                                            else "unique_confirmed_binding"
-                                        ),
-                                    }
-                                ),
-                            ),
-                        )
-                        for definition_id in source_definition_ids:
-                            cursor.execute(
-                                """
-                                INSERT INTO t_legacy_alarm_migration_targets
-                                  (migration_id, definition_id, source_kind,
-                                   source_key, origin_type)
-                                VALUES (%s, %s, %s, %s, 'legacy_migration')
-                                """,
-                                (
-                                    migration_id,
-                                    definition_id,
-                                    source[0],
-                                    source[1],
-                                ),
-                            )
-                    rebuilt_items = []
-                    for item in current_items:
-                        source = (item.source_kind, item.source_key)
-                        created = tuple(installed_by_source.get(source, ()))
-                        if created:
-                            rebuilt_items.append(
-                                replace(
-                                    item,
-                                    status="migrated",
-                                    target_definition_ids=created,
-                                )
-                            )
-                            target_ids.extend(created)
-                        else:
-                            rebuilt_items.append(item)
-                    current_items = rebuilt_items
-                return replace(
-                    plan,
-                    status="migrated",
-                    items=tuple(current_items),
-                    target_definition_ids=tuple(target_ids),
-                )
-
     @staticmethod
     def _legacy_target_is_current(
         cursor: Any,
@@ -1272,6 +1088,8 @@ class PostgresAlarmConfigurationRepository:
                 current = self._current_site_installation(cursor, current_version)
                 if current[0] != stored_plan.installation_id:
                     raise AlarmConfigurationError("ALARM_PLAN_STALE")
+                if stored_plan.kind == "legacy_migration":
+                    self._validate_legacy_stored_plan(cursor, stored_plan, current)
                 result = self._apply_stored_plan(
                     cursor,
                     connection,
@@ -1342,6 +1160,84 @@ class PostgresAlarmConfigurationRepository:
         if row is None:
             raise AlarmConfigurationError("ALARM_SITE_CONFIGURATION_MISSING")
         return row
+
+    def _validate_legacy_stored_plan(
+        self,
+        cursor: Any,
+        plan: AlarmConfigurationPlan,
+        current: tuple[Any, ...],
+    ) -> None:
+        legacy_plan = plan.legacy_migration
+        if legacy_plan is None or plan.rule_set_revision is not None:
+            raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+        _installation_id, snapshot_sources = self._legacy_alarm_sources(cursor)
+        planned_keys = {
+            (item.source_kind, item.source_key) for item in legacy_plan.items
+        }
+        snapshot_keys = {
+            (source.source_kind, source.source_key) for source in snapshot_sources
+        }
+        for source_kind, source_key in sorted(planned_keys | snapshot_keys):
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"{source_kind}:{source_key}",),
+            )
+        cursor.execute(
+            """
+            LOCK TABLE t_tags,
+                       t_entities,
+                       t_entity_bindings,
+                       t_entity_instance_bindings,
+                       t_entity_binding_confirmations,
+                       t_entity_instances,
+                       t_device_instances
+            IN SHARE MODE
+            """
+        )
+        locked_installation_id, locked_sources = self._legacy_alarm_sources(cursor)
+        if locked_installation_id != plan.installation_id:
+            raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+        locked_keys = {
+            (source.source_kind, source.source_key) for source in locked_sources
+        }
+        if planned_keys != locked_keys:
+            raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+        selections = {
+            (item.source_kind, item.source_key): item.entity_instance_id
+            for item in legacy_plan.items
+            if item.entity_instance_id is not None
+        }
+        trusted = compile_legacy_migration_plan(
+            installation_id=plan.installation_id,
+            sources=locked_sources,
+            selections=selections,
+            actor=plan.planned_by,
+        )
+        trusted_items = legacy_alarm_configuration_items(trusted)
+        trusted_digest = _digest({
+            "kind": "legacy_migration",
+            "base_site_configuration_version": plan.base_site_configuration_version,
+            "installation_id": plan.installation_id,
+            "planned_by": plan.planned_by,
+            "legacy_migration_digest": trusted.digest,
+            "items": trusted_items,
+        })
+        if (
+            trusted != legacy_plan
+            or trusted_items != plan.items
+            or trusted_digest != plan.digest
+        ):
+            raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+        _raise_legacy_blockers(trusted.blockers)
+        identity_installation_id = current[8]
+        for item in trusted.items:
+            for definition in item.definitions:
+                if not self._legacy_target_is_current(
+                    cursor,
+                    definition,
+                    identity_installation_id=identity_installation_id,
+                ):
+                    raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
 
     def _apply_stored_plan(
         self,
@@ -1448,10 +1344,37 @@ class PostgresAlarmConfigurationRepository:
             ),
         )
 
-        installable = tuple(
+        applicable = tuple(
             item
             for item in plan.items
-            if item.action in {"add", "update", "preserve"}
+            if item.action in {"add", "update", "preserve", "delete_candidate"}
+        )
+        current_definition_ids: dict[str, UUID] = {}
+        for item in applicable:
+            if item.action not in {"preserve", "delete_candidate"}:
+                continue
+            cursor.execute(
+                """
+                SELECT definition_id
+                FROM t_alarm_definition_current
+                WHERE asset_id = %s AND entity_instance_id = %s
+                FOR UPDATE
+                """,
+                (item.definition_key, item.entity_instance_id),
+            )
+            current_pointer = cursor.fetchone()
+            if (
+                item.before_definition_id is None
+                or current_pointer is None
+                or current_pointer[0] != item.before_definition_id
+            ):
+                raise AlarmConfigurationError("ALARM_PLAN_STALE")
+            current_definition_ids[item.definition_key] = current_pointer[0]
+
+        installable = tuple(
+            item
+            for item in applicable
+            if item.action in {"add", "update"}
         )
         entity_ids = [str(item.entity_instance_id) for item in installable]
         cursor.execute(
@@ -1467,14 +1390,20 @@ class PostgresAlarmConfigurationRepository:
             if item.after is None or item.entity_instance_id not in entity_definitions:
                 raise AlarmConfigurationError("ALARM_PLAN_ENTITY_MISSING")
             rule = item.after["rule"]
+            if plan.kind == "rule_set":
+                if plan.rule_set_revision is None:
+                    raise AlarmConfigurationError("ALARM_PLAN_STALE")
+                definition_version = (
+                    f"rule-set:{plan.rule_set_revision.rule_set_id}:"
+                    f"{plan.rule_set_revision.revision}"
+                )
+            else:
+                definition_version = "legacy-migration:1"
             installed_definitions.append(
                 InstalledAlarmDefinition(
                     id=uuid4(),
                     asset_id=item.definition_key,
-                    version=(
-                        f"rule-set:{plan.rule_set_revision.rule_set_id}:"
-                        f"{plan.rule_set_revision.revision}"
-                    ),
+                    version=definition_version,
                     installation_id=derived_installation_id,
                     site_configuration_version=next_version,
                     entity_instance_id=item.entity_instance_id,
@@ -1502,32 +1431,167 @@ class PostgresAlarmConfigurationRepository:
             definitions=tuple(installed_definitions),
             digest=_digest([definition.public_dict() for definition in installed_definitions]),
         )
-        definition_ids = self._definition_catalog.install_definitions(
+        installed_definition_ids = self._definition_catalog.install_definitions(
             definition_plan,
             transaction=connection,
         )
-        for item, definition_id in zip(installable, definition_ids, strict=True):
-            cursor.execute(
-                """
-                INSERT INTO t_alarm_definition_origins
-                  (definition_id, origin_type, rule_set_id,
-                   rule_set_revision, plan_id, details, actor)
-                VALUES (%s, 'rule_set', %s, %s, %s, %s, %s)
-                """,
-                (
-                    definition_id,
-                    plan.rule_set_revision.rule_set_id,
-                    plan.rule_set_revision.revision,
-                    plan.id,
-                    Json(
-                        {
+        installed_by_key = dict(zip(
+            (item.definition_key for item in installable),
+            installed_definition_ids,
+            strict=True,
+        ))
+        for item, definition_id in zip(
+            installable, installed_definition_ids, strict=True,
+        ):
+            if plan.kind == "legacy_migration":
+                legacy = item.after["legacy"]
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definition_origins
+                      (definition_id, origin_type, source_kind, source_key,
+                       plan_id, details, actor)
+                    VALUES (%s, 'legacy_migration', %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        definition_id,
+                        legacy["source_kind"],
+                        legacy["source_key"],
+                        plan.id,
+                        Json({
                             "definition_key": item.definition_key,
                             "rule": _json_value(item.after["rule"]),
-                        }
+                            **_json_value(legacy),
+                        }),
+                        actor,
                     ),
-                    actor,
-                ),
+                )
+            else:
+                if plan.rule_set_revision is None:
+                    raise AlarmConfigurationError("ALARM_PLAN_STALE")
+                cursor.execute(
+                    """
+                    INSERT INTO t_alarm_definition_origins
+                      (definition_id, origin_type, rule_set_id,
+                       rule_set_revision, plan_id, details, actor)
+                    VALUES (%s, 'rule_set', %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        definition_id,
+                        plan.rule_set_revision.rule_set_id,
+                        plan.rule_set_revision.revision,
+                        plan.id,
+                        Json({
+                            "definition_key": item.definition_key,
+                            "rule": _json_value(item.after["rule"]),
+                        }),
+                        actor,
+                    ),
+                )
+        if plan.kind == "legacy_migration":
+            if plan.legacy_migration is None:
+                raise AlarmConfigurationError("ALARM_MIGRATION_PLAN_STALE")
+            installed_by_source: dict[tuple[str, str], list[UUID]] = {}
+            for item, definition_id in zip(
+                installable, installed_definition_ids, strict=True,
+            ):
+                legacy = item.after["legacy"]
+                source = (legacy["source_kind"], legacy["source_key"])
+                installed_by_source.setdefault(source, []).append(definition_id)
+            candidates = {
+                (item.source_kind, item.source_key): item
+                for item in plan.legacy_migration.items
+            }
+            for source, source_definition_ids in sorted(installed_by_source.items()):
+                candidate = candidates[source]
+                migration_id = uuid4()
+                cursor.execute(
+                    """
+                    INSERT INTO t_legacy_alarm_migrations
+                      (id, source_kind, source_key, state, actor, details, plan_id)
+                    VALUES (%s, %s, %s, 'migrated', %s, %s, %s)
+                    """,
+                    (
+                        migration_id,
+                        source[0],
+                        source[1],
+                        actor,
+                        Json({
+                            "plan_id": str(plan.id),
+                            "plan_digest": plan.digest,
+                            "installation_id": str(plan.installation_id),
+                            "selected_entity_instance_id": str(candidate.entity_instance_id),
+                            "entity_instance_candidates": [
+                                str(value)
+                                for value in candidate.entity_instance_candidates
+                            ],
+                            "selection_reason": (
+                                "explicit_selection"
+                                if len(candidate.entity_instance_candidates) > 1
+                                else "unique_confirmed_binding"
+                            ),
+                        }),
+                        plan.id,
+                    ),
+                )
+                for definition_id in source_definition_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_legacy_alarm_migration_targets
+                          (migration_id, definition_id, source_kind,
+                           source_key, origin_type)
+                        VALUES (%s, %s, %s, %s, 'legacy_migration')
+                        """,
+                        (
+                            migration_id,
+                            definition_id,
+                            source[0],
+                            source[1],
+                        ),
+                    )
+        for item in applicable:
+            if item.action == "preserve":
+                cursor.execute(
+                    """
+                    UPDATE t_alarm_definition_current
+                    SET site_configuration_version = %s
+                    WHERE asset_id = %s
+                      AND entity_instance_id = %s
+                      AND definition_id = %s
+                    """,
+                    (
+                        next_version,
+                        item.definition_key,
+                        item.entity_instance_id,
+                        current_definition_ids[item.definition_key],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise AlarmConfigurationError("ALARM_PLAN_STALE")
+            elif item.action == "delete_candidate":
+                cursor.execute(
+                    """
+                    DELETE FROM t_alarm_definition_current
+                    WHERE asset_id = %s
+                      AND entity_instance_id = %s
+                      AND definition_id = %s
+                    """,
+                    (
+                        item.definition_key,
+                        item.entity_instance_id,
+                        current_definition_ids[item.definition_key],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise AlarmConfigurationError("ALARM_PLAN_STALE")
+
+        definition_ids = tuple(
+            (
+                installed_by_key[item.definition_key]
+                if item.action in {"add", "update"}
+                else current_definition_ids[item.definition_key]
             )
+            for item in applicable
+        )
 
         installation_audit_details = {
             "plan_id": str(derived_plan_id),
@@ -1604,5 +1668,5 @@ class PostgresAlarmConfigurationRepository:
             definition_ids=definition_ids,
             audit_event_id=audit_event_id,
             applied_at=datetime.now(timezone.utc),
-            items=installable,
+            items=applicable,
         )

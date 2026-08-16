@@ -1,5 +1,36 @@
 ---
 
+## Session 2026-08-16 — 最终规格审计修复
+
+### 已修复
+
+- PostgreSQL `preserve` 现在复用完全相同的不可变 definition UUID，只推进当前指针的站点版本；
+  `delete_candidate` 在 apply 时精确移除 current pointer，但保留定义、事件、时间线、origin 与审计。
+  指针被并发替换会稳定返回 `ALARM_PLAN_STALE`，整批事务零写。
+- 旧告警迁移不再由 `/legacy/plans` 直接写运行态。该端点只生成
+  `kind=legacy_migration` 的持久计划；唯一写入口是既有通用 plan apply，复用主体幂等、派生安装、
+  站点版本、双审计、验收 application 与回放链。旧 Protocol/service/repository 直写 seam 已删除。
+- migration 037 为两种计划建立条件约束和 nullable-safe append-only 门禁，并要求 legacy origin 与
+  migration evidence 的 plan_id 必须指向 legacy_migration 计划；无法证明版本归属的旧证据 fail closed。
+- 已全部迁移的旧来源不会再生成可应用的空计划：服务返回 409
+  `ALARM_MIGRATION_NOTHING_TO_MIGRATE`，并保持零计划、零运行态写；前端同时禁用无待迁移项和零项计划。
+- 前端旧迁移按钮改为“生成迁移计划”，随后复用同一变更预览和应用按钮；停用文案明确保留历史证据。
+- Schema 037 的新制品身份已从已发布的 0.4.79 推进并统一为 0.4.80，未覆盖历史候选。
+
+### 新鲜验证
+
+- 完整后端：`310 passed, 37 skipped, 199 subtests passed`（143.43s），仅 2 个既有 warning。
+- 隔离真实 PostgreSQL（migration 034–037、配置仓储、legacy public HTTP、验收事务与协议重启主缝）：
+  `40/40`（80.159s）。另 acceptance migration/并发定向复跑 `9/9`。
+- 前端 `npm run build`：TypeScript + Vite production build 通过，8184 modules（约 69s），仅既有大 chunk 告警。
+- `frontend/node_modules` 仅临时 Junction 到现有共享依赖，验证后已安全移除；未安装依赖。
+- 最终独立双轴 review 均已通过：Spec PASS / Ready，Standards PASS；Critical/Important 阻断为 0。
+- 未部署、未连接 1 号机、未修改现场数据。
+
+### 边界
+
+- 自动化证明了产品实现与隔离数据库/协议链，不等同于 1 号机现场部署或独立实施工程师验收。
+
 ## Session 2026-08-16 — 统一告警配置与告警验收最终门禁
 
 ### 最终状态

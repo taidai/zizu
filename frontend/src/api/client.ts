@@ -1062,9 +1062,10 @@ export interface AlarmConfigurationPlanItem {
 
 export interface AlarmConfigurationPlan {
   id: string
+  kind: 'rule_set' | 'legacy_migration'
   installation_id: string
   base_site_configuration_version: number
-  rule_set_revision: AlarmRuleSetRevision
+  rule_set_revision: AlarmRuleSetRevision | null
   status: AlarmPlanStatus
   items: AlarmConfigurationPlanItem[]
   blockers: AlarmBlocker[]
@@ -1191,6 +1192,7 @@ const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_PLAN_DIGEST_MISMATCH: '计划摘要已失效，请重新生成计划。',
   ALARM_PLAN_BLOCKED: '计划存在阻断项，不能应用。',
   ALARM_MIGRATION_AMBIGUOUS: '旧配置存在多个实体实例候选，需要明确选择。',
+  ALARM_MIGRATION_NOTHING_TO_MIGRATE: '旧配置已全部迁移，没有待生成的迁移计划。',
   ALARM_ENTITY_UNRESOLVED: '存在无法解析的实体实例。',
   ALARM_FAULT_MAP_UNRESOLVED: '存在无法解析的故障映射。',
   ALARM_MIGRATION_SELECTION_INVALID: '所选迁移目标无效，请重新选择。',
@@ -1313,11 +1315,11 @@ export async function fetchLegacyAlarmMigrationCandidates(): Promise<{ installat
 export async function createLegacyAlarmMigrationPlan(input: {
   installation_id: string
   selections: { source_kind: LegacyAlarmMigrationCandidate['source_kind']; source_key: string; entity_instance_id: string }[]
-}): Promise<LegacyAlarmMigrationPlan> {
+}): Promise<AlarmConfigurationPlan> {
   const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configuration-migrations/legacy/plans`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
-  if (!response.ok) throw await alarmConfigurationError(response, `迁移旧配置失败：${response.status}`)
+  if (!response.ok) throw await alarmConfigurationError(response, `生成旧配置迁移计划失败：${response.status}`)
   return response.json()
 }
 

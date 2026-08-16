@@ -29,6 +29,7 @@ const diagnostic = (blockers: AlarmBlocker[]) => blockers.map((blocker) => block
 
 export default function LegacyMigrationPanel({ candidates, entities, selections, onSelectionChange, onMigrate, migrating }: Props) {
   const names = new Map(entities.map((item) => [item.id, `${item.device_display_name} / ${item.display_name}`]))
+  const pendingCandidates = candidates.filter((candidate) => candidate.status !== 'migrated')
   const selectedProposal = (candidate: LegacyAlarmMigrationCandidate) => {
     const selected = selections[`${candidate.source_kind}:${candidate.source_key}`] || candidate.entity_instance_id || ''
     return candidate.proposed_rules.find((item) => item.entity_instance_id === selected) || null
@@ -37,7 +38,7 @@ export default function LegacyMigrationPanel({ candidates, entities, selections,
     const proposal = selectedProposal(candidate)
     return Boolean(proposal && proposal.blockers.length === 0)
   }
-  const blocked = candidates.some((candidate) => candidate.status === 'blocked' && (
+  const blocked = pendingCandidates.some((candidate) => candidate.status === 'blocked' && (
     !ambiguous(candidate) || candidate.blockers.length !== 1 || !validChoice(candidate)
   ))
 
@@ -48,8 +49,8 @@ export default function LegacyMigrationPanel({ candidates, entities, selections,
           <h3 id="legacy-migration-heading" className="text-sm font-bold text-gray-800">旧配置迁移</h3>
           <p className="mt-0.5 text-xs text-gray-500">旧配置只读。选择实体后会列出全部将创建的定义；存在候选级阻断的实体不可选择。</p>
         </div>
-        <button type="button" onClick={onMigrate} disabled={migrating || !candidates.length || blocked} className="neu-btn px-3 py-1.5 text-xs font-medium text-[#287c12] disabled:opacity-50">
-          {migrating ? '迁移中...' : blocked ? '处理阻断项后可迁移' : '执行迁移'}
+        <button type="button" onClick={onMigrate} disabled={migrating || !pendingCandidates.length || blocked} className="neu-btn px-3 py-1.5 text-xs font-medium text-[#287c12] disabled:opacity-50">
+          {migrating ? '正在生成计划...' : !pendingCandidates.length ? '没有待迁移项' : blocked ? '处理阻断项后可生成计划' : '生成迁移计划'}
         </button>
       </div>
       {!candidates.length ? <p className="mt-4 text-center text-xs text-gray-400">没有待迁移的旧告警配置。</p> : (

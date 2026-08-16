@@ -98,6 +98,7 @@ class AlarmConfigurationPlanItem:
     before: dict[str, Any] | None
     after: dict[str, Any] | None
     blockers: tuple[dict[str, Any], ...]
+    before_definition_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -105,12 +106,14 @@ class AlarmConfigurationPlan:
     id: UUID
     installation_id: UUID
     base_site_configuration_version: int
-    rule_set_revision: AlarmRuleSetRevision
+    rule_set_revision: AlarmRuleSetRevision | None
     status: str
     items: tuple[AlarmConfigurationPlanItem, ...]
     blockers: tuple[dict[str, Any], ...]
     digest: str
     planned_by: str
+    kind: Literal["rule_set", "legacy_migration"] = "rule_set"
+    legacy_migration: LegacyAlarmMigrationPlan | None = None
     applied_result: AppliedAlarmConfiguration | None = None
 
 
@@ -225,7 +228,6 @@ class AlarmConfigurationRepository(Protocol):
     def find_idempotency(self, actor: str, idempotency_key: str) -> tuple[UUID, str, str, AppliedAlarmConfiguration] | None: ...
     def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration: ...
     def list_legacy_alarm_sources(self) -> tuple[UUID, tuple[LegacyAlarmSource, ...]]: ...
-    def apply_legacy_alarm_migration(self, plan: LegacyAlarmMigrationPlan, *, actor: str) -> LegacyAlarmMigrationPlan: ...
 
 
 def _json_value(value: Any) -> Any:
@@ -648,6 +650,60 @@ def compile_legacy_migration_plan(
     )
 
 
+def legacy_alarm_configuration_items(
+    plan: LegacyAlarmMigrationPlan,
+) -> tuple[AlarmConfigurationPlanItem, ...]:
+    """Translate trusted legacy definitions into the normal apply contract."""
+    items: list[AlarmConfigurationPlanItem] = []
+    for candidate in plan.items:
+        for index, definition in enumerate(candidate.definitions, start=1):
+            rule_id = f"{candidate.source_kind}:{candidate.source_key}:{index}"
+            items.append(AlarmConfigurationPlanItem(
+                definition_key=definition.definition_key,
+                entity_instance_id=definition.entity.id,
+                rule_id=rule_id,
+                action="add",
+                before=None,
+                after={
+                    "entity_instance_id": str(definition.entity.id),
+                    "rule": {
+                        "id": rule_id,
+                        "name": definition.name,
+                        "severity": definition.severity,
+                        "trigger": {
+                            "operator": definition.trigger["op"],
+                            "value": definition.trigger.get("value"),
+                        },
+                        "trigger_duration_seconds": 0,
+                        "recovery": {
+                            "operator": definition.recovery["op"],
+                            "value": definition.recovery.get("value"),
+                        },
+                        "recovery_duration_seconds": 0,
+                        "notification_throttle_seconds": 0,
+                        "unit": definition.entity.unit,
+                        "fault_map_id": (
+                            str(definition.fault_map_id)
+                            if definition.fault_map_id is not None
+                            else None
+                        ),
+                    },
+                    "legacy": {
+                        "source_kind": definition.source_kind,
+                        "source_key": definition.source_key,
+                        "legacy_rule": _json_value(definition.legacy_rule),
+                        "confirmation_id": (
+                            str(definition.entity.confirmation_id)
+                            if definition.entity.confirmation_id is not None
+                            else None
+                        ),
+                    },
+                },
+                blockers=(),
+            ))
+    return tuple(sorted(items, key=lambda item: item.definition_key))
+
+
 class InMemoryAlarmConfigurationRepository:
     def __init__(self, *, installation_id: UUID | None = None, entities: tuple[ResolvedAlarmEntity, ...] = (), site_version: int = 1, legacy_sources: tuple[LegacyAlarmSource, ...] = ()) -> None:
         self.current_installation_id = installation_id or uuid4()
@@ -729,7 +785,11 @@ class InMemoryAlarmConfigurationRepository:
 
     def current_site_context(self) -> dict[str, Any]:
         entities = {str(entity.id): entity for entity in self._entities}
-        definitions = deepcopy(self._definitions)
+        definitions = {
+            key: deepcopy(record)
+            for key, record in self._definitions.items()
+            if self._current_pointers.get(key) == record["id"]
+        }
         for record in definitions.values():
             payload = record["payload"]
             entity = entities.get(payload["entity_instance_id"])
@@ -756,32 +816,73 @@ class InMemoryAlarmConfigurationRepository:
         definitions = deepcopy(self._definitions)
         pointers = dict(self._current_pointers)
         definition_ids: list[UUID] = []
+        applied_items: list[AlarmConfigurationPlanItem] = []
         for item in plan.items:
-            if item.action not in {"add", "update", "preserve"}:
+            if item.action not in {"add", "update", "preserve", "delete_candidate"}:
                 continue
             existing = definitions.get(item.definition_key)
+            if item.action in {"preserve", "delete_candidate"}:
+                if (
+                    item.before_definition_id is None
+                    or existing is None
+                    or existing["id"] != item.before_definition_id
+                    or pointers.get(item.definition_key) != item.before_definition_id
+                ):
+                    raise AlarmConfigurationError("ALARM_PLAN_STALE")
+                definition_ids.append(item.before_definition_id)
+                applied_items.append(item)
+                if item.action == "delete_candidate":
+                    del pointers[item.definition_key]
+                continue
             definition_id = existing["id"] if existing is not None else uuid4()
             definitions[item.definition_key] = {
                 "id": definition_id,
                 "payload": deepcopy(item.after),
-                "origin_type": "rule_set",
-                "rule_set_revision": plan.rule_set_revision.revision,
+                "origin_type": plan.kind,
+                "rule_set_revision": (
+                    plan.rule_set_revision.revision
+                    if plan.rule_set_revision is not None else None
+                ),
             }
             pointers[item.definition_key] = definition_id
             definition_ids.append(definition_id)
+            applied_items.append(item)
         audit_event_id = uuid4()
         if self.fail_audit:
             raise AlarmConfigurationError("ALARM_AUDIT_FAILED")
+        legacy_sources = list(self._legacy_sources)
+        if plan.kind == "legacy_migration":
+            targets_by_source: dict[tuple[str, str], list[UUID]] = {}
+            for item, definition_id in zip(applied_items, definition_ids, strict=True):
+                if item.after is None:
+                    continue
+                legacy = item.after["legacy"]
+                targets_by_source.setdefault(
+                    (legacy["source_kind"], legacy["source_key"]), []
+                ).append(definition_id)
+            rebuilt_sources = []
+            for source in legacy_sources:
+                source_key = (source.source_kind, source.source_key)
+                if source_key not in targets_by_source:
+                    rebuilt_sources.append(source)
+                    continue
+                targets = tuple(targets_by_source[source_key])
+                if is_dataclass(source):
+                    rebuilt_sources.append(
+                        replace(source, target_definition_ids=targets)
+                    )
+                else:
+                    copied_source = deepcopy(source)
+                    copied_source.target_definition_ids = targets
+                    rebuilt_sources.append(copied_source)
+            legacy_sources = rebuilt_sources
         derived_installation_id = uuid4()
         result = AppliedAlarmConfiguration(
             id=uuid4(), plan_id=plan.id, installation_id=derived_installation_id,
             site_configuration_version=self._site_version + 1,
             definition_ids=tuple(definition_ids), audit_event_id=audit_event_id,
             applied_at=datetime.now(timezone.utc),
-            items=tuple(
-                item for item in plan.items
-                if item.action in {"add", "update", "preserve"}
-            ),
+            items=tuple(applied_items),
         )
         idempotency = dict(self._idempotency)
         idempotency[(actor, idempotency_key)] = (plan.id, plan.digest, actor, result)
@@ -792,8 +893,12 @@ class InMemoryAlarmConfigurationRepository:
         self._site_version = result.site_configuration_version
         self._idempotency = idempotency
         self._audit_events = audits
+        self._legacy_sources = legacy_sources
         self._derived_installation_id = derived_installation_id
         self.applied_count += 1
+        if plan.kind == "legacy_migration":
+            self.legacy_migration_write_count += 1
+            self.last_legacy_migration_actor = actor
         return result
 
     def apply_plan(self, plan: AlarmConfigurationPlan, *, idempotency_key: str, actor: str) -> AppliedAlarmConfiguration:
@@ -824,51 +929,6 @@ class InMemoryAlarmConfigurationRepository:
 
     def list_legacy_alarm_sources(self) -> tuple[UUID, tuple[LegacyAlarmSource, ...]]:
         return self.current_installation_id, tuple(self._legacy_sources)
-
-    def apply_legacy_alarm_migration(
-        self,
-        plan: LegacyAlarmMigrationPlan,
-        *,
-        actor: str,
-    ) -> LegacyAlarmMigrationPlan:
-        if not actor.strip():
-            raise AlarmConfigurationError("ALARM_MIGRATION_ACTOR_INVALID")
-        target_ids: list[UUID] = []
-        migrated_items: list[LegacyAlarmMigrationCandidate] = []
-        changed = False
-        for item in plan.items:
-            if item.status == "migrated":
-                target_ids.extend(item.target_definition_ids)
-                migrated_items.append(item)
-                continue
-            created = tuple(uuid4() for _definition in item.definitions)
-            target_ids.extend(created)
-            migrated_items.append(
-                replace(item, status="migrated", target_definition_ids=created)
-            )
-            for index, source in enumerate(self._legacy_sources):
-                if (
-                    source.source_kind == item.source_kind
-                    and source.source_key == item.source_key
-                ):
-                    if is_dataclass(source):
-                        self._legacy_sources[index] = replace(
-                            source, target_definition_ids=created
-                        )
-                    else:
-                        source.target_definition_ids = created
-                    break
-            changed = True
-        if changed:
-            self.legacy_migration_write_count += 1
-            self.last_legacy_migration_actor = actor
-        return replace(
-            plan,
-            status="migrated",
-            items=tuple(migrated_items),
-            target_definition_ids=tuple(target_ids),
-        )
-
 
 class AlarmConfiguration:
     def __init__(self, repository: AlarmConfigurationRepository) -> None:
@@ -907,26 +967,52 @@ class AlarmConfiguration:
         )
         return installation_id, plan.items
 
-    def apply_legacy_migration(
+    def plan_legacy_migration(
         self,
         *,
         installation_id: UUID,
         selections: Mapping[tuple[str, str], UUID],
         actor: str,
-    ) -> LegacyAlarmMigrationPlan:
+    ) -> AlarmConfigurationPlan:
         if not actor.strip():
             raise AlarmConfigurationError("ALARM_MIGRATION_ACTOR_INVALID")
         current_installation_id, sources = self.repository.list_legacy_alarm_sources()
         if installation_id != current_installation_id:
             raise AlarmConfigurationError("ALARM_MIGRATION_INSTALLATION_STALE")
-        plan = compile_legacy_migration_plan(
+        legacy_plan = compile_legacy_migration_plan(
             installation_id=installation_id,
             sources=sources,
             selections=dict(selections),
             actor=actor,
         )
-        _raise_legacy_blockers(plan.blockers)
-        return self.repository.apply_legacy_alarm_migration(plan, actor=actor)
+        _raise_legacy_blockers(legacy_plan.blockers)
+        items = legacy_alarm_configuration_items(legacy_plan)
+        if not items:
+            raise AlarmConfigurationError("ALARM_MIGRATION_NOTHING_TO_MIGRATE")
+        if len(items) > 2000:
+            raise AlarmConfigurationError("expanded definition count must not exceed 2000")
+        base_version = self.repository.current_site_version()
+        digest = _digest({
+            "kind": "legacy_migration",
+            "base_site_configuration_version": base_version,
+            "installation_id": installation_id,
+            "planned_by": actor,
+            "legacy_migration_digest": legacy_plan.digest,
+            "items": items,
+        })
+        return self.repository.save_plan(AlarmConfigurationPlan(
+            id=uuid4(),
+            installation_id=installation_id,
+            base_site_configuration_version=base_version,
+            rule_set_revision=None,
+            status="ready",
+            items=items,
+            blockers=(),
+            digest=digest,
+            planned_by=actor,
+            kind="legacy_migration",
+            legacy_migration=legacy_plan,
+        ))
 
     def plan(self, command: PlanAlarmConfiguration) -> AlarmConfigurationPlan:
         if not command.planned_by.strip():
@@ -958,6 +1044,9 @@ class AlarmConfiguration:
                 after = {"rule": _rule_payload(alarm_rule), "entity_instance_id": str(entity.id)}
                 before_record = existing_definitions.get(definition_key)
                 before = None if before_record is None else before_record["payload"]
+                before_definition_id = (
+                    None if before_record is None else before_record["id"]
+                )
                 item_blockers = _binding_issues(entity, alarm_rule) + _rule_issues(alarm_rule)
                 if item_blockers:
                     action = "block"
@@ -971,6 +1060,7 @@ class AlarmConfiguration:
                 items.append(AlarmConfigurationPlanItem(
                     definition_key=definition_key, entity_instance_id=entity.id, rule_id=alarm_rule.id,
                     action=action, before=before, after=after, blockers=item_blockers,
+                    before_definition_id=before_definition_id,
                 ))
         if not entities:
             blockers.append(_blocker("NO_ENTITIES", "no alarm entities resolved"))
@@ -993,6 +1083,7 @@ class AlarmConfiguration:
                     before=before,
                     after=None,
                     blockers=(),
+                    before_definition_id=record["id"],
                 ))
         items.sort(key=lambda item: item.definition_key)
         items = tuple(items)

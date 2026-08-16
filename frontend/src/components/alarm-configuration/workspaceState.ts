@@ -21,7 +21,10 @@ export function readWorkspaceContext(storage: Storage = sessionStorage): Workspa
 }
 
 export function savePlanContext(plan: AlarmConfigurationPlan, storage: Storage = sessionStorage): void {
-  storage.setItem(PLAN_CONTEXT_KEY, JSON.stringify({ id: plan.id, revision: `${plan.rule_set_revision.rule_set_id}:${plan.rule_set_revision.revision}`, digest: plan.digest, baseVersion: plan.base_site_configuration_version } satisfies SavedPlanContext))
+  const revision = plan.rule_set_revision
+    ? `${plan.rule_set_revision.rule_set_id}:${plan.rule_set_revision.revision}`
+    : 'legacy_migration'
+  storage.setItem(PLAN_CONTEXT_KEY, JSON.stringify({ id: plan.id, revision, digest: plan.digest, baseVersion: plan.base_site_configuration_version } satisfies SavedPlanContext))
   storage.removeItem(APPLY_CONTEXT_KEY)
 }
 

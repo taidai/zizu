@@ -311,6 +311,31 @@ class AlarmConfigurationAcceptanceTest(unittest.TestCase):
         self.assertEqual("ALARM_ACCEPTANCE_PRESERVED", report.items[0].code)
         self.assertEqual(str(prior.id), report.items[0].evidence["prior_report_id"])
 
+    def test_delete_candidate_passes_without_runtime_lifecycle_evidence(self) -> None:
+        deleted = AlarmConfigurationPlanItem(
+            definition_key=self.plan_items[0].definition_key,
+            entity_instance_id=ENTITY_IDS[0],
+            rule_id="overpower",
+            action="delete_candidate",
+            before={"version": "old"},
+            after=None,
+            blockers=(),
+        )
+
+        report = self.run_acceptance(
+            self.acceptance(),
+            self.applied_for(DEFINITION_IDS[0], deleted),
+            key="delete-candidate",
+        )
+
+        self.assertEqual("passed", report.status)
+        self.assertEqual("delete_candidate", report.items[0].action)
+        self.assertEqual("ALARM_ACCEPTANCE_DELETED", report.items[0].code)
+        self.assertEqual(
+            True,
+            report.items[0].evidence["current_pointer_removed"],
+        )
+
     def test_same_command_replays_the_saved_report(self) -> None:
         self.complete_lifecycle(DEFINITION_IDS[0], ENTITY_IDS[0])
         repository = InMemoryAlarmConfigurationAcceptanceRepository()

@@ -627,12 +627,28 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
                     ],
                 },
             )
+            selected_plan = selected.json()
+            applied = await client.post(
+                f"/api/v1/alarm-configuration-plans/{selected_plan['id']}/apply",
+                headers={**headers, "Idempotency-Key": "legacy-memory-apply"},
+                json={"plan_digest": selected_plan["digest"]},
+            )
+            reloaded = await client.get(
+                "/api/v1/alarm-configuration-migrations/legacy",
+                headers=headers,
+            )
 
         self.assertEqual(blocked.status_code, 409, blocked.text)
         self.assertEqual(blocked.json()["detail"]["code"], "ALARM_MIGRATION_AMBIGUOUS")
-        self.assertEqual(selected.status_code, 200, selected.text)
-        self.assertEqual(selected.json()["status"], "migrated")
+        self.assertEqual(selected.status_code, 201, selected.text)
+        self.assertEqual(selected.json()["status"], "ready")
         self.assertEqual(selected.json()["items"][0]["entity_instance_id"], str(ENTITY_IDS[1]))
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(reloaded.json()["items"][0]["status"], "migrated")
+        self.assertEqual(
+            reloaded.json()["items"][0]["target_definition_ids"],
+            applied.json()["definition_ids"],
+        )
         self.assertEqual(configuration.repository.legacy_migration_write_count, 1)
         self.assertEqual(
             configuration.repository.last_legacy_migration_actor,
@@ -669,11 +685,12 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertIsNone(response.json()["items"][0]["entity_instance_id"])
+        self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(
-            response.json()["target_definition_ids"], [str(LEGACY_TARGET_ID)]
+            response.json()["detail"]["code"],
+            "ALARM_MIGRATION_NOTHING_TO_MIGRATE",
         )
+        self.assertEqual(configuration.repository.plans, [])
         self.assertEqual(configuration.repository.legacy_migration_write_count, 0)
 
     async def test_legacy_compatibility_reads_are_deprecated_and_writes_are_gated(self) -> None:
@@ -1012,49 +1029,6 @@ class AlarmConfigurationAuthorizationTest(unittest.IsolatedAsyncioTestCase):
             "ALARM_LEGACY_RULE_UNSUPPORTED",
         )
         self.assertEqual(configuration.repository.legacy_migration_write_count, 0)
-
-    async def test_legacy_apply_stale_and_blocked_codes_are_conflicts(self) -> None:
-        confirmed = ResolvedAlarmEntity(
-            id=ENTITY_IDS[0], device_instance_id=DEVICE_ID,
-            definition_id="pcs.activePower", display_name="PCS 1 active power",
-            data_type="number", unit="kW",
-            confirmation_id=UUID("40000000-0000-0000-0000-000000000010"),
-        )
-        source = _legacy_source(
-            "tag_alarm", "tag-ready", entities=(confirmed,), level_code="error1",
-        )
-        app, _identity_repository, configuration = self.build_app(
-            legacy_sources=(source,)
-        )
-        failures = iter((
-            "ALARM_MIGRATION_PLAN_STALE",
-            "ALARM_MIGRATION_PLAN_BLOCKED",
-        ))
-
-        def fail_apply(_plan, *, actor):
-            del actor
-            raise AlarmConfigurationError(next(failures))
-
-        configuration.repository.apply_legacy_alarm_migration = fail_apply
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
-            headers = await self.login(client, "engineer")
-            responses = [
-                await client.post(
-                    "/api/v1/alarm-configuration-migrations/legacy/plans",
-                    headers=headers,
-                    json={"installation_id": str(INSTALLATION_ID)},
-                )
-                for _index in range(2)
-            ]
-
-        for response, code in zip(
-            responses,
-            ("ALARM_MIGRATION_PLAN_STALE", "ALARM_MIGRATION_PLAN_BLOCKED"),
-            strict=True,
-        ):
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertEqual(code, response.json()["detail"]["code"])
 
     def test_startup_has_no_legacy_alarm_level_seed_path(self) -> None:
         from app import main

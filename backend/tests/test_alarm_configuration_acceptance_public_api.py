@@ -406,6 +406,11 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
             / "init-db"
             / "migration_036_alarm_configuration_acceptance.sql"
         )
+        cls.migration_037 = (
+            Path(__file__).resolve().parents[2]
+            / "init-db"
+            / "migration_037_alarm_configuration_application_kinds.sql"
+        )
 
     def setUp(self) -> None:
         base = self._base()
@@ -417,6 +422,11 @@ class AlarmConfigurationAcceptancePostgresTest(unittest.TestCase):
                 self.installation_id, _ = base._insert_installed_site(cursor)
                 self.entity_ids = base._insert_entities(cursor, self.installation_id)
                 base._apply_alarm_migrations(cursor, include_acceptance=False)
+                # Current repository code writes the plan_kind column. 037 is
+                # independent from the acceptance tables, so install its plan
+                # shape here while individual tests still control when 036 is
+                # applied and replayed.
+                cursor.execute(self.migration_037.read_text(encoding="utf-8"))
 
     def _repository(self):
         from app.services.alarm_configuration_postgres import (

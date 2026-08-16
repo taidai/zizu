@@ -618,6 +618,106 @@ class AlarmConfigurationApplyTest(unittest.TestCase):
         self.assertEqual([item.definition_key for item in second.items], sorted(item.definition_key for item in second.items))
         self.assertNotEqual(first.digest, second.digest)
 
+    def test_apply_reuses_preserved_definition_and_removes_deleted_current_pointer(self) -> None:
+        first_revision = self.service.create_rule_set_revision(
+            rule_set_id=self.revision.rule_set_id,
+            rules=(
+                rule("warning", "WARNING", "gt", 450, "lte", 430, unit="kW"),
+                rule("critical", "CRITICAL", "gt", 550, "lte", 500, unit="kW"),
+            ),
+            actor="user:engineer",
+        )
+        first_plan = self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id,
+            EntitySelection(),
+            first_revision.rule_set_id,
+            first_revision.revision,
+            "user:engineer",
+        ))
+        first = self.service.apply(ApplyAlarmConfigurationPlan(
+            first_plan.id, first_plan.digest, "delete-v1", "user:engineer",
+        ))
+        first_ids = dict(zip(
+            (item.definition_key for item in first.items),
+            first.definition_ids,
+            strict=True,
+        ))
+
+        second_revision = self.service.create_rule_set_revision(
+            rule_set_id=first_revision.rule_set_id,
+            rules=(first_revision.rules[0],),
+            actor="user:engineer",
+        )
+        second_plan = self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id,
+            EntitySelection(),
+            second_revision.rule_set_id,
+            second_revision.revision,
+            "user:engineer",
+        ))
+        second = self.service.apply(ApplyAlarmConfigurationPlan(
+            second_plan.id, second_plan.digest, "delete-v2", "user:engineer",
+        ))
+        second_ids = dict(zip(
+            (item.definition_key for item in second.items),
+            second.definition_ids,
+            strict=True,
+        ))
+
+        self.assertEqual(
+            ["delete_candidate", "preserve"],
+            sorted(item.action for item in second.items),
+        )
+        self.assertEqual(first_ids, second_ids)
+        deleted_key = next(
+            item.definition_key for item in second.items
+            if item.action == "delete_candidate"
+        )
+        preserved_key = next(
+            item.definition_key for item in second.items
+            if item.action == "preserve"
+        )
+        self.assertNotIn(deleted_key, self.repository._current_pointers)
+        self.assertIn(deleted_key, self.repository._definitions)
+        self.assertEqual(
+            first_ids[preserved_key],
+            self.repository._current_pointers[preserved_key],
+        )
+
+    def test_delete_fails_stale_when_current_pointer_no_longer_matches_preview(self) -> None:
+        first = self.ready_plan()
+        self.service.apply(ApplyAlarmConfigurationPlan(
+            first.id, first.digest, "delete-stale-v1", "user:engineer",
+        ))
+        empty_revision = self.service.create_rule_set_revision(
+            rule_set_id=self.revision.rule_set_id,
+            rules=(),
+            actor="user:engineer",
+        )
+        delete_plan = self.service.plan(PlanAlarmConfiguration(
+            self.repository.current_installation_id,
+            EntitySelection(),
+            empty_revision.rule_set_id,
+            empty_revision.revision,
+            "user:engineer",
+        ))
+        delete_key = delete_plan.items[0].definition_key
+        before_definitions = deepcopy(self.repository._definitions)
+        self.repository._current_pointers[delete_key] = uuid4()
+        before_pointers = deepcopy(self.repository._current_pointers)
+
+        with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_PLAN_STALE"):
+            self.service.apply(ApplyAlarmConfigurationPlan(
+                delete_plan.id,
+                delete_plan.digest,
+                "delete-stale-v2",
+                "user:engineer",
+            ))
+
+        self.assertEqual(before_definitions, self.repository._definitions)
+        self.assertEqual(before_pointers, self.repository._current_pointers)
+        self.assertEqual(8, self.repository._site_version)
+
     def test_concurrent_same_key_replays_one_atomic_apply(self) -> None:
         class RacingRepository(InMemoryAlarmConfigurationRepository):
             def __init__(self, **kwargs):

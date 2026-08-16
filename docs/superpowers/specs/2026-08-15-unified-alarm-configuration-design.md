@@ -167,6 +167,7 @@ admin 和 engineer 拥有配置读写能力；operator 不读取配置细节，�
 - 计划摘要不匹配：`ALARM_PLAN_DIGEST_MISMATCH`；
 - 站点配置或规则组 revision 已变化：`ALARM_PLAN_STALE`；
 - 旧配置无法唯一映射：`ALARM_MIGRATION_AMBIGUOUS`；
+- 旧配置已全部迁移、没有待迁移定义：`ALARM_MIGRATION_NOTHING_TO_MIGRATE`（HTTP 409，零计划、零运行态写入）；
 - 幂等键用于不同请求：`IDEMPOTENCY_KEY_REUSED`；
 - 审计无法持久化：`AUDIT_UNAVAILABLE`。
 
@@ -247,4 +248,3 @@ HTTP 200。验收接口只观察通过正常运行链路产生的事件，不自
 - 相关测试、完整后端套件和前端构建通过；
 - 真实 PostgreSQL 与协议模拟公开主缝通过；
 - 告警验收报告证明触发、确认、恢复、等级统计、审计和重启持久性。
-

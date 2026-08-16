@@ -292,6 +292,19 @@ class AlarmConfigurationAcceptance:
         item: AlarmConfigurationPlanItem,
         event: AlarmEvent | None,
     ) -> AlarmConfigurationAcceptanceItem:
+        if item.action == "delete_candidate":
+            return AlarmConfigurationAcceptanceItem(
+                definition_id=definition_id,
+                definition_key=item.definition_key,
+                action=item.action,
+                status="passed",
+                code="ALARM_ACCEPTANCE_DELETED",
+                event_id=None,
+                event_state=None,
+                transition_codes=(),
+                acknowledgement_audit_event_id=None,
+                evidence=_freeze({"current_pointer_removed": True}),
+            )
         if item.action == "preserve":
             prior = self._repository.latest_passed_item(definition_id)
             if prior is None:

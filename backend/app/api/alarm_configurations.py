@@ -152,7 +152,9 @@ def _rule(rule: AlarmRule) -> dict[str, Any]:
     return {"id": rule.id, "name": rule.name, "severity": rule.severity, "trigger": dict(rule.trigger), "trigger_duration_seconds": rule.trigger_duration_seconds, "recovery": dict(rule.recovery), "recovery_duration_seconds": rule.recovery_duration_seconds, "notification_throttle_seconds": rule.notification_throttle_seconds, "unit": rule.unit, "fault_map_id": str(rule.fault_map_id) if rule.fault_map_id else None}
 
 
-def _revision(revision: AlarmRuleSetRevision) -> dict[str, Any]:
+def _revision(revision: AlarmRuleSetRevision | None) -> dict[str, Any] | None:
+    if revision is None:
+        return None
     return {"rule_set_id": str(revision.rule_set_id), "key": revision.key, "name": revision.name, "revision": revision.revision, "rules": [_rule(rule) for rule in revision.rules], "digest": revision.digest}
 
 
@@ -161,7 +163,7 @@ def _item(item: AlarmConfigurationPlanItem) -> dict[str, Any]:
 
 
 def _plan(plan: AlarmConfigurationPlan) -> dict[str, Any]:
-    return {"id": str(plan.id), "installation_id": str(plan.installation_id), "base_site_configuration_version": plan.base_site_configuration_version, "rule_set_revision": _revision(plan.rule_set_revision), "status": plan.status, "items": [_item(item) for item in plan.items], "blockers": list(plan.blockers), "digest": plan.digest}
+    return {"id": str(plan.id), "kind": plan.kind, "installation_id": str(plan.installation_id), "base_site_configuration_version": plan.base_site_configuration_version, "rule_set_revision": _revision(plan.rule_set_revision), "status": plan.status, "items": [_item(item) for item in plan.items], "blockers": list(plan.blockers), "digest": plan.digest}
 
 
 def _legacy_candidate(candidate: LegacyAlarmMigrationCandidate) -> dict[str, Any]:
@@ -296,7 +298,7 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
     response_status = 422
     if code in {"ALARM_PLAN_NOT_FOUND", "ALARM_RULE_SET_NOT_FOUND"}:
         response_status = status.HTTP_404_NOT_FOUND
-    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_MIGRATION_AMBIGUOUS", "ALARM_ENTITY_UNRESOLVED", "ALARM_FAULT_MAP_UNRESOLVED", "ALARM_MIGRATION_SELECTION_INVALID", "ALARM_MIGRATION_INSTALLATION_STALE", "ALARM_MIGRATION_PLAN_STALE", "ALARM_MIGRATION_PLAN_BLOCKED"}:
+    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_MIGRATION_AMBIGUOUS", "ALARM_ENTITY_UNRESOLVED", "ALARM_FAULT_MAP_UNRESOLVED", "ALARM_MIGRATION_SELECTION_INVALID", "ALARM_MIGRATION_INSTALLATION_STALE", "ALARM_MIGRATION_NOTHING_TO_MIGRATE", "ALARM_MIGRATION_PLAN_STALE", "ALARM_MIGRATION_PLAN_BLOCKED"}:
         response_status = status.HTTP_409_CONFLICT
     elif (
         code == "AUDIT_UNAVAILABLE"
@@ -476,7 +478,7 @@ async def list_legacy_alarm_configuration_migrations(
         raise _error(error) from error
 
 
-@router.post("/alarm-configuration-migrations/legacy/plans", openapi_extra=capability_metadata(CONFIGURATION_WRITE))
+@router.post("/alarm-configuration-migrations/legacy/plans", status_code=status.HTTP_201_CREATED, openapi_extra=capability_metadata(CONFIGURATION_WRITE))
 async def create_legacy_alarm_configuration_migration_plan(
     body: LegacyMigrationPlanRequest,
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
@@ -486,8 +488,8 @@ async def create_legacy_alarm_configuration_migration_plan(
     if len(keys) != len(set(keys)):
         raise _error(AlarmConfigurationError("ALARM_MIGRATION_SELECTION_INVALID"))
     try:
-        return _legacy_plan(
-            configuration.apply_legacy_migration(
+        return _plan(
+            configuration.plan_legacy_migration(
                 installation_id=body.installation_id,
                 selections={
                     (item.source_kind, item.source_key): item.entity_instance_id

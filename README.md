@@ -305,8 +305,8 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 
 ```json
 {
-  "platform_version": "0.4.79",
-  "schema_version": "032",
+  "platform_version": "0.4.80",
+  "schema_version": "037",
   "edge_proxy_image": "registry.example/caddy@sha256:<64-hex>",
   "images": {
     "linux/amd64": "registry.example/zizu@sha256:<64-hex>",
@@ -328,7 +328,7 @@ ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本
 # TLS 入口镜像必须预先以 digest 审核。
 python scripts/build_release_images.py \
   --repository registry.example/zizu \
-  --platform-version 0.4.79 \
+  --platform-version 0.4.80 \
   --edge-proxy-image registry.example/caddy@sha256:<64-hex> \
   --output release.json
 python scripts/release_preflight.py verify \
@@ -516,6 +516,15 @@ zizu/
 | GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
 | GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
 | POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
+| GET | `/api/v1/alarm-configurations` | 查询当前统一告警定义、来源、版本和启用状态 |
+| GET | `/api/v1/alarm-rule-sets` | 查询告警规则组的全部不可变修订 |
+| POST | `/api/v1/alarm-rule-sets` | 创建包含固定严重度、触发和恢复条件的规则组首个修订 |
+| POST | `/api/v1/alarm-rule-sets/{id}/revisions` | 为既有规则组创建不可变新修订 |
+| POST | `/api/v1/alarm-configuration-plans` | 按批量实体范围和规则组修订生成确定性展开预览 |
+| GET | `/api/v1/alarm-configuration-plans/{id}` | 查询计划摘要、add/update/preserve/delete_candidate 项和阻断原因 |
+| POST | `/api/v1/alarm-configuration-plans/{id}/apply` | 携带 `Idempotency-Key` 原子应用计划并产生派生站点配置版本 |
+| GET | `/api/v1/alarm-configuration-migrations/legacy` | 只读列出旧点位/实体告警的唯一、缺失和歧义迁移候选 |
+| POST | `/api/v1/alarm-configuration-migrations/legacy/plans` | 按实施工程师的明确实体选择生成零运行态写入的迁移计划；审阅后仍由通用计划 apply 原子执行；没有待迁移定义时返回 409 `ALARM_MIGRATION_NOTHING_TO_MIGRATE`，且不保存计划、不写运行态 |
 | GET | `/api/v1/alarm-events` | 查询 `model_version=v1` 的统一告警事件 |
 | GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
 | GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
@@ -546,10 +555,17 @@ zizu/
 POST 与配置应用共用站点状态事务锁，若目标已不是最新应用，返回稳定
 `ALARM_ACCEPTANCE_APPLICATION_STALE` 且不写报告或幂等绑定。
 
-告警配置验收由 migration 036 保存报告与幂等绑定。新增和更新定义必须拥有同一不可变定义的
+告警配置验收由 migration 036 保存报告与幂等绑定；migration 037 让规则组计划和旧配置迁移计划
+共享同一版本化应用链。旧配置迁移的“生成计划”只保存审阅证据，不改变站点版本；确认应用时才
+通过通用 apply 原子创建派生安装、下一站点版本、审计、迁移目标与验收 application。同一 actor 和
+`Idempotency-Key` 只会产生一份应用，旧直写 seam 已删除。
+
+新增和更新定义必须拥有同一不可变定义的
 `ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、`ALARM_RECOVERED` 转换，其中确认转换必须关联非空
 审计事件；质量不合格或新鲜度中断不能补足持续时间。`preserve` 只能引用此前对完全相同定义 ID
-已通过的报告。报告绑定执行主体、应用、站点配置版本和内容摘要，写入后禁止更新、删除或清空；
+已通过的报告。`delete_candidate` 在计划应用后会停止该定义的新触发，但不会删除不可变定义、既有
+事件、时间线或审计证据；已经打开的事件仍按原定义完成恢复。报告绑定执行主体、应用、站点配置
+版本和内容摘要，写入后禁止更新、删除或清空；
 隔离 PostgreSQL 双连接并发、事务回滚、进程重启重放和公开 Neuron 协议生命周期主缝均已覆盖，
 这些机器证据不等同于现场部署或独立交付试验。
 
