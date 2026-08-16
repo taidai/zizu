@@ -1,5 +1,29 @@
 ---
 
+## Session 2026-08-16 — 统一告警配置与告警验收最终门禁
+
+### 最终状态
+
+- Plan B 整包 `e6426af..d7fdaed` 已由独立 reviewer 只读复审：Spec 通过、Task quality Approved、
+  Ready；Critical 0、Important 0。唯一 Minor 是 migration 036 的一个测试同时破坏两对 ID，建议
+  后续拆成两个独立负例；生产数据库约束本身分别存在，不阻断交付。
+- 本轮新鲜完整后端验证为 **308 passed、35 skipped、199 subtests passed**（124.40s），零失败；
+  两条 warning 均为既有 Starlette/httpx 弃用与重复 ZIP 成员测试告警。
+- 本轮新鲜前端 `npm run build` 退出 0：TypeScript 编译和 Vite production build 完成，8184 modules，
+  3m16s；仅既有大 chunk 性能告警。
+- 本地 production preview 的应用内浏览器冒烟已实际完成：`http://127.0.0.1:4173/` 正常展示 ZiZu
+  登录页、账号离线供应提示，浏览器控制台无前端 warning/error。因为未启动认证后端，`/auth/me`
+  代理连接失败属于预期环境限制；未将其声称为登录后交互验收。
+- 临时 preview、浏览器页和 `frontend/node_modules` Junction 均已关闭/移除；共享依赖目录未改动。
+  本轮没有部署、连接 1 号机或修改现场数据。
+
+### 交付边界
+
+- 分支 `ticket/unified-alarm-configuration` 当前提供统一告警配置、批量实体/规则、计划预览、原子应用、
+  旧配置安全迁移、协议观测驱动的触发/确认/恢复及不可变验收报告。
+- 真实 PostgreSQL + 协议模拟公开主缝已在 Task 3/4 隔离测试中证明，完整 suite 中这些显式环境门控
+  用例按设计 skip；不能把本地自动化替代为 1 号机现场部署或独立实施工程师验收。
+
 ## Session 2026-08-16 — Task 4 fix round 2
 
 ### 已修复
