@@ -1,5 +1,41 @@
 ---
 
+## Session 2026-08-16 — 1号机告警功能现场验收
+
+### 真实公共主缝
+
+- 现场此前为 0 个 solution installation、0 个 confirmed entity instance；19 条旧告警迁移候选均因
+  `ALARM_ENTITY_UNRESOLVED` 被安全阻断。为避免控制设备，导入并安装了只含只读实体的
+  `org.zizu.alarm-validation-readonly/1.0.0`，唯一匹配现有 Neuron
+  “变流器/电网频率”点位；实体实时读取为新鲜、quality=192，包不含策略、控制动作或写点位。
+- 通过公开告警 API 创建 INFO 临时规则：电网频率 `>=50.05` 触发、`<=50.04` 恢复，持续时间均为 0；
+  plan 为 ready、无 blocker，并经幂等 apply 进入站点配置版本 2。
+- 正常 Neuron 遥测实际产生告警事件。第一次事件在确认到达前已恢复，确认 API 稳定返回 409
+  `ALARM_ACKNOWLEDGE_NOT_ALLOWED`；随后事件由正式确认端点成功确认并自然恢复，完整时间线为
+  `ALARM_ACTIVATED → ALARM_ACKNOWLEDGED → ALARM_RECOVERED`，每条 transition 均有非空审计 ID。
+- application `d121dae0-e84f-4e25-82c7-8f431d4cd00d` 的不可变验收报告
+  `499630ea-1e94-4440-bf31-8a977961a862` 为 passed，摘要
+  `594e5262a95386217821cf2c182a4f544310143d2cba375a710cb00d9ad86b61`；GET 回读一致，
+  相同 actor/key 重放返回同一报告 ID 与摘要。
+
+### 清理与最终状态
+
+- 创建空规则修订后，预览得到唯一 `delete_candidate`；apply 只移除 current pointer 并推进站点配置
+  版本 3，历史定义、7 条现场测试事件、时间线与审计证据全部保留。
+- 清理 application `cd1fb675-0ea8-4d52-a8be-2ec5dd5346ba` 的报告
+  `13ff53e5-fbec-429e-9f4d-c99214bff366` 为 passed，机器码 `ALARM_ACCEPTANCE_DELETED`，证据为
+  `current_pointer_removed=true`。
+- 最终新鲜复核：`/alarm-configurations` 为 0 条 current definition；全站 open 告警为 0；7 条测试事件
+  均 recovered；backend healthy，固定 0.4.80 arm64 摘要、host network 和 `/dev/mqueue` tmpfs 未变；
+  最近 15 分钟日志无 traceback/critical/exception。远端临时 ZIP 已删除。
+
+### 保留边界
+
+- 只读 validation solution installation、confirmed entity instance、规则组两个不可变 revision、历史事件、
+  两份通过报告和审计均按产品追溯语义保留；当前没有活动告警定义，不会再由该规则产生新告警。
+- 应用内浏览器因本机 DNS 暂时无法解析域名，未取得登录后 UI 冒烟；公开 HTTP/API、真实 PostgreSQL、
+  Neuron 遥测、身份权限和告警状态机均由现场请求直接验证。未执行任何设备控制。
+
 ## Session 2026-08-16 — 1号机告警配置版本部署
 
 ### 已部署
