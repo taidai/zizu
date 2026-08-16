@@ -1,5 +1,37 @@
 ---
 
+## Session 2026-08-16 — 1号机告警配置版本部署
+
+### 已部署
+
+- 分支 `ticket/unified-alarm-configuration` 的 `1583457` 已由 GitHub Actions 构建为 v0.4.80
+  linux/arm64 固定制品，并切换到 1 号机现有 `zizu-release-test` 项目。
+- 运行镜像固定为
+  `ghcr.io/taidai/zizu@sha256:5abdd2d7b1d65b3cf90ecd3a78176d7b814cfb295d58f9a11e3dac209bfb2d41`；
+  容器实际 image ID、版本 label 与目标摘要已核对一致。
+- 保留现场既有运行方式：host network、`/dev/mqueue` tmpfs、现有 PostgreSQL/NanoMQ/Neuron；
+  只替换 backend，数据库与消息服务未重建。
+- 升级前已生成 PostgreSQL custom-format 备份并校验 `pg_restore -l` 目录；备份 SHA-256 为
+  `16c7e287dc141aa8be5e97ec9cf53856252663dd60e7d01da04b2e484878aa31`。未做实际恢复演练。
+- 一次性迁移作业成功应用 034、035、036、037，errors=0；新 backend 重启复核为全部 skipped、errors=0。
+
+### 现场只读验收
+
+- 公网 `/api/v1/health/live` 返回 `alive / 0.4.80`；首页与哈希前端资产均 HTTP 200。
+- 管理员登录、`/auth/me`、受认证 readiness、告警规则组、统一告警配置、旧配置迁移预览和
+  open 告警事件读取均 HTTP 200；匿名规则组/readiness 均稳定 401。
+- PostgreSQL、MQTT、Neuron 本机 TCP 可达；backend、TimescaleDB、NanoMQ 容器均 healthy；
+  新 backend 启动日志未见 traceback/critical/迁移错误。
+- 当前现场读取为 0 个规则组、0 个统一配置计划、0 个 open 告警事件、19 个待评估 legacy 候选；
+  本轮没有创建规则、触发告警或修改现场告警配置。
+
+### 明确边界
+
+- 按用户要求未部署 Caddy、未申请 TLS，仍为公网 HTTP + development/insecure 模式；没有写生产
+  release lock，不能称为生产安全发布。
+- 数据库现为 Schema 037；若回退旧应用，不能只切旧镜像，必须先评估 Schema 兼容性，必要时使用
+  已校验备份恢复。旧 v0.4.78 发布目录与备份均保留。
+
 ## Session 2026-08-16 — 最终规格审计修复
 
 ### 已修复
