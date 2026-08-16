@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlarmConfigurationApiError, applyAlarmConfigurationPlan, createAlarmConfigurationPlan, createAlarmRuleSet, createAlarmRuleSetRevision, createLegacyAlarmMigrationPlan, fetchAlarmConfigurationAcceptanceProgress, fetchAlarmConfigurationReport, fetchAlarmRuleSets, fetchEntityInstances, fetchLegacyAlarmMigrationCandidates, getAlarmConfigurationPlan, getUnifiedAlarmConfiguration, runAlarmConfigurationAcceptance, type AlarmConfigurationAcceptanceProgress, type AlarmConfigurationAcceptanceReport, type AlarmConfigurationCurrent, type AlarmConfigurationPlan, type AlarmRule, type AlarmRuleSetRevision, type EntityInstance, type LegacyAlarmMigrationCandidate } from '../api/client'
 import { formatAlarmConditionValue, isDefinitiveAlarmApplyCode } from '../components/alarm-configuration/alarmConfigurationContracts'
+import { clearAcceptanceRetry, readAcceptanceRetry, refreshAppliedWorkspace, saveAcceptanceRetry } from '../components/alarm-configuration/acceptanceRetryState'
 import EntityScopePicker, { type AlarmEntityScope } from '../components/alarm-configuration/EntityScopePicker'
 import LegacyMigrationPanel from '../components/alarm-configuration/LegacyMigrationPanel'
 import PlanPreview from '../components/alarm-configuration/PlanPreview'
@@ -25,23 +26,6 @@ const acceptanceStageLabel = { waiting_trigger: '待触发', waiting_acknowledge
 const eventStateLabel: Record<string, string> = { pending: '等待持续触发', active_unacknowledged: '活动未确认', active_acknowledged: '活动已确认', recovered: '已恢复' }
 const transitionLabel: Record<string, string> = { ALARM_ACTIVATED: '已触发', ALARM_ACKNOWLEDGED: '已确认', ALARM_RECOVERED: '已恢复' }
 const shortReference = (value: string | null) => value ? value.replace(/-/g, '').slice(0, 8).toUpperCase() : '未形成'
-const ACCEPTANCE_RETRY_STORAGE_KEY = 'zizu.alarmConfiguration.acceptanceRetry'
-const readAcceptanceRetry = (): { applicationId: string; idempotencyKey: string } | null => {
-  try {
-    const value = JSON.parse(sessionStorage.getItem(ACCEPTANCE_RETRY_STORAGE_KEY) || 'null')
-    return value && typeof value.applicationId === 'string' && typeof value.idempotencyKey === 'string'
-      ? value
-      : null
-  } catch { return null }
-}
-const saveAcceptanceRetry = (applicationId: string, idempotencyKey: string) => {
-  try { sessionStorage.setItem(ACCEPTANCE_RETRY_STORAGE_KEY, JSON.stringify({ applicationId, idempotencyKey })) }
-  catch { /* The in-memory key remains valid when session storage is unavailable. */ }
-}
-const clearAcceptanceRetry = () => {
-  try { sessionStorage.removeItem(ACCEPTANCE_RETRY_STORAGE_KEY) }
-  catch { /* Storage denial must not block the acceptance workspace. */ }
-}
 const progressOrEmpty = async () => {
   try { return await fetchAlarmConfigurationAcceptanceProgress() }
   catch (reason) { if (reason instanceof AlarmConfigurationApiError && reason.status === 404) return null; throw reason }
@@ -73,7 +57,7 @@ function AcceptancePanel({ progress, report, entityNames, loading, running, erro
   </section>
 }
 
-export default function AlarmConfigurationPage({ onOpenAlarms }: { onOpenAlarms: () => void }) {
+export default function AlarmConfigurationPage({ actorId, onOpenAlarms }: { actorId: string; onOpenAlarms: () => void }) {
   const [current, setCurrent] = useState<AlarmConfigurationCurrent | null>(null); const [ruleSets, setRuleSets] = useState<AlarmRuleSetRevision[]>([]); const [entities, setEntities] = useState<EntityInstance[]>([])
   const [migrationInstallationId, setMigrationInstallationId] = useState(''); const [migrationCandidates, setMigrationCandidates] = useState<LegacyAlarmMigrationCandidate[]>([]); const [scope, setScope] = useState<AlarmEntityScope>(EMPTY_SCOPE)
   const [selectedRuleSetKey, setSelectedRuleSetKey] = useState(''); const [rules, setRules] = useState<AlarmRule[]>([defaultRule()]); const [newRuleSetName, setNewRuleSetName] = useState('现场告警规则'); const [plan, setPlan] = useState<AlarmConfigurationPlan | null>(null)
@@ -98,7 +82,9 @@ export default function AlarmConfigurationPage({ onOpenAlarms }: { onOpenAlarms:
       selectedRevisionRef.current = chosen; setCurrent(configuration); setRuleSets(revisions); setEntities(entityResponse.items); setMigrationInstallationId(migrations.installation_id); setMigrationCandidates(migrations.items); setMigrationSelections({}); setSelectedRuleSetKey(chosen ? revisionKey(chosen) : ''); if (chosen) setRules(chosen.rules)
     } catch (reason) { setError(alarmWorkspaceError(reason, '无法读取告警配置工作台数据，请检查平台连接与权限后重试。')) } finally { setLoading(false) }
   }, [])
+  const refreshAcceptance = useCallback(async () => { setAcceptanceLoading(true); setAcceptanceError(''); try { const progress = await progressOrEmpty(); const applicationId = progress?.application_id || ''; if (acceptanceApplicationRef.current !== applicationId) setAcceptanceReport(null); const saved = readAcceptanceRetry(sessionStorage, actorId, applicationId); if (saved) setAcceptanceIdempotencyKey(saved.idempotencyKey); else setAcceptanceIdempotencyKey(null); acceptanceApplicationRef.current = applicationId; setAcceptanceProgress(progress); setAcceptanceReport(null); if (progress?.report_id) { setAcceptanceReport(await fetchAlarmConfigurationReport(progress.report_id)); clearAcceptanceRetry(sessionStorage); setAcceptanceIdempotencyKey(null) } } catch (reason) { setAcceptanceError(alarmWorkspaceError(reason, '无法刷新验收证据，请稍后重试。')) } finally { setAcceptanceLoading(false) } }, [actorId])
   useEffect(() => { void load() }, [load])
+  useEffect(() => { void refreshAcceptance() }, [refreshAcceptance])
   useEffect(() => {
     const context = readWorkspaceContext(); if (!current || !selectedRuleSetKey || !context.plan || context.plan.revision !== selectedRuleSetKey || restoredPlanRef.current === context.plan.id) return
     restoredPlanRef.current = context.plan.id
@@ -106,7 +92,7 @@ export default function AlarmConfigurationPage({ onOpenAlarms }: { onOpenAlarms:
       const replay = canReplaySavedApply(context, loaded)
       if (replay && context.apply) {
         setPlan(loaded); setIdempotencyKey(context.apply.key); setApplying(true)
-        try { const result = await applyAlarmConfigurationPlan(loaded.id, context.apply.digest, context.apply.key); setSuccess(`已恢复并确认告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); resetPlan(); await load() }
+        try { const result = await applyAlarmConfigurationPlan(loaded.id, context.apply.digest, context.apply.key); setSuccess(`已恢复并确认告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); resetPlan(); await refreshAppliedWorkspace(load, refreshAcceptance) }
         catch (reason) {
           if (stalePlan(reason)) markPlanStale()
           else if (unrecoverableReplay(reason)) resetPlan()
@@ -119,7 +105,7 @@ export default function AlarmConfigurationPage({ onOpenAlarms }: { onOpenAlarms:
       if (loaded.status === 'ready' && loaded.base_site_configuration_version === current.site_configuration_version && loaded.digest === context.plan?.digest) { setPlan(loaded); return }
       resetPlan()
     }).catch((reason) => { if (stalePlan(reason)) markPlanStale(); else if (unrecoverableReplay(reason)) resetPlan(); setError(alarmWorkspaceError(reason, '无法恢复此前的配置计划，请刷新后重试。')) })
-  }, [current, selectedRuleSetKey, load])
+  }, [current, selectedRuleSetKey, load, refreshAcceptance])
   const chooseRuleSet = (key: string) => { const revision = ruleSets.find((item) => revisionKey(item) === key) || null; selectedRevisionRef.current = revision; setSelectedRuleSetKey(key); if (revision) setRules(revision.rules); resetPlan() }
   const createPlan = async () => {
     if (!migrationInstallationId || !scopeHasValue) { setError('请先选择至少一个配置范围。'); return }; const validation = ruleValidation(rules); if (validation) { setError(validation); return }
@@ -127,10 +113,8 @@ export default function AlarmConfigurationPage({ onOpenAlarms }: { onOpenAlarms:
     try { let revision = selectedRuleSet; if (!revision) { revision = await createAlarmRuleSet({ key: `workspace-${Date.now()}`, name: newRuleSetName.trim() || '现场告警规则', rules }); setRuleSets((items) => [...items, revision!]) } else if (!sameRules(rules, revision.rules)) { revision = await createAlarmRuleSetRevision(revision.rule_set_id, rules); setRuleSets((items) => [...items, revision!]) }; selectedRevisionRef.current = revision; setSelectedRuleSetKey(revisionKey(revision)); const created = await createAlarmConfigurationPlan({ installation_id: migrationInstallationId, selection: scope, rule_set_id: revision.rule_set_id, rule_set_revision: revision.revision }); setPlan(created); savePlanContext(created); initialContextRef.current = readWorkspaceContext(); setPlanStale(false); setIdempotencyKey(null) }
     catch (reason) { setError(alarmWorkspaceError(reason, '生成计划失败，请检查当前配置后重试。')) } finally { setPlanning(false) }
   }
-  const applyPlan = async () => { if (!plan) return; const key = idempotencyKey || crypto.randomUUID(); saveApplyContext(plan, key); setIdempotencyKey(key); setApplying(true); setError(''); setSuccess(''); try { const result = await applyAlarmConfigurationPlan(plan.id, plan.digest, key); setSuccess(`已应用告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); resetPlan(); await load(); await refreshAcceptance() } catch (reason) { if (stalePlan(reason)) markPlanStale(); else if (unrecoverableReplay(reason)) resetPlan(); else if (definitiveApplyFailure(reason)) clearKnownApplyEvidence(); setError(alarmWorkspaceError(reason, '应用结果无法确认，请使用同一操作重试。')) } finally { setApplying(false) } }
-  const refreshAcceptance = async () => { setAcceptanceLoading(true); setAcceptanceError(''); try { const progress = await progressOrEmpty(); const applicationId = progress?.application_id || ''; if (acceptanceApplicationRef.current !== applicationId) setAcceptanceReport(null); const saved = readAcceptanceRetry(); if (applicationId && saved?.applicationId === applicationId) setAcceptanceIdempotencyKey(saved.idempotencyKey); else { setAcceptanceIdempotencyKey(null); clearAcceptanceRetry() }; acceptanceApplicationRef.current = applicationId; setAcceptanceProgress(progress); setAcceptanceReport(null); if (progress?.report_id) { setAcceptanceReport(await fetchAlarmConfigurationReport(progress.report_id)); clearAcceptanceRetry(); setAcceptanceIdempotencyKey(null) } } catch (reason) { setAcceptanceError(alarmWorkspaceError(reason, '无法刷新验收证据，请稍后重试。')) } finally { setAcceptanceLoading(false) } }
-  const runAcceptance = async () => { if (!acceptanceProgress?.ready_to_report || acceptanceProgress.report_id) return; const key = acceptanceIdempotencyKey || crypto.randomUUID(); setAcceptanceIdempotencyKey(key); saveAcceptanceRetry(acceptanceProgress.application_id, key); setAcceptanceRunning(true); setAcceptanceError(''); setSuccess(''); try { const created = await runAlarmConfigurationAcceptance(acceptanceProgress.application_id, key); const report = await fetchAlarmConfigurationReport(created.id); setAcceptanceReport(report); setAcceptanceProgress((previous) => previous ? { ...previous, report_id: report.id, report_status: report.status, report_digest: report.digest } : previous); clearAcceptanceRetry(); setAcceptanceIdempotencyKey(null); setSuccess('不可变验收报告已生成并重新读取确认。') } catch (reason) { if (reason instanceof AlarmConfigurationApiError && reason.code === 'ALARM_ACCEPTANCE_APPLICATION_STALE') await refreshAcceptance(); setAcceptanceError(alarmWorkspaceError(reason, '验收报告结果无法确认，请使用同一操作重试。')) } finally { setAcceptanceRunning(false) } }
-  useEffect(() => { void refreshAcceptance() }, [])
+  const applyPlan = async () => { if (!plan) return; const key = idempotencyKey || crypto.randomUUID(); saveApplyContext(plan, key); setIdempotencyKey(key); setApplying(true); setError(''); setSuccess(''); try { const result = await applyAlarmConfigurationPlan(plan.id, plan.digest, key); setSuccess(`已应用告警配置，站点配置版本已更新至 ${result.site_configuration_version}。`); resetPlan(); await refreshAppliedWorkspace(load, refreshAcceptance) } catch (reason) { if (stalePlan(reason)) markPlanStale(); else if (unrecoverableReplay(reason)) resetPlan(); else if (definitiveApplyFailure(reason)) clearKnownApplyEvidence(); setError(alarmWorkspaceError(reason, '应用结果无法确认，请使用同一操作重试。')) } finally { setApplying(false) } }
+  const runAcceptance = async () => { if (!acceptanceProgress?.ready_to_report || acceptanceProgress.report_id) return; const key = acceptanceIdempotencyKey || crypto.randomUUID(); setAcceptanceIdempotencyKey(key); saveAcceptanceRetry(sessionStorage, { actorId, applicationId: acceptanceProgress.application_id, idempotencyKey: key }); setAcceptanceRunning(true); setAcceptanceError(''); setSuccess(''); try { const created = await runAlarmConfigurationAcceptance(acceptanceProgress.application_id, key); const report = await fetchAlarmConfigurationReport(created.id); setAcceptanceReport(report); setAcceptanceProgress((previous) => previous ? { ...previous, report_id: report.id, report_status: report.status, report_digest: report.digest } : previous); clearAcceptanceRetry(sessionStorage); setAcceptanceIdempotencyKey(null); setSuccess('不可变验收报告已生成并重新读取确认。') } catch (reason) { if (reason instanceof AlarmConfigurationApiError && reason.code === 'ALARM_ACCEPTANCE_APPLICATION_STALE') await refreshAcceptance(); setAcceptanceError(alarmWorkspaceError(reason, '验收报告结果无法确认，请使用同一操作重试。')) } finally { setAcceptanceRunning(false) } }
   const migrate = async () => { const selections = migrationCandidates.filter((candidate) => candidate.blockers.some((blocker) => blocker.code === 'ALARM_MIGRATION_AMBIGUOUS')).map((candidate) => ({ source_kind: candidate.source_kind, source_key: candidate.source_key, entity_instance_id: migrationSelections[`${candidate.source_kind}:${candidate.source_key}`] })).filter((selection) => selection.entity_instance_id); setMigrating(true); setError(''); setSuccess(''); try { await createLegacyAlarmMigrationPlan({ installation_id: migrationInstallationId, selections }); setSuccess('旧告警配置已按明确选择迁移，原始配置保持只读。'); await load() } catch (reason) { setError(alarmWorkspaceError(reason, '旧配置迁移失败，请检查候选后重试。')) } finally { setMigrating(false) } }
   if (loading) return <div className="neu-card p-8 text-center text-sm text-gray-500">正在加载统一告警配置工作台...</div>
   return <div className="space-y-4">

@@ -87,6 +87,7 @@ tmp/
 .claude/worktrees/
 .workbuddy/
 .learnings/
+.superpowers/
 
 zizu-v*.zip
 release-artifacts/

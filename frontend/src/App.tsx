@@ -8,6 +8,7 @@ import {
   type AuthSession,
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
+import { clearAcceptanceRetry } from './components/alarm-configuration/acceptanceRetryState'
 import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard, PackageCheck } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
@@ -186,6 +187,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
     } catch {
       // Local logout is authoritative even when the server is unavailable.
     } finally {
+      clearAcceptanceRetry(sessionStorage)
       onLoggedOut()
     }
   }
@@ -278,7 +280,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
-            {activePage === 'alarm-config' && <AlarmConfigurationPage onOpenAlarms={() => setActivePage('alarms')} />}
+            {activePage === 'alarm-config' && <AlarmConfigurationPage actorId={session.user.id} onOpenAlarms={() => setActivePage('alarms')} />}
             {activePage === 'entities' && <EntityManagerPage />}
             {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>
@@ -325,6 +327,7 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = subscribeAuthenticationRequired(() => {
+      clearAcceptanceRetry(sessionStorage)
       setSession(null)
       setRestoreError('')
       setRestoring(false)
@@ -346,6 +349,7 @@ export default function App() {
           <button onClick={() => void restoreSession()} className="mt-5 rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white">重试</button>
           <button
             onClick={() => {
+              clearAcceptanceRetry(sessionStorage)
               clearAuthSession()
               setRestoreError('')
               setSession(null)

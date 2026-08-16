@@ -1,5 +1,24 @@
 ---
 
+## Session 2026-08-16 — Task 4 fix round 2
+
+### 已修复
+
+- 正常 apply 与 session 中恢复的 apply replay 现在共用 `refreshAppliedWorkspace` 顺序契约：先重载
+  核心工作台，再刷新验收 progress/report。`refreshAcceptance` 是 actor-bound stable callback，避免
+  replay effect 捕获旧回调；恢复成功后不再停留在旧 application A。
+- acceptance retry context 现在同时绑定 `session.user.id`、application ID 和 idempotency key。
+  application 或登录主体不匹配时删除；未知结果在同主体/同 application 下保留。显式 logout、认证
+  失效与“清除本地会话”都会清除 retry context。
+- `.superpowers/` 已由 `.gitignore` 覆盖；误跟踪的 `task-4-report.md` 从 Git 索引移除但本地文件保留。
+
+### 本轮验证
+
+- TDD RED：Node 契约 3 项因缺少 `acceptanceRetryState.ts` 全部失败；GREEN 为 3/3。
+- 全部 alarm configuration Node contracts 6/6；相关 acceptance backend 22 passed、9 个 PG 环境门控
+  skipped。
+- TypeScript `tsc -b` 和 production build 通过，8184 modules，55.06s；仅既有大 chunk warning。
+
 ## Session 2026-08-16 — Task 4 fix round 1
 
 ### 已修复
