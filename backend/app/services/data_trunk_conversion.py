@@ -228,5 +228,6 @@ def _observation(
 
 
 def _raw_order_key(source: RawObservation) -> str:
-    sequence = "" if source.source_sequence is None else str(source.source_sequence)
-    return f"{source.source_timestamp.isoformat()}|{sequence}|{source.source_digest}"
+    if source.source_sequence is None:
+        return f"D:{source.source_digest}"
+    return f"S:{source.source_sequence:020d}:{source.source_digest}"

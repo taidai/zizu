@@ -63,6 +63,10 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(result[0].quality, TrunkQuality.GOOD)
         self.assertEqual(result[0].source_observation_ids, (raw.observation_id,))
         self.assertEqual(result[0].site_configuration_version, 4)
+        self.assertEqual(
+            result[0].source_order_key,
+            f"S:00000000000000000001:{'a' * 64}",
+        )
 
     def test_numeric_conversion_marks_wrong_runtime_unit_bad_without_value(self) -> None:
         fixture = self.fixture()
