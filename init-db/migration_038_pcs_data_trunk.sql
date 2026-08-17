@@ -169,6 +169,18 @@ CREATE TABLE IF NOT EXISTS t_numeric_transform_rules (
   CHECK (minimum IS NULL OR maximum IS NULL OR minimum <= maximum)
 );
 
+CREATE TABLE IF NOT EXISTS t_enum_transform_rules (
+  output_id UUID PRIMARY KEY REFERENCES t_point_conversion_outputs(id),
+  input_id UUID NOT NULL REFERENCES t_point_conversion_inputs(id)
+);
+
+CREATE TABLE IF NOT EXISTS t_fault_code_transform_rules (
+  output_id UUID PRIMARY KEY REFERENCES t_point_conversion_outputs(id),
+  input_id UUID NOT NULL REFERENCES t_point_conversion_inputs(id),
+  delimiter TEXT NOT NULL
+    CHECK (delimiter IN ('semicolon','comma','pipe','whitespace'))
+);
+
 CREATE TABLE IF NOT EXISTS t_enum_mapping_entries (
   output_id UUID NOT NULL REFERENCES t_point_conversion_outputs(id),
   raw_value TEXT NOT NULL,
@@ -559,6 +571,8 @@ BEGIN
     't_point_conversion_inputs',
     't_point_conversion_outputs',
     't_numeric_transform_rules',
+    't_enum_transform_rules',
+    't_fault_code_transform_rules',
     't_enum_mapping_entries',
     't_fault_code_mapping_entries',
     't_point_conversion_plan_items',

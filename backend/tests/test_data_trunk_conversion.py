@@ -7,11 +7,14 @@ from typing import Any
 from uuid import UUID
 
 from app.services.data_trunk_contracts import (
+    EnumTransform,
+    FaultCodeTransform,
     InputReference,
     InstalledPointConversion,
     RawObservation,
     TrunkQuality,
     TypedValue,
+    ValueKind,
 )
 from app.services.data_trunk_conversion import evaluate_conversion
 
@@ -94,6 +97,230 @@ class PcsNumericConversionTest(unittest.TestCase):
 
         with self.assertRaises(FrozenInstanceError):
             raw.raw_unit = "A"
+
+    def test_maps_operating_state_enum(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue(ValueKind.STRING, "2"),
+                raw_unit=None,
+            )
+        }
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.ENUM,
+                output_unit=None,
+                transform=EnumTransform(
+                    input=base.transform.input,
+                    entries={"0": "STOPPED", "2": "RUNNING"},
+                ),
+            ),
+        )
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.enum("RUNNING"))
+        self.assertEqual(output.quality, TrunkQuality.GOOD)
+
+    def test_unknown_enum_is_bad_without_current_value(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue(ValueKind.STRING, "99"),
+                raw_unit=None,
+            )
+        }
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.ENUM,
+                output_unit=None,
+                transform=EnumTransform(
+                    input=base.transform.input,
+                    entries={"0": "STOPPED", "2": "RUNNING"},
+                ),
+            ),
+        )
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.enum(None))
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.BAD, "UNMAPPED_ENUM"),
+        )
+
+    def test_fault_codes_are_deduplicated_sorted_and_keep_unknown(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue(ValueKind.STRING, "E30; e11;E30;X99"),
+                raw_unit=None,
+            )
+        }
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.CODE_SET,
+                output_unit=None,
+                transform=FaultCodeTransform(
+                    input=base.transform.input,
+                    delimiter="semicolon",
+                    entries={
+                        "E30": "COMPRESSOR_FAULT",
+                        "E11": "DC_OVERVOLTAGE",
+                    },
+                ),
+            ),
+        )
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(
+            output.value,
+            TypedValue.code_set(
+                ("COMPRESSOR_FAULT", "DC_OVERVOLTAGE", "X99")
+            ),
+        )
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.UNCERTAIN, "UNMAPPED_FAULT_CODE"),
+        )
+
+    def test_out_of_range_numeric_is_bad_and_null(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue.float(900000.0),
+            )
+        }
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.float(None))
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.BAD, "OUT_OF_RANGE"),
+        )
+
+    def test_missing_required_input_emits_bad_output_instead_of_guessing(self) -> None:
+        fixture = self.fixture()
+        fixture["current_inputs"] = {}
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.float(None))
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.BAD, "REQUIRED_INPUT_MISSING"),
+        )
+
+    def test_bad_source_cannot_keep_a_numeric_current_value(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                quality=TrunkQuality.BAD,
+            )
+        }
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.float(None))
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.BAD, "INPUT_BAD"),
+        )
+
+    def test_fault_code_transform_rejects_arbitrary_regex_delimiters(self) -> None:
+        input_reference = next(
+            iter(self.fixture()["installed"])
+        ).transform.input
+
+        with self.assertRaisesRegex(ValueError, "unsupported fault-code delimiter"):
+            FaultCodeTransform(
+                input=input_reference,
+                delimiter=".+",
+                entries={"E30": "COMPRESSOR_FAULT"},
+            )
+
+    def test_fault_code_set_deduplicates_after_brand_mapping(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue(ValueKind.STRING, "E30;C30"),
+                raw_unit=None,
+            )
+        }
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.CODE_SET,
+                output_unit=None,
+                transform=FaultCodeTransform(
+                    input=base.transform.input,
+                    delimiter="semicolon",
+                    entries={
+                        "E30": "COMPRESSOR_FAULT",
+                        "C30": "COMPRESSOR_FAULT",
+                    },
+                ),
+            ),
+        )
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(
+            output.value,
+            TypedValue.code_set(("COMPRESSOR_FAULT",)),
+        )
+        self.assertEqual(output.quality, TrunkQuality.GOOD)
+
+    def test_code_set_value_object_is_canonical(self) -> None:
+        self.assertEqual(
+            TypedValue.code_set(("B", "A", "B")),
+            TypedValue(ValueKind.CODE_SET, ("A", "B")),
+        )
+
+    def test_missing_enum_input_emits_typed_bad_output(self) -> None:
+        fixture = self.fixture()
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {}
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.ENUM,
+                output_unit=None,
+                transform=EnumTransform(
+                    input=base.transform.input,
+                    entries={"0": "STOPPED", "2": "RUNNING"},
+                ),
+            ),
+        )
+
+        output = evaluate_conversion(**fixture)[0]
+
+        self.assertEqual(output.value, TypedValue.enum(None))
+        self.assertEqual(
+            (output.quality, output.reason),
+            (TrunkQuality.BAD, "REQUIRED_INPUT_MISSING"),
+        )
 
 
 if __name__ == "__main__":

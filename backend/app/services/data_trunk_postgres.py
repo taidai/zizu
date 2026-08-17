@@ -1,12 +1,13 @@
 """L0、L2、latest、source 与 outbox 的单事务 PostgreSQL adapter。"""
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg2.extras import Json
 
@@ -14,10 +15,13 @@ from app.services.data_trunk import ConversionEvaluator
 from app.services.data_trunk_contracts import (
     CommitReceipt,
     DataTrunkError,
+    EnumTransform,
+    FaultCodeTransform,
     InputReference,
     InstalledPointConversion,
     L2Observation,
     RawObservation,
+    TrunkQuality,
     TypedValue,
     ValueKind,
 )
@@ -29,6 +33,14 @@ FaultHook = Callable[[str], None]
 class _ConversionSnapshot:
     installed: tuple[InstalledPointConversion, ...]
     site_configuration_version: int
+
+
+@dataclass(frozen=True)
+class _FreshnessCandidate:
+    observation: L2Observation
+    source_event_id: UUID
+    source_observed_at: datetime
+    source_digest: str
 
 
 class PostgresDataTrunkRepository:
@@ -95,6 +107,155 @@ class PostgresDataTrunkRepository:
             l2_event_ids=tuple(item.event_id for item in produced),
             late_observation_count=late_l0,
         )
+
+    def mark_expired_outputs_stale(self, now: datetime) -> int:
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        candidates = self._load_expired_outputs(cursor, now)
+                        observations = tuple(
+                            item.observation for item in candidates
+                        )
+                        self._insert_l2(cursor, observations)
+                        advanced = self._advance_l2_latest(cursor, observations)
+                        advanced_ids = {item.event_id for item in advanced}
+                        self._insert_freshness_sources(
+                            cursor,
+                            tuple(
+                                item
+                                for item in candidates
+                                if item.observation.event_id in advanced_ids
+                            ),
+                        )
+                        self._fault_hook("source")
+                        self._insert_outbox(cursor, advanced)
+                        self._fault_hook("outbox")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_TRUNK_UNAVAILABLE",
+                "DATA_TRUNK_UNAVAILABLE",
+            ) from exc
+        return len(advanced)
+
+    @staticmethod
+    def _load_expired_outputs(
+        cursor,
+        now: datetime,
+    ) -> tuple[_FreshnessCandidate, ...]:
+        cursor.execute(
+            """
+            SELECT
+              latest.entity_instance_id,
+              latest.event_id,
+              latest.observed_at,
+              latest.source_digest,
+              latest.conversion_revision_id,
+              latest.site_configuration_version,
+              output.entity_definition_id,
+              output.data_type,
+              output.unit,
+              latest.observed_at
+                + output.freshness_seconds * INTERVAL '1 second'
+                AS freshness_deadline
+            FROM t_l2_latest AS latest
+            JOIN t_conversion_output_bindings AS output_binding
+              ON output_binding.entity_instance_id = latest.entity_instance_id
+            JOIN t_installed_point_conversions AS installed
+              ON installed.id = output_binding.installed_conversion_id
+             AND installed.current = TRUE
+            JOIN t_point_conversion_outputs AS output
+              ON output.id = output_binding.output_id
+            WHERE latest.quality <> %s
+              AND latest.observed_at
+                + output.freshness_seconds * INTERVAL '1 second' <= %s
+            ORDER BY latest.entity_instance_id
+            FOR UPDATE OF latest SKIP LOCKED
+            """,
+            (int(TrunkQuality.STALE), now),
+        )
+        candidates: list[_FreshnessCandidate] = []
+        for row in cursor.fetchall():
+            (
+                entity_instance_id,
+                source_event_id,
+                source_observed_at,
+                source_digest,
+                revision_id,
+                site_configuration_version,
+                definition_id,
+                output_type,
+                output_unit,
+                deadline,
+            ) = row
+            freshness_material = "|".join(
+                (
+                    str(entity_instance_id),
+                    str(source_event_id),
+                    deadline.isoformat(),
+                )
+            )
+            freshness_digest = hashlib.sha256(
+                freshness_material.encode("utf-8")
+            ).hexdigest()
+            observation = L2Observation(
+                event_id=uuid5(
+                    NAMESPACE_URL,
+                    f"data-trunk-freshness|{freshness_material}",
+                ),
+                entity_instance_id=UUID(str(entity_instance_id)),
+                definition_id=definition_id,
+                value=TypedValue(ValueKind(output_type), None),
+                unit=output_unit,
+                quality=TrunkQuality.STALE,
+                reason="FRESHNESS_EXPIRED",
+                observed_at=deadline,
+                received_at=now,
+                calculated_at=now,
+                conversion_revision_id=UUID(str(revision_id)),
+                site_configuration_version=site_configuration_version,
+                source_observation_ids=(),
+                source_digest=freshness_digest,
+                source_order_key=f"A:{deadline.isoformat()}:{freshness_digest}",
+            )
+            candidates.append(
+                _FreshnessCandidate(
+                    observation=observation,
+                    source_event_id=UUID(str(source_event_id)),
+                    source_observed_at=source_observed_at,
+                    source_digest=source_digest,
+                )
+            )
+        return tuple(candidates)
+
+    @staticmethod
+    def _insert_freshness_sources(
+        cursor,
+        candidates: tuple[_FreshnessCandidate, ...],
+    ) -> None:
+        for candidate in candidates:
+            cursor.execute(
+                """
+                INSERT INTO t_l2_observation_sources
+                  (l2_event_id, l2_observed_at, source_kind,
+                   source_l2_event_id, source_l2_observed_at, source_digest)
+                VALUES (%s, %s, 'freshness', %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    str(candidate.observation.event_id),
+                    candidate.observation.observed_at,
+                    str(candidate.source_event_id),
+                    candidate.source_observed_at,
+                    candidate.source_digest,
+                ),
+            )
 
     @staticmethod
     def _insert_l0(cursor, observations: tuple[RawObservation, ...]) -> tuple[RawObservation, ...]:
@@ -239,6 +400,7 @@ class PostgresDataTrunkRepository:
               installed.revision_id,
               input_binding.l0_tag_id,
               output_binding.entity_instance_id,
+              output.id,
               output.entity_definition_id,
               output.data_type,
               output.unit,
@@ -247,33 +409,51 @@ class PostgresDataTrunkRepository:
               numeric.scale,
               numeric."offset",
               numeric.minimum,
-              numeric.maximum
+              numeric.maximum,
+              enum_rule.output_id IS NOT NULL,
+              fault_rule.delimiter
             FROM t_installed_point_conversions AS installed
-            JOIN t_conversion_input_bindings AS input_binding
-              ON input_binding.installed_conversion_id = installed.id
-             AND input_binding.source_kind = 'l0'
-            JOIN t_point_conversion_inputs AS input
-              ON input.id = input_binding.input_id
-            JOIN t_numeric_transform_rules AS numeric
-              ON numeric.input_id = input.id
             JOIN t_point_conversion_outputs AS output
-              ON output.id = numeric.output_id
+              ON output.revision_id = installed.revision_id
             JOIN t_conversion_output_bindings AS output_binding
               ON output_binding.installed_conversion_id = installed.id
              AND output_binding.output_id = output.id
+            LEFT JOIN t_numeric_transform_rules AS numeric
+              ON numeric.output_id = output.id
+            LEFT JOIN t_enum_transform_rules AS enum_rule
+              ON enum_rule.output_id = output.id
+            LEFT JOIN t_fault_code_transform_rules AS fault_rule
+              ON fault_rule.output_id = output.id
+            JOIN t_point_conversion_inputs AS input
+              ON input.id = COALESCE(
+                numeric.input_id,
+                enum_rule.input_id,
+                fault_rule.input_id
+              )
+            JOIN t_conversion_input_bindings AS input_binding
+              ON input_binding.installed_conversion_id = installed.id
+             AND input_binding.input_id = input.id
+             AND input_binding.source_kind = 'l0'
             WHERE installed.current = TRUE
               AND input_binding.l0_tag_id = ANY(%s::uuid[])
+              AND num_nonnulls(
+                numeric.output_id,
+                enum_rule.output_id,
+                fault_rule.output_id
+              ) = 1
             ORDER BY output_binding.entity_instance_id, installed.id
             """,
             ([str(tag_id) for tag_id in tag_ids],),
         )
         installed_items: list[InstalledPointConversion] = []
-        for row in cursor.fetchall():
+        rows = cursor.fetchall()
+        for row in rows:
             (
                 installation_id,
                 revision_id,
                 input_tag_id,
                 entity_instance_id,
+                output_id,
                 definition_id,
                 output_type,
                 output_unit,
@@ -283,25 +463,89 @@ class PostgresDataTrunkRepository:
                 offset,
                 minimum,
                 maximum,
+                has_enum_rule,
+                fault_delimiter,
             ) = row
-            if output_type != ValueKind.FLOAT.value:
-                raise DataTrunkError(
-                    "POINT_CONVERSION_CONFIGURATION_INVALID",
-                    "numeric transform output must be FLOAT",
+            input_reference = InputReference.l0(UUID(str(input_tag_id)))
+            if scale is not None:
+                if output_type != ValueKind.FLOAT.value:
+                    raise DataTrunkError(
+                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "numeric transform output must be FLOAT",
+                    )
+                item = InstalledPointConversion.numeric(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    input_tag_id=UUID(str(input_tag_id)),
+                    output_entity_instance_id=UUID(str(entity_instance_id)),
+                    output_definition_id=definition_id,
+                    scale=scale,
+                    offset=offset,
+                    input_unit=input_unit,
+                    output_unit=output_unit,
+                    minimum=minimum,
+                    maximum=maximum,
                 )
-            item = InstalledPointConversion.numeric(
-                installation_id=UUID(str(installation_id)),
-                revision_id=UUID(str(revision_id)),
-                input_tag_id=UUID(str(input_tag_id)),
-                output_entity_instance_id=UUID(str(entity_instance_id)),
-                output_definition_id=definition_id,
-                scale=scale,
-                offset=offset,
-                input_unit=input_unit,
-                output_unit=output_unit,
-                minimum=minimum,
-                maximum=maximum,
-            )
+            elif has_enum_rule:
+                if output_type != ValueKind.ENUM.value:
+                    raise DataTrunkError(
+                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "enum transform output must be ENUM",
+                    )
+                cursor.execute(
+                    """
+                    SELECT raw_value, canonical_value
+                    FROM t_enum_mapping_entries
+                    WHERE output_id = %s
+                    ORDER BY raw_value
+                    """,
+                    (str(output_id),),
+                )
+                item = InstalledPointConversion(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(entity_instance_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind.ENUM,
+                    output_unit=output_unit,
+                    freshness_seconds=freshness_seconds,
+                    transform=EnumTransform(
+                        input=input_reference,
+                        entries=dict(cursor.fetchall()),
+                    ),
+                )
+            else:
+                if (
+                    output_type != ValueKind.CODE_SET.value
+                    or fault_delimiter is None
+                ):
+                    raise DataTrunkError(
+                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "fault-code transform output must be CODE_SET",
+                    )
+                cursor.execute(
+                    """
+                    SELECT raw_code, canonical_code
+                    FROM t_fault_code_mapping_entries
+                    WHERE output_id = %s
+                    ORDER BY raw_code
+                    """,
+                    (str(output_id),),
+                )
+                item = InstalledPointConversion(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(entity_instance_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind.CODE_SET,
+                    output_unit=output_unit,
+                    freshness_seconds=freshness_seconds,
+                    transform=FaultCodeTransform(
+                        input=input_reference,
+                        delimiter=fault_delimiter,
+                        entries=dict(cursor.fetchall()),
+                    ),
+                )
             installed_items.append(
                 replace(item, freshness_seconds=freshness_seconds)
             )

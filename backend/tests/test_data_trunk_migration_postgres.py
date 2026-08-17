@@ -82,6 +82,8 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
 
                 for table in (
                     "t_point_conversion_revisions",
+                    "t_enum_transform_rules",
+                    "t_fault_code_transform_rules",
                     "t_l2_observations",
                     "t_l2_latest",
                     "t_l2_stream_outbox",

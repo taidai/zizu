@@ -1,9 +1,11 @@
 """L0—L2 数据主干的不可变领域契约。"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, IntEnum
+from types import MappingProxyType
 from uuid import UUID
 
 
@@ -31,6 +33,15 @@ class TypedValue:
     @classmethod
     def float(cls, value: float | None) -> "TypedValue":
         return cls(ValueKind.FLOAT, value)
+
+    @classmethod
+    def enum(cls, value: str | None) -> "TypedValue":
+        return cls(ValueKind.ENUM, value)
+
+    @classmethod
+    def code_set(cls, value: tuple[str, ...] | None) -> "TypedValue":
+        canonical = None if value is None else tuple(sorted(set(value)))
+        return cls(ValueKind.CODE_SET, canonical)
 
 
 @dataclass(frozen=True)
@@ -74,6 +85,43 @@ class NumericTransform:
 
 
 @dataclass(frozen=True)
+class EnumTransform:
+    input: InputReference
+    entries: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "entries",
+            MappingProxyType(dict(sorted(self.entries.items()))),
+        )
+
+
+@dataclass(frozen=True)
+class FaultCodeTransform:
+    input: InputReference
+    delimiter: str
+    entries: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if self.delimiter not in {"semicolon", "comma", "pipe", "whitespace"}:
+            raise ValueError("unsupported fault-code delimiter")
+        object.__setattr__(
+            self,
+            "entries",
+            MappingProxyType(
+                {
+                    raw.strip().upper(): canonical.strip()
+                    for raw, canonical in sorted(self.entries.items())
+                }
+            ),
+        )
+
+
+Transform = NumericTransform | EnumTransform | FaultCodeTransform
+
+
+@dataclass(frozen=True)
 class InstalledPointConversion:
     installation_id: UUID
     revision_id: UUID
@@ -82,7 +130,7 @@ class InstalledPointConversion:
     output_kind: ValueKind
     output_unit: str | None
     freshness_seconds: float
-    transform: NumericTransform
+    transform: Transform
 
     @classmethod
     def numeric(

@@ -10,9 +10,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import (
     DataTrunkError,
+    EnumTransform,
+    FaultCodeTransform,
     InputReference,
     InstalledPointConversion,
     L2Observation,
+    NumericTransform,
     RawObservation,
     TrunkQuality,
     TypedValue,
@@ -46,6 +49,25 @@ def _evaluate_output(
     site_configuration_version: int,
     calculated_at: datetime,
 ) -> L2Observation:
+    if isinstance(installed.transform, FaultCodeTransform):
+        return _evaluate_fault_code_output(
+            installed,
+            current_inputs,
+            site_configuration_version,
+            calculated_at,
+        )
+    if isinstance(installed.transform, EnumTransform):
+        return _evaluate_enum_output(
+            installed,
+            current_inputs,
+            site_configuration_version,
+            calculated_at,
+        )
+    if not isinstance(installed.transform, NumericTransform):
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "unsupported point conversion transform",
+        )
     if installed.output_kind is not ValueKind.FLOAT:
         raise DataTrunkError(
             "POINT_CONVERSION_CONFIGURATION_INVALID",
@@ -126,7 +148,195 @@ def _evaluate_output(
         installed=installed,
         value=typed_value,
         quality=quality,
-        reason=None,
+        reason=_input_quality_reason(quality),
+        observed_at=source.source_timestamp,
+        received_at=source.received_at,
+        calculated_at=calculated_at,
+        site_configuration_version=site_configuration_version,
+        source_observation_ids=(source.observation_id,),
+        source_digest=source.source_digest,
+        source_order_key=_raw_order_key(source),
+    )
+
+
+def _evaluate_fault_code_output(
+    installed: InstalledPointConversion,
+    current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+    site_configuration_version: int,
+    calculated_at: datetime,
+) -> L2Observation:
+    if installed.output_kind is not ValueKind.CODE_SET:
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "fault-code conversion output must be CODE_SET",
+        )
+    transform = installed.transform
+    if not isinstance(transform, FaultCodeTransform):
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "fault-code conversion requires a fault-code transform",
+        )
+    source = current_inputs.get(transform.input)
+    if source is None:
+        return _runtime_failure(
+            installed,
+            site_configuration_version,
+            calculated_at,
+            "REQUIRED_INPUT_MISSING",
+        )
+    if not isinstance(source, RawObservation):
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "fault-code conversion requires an L0 input",
+        )
+    if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM} or not isinstance(
+        source.value.value,
+        str,
+    ):
+        return _fault_code_observation(
+            installed,
+            source,
+            site_configuration_version,
+            calculated_at,
+            value=None,
+            quality=TrunkQuality.BAD,
+            reason="TYPE_MISMATCH",
+        )
+    if source.quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+        return _fault_code_observation(
+            installed,
+            source,
+            site_configuration_version,
+            calculated_at,
+            value=None,
+            quality=source.quality,
+            reason=_input_quality_reason(source.quality),
+        )
+
+    separators = {
+        "semicolon": ";",
+        "comma": ",",
+        "pipe": "|",
+    }
+    if transform.delimiter == "whitespace":
+        pieces = source.value.value.split()
+    else:
+        pieces = source.value.value.split(separators[transform.delimiter])
+    raw_codes = {
+        piece.strip().upper()
+        for piece in pieces
+        if piece.strip()
+    }
+    unknown = any(code not in transform.entries for code in raw_codes)
+    canonical_codes = tuple(
+        sorted({transform.entries.get(code, code) for code in raw_codes})
+    )
+    return _fault_code_observation(
+        installed,
+        source,
+        site_configuration_version,
+        calculated_at,
+        value=canonical_codes,
+        quality=(TrunkQuality.UNCERTAIN if unknown else source.quality),
+        reason="UNMAPPED_FAULT_CODE" if unknown else None,
+    )
+
+
+def _fault_code_observation(
+    installed: InstalledPointConversion,
+    source: RawObservation,
+    site_configuration_version: int,
+    calculated_at: datetime,
+    *,
+    value: tuple[str, ...] | None,
+    quality: TrunkQuality,
+    reason: str | None,
+) -> L2Observation:
+    return _observation(
+        installed=installed,
+        value=TypedValue.code_set(value),
+        quality=quality,
+        reason=reason,
+        observed_at=source.source_timestamp,
+        received_at=source.received_at,
+        calculated_at=calculated_at,
+        site_configuration_version=site_configuration_version,
+        source_observation_ids=(source.observation_id,),
+        source_digest=source.source_digest,
+        source_order_key=_raw_order_key(source),
+    )
+
+
+def _evaluate_enum_output(
+    installed: InstalledPointConversion,
+    current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+    site_configuration_version: int,
+    calculated_at: datetime,
+) -> L2Observation:
+    if installed.output_kind is not ValueKind.ENUM:
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "enum conversion output must be ENUM",
+        )
+    transform = installed.transform
+    if not isinstance(transform, EnumTransform):
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "enum conversion requires an enum transform",
+        )
+    source = current_inputs.get(transform.input)
+    if source is None:
+        return _runtime_failure(
+            installed,
+            site_configuration_version,
+            calculated_at,
+            "REQUIRED_INPUT_MISSING",
+        )
+    if not isinstance(source, RawObservation):
+        raise DataTrunkError(
+            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "enum conversion requires an L0 input",
+        )
+    if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM} or not isinstance(
+        source.value.value,
+        str,
+    ):
+        return _observation(
+            installed=installed,
+            value=TypedValue.enum(None),
+            quality=TrunkQuality.BAD,
+            reason="TYPE_MISMATCH",
+            observed_at=source.source_timestamp,
+            received_at=source.received_at,
+            calculated_at=calculated_at,
+            site_configuration_version=site_configuration_version,
+            source_observation_ids=(source.observation_id,),
+            source_digest=source.source_digest,
+            source_order_key=_raw_order_key(source),
+        )
+    mapped = transform.entries.get(source.value.value)
+    if mapped is None:
+        return _observation(
+            installed=installed,
+            value=TypedValue.enum(None),
+            quality=TrunkQuality.BAD,
+            reason="UNMAPPED_ENUM",
+            observed_at=source.source_timestamp,
+            received_at=source.received_at,
+            calculated_at=calculated_at,
+            site_configuration_version=site_configuration_version,
+            source_observation_ids=(source.observation_id,),
+            source_digest=source.source_digest,
+            source_order_key=_raw_order_key(source),
+        )
+    quality = source.quality
+    return _observation(
+        installed=installed,
+        value=TypedValue.enum(
+            mapped if quality not in {TrunkQuality.BAD, TrunkQuality.STALE} else None
+        ),
+        quality=quality,
+        reason=_input_quality_reason(quality),
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
@@ -146,7 +356,7 @@ def _runtime_failure_from_source(
 ) -> L2Observation:
     return _observation(
         installed=installed,
-        value=TypedValue.float(None),
+        value=TypedValue(installed.output_kind, None),
         quality=TrunkQuality.BAD,
         reason=reason,
         observed_at=source.source_timestamp,
@@ -167,7 +377,7 @@ def _runtime_failure(
 ) -> L2Observation:
     return _observation(
         installed=installed,
-        value=TypedValue.float(None),
+        value=TypedValue(installed.output_kind, None),
         quality=TrunkQuality.BAD,
         reason=reason,
         observed_at=calculated_at,
@@ -178,6 +388,16 @@ def _runtime_failure(
         source_digest=hashlib.sha256(b"").hexdigest(),
         source_order_key=f"{calculated_at.isoformat()}||",
     )
+
+
+def _input_quality_reason(quality: TrunkQuality) -> str | None:
+    if quality is TrunkQuality.BAD:
+        return "INPUT_BAD"
+    if quality is TrunkQuality.STALE:
+        return "INPUT_STALE"
+    if quality is TrunkQuality.UNCERTAIN:
+        return "INPUT_UNCERTAIN"
+    return None
 
 
 def _observation(

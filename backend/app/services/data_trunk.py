@@ -1,7 +1,7 @@
 """L0—L2 数据主干的唯一公开写入模块。"""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -49,3 +49,22 @@ class DataTrunk:
                 "Raw observation batch is empty",
             )
         return self._repository.transact(batch, evaluate_conversion)
+
+
+class _FreshnessRepository(Protocol):
+    def mark_expired_outputs_stale(self, now: datetime) -> int: ...
+
+
+class _FreshnessScheduler:
+    """由 DataTrunk implementation 持有的内部新鲜度调度器。"""
+
+    def __init__(
+        self,
+        repository: _FreshnessRepository,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._repository = repository
+        self._clock = clock
+
+    def run_once(self, now: datetime | None = None) -> int:
+        return self._repository.mark_expired_outputs_stale(now or self._clock())
