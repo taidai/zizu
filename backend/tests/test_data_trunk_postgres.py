@@ -430,6 +430,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
 
         self.assertEqual(receipt.accepted_l0_count, 1)
         self.assertEqual(receipt.duplicate_l0_count, 0)
+        self.assertEqual((UUID(int=0x101),), receipt.accepted_l0_observation_ids)
         self.assertEqual(receipt.l2_event_ids, (EXPECTED_EVENT_ID,))
         self.assert_counts(
             l0=1,
@@ -469,6 +470,42 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     sources=0,
                     outbox=0,
                 )
+
+    def test_terminal_ingestion_failure_records_only_a_safe_idempotent_reference(
+        self,
+    ) -> None:
+        raw = self.raw_power(12345.0, sequence=1)
+
+        first = self.trunk.record_failure(
+            (raw,),
+            attempts=5,
+            error_code="DATA_TRUNK_UNAVAILABLE",
+        )
+        second = self.trunk.record_failure(
+            (raw,),
+            attempts=5,
+            error_code="DATA_TRUNK_UNAVAILABLE",
+        )
+
+        self.assertEqual(first, second)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, source_digest, stage, safe_summary, attempts
+                    FROM t_ingestion_failures
+                    """
+                )
+                rows = cursor.fetchall()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(str(first), str(rows[0][0]))
+        self.assertEqual("l0", rows[0][2])
+        self.assertEqual(
+            {"code": "DATA_TRUNK_UNAVAILABLE", "observation_count": 1},
+            rows[0][3],
+        )
+        self.assertEqual(5, rows[0][4])
+        self.assertNotIn("12345", str(rows[0]))
 
     def test_duplicate_source_digest_is_idempotent(self) -> None:
         raw = self.raw_power(12345.0, sequence=1)

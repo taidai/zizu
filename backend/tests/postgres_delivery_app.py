@@ -16,6 +16,7 @@ from app.api.rpc import router as rpc_router
 from app.api.rules import router as rules_router
 from app.core.config import settings
 from app.services.telemetry_store import init_db_pool
+from app.services.data_trunk_postgres import build_postgres_data_trunk
 from app.services.pipeline import DataPipeline
 
 
@@ -41,7 +42,7 @@ class _SimulatedMqttMessage:
     qos: int = 1
 
 
-_protocol_pipeline = DataPipeline()
+_protocol_pipeline = DataPipeline(data_trunk=build_postgres_data_trunk())
 
 
 @app.post("/protocol-simulator/neuron")

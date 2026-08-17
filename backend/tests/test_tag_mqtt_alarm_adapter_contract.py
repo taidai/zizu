@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 
@@ -236,12 +235,33 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         self.assertIn("_submit_unified_tag_alarms", source)
 
     def test_pipeline_submits_only_persisted_confirmed_tag_and_mqtt_observations(self) -> None:
-        from app.models.schemas import TelemetryRecord
+        from app.services.data_trunk_contracts import (
+            CommitReceipt,
+            RawObservation,
+            TrunkQuality,
+            TypedValue,
+            ValueKind,
+        )
         from app.services.pipeline import DataPipeline
         from app.services.tag_mqtt_alarm_adapter import MqttAlarmAdapter
 
+        class RecordingDataTrunk:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def ingest(self, batch):
+                self.calls.append(tuple(batch))
+                return CommitReceipt(
+                    transaction_id=UUID("72000000-0000-0000-0000-000000000099"),
+                    accepted_l0_count=len(batch),
+                    duplicate_l0_count=0,
+                    l2_event_ids=(),
+                    late_observation_count=0,
+                )
+
         definitions, runtime, repository = self._runtime(trigger_duration_seconds=1)
-        pipeline = DataPipeline()
+        data_trunk = RecordingDataTrunk()
+        pipeline = DataPipeline(data_trunk=data_trunk)
         class RecordingEntityAdapter:
             def __init__(self) -> None:
                 self.excluded_entity_instance_ids: set[UUID] | None = None
@@ -275,42 +295,46 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
         )
         pipeline._mqtt = SimpleNamespace(is_alarm_topic=lambda topic: topic.startswith("/alarm/"))
         pipeline._buffer.append(
-            TelemetryRecord(
-                ts=STARTED_AT + timedelta(seconds=1),
+            RawObservation(
+                observation_id=UUID("72000000-0000-0000-0000-000000000031"),
                 node_id=UUID("72000000-0000-0000-0000-000000000004"),
                 tag_id=TAG_ID,
-                value_int=1,
-                quality=192,
+                source_key="pcs/faultCode",
+                value=TypedValue(ValueKind.INT, 1),
+                raw_unit=None,
+                quality=TrunkQuality.GOOD,
+                source_timestamp=STARTED_AT + timedelta(seconds=1),
+                received_at=STARTED_AT + timedelta(seconds=1),
+                source_message_id="message-2",
+                source_sequence=2,
+                source_digest="2" * 64,
             )
         )
         pipeline._buffer.append(
-            TelemetryRecord(
-                ts=STARTED_AT,
+            RawObservation(
+                observation_id=UUID("72000000-0000-0000-0000-000000000030"),
                 node_id=UUID("72000000-0000-0000-0000-000000000004"),
                 tag_id=TAG_ID,
-                value_int=1,
-                quality=192,
+                source_key="pcs/faultCode",
+                value=TypedValue(ValueKind.INT, 1),
+                raw_unit=None,
+                quality=TrunkQuality.GOOD,
+                source_timestamp=STARTED_AT,
+                received_at=STARTED_AT,
+                source_message_id="message-1",
+                source_sequence=1,
+                source_digest="1" * 64,
             )
         )
 
-        with patch(
-            "app.services.pipeline.batch_insert_telemetry",
-            AsyncMock(return_value=1),
-        ) as persisted, patch(
-            "app.services.pipeline.upsert_telemetry_latest",
-            AsyncMock(),
-        ) as latest:
-            import asyncio
+        import asyncio
 
-            asyncio.run(pipeline.flush_now())
+        asyncio.run(pipeline.flush_now())
 
         self.assertEqual(1, len(repository.list_events()))
         self.assertEqual("active_unacknowledged", repository.list_events()[0].state)
         self.assertEqual({ENTITY_INSTANCE_ID}, entity_adapter.excluded_entity_instance_ids)
-        persisted.assert_awaited_once()
-        latest.assert_awaited_once()
-
-        import asyncio
+        self.assertEqual(1, len(data_trunk.calls))
 
         asyncio.run(
             pipeline.on_message(

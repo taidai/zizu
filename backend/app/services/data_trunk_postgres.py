@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg2.extras import Json
 
-from app.services.data_trunk import ConversionEvaluator
+from app.services.data_trunk import ConversionEvaluator, DataTrunk
 from app.services.data_trunk_contracts import (
     CommitReceipt,
     DataTrunkError,
@@ -106,7 +106,68 @@ class PostgresDataTrunkRepository:
             duplicate_l0_count=len(raw_observations) - len(accepted),
             l2_event_ids=tuple(item.event_id for item in produced),
             late_observation_count=late_l0,
+            accepted_l0_observation_ids=tuple(
+                item.observation_id for item in accepted
+            ),
         )
+
+    def record_failure(
+        self,
+        raw_observations: tuple[RawObservation, ...],
+        *,
+        attempts: int,
+        error_code: str,
+    ) -> UUID:
+        source_digest = hashlib.sha256(
+            "\n".join(sorted(item.source_digest for item in raw_observations)).encode(
+                "ascii"
+            )
+        ).hexdigest()
+        safe_code = (
+            error_code
+            if error_code.isascii()
+            and error_code.replace("_", "").isalnum()
+            and error_code.upper() == error_code
+            and len(error_code) <= 64
+            else "DATA_TRUNK_WRITE_FAILED"
+        )
+        failure_id = uuid5(
+            NAMESPACE_URL,
+            f"zizu:ingestion-failure:{source_digest}:{attempts}:{safe_code}",
+        )
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            INSERT INTO t_ingestion_failures
+                              (id, source_digest, stage, safe_summary, attempts)
+                            VALUES (%s, %s, 'l0', %s, %s)
+                            ON CONFLICT (id) DO NOTHING
+                            """,
+                            (
+                                str(failure_id),
+                                source_digest,
+                                Json(
+                                    {
+                                        "code": safe_code,
+                                        "observation_count": len(raw_observations),
+                                    }
+                                ),
+                                attempts,
+                            ),
+                        )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_TRUNK_UNAVAILABLE",
+                "DATA_TRUNK_UNAVAILABLE",
+            ) from exc
+        return failure_id
 
     def mark_expired_outputs_stale(self, now: datetime) -> int:
         try:
@@ -143,7 +204,6 @@ class PostgresDataTrunkRepository:
                 "DATA_TRUNK_UNAVAILABLE",
             ) from exc
         return len(advanced)
-
     @staticmethod
     def _load_expired_outputs(
         cursor,
@@ -847,3 +907,7 @@ def _l2_columns(
         "POINT_CONVERSION_VALUE_INVALID",
         "Unsupported L2 typed value",
     )
+
+
+def build_postgres_data_trunk() -> DataTrunk:
+    return DataTrunk(PostgresDataTrunkRepository())

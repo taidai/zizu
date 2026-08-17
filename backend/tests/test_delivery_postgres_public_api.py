@@ -32,6 +32,7 @@ MIGRATION_029 = BACKEND_ROOT.parent / "init-db" / "migration_029_unified_alarm_r
 MIGRATION_030 = BACKEND_ROOT.parent / "init-db" / "migration_030_rule_alarm_and_legacy_gate.sql"
 MIGRATION_031 = BACKEND_ROOT.parent / "init-db" / "migration_031_ems_policy_activations.sql"
 MIGRATION_032 = BACKEND_ROOT.parent / "init-db" / "migration_032_release_locks.sql"
+MIGRATION_038 = BACKEND_ROOT.parent / "init-db" / "migration_038_pcs_data_trunk.sql"
 MIGRATIONS = (
     MIGRATION_020,
     MIGRATION_021,
@@ -46,6 +47,7 @@ MIGRATIONS = (
     MIGRATION_030,
     MIGRATION_031,
     MIGRATION_032,
+    MIGRATION_038,
 )
 def build_minimal_package(
     *,
@@ -322,6 +324,7 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
 
                 cursor.execute("DROP SCHEMA public CASCADE")
                 cursor.execute("CREATE SCHEMA public")
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
                 for migration in MIGRATIONS:
                     if migration == MIGRATION_024:
                         cls._create_source_catalog_tables(cursor)

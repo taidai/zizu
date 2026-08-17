@@ -194,6 +194,7 @@ class CommitReceipt:
     l2_event_ids: tuple[UUID, ...]
     late_observation_count: int
     failure_reference: UUID | None = None
+    accepted_l0_observation_ids: tuple[UUID, ...] = ()
 
 
 class DataTrunkError(ValueError):
