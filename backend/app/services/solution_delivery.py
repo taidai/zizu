@@ -61,6 +61,7 @@ from app.services.solution_policies import (
     validate_ems_policy_assets,
     validate_policy_execution_acceptances,
 )
+from app.services.solution_point_conversions import validate_point_conversion_assets
 from app.services.gateway_readiness import GatewayReadiness
 
 __all__ = [
@@ -238,6 +239,13 @@ class SolutionDelivery:
         )
         if normalized_policies:
             manifest["_policy_assets"] = list(normalized_policies)
+        normalized_point_conversions = validate_point_conversion_assets(
+            manifest,
+            declared_assets,
+            _load_mapping,
+        )
+        if normalized_point_conversions:
+            manifest["_point_conversion_assets"] = list(normalized_point_conversions)
         validate_policy_execution_acceptances(
             manifest,
             declared_assets,

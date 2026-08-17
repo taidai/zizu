@@ -179,6 +179,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "alarm_definition",
             "ems_workbench",
             "ems_policy",
+            "point_conversion_template",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
@@ -234,7 +235,7 @@ def _validate_entity_assets(
                 not isinstance(definition.get(field), str) or not definition[field]
                 for field in ("displayName", "deviceCategory", "dataType", "direction")
             )
-            or definition["dataType"] not in {"FLOAT", "INT", "BOOL", "STRING", "ENUM"}
+            or definition["dataType"] not in {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
             or definition["direction"] not in {"R", "W", "RW"}
             or not isinstance(definition.get("unit"), (str, type(None)))
         ):

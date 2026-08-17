@@ -1,0 +1,41 @@
+schemaVersion: zizu.point-conversion/v1alpha1
+id: pcs.brand-a
+kind: point_conversion_template
+displayName: PCS 通用品牌 A
+deviceCategory: PCS
+brand: GENERIC_A
+model: PCS-A
+revision: 1
+status: active
+inputs:
+  - {id: active_power_raw, sourceKind: l0, sourceKey: ActivePowerRaw, aliases: [ActivePower], dataType: FLOAT, unit: W, required: true}
+  - {id: operating_state_raw, sourceKind: l0, sourceKey: RunningState, aliases: [RunState], dataType: STRING, required: true}
+  - {id: fault_codes_raw, sourceKind: l0, sourceKey: FaultCodeText, aliases: [FaultCodes], dataType: STRING, required: true}
+outputs:
+  - id: active_power
+    entityDefinition: pcs.active_power
+    dataType: FLOAT
+    unit: kW
+    freshness: 30s
+    transform: {kind: numeric, input: active_power_raw, scale: 0.001, offset: 0, minimum: -500, maximum: 500}
+  - id: operating_state
+    entityDefinition: pcs.operating_state
+    dataType: ENUM
+    unit: null
+    freshness: 30s
+    transform:
+      kind: enum
+      input: operating_state_raw
+      entries: {"0": STOPPED, "1": STANDBY, "2": RUNNING, "3": FAULTED}
+  - id: fault_codes
+    entityDefinition: pcs.fault_codes
+    dataType: CODE_SET
+    unit: null
+    freshness: 30s
+    transform:
+      kind: fault_codes
+      input: fault_codes_raw
+      delimiter: semicolon
+      entries:
+        E11: {code: DC_OVERVOLTAGE, name: 直流过压, defaultSeverity: MAJOR}
+        E30: {code: COMPRESSOR_FAULT, name: 压缩机故障, defaultSeverity: WARNING}
