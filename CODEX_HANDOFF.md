@@ -1,5 +1,128 @@
 ---
 
+## Session 2026-08-19 — v0.4.81-rc.1 本地候选收口
+
+- PCS 数据主干完成提交 `3641443 feat(data): certify PCS data trunk`：公开机器验收只报告已提交、可观测的 L0 来源谱系、L2 latest、质量/时间戳和 outbox 事实，不把品牌替换、WebSocket、重启或幂等测试冒充运行时报告证据。
+- Brand A→Brand B 真实 PostgreSQL 公共主缝直接核对 `pcs.active_power=13.5`、`pcs.operating_state=RUNNING`、故障码 `COMPRESSOR_FAULT/DC_OVERVOLTAGE`、quality=192，并证明三个 L2 UUID 不随品牌替换变化；生产启动在 migration 039 后逐实体执行单一来源 contract gate，零来源负例 fail closed。
+- 验证证据：完整后端 `362 tests / 71 skipped / 0 failures`；最终数据主干 PostgreSQL 定向 `37/37`；发布脚本门禁 `12/12`；前端生产构建 8189 modules 通过；compileall、diff-check 通过；独立代码审查结论 Ready。
+- 运行版本已从 0.4.80 提升为 0.4.81；候选标签采用 `v0.4.81-rc.1`。本轮仍未连接或部署 1号机，也未进行设备控制；必须在固定镜像摘要生成后，再由维护者确认维护窗口，执行只读数据主干验收和受控低功率验收，才能把同一摘要晋级为正式 v0.4.81。
+
+
+## Session 2026-08-19 — v0.4.81 PCS 数据主干主线确认
+
+- 维护者确认暂不删除 v0.4.80 功能；v0.4.81 唯一开发主线为 PCS 的 L0 原始点位 → L1 点位转换 →
+  L2 全局实体第一条生产级纵向切片，不扩展 BMS、光伏、充电桩、电表或跨节点通用计算。
+- 完成口径限定为 Brand A/Brand B 替换保持 L2 实体身份及 PCS 上层引用稳定，并由公开协议、真实
+  PostgreSQL、REST、认证 WebSocket、重启和不可变机器报告证明；只对 migrated PCS 收紧 contract gate。
+- 发布采用维护者选择的方案 C：Task 6—10 和完整门禁通过后只形成固定摘要 `v0.4.81-rc.1`；随后必须
+  通过结构化选择再次确认维护窗口，先做 1号机只读数据主干验收，再做受控低功率控制验收；全部通过后
+  才发布正式 `v0.4.81`，失败则保持 rc 并回滚至已验证 v0.4.80 摘要。
+- 本轮只更新既有规格和实施计划的范围/发布门禁，未改产品代码、未连接或部署 1号机。
+
+## Session 2026-08-18 — 1 号机 v0.4.80 HTTP 部署说明
+
+- 新增 `docs/deploy-1号机-v0.4.80-http.md`，以现场已验证的 v0.4.80 linux/arm64 固定摘要、
+  Schema 037、`zizu-release-test` project 和现有 `/opt/zizu-release-test-0.4.80/runtime.env`
+  为唯一基线，提供可直接执行的镜像核验、数据库备份、backend-only Compose 切换、健康门禁和
+  回滚边界。
+- 文档遵循维护者已确认的现场约束：不启动 Caddy、不申请 TLS，保留 host network 与
+  `/dev/mqueue` tmpfs；因此明确标记为 HTTP 联网测试/维护部署，而非符合生产安全基线的发布。
+- 文档禁止现场构建、`latest`、源码覆盖、重建 PostgreSQL/NanoMQ/Neuron、`down -v` 和旧部署入口；
+  Secret 只复用现场权限受限文件，不写入命令或仓库。
+- 本轮没有连接或修改 1 号机。SSH 只读核对尝试因当前网络到 13122 端口拒绝而未建立；部署说明的
+  固定身份取自已保存的 v0.4.80 `release.json/release.env` 与前次现场验收记录。
+- 当前 L0→L1→L2 数据主干工作树尚未形成新的固定摘要和完整 Task 10 门禁，不能按本文作为新版本部署。
+- 文档所有 Bash fenced blocks 合并后通过 `bash -n`；该文档 `git diff --check` 通过。
+
+## Session 2026-08-17 — PCS 数据主干 Task 5
+
+- Task 5 已独立提交为 `d4dd162 feat(data): add versioned PCS conversion assets`。参考 EMS 包新增
+  Brand A/Brand B 两套 `zizu.point-conversion/v1alpha1` PCS 模板，二者把品牌相关 L0 映射为同一组
+  `pcs.active_power / pcs.operating_state / pcs.fault_codes` L2 定义；新增 ENUM 与 CODE_SET 实体定义。
+- 包导入只接受 `numeric / enum / fault_codes` 三种声明式转换，拒绝表达式、非有限数值、反向范围、
+  大小写歧义故障码、实体类型/单位不一致和未知字段；规范资产以 frozen dataclass + 递归不可变映射暴露。
+- 新 `PointConversion` 深模块提供确定性 `plan/get_plan/apply`：必需输入缺失或歧义形成 blocker 且零应用写；
+  exact stable source key 优先于 alias；Brand A→B 输入为 update、三个输出为 preserve，L2 实体 UUID 不含
+  品牌/模板修订；同 actor/key 重放只返回同一 application。
+- 定向资产/领域/参考包导入为 6/6；参考 EMS 完整公开交付主缝 1/1；完整后端 328 tests、53 skipped、
+  零失败（230.007s）；compileall 与 cached diff-check 通过。未新增依赖、前端、部署或 1 号机改动。
+- 为保持本提交完整回归绿色，`slots/pcs.yaml` 的读取实体尚未切换到 `sourceKind: point_conversion`；该接线与
+  首次安装事务、PostgreSQL adapter、公开 REST/RBAC 同属紧接着的 Task 6，不能遗漏或继续保留旧 direct matcher。
+
+---
+
+## Session 2026-08-17 — PCS 数据主干 Task 4
+
+- Task 4 已独立提交为 `a89667a refactor(data): route ingestion through DataTrunk`。生产 `DataPipeline` 从旧 `batch_insert_telemetry` + `upsert_telemetry_latest` 双提交切换为唯一业务写 seam `DataTrunk.ingest()`；parser 后先构造确定性 L0 `RawObservation`，L1 始终读取 raw typed value，既有 normalizer 仅保留为 legacy 告警兼容投影。
+- buffer 仅在收到 commit receipt 后删除精确前缀；写失败保留原批次，并发追加不会被旧回执误删。固定最多 5 次、0.25/0.5/1/2/4 秒退避；第 5 次失败只有在独立安全失败引用成功落库后才移除，失败台账只含组合 digest、稳定机器码和数量。
+- `CommitReceipt` 新增 accepted observation IDs，解决“数据库已提交但回执丢失后重试”场景：重复 L0 不会再次提交 legacy 告警生命周期。原始消息标识仅保存 payload SHA-256，不保存 broker/topic/Secret；tag 元数据优先使用明确 Neuron source path 或节点稳定键，不按重名点位猜测。
+- TDD 定向 pipeline + legacy alarm 为 11/11；真实隔离 PostgreSQL 数据主干 12/12；完整后端 322 tests、53 skipped、零失败（245.109s）。`compileall`、`git diff --check` 通过，未新增依赖或前端改动。
+- 公共协议模拟器已注入真实 PostgreSQL DataTrunk，并在完整交付 PG 主缝中实际返回 `messages_received=1 / points_written=1`；该旧超长主缝随后暴露了既有的“主备切换后 confirmation 仍指向原 tag”及测试 schema 未纳入 034—037 问题，未混入本采集提交，后续节点来源一致性任务需单独收口。
+- 隔离容器 `zizu_data_trunk_task4_test` 已精确核对名称后停止并由 `--rm` 删除；未部署、未连接 1 号机、未修改现场数据库。下一步执行 Task 5 两品牌 PCS 点位转换资产与确定性 plan/apply。
+
+## Session 2026-08-17 — PCS 数据主干 Task 3
+
+- 维护者再次确认书面规格，L0 原始点位 → L1 点位转换 → L2 全局实体继续作为后续实现的唯一数据主干；告警、策略、控制和画面不直接依赖品牌点位。
+- Task 3 已完成枚举、字符串多故障码、质量与时间语义：数值、枚举和故障码转换由同一纯计算 seam 分派；未知枚举输出 BAD/null，未知故障码保留原码并输出 UNCERTAIN，CODE_SET 规范化去重，越界、缺输入及上游 BAD/STALE/UNCERTAIN 均生成稳定机器码而不抛业务异常。
+- migration 038 追加 `t_enum_transform_rules` 与 `t_fault_code_transform_rules` 两个显式关系表，固定输入到输出及分隔符契约；PostgreSQL snapshot loader 不从 JSON 猜拓扑。freshness scheduler 通过仓储同一原子事务写 L2 history/latest/source/outbox，重复扫描幂等，真实原始值在截止时刻与合成 STALE 冲突时由稳定顺序键获胜。
+- Task 3 定向为纯转换/迁移 18/18、真实隔离 PostgreSQL 11/11，合计 29/29；完整后端 314 tests、52 skipped、零失败（154.690s）。`compileall` 与 `git diff --check` 通过，未新增依赖或前端改动。
+- 隔离容器 `zizu_data_trunk_task3_test` 已精确核对名称后停止并由 `--rm` 删除；未部署、未连接 1 号机、未修改现场数据库。下一步执行 Task 4 pipeline 纵向接入，仍不得增加第二个业务写 seam。
+
+## Session 2026-08-17 — PCS 数据主干 Task 2
+
+- Task 2 已按 executing-plans + TDD 独立提交为
+  `5761dc6 feat(data): persist PCS trunk atomically`。Migration 038 以 expand-only 方式建立点位转换
+  关系模型、共享 L2 history/latest、来源关系、提交后 outbox、失败记录和 typed-value/append-only
+  数据库门禁；未改写 020—037。
+- 唯一外部写入 seam 仍为 `DataTrunk.ingest()`。PostgreSQL adapter 在一个事务内完成 L0
+  history/latest、固定数值修订计算、L2 history/latest、来源关系与 outbox；source/outbox 注入故障均
+  整笔回滚，重复 source digest 幂等，迟到及同时间 tie-breaker 不倒退 latest 或产生虚假 outbox。
+- 规格复核额外抓出并用 RED 修复了“同一 batch 同点位多条观测只生成最后一条 L2”的历史丢失：
+  现在每条 accepted L0 都产生对应 L2 history/source，最终 latest 按业务时间和稳定顺序键推进。
+- 真实隔离 PostgreSQL 定向为 migration 4/4、transaction 6/6，Task 1 conversion 4/4，合计
+  14/14；完整后端为 299 tests、47 skipped、零失败（新增 10 个 PG 测试在未设置环境变量时按设计
+  skip）。`compileall`、cached diff-check 与敏感字段扫描通过。
+- 临时容器 `zizu_data_trunk_task2_test` 仅映射本机测试端口，已精确校验名称后停止并由 `--rm`
+  删除；未部署、未连接 1 号机、未修改现场数据库或新增依赖。
+- 下一步执行 Task 3：先写枚举、多故障码、BAD/UNCERTAIN/STALE、类型/单位/范围失败和 freshness
+  原子事务 RED；不增加第二个业务写接口。
+
+## Session 2026-08-17 — 节点树与 L0—L2 数据主干开发目标
+
+- 实施计划 Task 1 已按 executing-plans + TDD 完成并独立提交为
+  `2017faf feat(data): add PCS conversion kernel`。新增不可变 `RawObservation` / `L2Observation` /
+  `InstalledPointConversion` / `CommitReceipt` 契约，以及唯一纯计算 seam
+  `evaluate_conversion()`；首条 PCS 规则把 12345 W 确定性转换为 12.345 kW。
+- RED 已精确证明契约模块缺失；GREEN 定向 4/4，覆盖单位错配生成 BAD/null 而不抛异常、相同输入
+  event ID 稳定和原始观测不可变。`compileall` 与 staged diff-check 通过。
+- 完整后端基线为 285 tests / 37 skipped；Task 1 后提交门禁为 289 tests / 37 skipped，零失败。
+  当前 worktree 自带 `.venv` 只有少量 Pydantic 包，完整套件使用既有 zizu-p0-main 运行依赖环境和
+  已缓存 pytest site-packages 组合执行，未安装或修改依赖。
+- Task 1 未改数据库、pipeline、前端、部署或 1 号机。下一步是 Task 2：先写 migration 038 的
+  fresh/upgrade/replay RED，再建立单连接事务的 L0/L2/latest/source/outbox PostgreSQL 主缝。
+- 维护者已书面回复“规格确认”；对应实施计划已用 writing-plans 拆成 10 个纵向 TDD 任务并独立提交为
+  `4ceb1ce docs(data): plan PCS data trunk`，文件为
+  `docs/superpowers/plans/2026-08-17-pcs-l0-l1-l2-data-trunk.md`。计划固定先数值转换和 PG 原子事务，
+  再做质量/时间、pipeline、两品牌资产、原子安装、L2 runtime、认证 WS、驾驶舱和机器验收；038 仅
+  expand，039 独立执行 migrated PCS contract gate，避免改写已登记 migration。
+- 计划自检已覆盖正式规格第 2—15 节、无未定项/空测试体、跨任务类型一致；同时解决首次安装实体与
+  转换输出的鸡生蛋问题，以及换牌后验收报告必须指向新 derived solution installation 的版本谱系。
+  本轮仍未改产品代码、数据库或 1 号机；下一步由维护者选择按 subagent-driven-development（推荐）
+  或 executing-plans 在当前会话逐任务执行。
+- 维护者已整体确认 PCS 数据主干第一纵向切片的五部分设计；正式规格已独立提交为
+  `9ffd8ca docs(data): define PCS data trunk`，文件为
+  `docs/superpowers/specs/2026-08-17-pcs-l0-l1-l2-data-trunk-design.md`。
+- 规格固定应用层事务转换内核、L0/L2 同事务与提交后 outbox、四态质量、强关系模型、两品牌 PCS
+  替换、交付驾驶舱和公开机器验收。当前尚未进入实现；下一步须由维护者复核书面规格，确认后再用
+  writing-plans 拆分纵向 TDD 实施计划。
+- 维护者确认 ZiZu 主线改为“物理节点树及其 L0 原始点位、L1 点位转换、L2 全局实体共同构成数据主干”；上层告警、策略、控制、画面和报表只引用 L2，不直接依赖品牌 L0 点位。
+- `docs/product-destination.md` 已新增正式开发目标、数据主干不变量、目标关系/时序结构、EMS 界面功能清单、提交后实时数据流、PLC/本地保护边界、控制仲裁和可量化交付门槛。
+- 简单配置边界已固定：仅适用于协议、品牌型号和点位转换模板已经存在的场景；实施工程师填写必要通信参数，但不接触寄存器地址、标签 ID、UUID、SQL 或 JSON/YAML。小型参考站连接就绪后一小时完成五阶段配置与机器验收，完整独立试验仍以四小时为上限，已支持模板所需 L0 自动匹配率至少 95%。
+- `CONTEXT.md` 已新增“数据主干、L0 原始点位、L1 点位转换、点位转换模板、L2 全局实体”统一语言，并说明 L2 产品术语与实体定义/实例的关系。
+- `README.md` 顶部已指向正式产品目的地，把旧 F0—F4 与五层节点树明确标为迁移基线，避免继续把旧管道或 Tag 树层级误称为目标架构。
+- 维护者在三种交付界面原型中选择 A“引导式交付驾驶舱”：顶部五阶段、左侧物理节点树、中部 L0→L1→L2 与安装计划、右侧阻断和机器验收；该决定已写入产品目的地，EMS 运行工作台继续保持独立。
+- 本轮仅修改目标与领域文档，未改产品代码、数据库、部署或 1 号机现场；验证仅需 Markdown 差异、术语一致性和 `git diff --check`。
+
 ## Session 2026-08-16 — 1号机站点访问恢复
 
 - 现场后端未宕机：远端 `0.0.0.0:9000` 正常监听，固定 v0.4.80 backend healthy，
