@@ -10,6 +10,8 @@
 
 ## Global Constraints
 
+- v0.4.81 只完成 PCS 第一纵向切片；保留 v0.4.80 兼容能力，不新增其他设备品类，不删除旧模型或兼容入口。
+- 发布采用双门禁：本计划 Task 6—10 和全部测试通过后只生成固定摘要 `v0.4.81-rc.1`；维护者明确确认维护窗口并完成 1号机只读数据主干及受控低功率现场验收后，才发布正式 `v0.4.81`。
 - 第一纵向切片只包含概念语义 `pcs.activePower`、`pcs.operatingState`、`pcs.faultCodes`；机器 ID 沿用仓库既有 snake_case 规则 `pcs.active_power`、`pcs.operating_state`、`pcs.fault_codes`，不扩展任意表达式、跨节点公式或反向控制换算。
 - 物理节点树只表达物理归属；L0、L1、L2 是选中节点后的数据主干视图，不创建伪物理子节点。
 - L0 使用 `t_telemetry`/`t_telemetry_latest` 的新增 raw 列保存品牌事实；既有 `value_*` 只作为 expand 阶段兼容投影，L1 必须读取 raw 列。
@@ -2298,3 +2300,13 @@ git commit -m "feat(data): prove PCS data trunk delivery"
 - [ ] **Public-contract review:** 请求/响应字段、机器码、capability、OpenAPI 路由分类、README 示例和 reference package 完全一致。
 - [ ] **UI review:** 实施工程师无需 UUID/SQL/JSON/YAML；operator 只看 L2；blocker 清零前安装禁用；窄屏单列；未知结果使用同 actor/node/plan/key 重放。
 - [ ] **Release wording:** 只声明“PCS 的 L0—L2 数据主干纵向切片通过机器验收，并证明两品牌替换不改变上层业务身份”。
+
+## v0.4.81 Candidate and Site Release Gates
+
+- [ ] **候选身份：** 根 `VERSION`、OCI label、release manifest、前端版本和机器报告均为 `0.4.81-rc.1`，Schema 最高版本为 039。
+- [ ] **固定制品：** GitHub Actions 构建并核验 linux/amd64 与 linux/arm64 摘要；1号机只允许使用 release manifest 中的 arm64 摘要，禁止 `latest`、现场构建和源码挂载。
+- [ ] **部署授权：** 在任何 1号机写操作前，以结构化选择请求维护者明确确认维护窗口；未确认时停止在候选状态。
+- [ ] **部署前置：** 核验固定主机身份、当前容器摘要、host network、`/dev/mqueue` tmpfs、运行时 Secret、数据库备份及 Schema 037→039 迁移路径，不重建现场 PostgreSQL、NanoMQ 或 Neuron。
+- [ ] **现场只读验收：** 健康、登录、节点树、PCS L0/L1/L2、REST latest/history、认证 WebSocket、来源证据和重启持久性全部通过后，才允许进入控制验收。
+- [ ] **受控低功率验收：** 使用明确安全限值、联锁、二次确认、持久命令、现场回读和审计执行；任一前置失败则零现场写入并停止发布。
+- [ ] **正式发布：** 现场验收报告、运行镜像摘要、Schema、站点配置版本和回滚证据一致后，将候选提升为 `v0.4.81`；否则保持 `rc` 并回滚到已验证的 v0.4.80 固定摘要。
