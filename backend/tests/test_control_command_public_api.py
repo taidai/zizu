@@ -45,6 +45,11 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         dispatcher_fails: bool = False,
         sources: tuple | None = None,
         release_lock_reader=None,
+        point_conversions=None,
+        entity_repository=None,
+        observations=None,
+        data_trunk=None,
+        point_tag_catalog=None,
     ) -> tuple[FastAPI, RecordingDispatcher]:
         from app.api.control_commands import (
             get_default_control_commands,
@@ -75,6 +80,11 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app = entity_delivery_test.EntityDeliveryPublicApiTest.build_app(
             sources=sources or default_sources,
             release_lock_reader=release_lock_reader,
+            point_conversions=point_conversions,
+            entity_repository=entity_repository,
+            observations=observations,
+            data_trunk=data_trunk,
+            point_tag_catalog=point_tag_catalog,
         )
         dispatcher = FailingDispatcher() if dispatcher_fails else RecordingDispatcher()
         runtime = ControlCommandRuntime(

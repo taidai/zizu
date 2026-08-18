@@ -9,6 +9,7 @@ import math
 import re
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.solution_delivery_contracts import DeliveryError
 
@@ -50,6 +51,7 @@ class PointConversionOutput:
 @dataclass(frozen=True)
 class PointConversionAsset:
     asset_id: str
+    display_name: str
     device_category: str
     brand: str
     model: str
@@ -64,6 +66,23 @@ class PointConversionAssetError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def point_conversion_template_id(asset: PointConversionAsset) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        (
+            "zizu/point-conversion-template/"
+            f"{asset.asset_id}/{asset.brand}/{asset.model}"
+        ),
+    )
+
+
+def point_conversion_revision_id(asset: PointConversionAsset) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        f"zizu/point-conversion-revision/{point_conversion_template_id(asset)}/{asset.revision}",
+    )
 
 
 def parse_point_conversion_asset(
@@ -126,6 +145,7 @@ def parse_point_conversion_asset(
     ).encode("utf-8")
     return PointConversionAsset(
         asset_id=raw["id"],
+        display_name=raw["displayName"],
         device_category=raw["deviceCategory"],
         brand=raw["brand"],
         model=raw["model"],
@@ -448,6 +468,7 @@ def _plain(value: Any) -> Any:
 def _asset_dict(asset: PointConversionAsset) -> dict[str, Any]:
     return {
         "asset_id": asset.asset_id,
+        "display_name": asset.display_name,
         "device_category": asset.device_category,
         "brand": asset.brand,
         "model": asset.model,
@@ -483,6 +504,7 @@ def _asset_dict(asset: PointConversionAsset) -> dict[str, Any]:
 def _asset_from_dict(raw: Mapping[str, Any]) -> PointConversionAsset:
     return PointConversionAsset(
         asset_id=raw["asset_id"],
+        display_name=raw["display_name"],
         device_category=raw["device_category"],
         brand=raw["brand"],
         model=raw["model"],

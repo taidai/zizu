@@ -402,6 +402,11 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         sources: tuple,
         legacy_entities: tuple = (),
         release_lock_reader=None,
+        point_conversions=None,
+        entity_repository=None,
+        observations=None,
+        data_trunk=None,
+        point_tag_catalog=None,
     ) -> FastAPI:
         from app.api.entity_instances import (
             get_entity_instance_catalog,
@@ -449,14 +454,21 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
 
         delivery_repository = InMemoryDeliveryRepository()
         source_catalog = InMemorySourceCatalog(sources)
-        entity_repository = InMemoryEntityInstanceRepository(legacy_entities=legacy_entities)
+        entity_repository = entity_repository or InMemoryEntityInstanceRepository(
+            legacy_entities=legacy_entities
+        )
         registry = EntityInstanceRegistry(
             entity_repository,
             source_catalog,
             delivery_repository.site_configuration_version,
         )
-        observations = InMemoryObservationCatalog()
-        simulator = InMemoryNeuronProtocolSimulator(source_catalog, observations)
+        observations = observations or InMemoryObservationCatalog()
+        simulator = InMemoryNeuronProtocolSimulator(
+            source_catalog,
+            observations,
+            data_trunk=data_trunk,
+            point_tag_catalog=point_tag_catalog,
+        )
         runtime = EntityInstanceRuntime(registry, observations)
         alarm_definitions = InMemoryAlarmDefinitionCatalog()
         alarm_runtime = AlarmRuntime(alarm_definitions, InMemoryAlarmRepository())
@@ -497,6 +509,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_definitions=alarm_definitions,
             alarm_runtime=alarm_runtime,
             release_lock_reader=release_lock_reader,
+            point_conversions=point_conversions,
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
         app.state.solution_delivery = delivery
@@ -1860,6 +1873,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             quality=192,
             fresh=True,
             max_observation_gap_seconds=30,
+            source_evidence=lambda: {},
         )
         with patch(
             "app.api.solution_delivery.get_default_entity_instance_registry",

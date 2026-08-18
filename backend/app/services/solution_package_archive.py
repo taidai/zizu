@@ -297,9 +297,39 @@ def _validate_entity_assets(
         required_definition_ids: set[str] = set()
         matcher_ids: set[str] = set()
         for required in required_entities:
-            if not isinstance(required, dict) or set(required) != {"definition", "matcher"}:
+            if not isinstance(required, dict) or set(required) not in (
+                {"definition", "matcher"},
+                {"definition", "sourceKind", "conversionOutputKey"},
+            ):
                 raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot reference is invalid")
             definition = definitions.get(required["definition"])
+            if required.get("sourceKind") == "point_conversion":
+                output_key = required.get("conversionOutputKey")
+                if (
+                    definition is None
+                    or definition["id"] in required_definition_ids
+                    or not isinstance(output_key, str)
+                    or not output_key
+                    or definition["deviceCategory"] != raw["deviceCategory"]
+                    or definition["direction"] not in {"R", "RW"}
+                ):
+                    raise DeliveryError(
+                        "ASSET_REFERENCE_INVALID",
+                        "Point-conversion entity slot reference is invalid",
+                    )
+                required_definition_ids.add(definition["id"])
+                normalized_definitions.append(
+                    {
+                        "id": definition["id"],
+                        "display_name": definition["displayName"],
+                        "data_type": definition["dataType"],
+                        "unit": definition.get("unit"),
+                        "direction": definition["direction"],
+                        "source_kind": "point_conversion",
+                        "conversion_output_key": output_key,
+                    }
+                )
+                continue
             matcher = required.get("matcher")
             if (
                 definition is None
@@ -659,6 +689,52 @@ def _validate_acceptance_definition(
     definition: dict[str, Any],
     acceptance_id: str,
 ) -> None:
+    if definition.get("kind") == "data_trunk":
+        allowed_fields = {
+            "schemaVersion",
+            "id",
+            "kind",
+            "required",
+            "deviceCategory",
+            "entityDefinitions",
+            "templateAssets",
+            "checks",
+        }
+        allowed_checks = {
+            "l0_history_latest",
+            "numeric_enum_fault_conversion",
+            "quality_time_semantics",
+            "atomic_rollback_and_idempotency",
+            "committed_websocket",
+            "restart_persistence",
+            "brand_replacement_identity",
+        }
+        entities = definition.get("entityDefinitions")
+        templates = definition.get("templateAssets")
+        checks = definition.get("checks")
+        if (
+            set(definition) != allowed_fields
+            or definition.get("schemaVersion") != "zizu.acceptance/v1alpha1"
+            or definition.get("id") != acceptance_id
+            or definition.get("required") is not True
+            or definition.get("deviceCategory") != "PCS"
+            or not isinstance(entities, list)
+            or not entities
+            or len(entities) != len(set(entities))
+            or not all(isinstance(item, str) and item for item in entities)
+            or not isinstance(templates, list)
+            or len(templates) < 2
+            or len(templates) != len(set(templates))
+            or not all(isinstance(item, str) and item for item in templates)
+            or not isinstance(checks, list)
+            or set(checks) != allowed_checks
+            or len(checks) != len(allowed_checks)
+        ):
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Data trunk acceptance is invalid",
+            )
+        return
     if definition.get("kind") == "entity_readiness":
         return
     if definition.get("kind") == "history_readiness":
@@ -781,7 +857,43 @@ def _validate_acceptance_definition(
             "ASSET_REFERENCE_INVALID",
             "Unsupported acceptance definition",
         )
-    _validate_timeout(definition.get("timeout"))
+
+
+def validate_data_trunk_acceptances(
+    manifest: dict[str, Any],
+    assets: dict[str, bytes],
+) -> None:
+    declarations = {item["id"]: item for item in manifest["assets"]}
+    accepted = set(manifest["acceptance"])
+    for declaration in manifest["assets"]:
+        if declaration["kind"] != "acceptance":
+            continue
+        definition = _load_mapping(
+            assets.get(declaration["path"]),
+            "ASSET_REFERENCE_INVALID",
+        )
+        if definition.get("required") is True and declaration["id"] not in accepted:
+            raise DeliveryError(
+                "ASSET_REFERENCE_INVALID",
+                "Required acceptance asset must be listed by the package",
+            )
+        if definition.get("kind") != "data_trunk":
+            continue
+        _validate_acceptance_definition(definition, declaration["id"])
+        for entity_id in definition["entityDefinitions"]:
+            target = declarations.get(entity_id)
+            if target is None or target.get("kind") != "entity_definition":
+                raise DeliveryError(
+                    "ASSET_REFERENCE_INVALID",
+                    "Data trunk acceptance entity reference is invalid",
+                )
+        for template_id in definition["templateAssets"]:
+            target = declarations.get(template_id)
+            if target is None or target.get("kind") != "point_conversion_template":
+                raise DeliveryError(
+                    "ASSET_REFERENCE_INVALID",
+                    "Data trunk acceptance template reference is invalid",
+                )
 
 
 def _validate_timeout(value: Any) -> None:

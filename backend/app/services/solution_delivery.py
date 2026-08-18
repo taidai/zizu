@@ -37,6 +37,7 @@ from app.services.solution_package_archive import (
     _validate_manifest,
     _validate_platform_range,
     _version_tuple,
+    validate_data_trunk_acceptances,
 )
 from app.services.solution_parameters import (
     resolve_site_parameters,
@@ -61,7 +62,17 @@ from app.services.solution_policies import (
     validate_ems_policy_assets,
     validate_policy_execution_acceptances,
 )
-from app.services.solution_point_conversions import validate_point_conversion_assets
+from app.services.solution_point_conversions import (
+    point_conversion_assets,
+    point_conversion_revision_id,
+    validate_point_conversion_assets,
+)
+from app.services.point_conversion import (
+    ApplyPointConversionPlan,
+    PlanPointConversion,
+    PointConversion,
+    PointConversionError,
+)
 from app.services.gateway_readiness import GatewayReadiness
 
 __all__ = [
@@ -134,6 +145,7 @@ class SolutionDelivery:
         authorization_evidence_runtime: AuthorizationEvidenceRuntime | None = None,
         gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
+        point_conversions: PointConversion | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
@@ -147,6 +159,7 @@ class SolutionDelivery:
         self._authorization_evidence_runtime = authorization_evidence_runtime
         self._gateway_readiness = gateway_readiness
         self._release_lock_reader = release_lock_reader
+        self._point_conversions = point_conversions
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
         """Attach the runtime after construction to avoid a delivery-policy cycle."""
@@ -165,7 +178,12 @@ class SolutionDelivery:
     def set_gateway_readiness(self, gateway_readiness: GatewayReadiness) -> None:
         self._gateway_readiness = gateway_readiness
 
-    def import_package(self, archive: bytes) -> PackageImport:
+    def import_package(self, archive: bytes, actor: str) -> PackageImport:
+        if not actor.strip():
+            raise DeliveryError(
+                "PACKAGE_IMPORT_ACTOR_INVALID",
+                "Package import actor is required",
+            )
         files = _read_archive(archive)
         manifest = _load_mapping(files.get("solution.yaml"), "MANIFEST_INVALID")
         _validate_manifest(manifest)
@@ -246,6 +264,7 @@ class SolutionDelivery:
         )
         if normalized_point_conversions:
             manifest["_point_conversion_assets"] = list(normalized_point_conversions)
+        validate_data_trunk_acceptances(manifest, declared_assets)
         validate_policy_execution_acceptances(
             manifest,
             declared_assets,
@@ -269,7 +288,7 @@ class SolutionDelivery:
             manifest=manifest,
             assets=declared_assets,
         )
-        return self._repository.save_package(package)
+        return self._repository.save_package(package, actor)
 
     def list_packages(self) -> list[PackageImport]:
         return self._repository.list_packages()
@@ -283,6 +302,7 @@ class SolutionDelivery:
         binding_selections: dict[str, UUID] | None = None,
         binding_overrides: dict[str, UUID] | None = None,
         upgrade_risk_resolutions: dict[str, str] | None = None,
+        point_conversions: list[dict[str, Any]] | None = None,
         actor: str = "system:delivery-plan",
     ) -> InstallationPlan:
         package = self._repository.get_package(package_record_id)
@@ -404,6 +424,9 @@ class SolutionDelivery:
         entity_items: tuple[dict[str, Any], ...] = ()
         entity_blockers: tuple[dict[str, str], ...] = ()
         alarm_plan: AlarmDefinitionPlan | None = None
+        point_conversion_plans: tuple[dict[str, Any], ...] = ()
+        point_conversion_items: tuple[dict[str, Any], ...] = ()
+        point_conversion_selection_by_instance: dict[str, dict[str, Any]] = {}
         alarm_items: tuple[dict[str, Any], ...] = ()
         alarm_assets = tuple(package.manifest.get("_alarm_assets", ()))
         policy_assets = tuple(package.manifest.get("_policy_assets", ()))
@@ -432,6 +455,15 @@ class SolutionDelivery:
                 tuple(package.manifest["_entity_slots"]),
                 parameter_values,
             )
+            entity_slots, point_conversion_selection_by_instance, selection_blockers = (
+                self._resolve_point_conversion_selections(
+                    package,
+                    entity_slots,
+                    tuple(point_conversions or ()),
+                    parameter_values,
+                )
+            )
+            blockers = (*blockers, *selection_blockers)
             # Each installation plan owns one deterministic prospective
             # installation identity. Saved-plan deduplication preserves it.
             try:
@@ -485,6 +517,20 @@ class SolutionDelivery:
             # derived only after this content determines the installation ID.
             "alarm_definitions": list(alarm_assets) if alarm_assets else None,
             "ems_policies": list(policy_assets) if policy_assets else None,
+            "point_conversions": [
+                {
+                    "instance_key": instance_key,
+                    "node_id": str(selection["node_id"]),
+                    "template_revision_id": str(selection["template_revision_id"]),
+                    "input_selections": {
+                        key: str(value)
+                        for key, value in sorted(selection["input_selections"].items())
+                    },
+                }
+                for instance_key, selection in sorted(
+                    point_conversion_selection_by_instance.items()
+                )
+            ],
         }
         configuration_digest = (
             package.digest
@@ -509,6 +555,59 @@ class SolutionDelivery:
                 f"{configuration_digest}"
             ),
         )
+        if point_conversion_selection_by_instance:
+            if self._point_conversions is None or entity_plan is None:
+                raise DeliveryError(
+                    "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
+                    "Point conversion planning is not configured",
+                )
+            point_plans: list[dict[str, Any]] = []
+            point_items: list[dict[str, Any]] = []
+            entity_outputs: dict[str, dict[str, UUID]] = {}
+            for item in entity_plan.items:
+                if item.get("source_kind") != "point_conversion":
+                    continue
+                entity_outputs.setdefault(item["instance_key"], {})[
+                    item["conversion_output_key"]
+                ] = UUID(item["entity_instance_id"])
+            for instance_key, selection in sorted(
+                point_conversion_selection_by_instance.items()
+            ):
+                try:
+                    child = self._point_conversions.plan(
+                        PlanPointConversion(
+                            node_id=selection["node_id"],
+                            template_revision_id=selection["template_revision_id"],
+                            input_selections=selection["input_selections"],
+                            actor=actor,
+                            entity_identity_installation_id=(
+                                entity_identity_installation_id
+                            ),
+                            planned_output_entity_ids=entity_outputs.get(
+                                instance_key,
+                                {},
+                            ),
+                            solution_installation_id=target_installation_id,
+                        )
+                    )
+                except PointConversionError as exc:
+                    raise DeliveryError(exc.code, str(exc)) from exc
+                public_child = child.public_dict()
+                public_child["instance_key"] = instance_key
+                point_plans.append(public_child)
+                point_items.append(
+                    {
+                        "asset_id": instance_key,
+                        "kind": "point_conversion",
+                        "action": "add" if base_version == 0 else "update",
+                        "node_id": str(child.node_id),
+                        "point_conversion_plan_id": str(child.id),
+                        "point_conversion_plan_digest": child.digest,
+                    }
+                )
+                blockers = (*blockers, *child.blockers)
+            point_conversion_plans = tuple(point_plans)
+            point_conversion_items = tuple(point_items)
         if alarm_assets:
             # A definition belongs to this immutable installation, not to the
             # stable entity-identity installation used for binding resolution.
@@ -555,6 +654,7 @@ class SolutionDelivery:
             *acceptance_items,
             *parameter_items,
             *entity_items,
+            *point_conversion_items,
             *alarm_items,
             *policy_items,
             *_removed_manifest_asset_items(asset_actions),
@@ -583,6 +683,7 @@ class SolutionDelivery:
             ),
             "entity_plan": entity_plan.public_dict() if entity_plan else None,
             "alarm_plan": alarm_plan.public_dict() if alarm_plan else None,
+            "point_conversion_plans": list(point_conversion_plans),
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -616,8 +717,129 @@ class SolutionDelivery:
                 entity_plan=entity_plan.public_dict() if entity_plan else None,
                 digest=digest,
                 alarm_plan=alarm_plan.public_dict() if alarm_plan else None,
+                point_conversion_plans=point_conversion_plans,
             )
         )
+
+    def _resolve_point_conversion_selections(
+        self,
+        package: PackageImport,
+        entity_slots: tuple[dict[str, Any], ...],
+        selections: tuple[dict[str, Any], ...],
+        parameters: dict[str, Any],
+    ) -> tuple[
+        tuple[dict[str, Any], ...],
+        dict[str, dict[str, Any]],
+        tuple[dict[str, str], ...],
+    ]:
+        point_slots = {
+            slot["instance_key"]: slot
+            for slot in entity_slots
+            if slot["device_category"].casefold() == "pcs"
+            and any(
+                item.get("source_kind") == "point_conversion"
+                for item in slot["definitions"]
+            )
+        }
+        if not point_slots and not selections:
+            return entity_slots, {}, ()
+        if point_slots and not selections:
+            return (
+                entity_slots,
+                {},
+                tuple(
+                    {
+                        "code": "POINT_CONVERSION_SELECTION_REQUIRED",
+                        "asset_id": instance_key,
+                        "message": "PCS instance requires one point conversion selection",
+                    }
+                    for instance_key in sorted(point_slots)
+                ),
+            )
+        if self._point_conversions is None:
+            raise DeliveryError(
+                "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
+                "Point conversion planning is not configured",
+            )
+        allowed_revisions = {
+            point_conversion_revision_id(asset)
+            for asset in point_conversion_assets(package)
+        }
+        pcs_instances = parameters.get("pcs.instances", [])
+        slot_by_device_key = {
+            str(instance["device_key"]): str(instance["instance_key"])
+            for instance in pcs_instances
+            if isinstance(instance, dict)
+            and isinstance(instance.get("device_key"), str)
+            and isinstance(instance.get("instance_key"), str)
+        }
+        by_instance: dict[str, dict[str, Any]] = {}
+        blockers: list[dict[str, str]] = []
+        seen_nodes: set[UUID] = set()
+        for raw in selections:
+            node_id = raw.get("node_id")
+            revision_id = raw.get("template_revision_id")
+            input_selections = raw.get("input_selections", {})
+            if (
+                not isinstance(node_id, UUID)
+                or not isinstance(revision_id, UUID)
+                or not isinstance(input_selections, dict)
+                or any(
+                    not isinstance(key, str) or not isinstance(value, UUID)
+                    for key, value in input_selections.items()
+                )
+            ):
+                raise DeliveryError(
+                    "POINT_CONVERSION_SELECTION_INVALID",
+                    "Point conversion selection is invalid",
+                )
+            source_key = self._point_conversions.node_source_key(node_id)
+            instance_key = slot_by_device_key.get(source_key or "")
+            if node_id in seen_nodes or instance_key is None or instance_key in by_instance:
+                blockers.append(
+                    {
+                        "code": "POINT_CONVERSION_NODE_MISMATCH",
+                        "asset_id": str(node_id),
+                        "message": "PCS node does not match exactly one declared PCS instance",
+                    }
+                )
+                continue
+            seen_nodes.add(node_id)
+            if revision_id not in allowed_revisions:
+                blockers.append(
+                    {
+                        "code": "POINT_CONVERSION_REVISION_NOT_IN_PACKAGE",
+                        "asset_id": str(revision_id),
+                        "message": "Point conversion revision is not owned by this package",
+                    }
+                )
+                continue
+            by_instance[instance_key] = {
+                "node_id": node_id,
+                "template_revision_id": revision_id,
+                "input_selections": dict(input_selections),
+            }
+        for instance_key in sorted(point_slots):
+            if instance_key not in by_instance:
+                blockers.append(
+                    {
+                        "code": "POINT_CONVERSION_SELECTION_REQUIRED",
+                        "asset_id": instance_key,
+                        "message": "PCS instance requires one point conversion selection",
+                    }
+                )
+        resolved = tuple(
+            {
+                **slot,
+                **(
+                    {"node_id": str(by_instance[slot["instance_key"]]["node_id"])}
+                    if slot["instance_key"] in by_instance
+                    else {}
+                ),
+            }
+            for slot in entity_slots
+        )
+        return resolved, by_instance, tuple(blockers)
 
 
     def get_install_plan(self, plan_id: UUID) -> InstallationPlan:
@@ -673,6 +895,7 @@ class SolutionDelivery:
             )
         entity_plan = plan.entity_plan
         alarm_plan = plan.alarm_plan
+        point_conversion_plans = plan.point_conversion_plans
 
         def apply_entities(transaction: Any | None) -> tuple[UUID, ...]:
             if entity_plan is None:
@@ -697,6 +920,30 @@ class SolutionDelivery:
 
         def apply_configuration(transaction: Any | None) -> tuple[UUID, ...]:
             entity_ids = apply_entities(transaction)
+            if point_conversion_plans:
+                if self._point_conversions is None:
+                    raise DeliveryError(
+                        "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
+                        "Point conversion application is not configured",
+                    )
+                for child in sorted(
+                    point_conversion_plans,
+                    key=lambda item: item["node_id"],
+                ):
+                    try:
+                        self._point_conversions.apply(
+                            ApplyPointConversionPlan(
+                                plan_id=UUID(child["id"]),
+                                plan_digest=child["digest"],
+                                idempotency_key=(
+                                    f"solution:{idempotency_key}:{child['node_id']}"
+                                ),
+                                actor=actor,
+                            ),
+                            transaction=transaction,
+                        )
+                    except PointConversionError as exc:
+                        raise DeliveryError(exc.code, str(exc)) from exc
             if alarm_plan is not None:
                 if self._alarm_definitions is None:
                     raise DeliveryError(
@@ -714,7 +961,13 @@ class SolutionDelivery:
             actor,
             idempotency_key,
             request_digest,
-            apply_configuration if entity_plan is not None else None,
+            (
+                apply_configuration
+                if entity_plan is not None
+                or alarm_plan is not None
+                or point_conversion_plans
+                else None
+            ),
         )
 
     def list_installations(self) -> list[InstallationOutcome]:
@@ -1971,6 +2224,9 @@ def _resolve_entity_slots(
             for instance in instances:
                 definitions = []
                 for definition in slot["definitions"]:
+                    if definition.get("source_kind") == "point_conversion":
+                        definitions.append(dict(definition))
+                        continue
                     matcher = {
                         "id": definition["matcher"]["id"],
                         "device_key": instance["device_key"],
@@ -2009,6 +2265,9 @@ def _resolve_entity_slots(
             )
         definitions: list[dict[str, Any]] = []
         for definition in slot["definitions"]:
+            if definition.get("source_kind") == "point_conversion":
+                definitions.append(dict(definition))
+                continue
             device_key = parameters.get(
                 definition["matcher"]["device_key_parameter"]
             )

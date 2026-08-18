@@ -1,7 +1,7 @@
 """Deterministic planning and application of installed L1 conversions."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
@@ -10,6 +10,14 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from app.services.data_trunk_contracts import (
+    EnumTransform,
+    FaultCodeTransform,
+    InputReference,
+    InstalledPointConversion,
+    NumericTransform,
+    ValueKind,
+)
 from app.services.solution_point_conversions import PointConversionAsset
 
 
@@ -34,6 +42,7 @@ class PointConversionSource:
 class CurrentPointConversionContext:
     entity_identity_installation_id: UUID
     solution_installation_id: UUID
+    revision_id: UUID
     input_source_ids: Mapping[str, UUID]
     output_entity_ids: Mapping[str, UUID]
 
@@ -96,6 +105,23 @@ class PointConversionPlan:
     digest: str
     planned_by: str
 
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "node_id": str(self.node_id),
+            "template_revision_id": str(self.template_revision_id),
+            "entity_identity_installation_id": str(
+                self.entity_identity_installation_id
+            ),
+            "solution_installation_id": str(self.solution_installation_id),
+            "base_site_configuration_version": self.base_site_configuration_version,
+            "source_catalog_digest": self.source_catalog_digest,
+            "status": self.status,
+            "items": [_plain(item) for item in self.items],
+            "blockers": [_plain(item) for item in self.blockers],
+            "digest": self.digest,
+        }
+
 
 @dataclass(frozen=True)
 class PointConversionApplication:
@@ -108,11 +134,87 @@ class PointConversionApplication:
     output_entity_instance_ids: tuple[UUID, ...]
     actor: str
 
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "plan_id": str(self.plan_id),
+            "installed_conversion_id": str(self.installed_conversion_id),
+            "solution_installation_id": str(self.solution_installation_id),
+            "revision_id": str(self.revision_id),
+            "site_configuration_version": self.site_configuration_version,
+            "output_entity_instance_ids": [
+                str(item) for item in self.output_entity_instance_ids
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class PointConversionTemplateSummary:
+    revision_id: UUID
+    asset: PointConversionAsset
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "revision_id": str(self.revision_id),
+            "asset_id": self.asset.asset_id,
+            "display_name": self.asset.display_name,
+            "device_category": self.asset.device_category,
+            "brand": self.asset.brand,
+            "model": self.asset.model,
+            "revision": self.asset.revision,
+            "status": self.asset.status,
+            "content_digest": self.asset.content_digest,
+            "inputs": [
+                {
+                    "input_id": item.input_id,
+                    "source_kind": item.source_kind,
+                    "source_key": item.source_key,
+                    "aliases": list(item.aliases),
+                    "data_type": item.data_type,
+                    "unit": item.unit,
+                    "required": item.required,
+                }
+                for item in self.asset.inputs
+            ],
+            "outputs": [
+                {
+                    "output_key": item.output_id,
+                    "entity_definition_id": item.entity_definition_id,
+                    "data_type": item.data_type,
+                    "unit": item.unit,
+                }
+                for item in self.asset.outputs
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class NodeDataTrunkView:
+    node_id: UUID
+    l0: tuple[Mapping[str, Any], ...]
+    l1_summary: Mapping[str, Any]
+    l2: tuple[Mapping[str, Any], ...]
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": str(self.node_id),
+            "l0": [_plain(item) for item in self.l0],
+            "l1_summary": _plain(self.l1_summary),
+            "l2": [_plain(item) for item in self.l2],
+        }
+
 
 class PointConversionCatalog(Protocol):
     def get_template(self, revision_id: UUID) -> PointConversionAsset | None: ...
 
     def list_sources(self, node_id: UUID) -> tuple[PointConversionSource, ...]: ...
+
+    def list_templates(
+        self,
+        device_category: str,
+    ) -> tuple[PointConversionTemplateSummary, ...]: ...
+
+    def node_source_key(self, node_id: UUID) -> str | None: ...
 
 
 class PointConversionRepository(Protocol):
@@ -155,6 +257,73 @@ class PointConversion:
         )
         return self._repository.save_plan(plan)
 
+    def list_templates(
+        self,
+        device_category: str,
+    ) -> tuple[PointConversionTemplateSummary, ...]:
+        return self._catalog.list_templates(device_category)
+
+    def node_source_key(self, node_id: UUID) -> str | None:
+        return self._catalog.node_source_key(node_id)
+
+    def inspect_node(
+        self,
+        node_id: UUID,
+        *,
+        include_engineering: bool,
+    ) -> NodeDataTrunkView:
+        sources = self._catalog.list_sources(node_id)
+        current = self._repository.current_context(node_id)
+        l0 = (
+            tuple(
+                MappingProxyType(
+                    {
+                        "source_id": str(item.source_id),
+                        "source_key": item.stable_source_key,
+                        "data_type": item.data_type,
+                        "unit": item.unit,
+                    }
+                )
+                for item in sources
+                if item.source_kind == "l0"
+            )
+            if include_engineering
+            else ()
+        )
+        input_bindings = (
+            {
+                key: str(value)
+                for key, value in sorted(current.input_source_ids.items())
+            }
+            if current is not None
+            else {}
+        )
+        l1_summary = {
+            "installed": current is not None,
+            "revision_id": str(current.revision_id) if current is not None else None,
+            "output_count": len(current.output_entity_ids) if current is not None else 0,
+            **({"input_bindings": input_bindings} if include_engineering else {}),
+        }
+        l2 = (
+            tuple(
+                MappingProxyType(
+                    {
+                        "output_key": key,
+                        "entity_instance_id": str(value),
+                    }
+                )
+                for key, value in sorted(current.output_entity_ids.items())
+            )
+            if current is not None
+            else ()
+        )
+        return NodeDataTrunkView(
+            node_id=node_id,
+            l0=l0,
+            l1_summary=MappingProxyType(l1_summary),
+            l2=l2,
+        )
+
     def get_plan(self, plan_id: UUID) -> PointConversionPlan:
         plan = self._repository.get_plan(plan_id)
         if plan is None:
@@ -183,9 +352,11 @@ class InMemoryPointConversionCatalog:
         *,
         templates: Mapping[UUID, PointConversionAsset],
         sources: tuple[PointConversionSource, ...] = (),
+        node_source_keys: Mapping[UUID, str] | None = None,
     ) -> None:
         self._templates = dict(templates)
         self._sources = tuple(sources)
+        self._node_source_keys = dict(node_source_keys or {})
 
     def get_template(self, revision_id: UUID) -> PointConversionAsset | None:
         return self._templates.get(revision_id)
@@ -197,18 +368,40 @@ class InMemoryPointConversionCatalog:
             if item.source_kind == "l2" or item.node_id == node_id
         )
 
+    def list_templates(
+        self,
+        device_category: str,
+    ) -> tuple[PointConversionTemplateSummary, ...]:
+        return tuple(
+            PointConversionTemplateSummary(revision_id, asset)
+            for revision_id, asset in sorted(
+                self._templates.items(),
+                key=lambda item: (item[1].asset_id, item[1].revision, str(item[0])),
+            )
+            if asset.device_category == device_category and asset.status == "active"
+        )
+
+    def node_source_key(self, node_id: UUID) -> str | None:
+        return self._node_source_keys.get(node_id)
+
     def replace_sources(self, sources: tuple[PointConversionSource, ...]) -> None:
         self._sources = tuple(sources)
 
 
 class InMemoryPointConversionRepository:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        on_applied: Callable[[PointConversionApplication], None] | None = None,
+    ) -> None:
         self._plans: dict[UUID, PointConversionPlan] = {}
         self._applications: dict[UUID, PointConversionApplication] = {}
         self._idempotency: dict[tuple[str, str], tuple[str, UUID]] = {}
         self._current: dict[UUID, CurrentPointConversionContext] = {}
+        self._installed_ids: dict[UUID, UUID] = {}
         self._site_version = 0
         self._lock = RLock()
+        self._on_applied = on_applied or (lambda _application: None)
 
     def site_configuration_version(self) -> int:
         return self._site_version
@@ -234,6 +427,65 @@ class InMemoryPointConversionRepository:
 
     def application_count(self) -> int:
         return len(self._applications)
+
+    def installed_conversions(
+        self,
+        catalog: PointConversionCatalog,
+    ) -> tuple[InstalledPointConversion, ...]:
+        installed: list[InstalledPointConversion] = []
+        for node_id, current in sorted(self._current.items(), key=lambda item: str(item[0])):
+            asset = catalog.get_template(current.revision_id)
+            installation_id = self._installed_ids.get(node_id)
+            if asset is None or installation_id is None:
+                continue
+            inputs = {item.input_id: item for item in asset.inputs}
+            for output in asset.outputs:
+                input_id = str(output.transform["input"])
+                input_contract = inputs[input_id]
+                input_source_id = current.input_source_ids[input_id]
+                input_reference = InputReference(
+                    input_contract.source_kind,
+                    input_source_id,
+                )
+                kind = output.transform["kind"]
+                if kind == "numeric":
+                    transform = NumericTransform(
+                        input=input_reference,
+                        scale=float(output.transform["scale"]),
+                        offset=float(output.transform["offset"]),
+                        input_unit=input_contract.unit,
+                        minimum=float(output.transform["minimum"]),
+                        maximum=float(output.transform["maximum"]),
+                    )
+                elif kind == "enum":
+                    transform = EnumTransform(
+                        input=input_reference,
+                        entries=dict(output.transform["entries"]),
+                    )
+                else:
+                    transform = FaultCodeTransform(
+                        input=input_reference,
+                        delimiter=str(output.transform["delimiter"]),
+                        entries={
+                            raw_code: str(entry["code"])
+                            for raw_code, entry in output.transform["entries"].items()
+                        },
+                    )
+                installed.append(
+                    InstalledPointConversion(
+                        installation_id=installation_id,
+                        revision_id=current.revision_id,
+                        entity_instance_id=current.output_entity_ids[
+                            output.output_id
+                        ],
+                        entity_definition_id=output.entity_definition_id,
+                        output_kind=ValueKind(output.data_type),
+                        output_unit=output.unit,
+                        freshness_seconds=output.freshness_seconds,
+                        transform=transform,
+                    )
+                )
+        return tuple(sorted(installed, key=lambda item: str(item.entity_instance_id)))
 
     def apply_plan(
         self,
@@ -282,20 +534,24 @@ class InMemoryPointConversionRepository:
                     "POINT_CONVERSION_PLAN_BLOCKED",
                     "Point conversion plan is not ready",
                 )
-            if (
-                plan.base_site_configuration_version != self._site_version
-                or plan.source_catalog_digest
-                != _source_catalog_digest(catalog.list_sources(plan.node_id))
-            ):
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_STALE",
-                    "Point conversion sources or site configuration changed after planning",
-                )
             template = catalog.get_template(plan.template_revision_id)
             if template is None or template.status != "active":
                 raise PointConversionError(
                     "POINT_CONVERSION_PLAN_STALE",
                     "Point conversion template changed after planning",
+                )
+            if (
+                plan.base_site_configuration_version != self._site_version
+                or plan.source_catalog_digest
+                != _template_source_catalog_digest(
+                    template,
+                    catalog.list_sources(plan.node_id),
+                    plan.node_id,
+                )
+            ):
+                raise PointConversionError(
+                    "POINT_CONVERSION_PLAN_STALE",
+                    "Point conversion sources or site configuration changed after planning",
                 )
 
             output_ids = {
@@ -341,14 +597,17 @@ class InMemoryPointConversionRepository:
                 ),
                 actor=command.actor,
             )
+            self._on_applied(application)
             self._applications[application.id] = application
             self._idempotency[key] = (request_digest, application.id)
             self._current[plan.node_id] = CurrentPointConversionContext(
                 entity_identity_installation_id=plan.entity_identity_installation_id,
                 solution_installation_id=solution_id,
+                revision_id=plan.template_revision_id,
                 input_source_ids=input_ids,
                 output_entity_ids=output_ids,
             )
+            self._installed_ids[plan.node_id] = installed_id
             self._site_version = next_version
             self._plans[plan.id] = replace(plan, status="applied")
             return application
@@ -389,7 +648,11 @@ def compile_point_conversion_plan(
         )
 
     sources = catalog.list_sources(command.node_id)
-    source_digest = _source_catalog_digest(sources)
+    source_digest = _template_source_catalog_digest(
+        template,
+        sources,
+        command.node_id,
+    )
     items: list[Mapping[str, Any]] = []
     blockers: list[Mapping[str, str]] = []
     selected_inputs: dict[str, UUID] = {}
@@ -457,22 +720,56 @@ def compile_point_conversion_plan(
 
     current_outputs = dict(current.output_entity_ids) if current is not None else {}
     requested_outputs = dict(command.planned_output_entity_ids)
-    output_ids: dict[str, UUID] = {}
-    for output in template.outputs:
-        expected_id = _stable_output_entity_id(
-            identity_id,
-            command.node_id,
-            output.entity_definition_id,
+    target_output_contract = {
+        item.output_id: item.entity_definition_id for item in template.outputs
+    }
+    if current is not None:
+        current_template = catalog.get_template(current.revision_id)
+        current_output_contract = (
+            {
+                item.output_id: item.entity_definition_id
+                for item in current_template.outputs
+            }
+            if current_template is not None
+            else {}
         )
-        entity_id = requested_outputs.get(
-            output.output_id,
-            current_outputs.get(output.output_id, expected_id),
-        )
-        if entity_id != expected_id:
+        if current_output_contract != target_output_contract:
             blockers.append(
                 MappingProxyType(
                     {
-                        "code": "POINT_CONVERSION_OUTPUT_ID_INVALID",
+                        "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
+                        "input_id": "outputs",
+                    }
+                )
+            )
+    elif requested_outputs and set(requested_outputs) != set(target_output_contract):
+        blockers.append(
+            MappingProxyType(
+                {
+                    "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
+                    "input_id": "outputs",
+                }
+            )
+        )
+    output_ids: dict[str, UUID] = {}
+    for output in template.outputs:
+        expected_id = current_outputs.get(
+            output.output_id,
+            requested_outputs.get(
+                output.output_id,
+                _stable_output_entity_id(
+                    identity_id,
+                    command.node_id,
+                    output.entity_definition_id,
+                ),
+            ),
+        )
+        entity_id = expected_id
+        if current is not None and output.output_id not in current_outputs:
+            blockers.append(
+                MappingProxyType(
+                    {
+                        "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
                         "input_id": output.output_id,
                     }
                 )
@@ -574,6 +871,21 @@ def _source_catalog_digest(sources: tuple[PointConversionSource, ...]) -> str:
             }
             for source in sorted(sources, key=lambda item: str(item.source_id))
         ]
+    )
+
+
+def _template_source_catalog_digest(
+    template: PointConversionAsset,
+    sources: tuple[PointConversionSource, ...],
+    node_id: UUID,
+) -> str:
+    relevant = {
+        candidate.source_id: candidate
+        for input_contract in template.inputs
+        for candidate in _input_candidates(input_contract, sources, node_id)
+    }
+    return _source_catalog_digest(
+        tuple(relevant[key] for key in sorted(relevant, key=str))
     )
 
 

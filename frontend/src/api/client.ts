@@ -23,6 +23,7 @@ export type { AlarmConditionValue } from '../components/alarm-configuration/alar
 
 const API_BASE = '/api/v1'
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/telemetry`
+const ENTITY_OBSERVATION_WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/entity-observations`
 
 /**
  * Single HTTP seam for the frontend. Authentication is resolved at request
@@ -1018,6 +1019,273 @@ export type AlarmConditionOperator = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'
 export interface AlarmCondition {
   operator: AlarmConditionOperator
   value: AlarmConditionValue
+}
+
+// ── L0 -> L1 -> L2 Data Trunk ──
+
+export type DataTrunkQuality = 0 | 1 | 64 | 192
+export type PointConversionPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
+
+export interface PointConversionTemplateInput {
+  input_id: string
+  source_kind: 'l0' | 'l2'
+  source_key: string
+  aliases: string[]
+  data_type: string
+  unit: string | null
+  required: boolean
+}
+
+export interface PointConversionTemplate {
+  revision_id: string
+  asset_id: string
+  display_name: string
+  device_category: string
+  brand: string
+  model: string
+  revision: number
+  status: 'active' | 'retired'
+  content_digest: string
+  inputs: PointConversionTemplateInput[]
+  outputs: Array<{
+    output_key: string
+    entity_definition_id: string
+    data_type: string
+    unit: string | null
+  }>
+}
+
+export interface NodeDataTrunk {
+  node_id: string
+  l0: Array<{
+    source_id: string
+    source_key: string
+    data_type: string
+    unit: string | null
+  }>
+  l1_summary: {
+    installed: boolean
+    revision_id: string | null
+    output_count: number
+    input_bindings?: Record<string, string>
+  }
+  l2: Array<{
+    output_key: string
+    entity_instance_id: string
+  }>
+}
+
+export interface PointConversionPlanItem {
+  item_key: string
+  kind: 'input_binding' | 'output_binding'
+  action: PointConversionPlanAction
+  input_id?: string
+  candidate_source_ids?: string[]
+  selected_source_id?: string | null
+  blocker_code?: string | null
+  output_id?: string
+  entity_definition_id?: string
+}
+
+export interface PointConversionPlan {
+  id: string
+  node_id: string
+  template_revision_id: string
+  base_site_configuration_version: number
+  status: 'ready' | 'blocked' | 'applied'
+  items: PointConversionPlanItem[]
+  blockers: Array<{ code: string; input_id: string }>
+  digest: string
+}
+
+export interface PointConversionApplication {
+  id: string
+  plan_id: string
+  installed_conversion_id: string
+  solution_installation_id: string
+  revision_id: string
+  site_configuration_version: number
+  output_entity_instance_ids: string[]
+}
+
+export interface EntityInstanceObservation {
+  type?: 'entity_observation'
+  event_id: string | null
+  entity_instance_id: string
+  definition_id: string
+  instance_key?: string
+  value: number | boolean | string | string[] | null
+  data_type: string
+  unit: string | null
+  quality: DataTrunkQuality
+  reason: string | null
+  observed_at: string
+  received_at?: string | null
+  calculated_at?: string | null
+  age_ms: number
+  fresh?: boolean
+  quality_good?: boolean
+  conversion_revision_id: string | null
+  site_configuration_version: number | null
+  source_digest?: string | null
+  source_summary?: { digest?: string } | string | null
+}
+
+export class DataTrunkApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message)
+    this.name = 'DataTrunkApiError'
+  }
+
+  get retryable(): boolean { return this.status >= 500 }
+}
+
+export class DataTrunkResultUnknownError extends Error {
+  readonly cause: unknown
+
+  constructor(cause: unknown) {
+    super('服务器可能已经完成应用，但响应未能完整读取。请使用同一请求重试。')
+    this.name = 'DataTrunkResultUnknownError'
+    this.cause = cause
+  }
+}
+
+async function dataTrunkError(response: Response, fallback: string): Promise<DataTrunkApiError> {
+  const payload = await response.json().catch(() => null) as {
+    detail?: string | { code?: string; message?: string }
+  } | null
+  const detail = payload?.detail
+  return new DataTrunkApiError(
+    typeof detail === 'string' ? detail : detail?.message || fallback,
+    response.status,
+    typeof detail === 'object' ? detail?.code || null : null,
+  )
+}
+
+export async function fetchPointConversionTemplates(deviceCategory: string): Promise<PointConversionTemplate[]> {
+  const response = await apiFetch(`${API_BASE}/point-conversion-templates?device_category=${encodeURIComponent(deviceCategory)}`)
+  if (!response.ok) throw await dataTrunkError(response, `读取点位转换模板失败：${response.status}`)
+  return (await response.json() as { items: PointConversionTemplate[] }).items
+}
+
+export async function fetchNodeDataTrunk(nodeId: string): Promise<NodeDataTrunk> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/data-trunk`)
+  if (!response.ok) throw await dataTrunkError(response, `读取节点数据主干失败：${response.status}`)
+  return response.json()
+}
+
+export async function createPointConversionPlan(
+  nodeId: string,
+  body: { template_revision_id: string; input_selections: Record<string, string> },
+): Promise<PointConversionPlan> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-conversion-plans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `生成点位转换计划失败：${response.status}`)
+  return response.json()
+}
+
+export async function fetchPointConversionPlan(planId: string): Promise<PointConversionPlan> {
+  const response = await apiFetch(`${API_BASE}/point-conversion-plans/${encodeURIComponent(planId)}`)
+  if (!response.ok) throw await dataTrunkError(response, `读取点位转换计划失败：${response.status}`)
+  return response.json()
+}
+
+export async function applyPointConversionPlan(
+  planId: string,
+  planDigest: string,
+  idempotencyKey: string,
+): Promise<PointConversionApplication> {
+  const response = await apiFetch(`${API_BASE}/point-conversion-plans/${encodeURIComponent(planId)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ plan_digest: planDigest }),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `应用点位转换计划失败：${response.status}`)
+  try { return await response.json() }
+  catch (cause) { throw new DataTrunkResultUnknownError(cause) }
+}
+
+export async function fetchEntityInstanceHistory(
+  entityInstanceId: string,
+  range: '1h' | '6h' | '24h' | '7d' = '1h',
+): Promise<EntityInstanceObservation[]> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${encodeURIComponent(entityInstanceId)}/history?range=${range}`)
+  if (!response.ok) throw await dataTrunkError(response, `读取全局实体历史失败：${response.status}`)
+  return (await response.json() as { items: EntityInstanceObservation[] }).items
+}
+
+export function connectEntityObservationWS(
+  entityInstanceIds: string[],
+  onObservation: (observation: EntityInstanceObservation) => void,
+  onReconnectRefresh: () => Promise<void>,
+): () => void {
+  let socket: WebSocket | null = null
+  let cancelled = false
+  let reconnectTimer: number | null = null
+  let attempt = 0
+  const seen = new Set<string>()
+  const seenOrder: string[] = []
+
+  const remember = (eventId: string): boolean => {
+    if (seen.has(eventId)) return false
+    seen.add(eventId)
+    seenOrder.push(eventId)
+    if (seenOrder.length > 1000) {
+      const oldest = seenOrder.shift()
+      if (oldest) seen.delete(oldest)
+    }
+    return true
+  }
+
+  const connect = async () => {
+    if (cancelled || entityInstanceIds.length === 0) return
+    if (attempt > 0) await onReconnectRefresh()
+    const issued = await apiFetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST' })
+    if (!issued.ok || cancelled) return
+    const { ticket } = await issued.json() as { ticket: string }
+    if (cancelled) return
+    socket = new WebSocket(ENTITY_OBSERVATION_WS_URL)
+    socket.onopen = () => socket?.send(JSON.stringify({ authenticate: { ticket } }))
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string
+          event_id?: string | null
+          entity_instance_id?: string
+        }
+        if (payload.type === 'authenticated') {
+          socket?.send(JSON.stringify({ subscribe: entityInstanceIds }))
+        } else if (
+          payload.type === 'entity_observation'
+          && payload.event_id
+          && payload.entity_instance_id
+          && remember(payload.event_id)
+        ) {
+          onObservation(payload as unknown as EntityInstanceObservation)
+        }
+      } catch { /* Malformed stream frames do not alter the current projection. */ }
+    }
+    socket.onclose = (event) => {
+      socket = null
+      if (cancelled || event.code === 4401 || event.code === 4403) return
+      attempt += 1
+      reconnectTimer = window.setTimeout(() => { void connect().catch(() => {}) }, Math.min(5000, attempt * 1000))
+    }
+  }
+
+  void connect().catch(() => {})
+  return () => {
+    cancelled = true
+    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+    socket?.close()
+  }
 }
 
 export interface NumericAlarmCondition extends AlarmCondition {

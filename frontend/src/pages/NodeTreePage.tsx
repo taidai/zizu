@@ -6,9 +6,9 @@ import {
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
 import NodeEntityPanel from '../components/NodeEntityPanel'
-import NodeRealtimePanel from '../components/NodeRealtimePanel'
+import DataTrunkWorkspace from '../components/data-trunk/DataTrunkWorkspace'
 
-type TabKey = 'realtime' | 'overview' | 'tags' | 'entities'
+type TabKey = 'data-trunk' | 'overview' | 'tags' | 'entities'
 type FormMode = 'create' | 'edit'
 
 const LAYER_NAMES: Record<number, string> = {
@@ -433,13 +433,13 @@ function ImportNeuronModal({
   )
 }
 
-export default function NodeTreePage({ readOnly = false }: { readOnly?: boolean }) {
+export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?: boolean; actorId: string }) {
   const [nodes, setNodes] = useState<Node[]>([])
   const [rules, setRules] = useState<Rule[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [selectedId, setSelectedId] = useState<string>('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [activeTab, setActiveTab] = useState<TabKey>(readOnly ? 'realtime' : 'overview')
+  const [activeTab, setActiveTab] = useState<TabKey>('data-trunk')
   const [showAssignModal, setShowAssignModal] = useState(false)
   const [nodeFormMode, setNodeFormMode] = useState<FormMode | null>(null)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -628,7 +628,7 @@ export default function NodeTreePage({ readOnly = false }: { readOnly?: boolean 
                       <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-600">已禁用</span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">点位数: {selectedNode.tag_count} · ID: {selectedNode.id}</p>
+                  <p className="text-xs text-gray-500 mt-1">设备类型：{selectedNode.node_type || '未设置'}　原始点位：{selectedNode.tag_count}</p>
                 </div>
                 {!readOnly && <div className="flex items-center gap-2">
                   <button
@@ -675,8 +675,9 @@ export default function NodeTreePage({ readOnly = false }: { readOnly?: boolean 
 
             <div className="flex items-center gap-2 mb-3">
               {(readOnly ? [
-                { key: 'realtime', label: '实时数据' },
+                { key: 'data-trunk', label: '全局实体运行' },
               ] : [
+                { key: 'data-trunk', label: '数据主干' },
                 { key: 'overview', label: '节点概览' },
                 { key: 'tags', label: '点位管理' },
                 { key: 'entities', label: '全局实体' },
@@ -694,7 +695,9 @@ export default function NodeTreePage({ readOnly = false }: { readOnly?: boolean 
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === 'realtime' && <NodeRealtimePanel nodeId={selectedNode.id} />}
+              {activeTab === 'data-trunk' && (
+                <DataTrunkWorkspace node={selectedNode} readOnly={readOnly} actorId={actorId} />
+              )}
               {activeTab === 'overview' && (
                 <div className="neu-card p-4 space-y-3">
                   <div className="grid grid-cols-2 gap-4 text-xs">

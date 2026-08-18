@@ -7,8 +7,9 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from threading import RLock
 from typing import Protocol
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from app.models.schemas import ParsedMessage
 from app.services.data_trunk_contracts import (
@@ -86,6 +87,118 @@ class DataTrunk:
             attempts=attempts,
             error_code=error_code,
         )
+
+
+class InMemoryDataTrunkRepository:
+    """Test adapter with the same dedup-and-convert boundary as PostgreSQL."""
+
+    def __init__(
+        self,
+        *,
+        installed_provider: Callable[[], tuple[InstalledPointConversion, ...]],
+        site_configuration_version: Callable[[], int],
+        on_l2_committed: Callable[[tuple[L2Observation, ...]], None] | None = None,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._installed_provider = installed_provider
+        self._site_configuration_version = site_configuration_version
+        self._on_l2_committed = on_l2_committed or (lambda _items: None)
+        self._clock = clock
+        self._source_digests: set[str] = set()
+        self._l0_history: list[RawObservation] = []
+        self._l2_history: list[L2Observation] = []
+        self._failures: set[UUID] = set()
+        self._lock = RLock()
+
+    def transact(
+        self,
+        raw_observations: tuple[RawObservation, ...],
+        evaluator: ConversionEvaluator,
+    ) -> CommitReceipt:
+        with self._lock:
+            batch_digests: set[str] = set()
+            accepted_items: list[RawObservation] = []
+            for item in raw_observations:
+                if (
+                    item.source_digest in self._source_digests
+                    or item.source_digest in batch_digests
+                ):
+                    continue
+                batch_digests.add(item.source_digest)
+                accepted_items.append(item)
+            accepted = tuple(accepted_items)
+            installed = self._installed_provider()
+            calculated_at = self._clock()
+            produced: list[L2Observation] = []
+            for observation in sorted(
+                accepted,
+                key=lambda item: (
+                    item.source_timestamp,
+                    _raw_order_key(item),
+                    str(item.tag_id),
+                ),
+            ):
+                input_reference = InputReference.l0(observation.tag_id)
+                affected = tuple(
+                    item
+                    for item in installed
+                    if item.transform.input == input_reference
+                )
+                if not affected:
+                    continue
+                produced.extend(
+                    evaluator(
+                        installed=affected,
+                        current_inputs={input_reference: observation},
+                        site_configuration_version=(
+                            self._site_configuration_version()
+                        ),
+                        calculated_at=calculated_at,
+                    )
+                )
+
+            committed_l2 = tuple(produced)
+            self._source_digests.update(item.source_digest for item in accepted)
+            self._l0_history.extend(accepted)
+            self._l2_history.extend(committed_l2)
+            self._on_l2_committed(committed_l2)
+
+        return CommitReceipt(
+            transaction_id=uuid4(),
+            accepted_l0_count=len(accepted),
+            duplicate_l0_count=len(raw_observations) - len(accepted),
+            l2_event_ids=tuple(item.event_id for item in committed_l2),
+            late_observation_count=0,
+            accepted_l0_observation_ids=tuple(
+                item.observation_id for item in accepted
+            ),
+        )
+
+    def record_failure(
+        self,
+        raw_observations: tuple[RawObservation, ...],
+        *,
+        attempts: int,
+        error_code: str,
+    ) -> UUID:
+        source_digest = hashlib.sha256(
+            "\n".join(
+                sorted(item.source_digest for item in raw_observations)
+            ).encode("ascii")
+        ).hexdigest()
+        failure_id = uuid5(
+            NAMESPACE_URL,
+            f"zizu:ingestion-failure:{source_digest}:{attempts}:{error_code}",
+        )
+        with self._lock:
+            self._failures.add(failure_id)
+        return failure_id
+
+
+def _raw_order_key(observation: RawObservation) -> str:
+    if observation.source_sequence is None:
+        return f"D:{observation.source_digest}"
+    return f"S:{observation.source_sequence:020d}:{observation.source_digest}"
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,11 @@ from app.api.security import (
 )
 from app.core.config import settings
 from app.services.identity import AuditEvent, Identity, IdentityError
+from app.services.data_trunk_outbox import EntityObservationBroadcaster
+from app.services.entity_instance_catalog import (
+    EntityInstanceCatalog,
+    EntityInstanceReferenceError,
+)
 
 router = APIRouter()
 
@@ -170,6 +175,17 @@ class TelemetryBroadcaster:
 
 # 全局单例
 _broadcaster = TelemetryBroadcaster()
+_entity_observation_broadcaster = EntityObservationBroadcaster()
+
+
+def get_entity_observation_broadcaster() -> EntityObservationBroadcaster:
+    return _entity_observation_broadcaster
+
+
+def get_entity_observation_catalog() -> EntityInstanceCatalog:
+    from app.api.solution_delivery import get_default_entity_instance_catalog
+
+    return get_default_entity_instance_catalog()
 
 
 @router.websocket("/ws/telemetry")
@@ -287,3 +303,120 @@ async def telemetry_ws(
         pass
     finally:
         await _broadcaster.disconnect(ws)
+
+
+@router.websocket("/ws/entity-observations")
+async def entity_observations_ws(
+    ws: WebSocket,
+    identity: Identity = Depends(get_identity),
+    catalog: EntityInstanceCatalog = Depends(get_entity_observation_catalog),
+    broadcaster: EntityObservationBroadcaster = Depends(
+        get_entity_observation_broadcaster
+    ),
+) -> None:
+    """Authenticate once, then stream only explicitly subscribed L2 entities."""
+    await ws.accept()
+    if (
+        settings.auth_require_https
+        and _request_scheme(ws) != "https"
+        and not (
+            settings.deployment_mode == "development"
+            and settings.allow_insecure_anonymous_access
+        )
+    ):
+        try:
+            await asyncio.to_thread(
+                identity.audit,
+                AuditEvent(
+                    event="authentication.transport",
+                    outcome="denied",
+                    reason="https_required",
+                    target=ws.url.path,
+                    client_ip=_client_ip(ws),
+                ),
+            )
+        except Exception:
+            await ws.close(code=4503, reason="authentication unavailable")
+            return
+        await ws.close(code=4406, reason="secure WebSocket required")
+        return
+    try:
+        try:
+            first = json.loads(
+                await asyncio.wait_for(ws.receive_text(), timeout=5.0)
+            )
+            ticket = first.get("authenticate", {}).get("ticket")
+            if not isinstance(ticket, str):
+                raise ValueError("ticket required")
+            if (
+                settings.deployment_mode == "development"
+                and settings.allow_insecure_anonymous_access
+                and ticket == "insecure-development"
+            ):
+                principal = _INSECURE_DEVELOPMENT_PRINCIPAL
+            else:
+                principal = await asyncio.to_thread(
+                    identity.consume_ws_ticket,
+                    ticket,
+                )
+            await asyncio.to_thread(identity.authorize, principal, "runtime.read")
+        except (
+            IdentityError,
+            ValueError,
+            json.JSONDecodeError,
+            AttributeError,
+            TimeoutError,
+        ):
+            await ws.close(code=4401, reason="authentication required")
+            return
+
+        await broadcaster.connect(ws)
+        await ws.send_json({"type": "authenticated"})
+        while True:
+            try:
+                message = json.loads(await ws.receive_text())
+                values = message.get("subscribe")
+                if (
+                    not isinstance(values, list)
+                    or len(values) > 500
+                    or not all(isinstance(value, str) for value in values)
+                ):
+                    raise ValueError("invalid entity subscription")
+                entity_ids = tuple(UUID(value) for value in values)
+                if principal != _INSECURE_DEVELOPMENT_PRINCIPAL:
+                    principal = await asyncio.to_thread(
+                        identity.revalidate_session,
+                        principal,
+                        client_ip=_client_ip(ws),
+                    )
+                await asyncio.to_thread(
+                    identity.authorize,
+                    principal,
+                    "runtime.read",
+                )
+                await asyncio.to_thread(catalog.require, entity_ids)
+                await broadcaster.subscribe(ws, entity_ids)
+                await ws.send_json(
+                    {
+                        "type": "subscribed",
+                        "entity_instance_ids": [str(item) for item in entity_ids],
+                    }
+                )
+            except (json.JSONDecodeError, ValueError, EntityInstanceReferenceError):
+                await ws.send_json(
+                    {"type": "error", "code": "SUBSCRIPTION_INVALID"}
+                )
+            except IdentityError as exc:
+                await ws.close(
+                    code=4401 if exc.status_code == 401 else 4403,
+                    reason=(
+                        "authentication required"
+                        if exc.status_code == 401
+                        else "permission denied"
+                    ),
+                )
+                return
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await broadcaster.disconnect(ws)

@@ -6,7 +6,9 @@ instancesParameter: pcs.instances
 displayName: PCS
 freshness: 30s
 requiredEntities:
-  - {definition: pcs.active_power, matcher: {id: pcs-active-power, tagName: ActivePower}}
+  - {definition: pcs.active_power, sourceKind: point_conversion, conversionOutputKey: active_power}
+  - {definition: pcs.operating_state, sourceKind: point_conversion, conversionOutputKey: operating_state}
+  - {definition: pcs.fault_codes, sourceKind: point_conversion, conversionOutputKey: fault_codes}
   - {definition: pcs.setpoint, matcher: {id: pcs-setpoint, tagName: ActivePowerSetpoint}}
   - {definition: pcs.readback, matcher: {id: pcs-readback, tagName: ActivePowerReadback}}
   - {definition: bms.ready, matcher: {id: pcs-bms-ready, tagName: BmsReady}}

@@ -81,6 +81,7 @@ class InstallationPlan:
     entity_plan: dict[str, Any] | None
     digest: str
     alarm_plan: dict[str, Any] | None = None
+    point_conversion_plans: tuple[dict[str, Any], ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -189,7 +190,7 @@ class InstallationAuditEvent:
 class DeliveryRepository(Protocol):
     """`SolutionDelivery` 使用的最小持久化端口。"""
 
-    def save_package(self, package: PackageImport) -> PackageImport: ...
+    def save_package(self, package: PackageImport, actor: str) -> PackageImport: ...
 
     def list_packages(self) -> list[PackageImport]: ...
 

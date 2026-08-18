@@ -57,6 +57,7 @@ class EntityAlarmAdapter:
                             "unit": observation.unit,
                             "fresh": observation.fresh,
                             "source_quality": observation.quality,
+                            **observation.source_evidence(),
                         },
                         max_observation_gap_seconds=(
                             observation.max_observation_gap_seconds

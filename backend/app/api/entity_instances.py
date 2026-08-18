@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.api.business_security import (
@@ -136,3 +136,26 @@ async def read_entity_instance_realtime(
             status_code=response_status,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+
+
+@router.get(
+    "/entity-instances/{entity_instance_id}/history",
+    **protected(RUNTIME_READ),
+)
+async def read_entity_instance_history(
+    entity_instance_id: UUID,
+    range_key: str = Query(
+        "1h",
+        alias="range",
+        pattern="^(1h|6h|24h|7d)$",
+    ),
+    runtime: EntityInstanceRuntime = Depends(get_entity_instance_runtime),
+) -> dict:
+    try:
+        items = runtime.history(entity_instance_id, range_key)
+    except EntityInstanceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return {"items": [item.public_dict() for item in items], "total": len(items)}

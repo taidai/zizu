@@ -56,6 +56,7 @@ def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]
             "fresh": observation.fresh,
             "max_observation_gap_seconds": observation.max_observation_gap_seconds,
             "is_entity_instance": True,
+            **observation.source_evidence(),
         }
     return context
 

@@ -105,14 +105,18 @@ class ResolvedEntitySource:
     definition_id: str
     instance_key: str
     device_instance_id: UUID
-    binding_id: UUID
-    tag_id: UUID
-    matcher_id: str
-    confirmation_audit_id: UUID
+    binding_id: UUID | None
+    tag_id: UUID | None
+    matcher_id: str | None
+    confirmation_audit_id: UUID | None
     data_type: str
     unit: str | None
     direction: str
     freshness_seconds: float
+    source_kind: str = "legacy_tag"
+    source_id: UUID | None = None
+    conversion_revision_id: UUID | None = None
+    site_configuration_version: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -202,6 +206,7 @@ class InMemoryEntityInstanceRepository:
         self._devices: dict[UUID, dict[str, Any]] = {}
         self._entities: dict[UUID, dict[str, Any]] = {}
         self._bindings: dict[UUID, ResolvedEntitySource] = {}
+        self._point_sources: dict[UUID, ResolvedEntitySource] = {}
         self._legacy_entities = legacy_entities
         self._failovers: dict[UUID, dict[str, Any]] = {}
 
@@ -260,9 +265,31 @@ class InMemoryEntityInstanceRepository:
             reserved_tags[failover["primary_tag_id"]] = entity_id
             reserved_tags[failover["standby_tag_id"]] = entity_id
         for item in plan.items:
-            tag_id = UUID(item["selected_tag_id"])
             device_id = UUID(item["device_instance_id"])
             entity_id = UUID(item["entity_instance_id"])
+            pending_devices[device_id] = {
+                "slot_id": item["slot_id"],
+                "instance_key": item["instance_key"],
+                "display_name": item["device_display_name"],
+                "device_category": item["device_category"],
+                "node_id": item.get("node_id"),
+            }
+            pending_entities[entity_id] = {
+                "definition_id": item["definition_id"],
+                "device_instance_id": device_id,
+                "display_name": item["definition_display_name"],
+                "data_type": item["data_type"],
+                "unit": item["unit"],
+                "direction": item["direction"],
+                "freshness_seconds": float(item["freshness_seconds"]),
+                "control": item.get("control"),
+                "source_kind": item.get("source_kind", "legacy_tag"),
+            }
+            device_ids.append(device_id)
+            entity_ids.append(entity_id)
+            if item.get("source_kind") == "point_conversion":
+                continue
+            tag_id = UUID(item["selected_tag_id"])
             standby_tag_id = (
                 UUID(item["standby_tag_id"]) if item.get("standby_tag_id") else None
             )
@@ -278,22 +305,6 @@ class InMemoryEntityInstanceRepository:
                 reserved_tags[reserved_tag_id] = entity_id
             binding_id = UUID(item["binding_id"])
             audit_id = UUID(item["confirmation_audit_id"])
-            pending_devices[device_id] = {
-                "slot_id": item["slot_id"],
-                "instance_key": item["instance_key"],
-                "display_name": item["device_display_name"],
-                "device_category": item["device_category"],
-            }
-            pending_entities[entity_id] = {
-                "definition_id": item["definition_id"],
-                "device_instance_id": device_id,
-                "display_name": item["definition_display_name"],
-                "data_type": item["data_type"],
-                "unit": item["unit"],
-                "direction": item["direction"],
-                "freshness_seconds": float(item["freshness_seconds"]),
-                "control": item.get("control"),
-            }
             resolved_binding = ResolvedEntitySource(
                 entity_instance_id=entity_id,
                 definition_id=item["definition_id"],
@@ -343,8 +354,6 @@ class InMemoryEntityInstanceRepository:
             else:
                 removed_failovers.add(entity_id)
             pending_bindings[entity_id] = resolved_binding
-            device_ids.append(device_id)
-            entity_ids.append(entity_id)
             binding_ids.append(binding_id)
 
         self._devices.update(pending_devices)
@@ -363,7 +372,45 @@ class InMemoryEntityInstanceRepository:
         return outcome
 
     def resolve(self, entity_instance_id: UUID) -> ResolvedEntitySource | None:
-        return self._bindings.get(entity_instance_id)
+        return self._bindings.get(entity_instance_id) or self._point_sources.get(
+            entity_instance_id
+        )
+
+    def activate_point_conversion_outputs(
+        self,
+        revision_id: UUID,
+        site_configuration_version: int,
+        entity_instance_ids: tuple[UUID, ...],
+    ) -> None:
+        """Link the in-memory runtime Adapter to applied L1 output evidence."""
+        pending: dict[UUID, ResolvedEntitySource] = {}
+        for entity_instance_id in entity_instance_ids:
+            entity = self._entities.get(entity_instance_id)
+            if entity is None or entity.get("source_kind") != "point_conversion":
+                raise EntityInstanceError(
+                    "ENTITY_SOURCE_INVALID",
+                    "Point conversion output does not belong to an installed entity",
+                )
+            device = self._devices[entity["device_instance_id"]]
+            pending[entity_instance_id] = ResolvedEntitySource(
+                entity_instance_id=entity_instance_id,
+                definition_id=entity["definition_id"],
+                instance_key=device["instance_key"],
+                device_instance_id=entity["device_instance_id"],
+                binding_id=None,
+                tag_id=None,
+                matcher_id=None,
+                confirmation_audit_id=None,
+                data_type=entity["data_type"],
+                unit=entity["unit"],
+                direction=entity["direction"],
+                freshness_seconds=entity["freshness_seconds"],
+                source_kind="point_conversion",
+                source_id=entity_instance_id,
+                conversion_revision_id=revision_id,
+                site_configuration_version=site_configuration_version,
+            )
+        self._point_sources.update(pending)
 
     def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None:
         entity = self._entities.get(entity_instance_id)
@@ -379,14 +426,20 @@ class InMemoryEntityInstanceRepository:
             for entity_id, entity in self._entities.items()
             if entity["device_instance_id"] == device_instance_id
             and entity["definition_id"] == definition_id
-            and entity_id in self._bindings
+            and (
+                entity_id in self._bindings
+                or entity_id in self._point_sources
+            )
         ]
         return matches[0] if len(matches) == 1 else None
 
     def list_instances(self) -> tuple[EntityInstanceDescriptor, ...]:
         descriptors = []
         for entity_id, entity in self._entities.items():
-            if entity_id not in self._bindings:
+            if (
+                entity_id not in self._bindings
+                and entity.get("source_kind") != "point_conversion"
+            ):
                 continue
             device = self._devices[entity["device_instance_id"]]
             descriptors.append(
@@ -611,6 +664,22 @@ class EntityInstanceRegistry:
                 "ENTITY_INSTANCE_NOT_BOUND",
                 "Entity instance has no confirmed active primary binding",
             )
+        if source.source_kind == "point_conversion":
+            if (
+                source.source_id != source.entity_instance_id
+                or source.conversion_revision_id is None
+                or source.site_configuration_version is None
+            ):
+                raise EntityInstanceError(
+                    "ENTITY_SOURCE_INVALID",
+                    "Point conversion entity source evidence is incomplete",
+                )
+            return source
+        if source.source_kind != "legacy_tag" or source.tag_id is None:
+            raise EntityInstanceError(
+                "ENTITY_SOURCE_KIND_INVALID",
+                "Entity source kind is invalid",
+            )
         catalog_source = next(
             (
                 candidate
@@ -651,7 +720,6 @@ def _plan_definition(
     overrides: dict[str, UUID],
     resolve_existing: Callable[[UUID], ResolvedEntitySource | None],
 ) -> tuple[dict[str, Any], dict[str, str] | None]:
-    matcher = definition["matcher"]
     key = f"{slot['id']}/{slot['instance_key']}/{definition['id']}"
     entity_id = _stable_id(
         "entity",
@@ -666,6 +734,41 @@ def _plan_definition(
         slot["id"],
         slot["instance_key"],
     )
+    if definition.get("source_kind") == "point_conversion":
+        return {
+            "slot_id": slot["id"],
+            "device_category": slot["device_category"],
+            "instance_key": slot["instance_key"],
+            "device_display_name": slot["display_name"],
+            "node_id": slot.get("node_id"),
+            "definition_id": definition["id"],
+            "definition_display_name": definition["display_name"],
+            "device_instance_id": str(device_id),
+            "entity_instance_id": str(entity_id),
+            "source_kind": "point_conversion",
+            "conversion_output_key": definition["conversion_output_key"],
+            "matcher_id": None,
+            "expected_tag_name": None,
+            "candidates": (),
+            "override_candidates": (),
+            "standby_candidates": (),
+            "selected_tag_id": None,
+            "failover_policy": None,
+            "standby_tag_id": None,
+            "selection_source": "point_conversion_plan",
+            "selection_reason": "Output is bound by the point-conversion subplan",
+            "binding_id": None,
+            "confirmation_audit_id": None,
+            "data_type": definition["data_type"],
+            "unit": definition.get("unit"),
+            "direction": definition["direction"],
+            "freshness_seconds": float(slot["freshness_seconds"]),
+            "control": definition.get("control"),
+            "status": "ready",
+            "code": "ENTITY_POINT_CONVERSION_READY",
+            "action": "add",
+        }, None
+    matcher = definition["matcher"]
     matches = [
         source
         for source in sources
@@ -879,12 +982,23 @@ def _validated_slot(value: dict[str, Any]) -> dict[str, Any]:
         if any(
             not isinstance(definition.get(field), str) or not definition[field]
             for field in definition_required
-        ) or definition["data_type"] not in {"FLOAT", "INT", "BOOL", "STRING", "ENUM"} \
+        ) or definition["data_type"] not in {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"} \
                 or definition["direction"] not in {"R", "W", "RW"}:
             raise EntityInstanceError("ENTITY_SLOT_INVALID", "Entity definition is invalid")
         if definition["id"] in definition_ids:
             raise EntityInstanceError("ENTITY_SLOT_INVALID", "Entity definition ids must be unique")
         definition_ids.add(definition["id"])
+        if definition.get("source_kind") == "point_conversion":
+            if (
+                not isinstance(definition.get("conversion_output_key"), str)
+                or not definition["conversion_output_key"]
+                or definition["direction"] not in {"R", "RW"}
+            ):
+                raise EntityInstanceError(
+                    "ENTITY_SLOT_INVALID",
+                    "Point-conversion entity definition is invalid",
+                )
+            continue
         matcher = definition.get("matcher")
         if not isinstance(matcher, dict) or any(
             not isinstance(matcher.get(field), str) or not matcher[field]

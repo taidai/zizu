@@ -61,7 +61,8 @@ class InMemoryDeliveryRepository:
         self._site_configuration_version = 0
         self._site_configurations: dict[int, SiteConfigurationVersion] = {}
 
-    def save_package(self, package: PackageImport) -> PackageImport:
+    def save_package(self, package: PackageImport, actor: str) -> PackageImport:
+        del actor
         key = (package.package_id, package.version)
         existing = self._packages.get(key)
         if existing is not None:
@@ -312,7 +313,8 @@ class PostgresDeliveryRepository:
             entity_identity_installation_id=row[14],
             entity_plan=row[15],
             alarm_plan=row[16],
-            digest=row[17],
+            point_conversion_plans=tuple(row[17] or ()),
+            digest=row[18],
         )
 
     @staticmethod
@@ -373,7 +375,11 @@ class PostgresDeliveryRepository:
         )
         return {path: bytes(content) for path, content in cur.fetchall()}
 
-    def save_package(self, package: PackageImport) -> PackageImport:
+    def save_package(self, package: PackageImport, actor: str) -> PackageImport:
+        from app.services.point_conversion_postgres import (
+            persist_point_conversion_assets,
+        )
+
         with self._connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -404,6 +410,7 @@ class PostgresDeliveryRepository:
                             "(package_record_id, path, content) VALUES (%s, %s, %s)",
                             (package.id, path, content),
                         )
+                    persist_point_conversion_assets(cur, package, actor)
                     conn.commit()
                     return package
 
@@ -425,8 +432,10 @@ class PostgresDeliveryRepository:
                         "Package id and version already exist with different content",
                     )
                 assets = self._load_assets(cur, row[0])
+                existing_package = self._package_from_row(row, assets)
+                persist_point_conversion_assets(cur, existing_package, actor)
                 conn.commit()
-                return self._package_from_row(row, assets)
+                return existing_package
 
     def list_packages(self) -> list[PackageImport]:
         with self._connection() as conn:
@@ -489,8 +498,9 @@ class PostgresDeliveryRepository:
                        parameter_contracts, parameters, secret_references,
                        parameter_sources, parameter_metadata,
                        configuration_digest, target_installation_id,
-                       entity_identity_installation_id, entity_plan, alarm_plan, digest)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       entity_identity_installation_id, entity_plan, alarm_plan,
+                       point_conversion_plans, digest)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING id, package_record_id, package_digest,
                               base_site_configuration_version, status,
@@ -498,7 +508,8 @@ class PostgresDeliveryRepository:
                               secret_references, parameter_sources,
                               parameter_metadata, configuration_digest,
                               target_installation_id,
-                              entity_identity_installation_id, entity_plan, alarm_plan, digest
+                              entity_identity_installation_id, entity_plan, alarm_plan,
+                              point_conversion_plans, digest
                     """,
                     (
                         plan.id,
@@ -518,6 +529,7 @@ class PostgresDeliveryRepository:
                         plan.entity_identity_installation_id,
                         Json(plan.entity_plan) if plan.entity_plan is not None else None,
                         Json(plan.alarm_plan) if plan.alarm_plan is not None else None,
+                        Json(list(plan.point_conversion_plans)),
                         plan.digest,
                     ),
                 )
@@ -531,7 +543,8 @@ class PostgresDeliveryRepository:
                                secret_references, parameter_sources,
                                parameter_metadata, configuration_digest,
                                target_installation_id,
-                               entity_identity_installation_id, entity_plan, alarm_plan, digest
+                               entity_identity_installation_id, entity_plan, alarm_plan,
+                               point_conversion_plans, digest
                         FROM t_solution_install_plans WHERE digest = %s
                         """,
                         (plan.digest,),
@@ -551,7 +564,8 @@ class PostgresDeliveryRepository:
                            parameter_contracts, parameters, secret_references,
                            parameter_sources, parameter_metadata,
                            configuration_digest, target_installation_id,
-                           entity_identity_installation_id, entity_plan, alarm_plan, digest
+                           entity_identity_installation_id, entity_plan, alarm_plan,
+                           point_conversion_plans, digest
                     FROM t_solution_install_plans WHERE id = %s
                     """,
                     (plan_id,),

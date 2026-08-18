@@ -1,0 +1,214 @@
+"""Authenticated public HTTP seam for point-conversion planning and apply."""
+from __future__ import annotations
+
+import importlib.util
+import os
+from pathlib import Path
+import unittest
+from uuid import UUID
+
+os.environ.setdefault("DB_PASSWORD", "database-secret-value")
+os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
+os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
+
+import httpx
+from fastapi import FastAPI
+
+from app.api.auth import router as auth_router
+from app.api.security import get_identity
+from app.services.identity import (
+    Identity,
+    InMemoryIdentityRepository,
+    UserIdentity,
+    hash_password,
+)
+from app.services.point_conversion import (
+    ApplyPointConversionPlan,
+    InMemoryPointConversionCatalog,
+    InMemoryPointConversionRepository,
+    PlanPointConversion,
+    PointConversion,
+    PointConversionSource,
+)
+from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
+from app.services.solution_point_conversions import point_conversion_assets
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / "scripts" / "build_reference_delivery.py"
+SPEC = importlib.util.spec_from_file_location("build_reference_delivery", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+builder = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(builder)
+
+NODE_ID = UUID("84000000-0000-0000-0000-000000000001")
+ENTITY_IDENTITY_INSTALLATION_ID = UUID("84000000-0000-0000-0000-000000000002")
+SOLUTION_INSTALLATION_ID = UUID("84000000-0000-0000-0000-000000000003")
+BRAND_A_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000a")
+BRAND_B_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000b")
+
+
+class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.password = "correct horse battery staple"
+        cls.password_hash = hash_password(
+            cls.password,
+            salt=b"point-conv-auth",
+        )
+
+    def build_app(self) -> tuple[FastAPI, InMemoryIdentityRepository, InMemoryPointConversionRepository]:
+        package = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        ).import_package(builder.build_archive(), "user:test-engineer")
+        assets = {item.asset_id: item for item in point_conversion_assets(package)}
+        repository = InMemoryPointConversionRepository()
+        service = PointConversion(
+            repository,
+            InMemoryPointConversionCatalog(
+                templates={
+                    BRAND_A_REVISION_ID: assets["pcs.brand-a"],
+                    BRAND_B_REVISION_ID: assets["pcs.brand-b"],
+                },
+                sources=(
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000001"), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000002"), "l0", NODE_ID, "RunningState", "STRING", None, True),
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000003"), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000011"), "l0", NODE_ID, "PActKw", "FLOAT", "kW", True),
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000012"), "l0", NODE_ID, "ModeCode", "STRING", None, True),
+                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000013"), "l0", NODE_ID, "AlarmList", "STRING", None, True),
+                ),
+            ),
+        )
+        initial_plan = service.plan(
+            PlanPointConversion(
+                node_id=NODE_ID,
+                template_revision_id=BRAND_A_REVISION_ID,
+                input_selections={},
+                actor="user:seed-engineer",
+                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
+                solution_installation_id=SOLUTION_INSTALLATION_ID,
+            )
+        )
+        service.apply(
+            ApplyPointConversionPlan(
+                initial_plan.id,
+                initial_plan.digest,
+                "initial-brand-a",
+                "user:seed-engineer",
+            )
+        )
+        identity_repository = InMemoryIdentityRepository(
+            [
+                UserIdentity(UUID("00000000-0000-0000-0000-000000000001"), "admin", self.password_hash, "admin", "active"),
+                UserIdentity(UUID("00000000-0000-0000-0000-000000000002"), "engineer", self.password_hash, "engineer", "active"),
+                UserIdentity(UUID("00000000-0000-0000-0000-000000000003"), "operator", self.password_hash, "operator", "active"),
+            ]
+        )
+        app = FastAPI()
+        app.include_router(auth_router, prefix="/api/v1")
+        try:
+            from app.api.point_conversions import get_point_conversions, router
+        except ImportError:
+            pass
+        else:
+            app.include_router(router, prefix="/api/v1")
+            app.dependency_overrides[get_point_conversions] = lambda: service
+        app.dependency_overrides[get_identity] = lambda: Identity(identity_repository)
+        return app, identity_repository, repository
+
+    async def login(self, client: httpx.AsyncClient, username: str) -> dict[str, str]:
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"username": username, "password": self.password},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
+        app, identity_repository, repository = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            anonymous = await client.get(
+                "/api/v1/point-conversion-templates?device_category=PCS"
+            )
+            operator_headers = await self.login(client, "operator")
+            engineer_headers = await self.login(client, "engineer")
+            operator_templates = await client.get(
+                "/api/v1/point-conversion-templates?device_category=PCS",
+                headers=operator_headers,
+            )
+            templates = await client.get(
+                "/api/v1/point-conversion-templates?device_category=PCS",
+                headers=engineer_headers,
+            )
+            planned = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-conversion-plans",
+                headers=engineer_headers,
+                json={
+                    "template_revision_id": str(BRAND_B_REVISION_ID),
+                    "input_selections": {},
+                },
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            operator_apply = await client.post(
+                f"/api/v1/point-conversion-plans/{planned.json()['id']}/apply",
+                headers={**operator_headers, "Idempotency-Key": "operator-denied"},
+                json={"plan_digest": planned.json()["digest"]},
+            )
+            count_after_denied = repository.application_count()
+            applied = await client.post(
+                f"/api/v1/point-conversion-plans/{planned.json()['id']}/apply",
+                headers={**engineer_headers, "Idempotency-Key": "engineer-apply"},
+                json={"plan_digest": planned.json()["digest"]},
+            )
+            operator_trunk = await client.get(
+                f"/api/v1/nodes/{NODE_ID}/data-trunk",
+                headers=operator_headers,
+            )
+            engineer_trunk = await client.get(
+                f"/api/v1/nodes/{NODE_ID}/data-trunk",
+                headers=engineer_headers,
+            )
+
+        self.assertEqual(401, anonymous.status_code, anonymous.text)
+        self.assertEqual(403, operator_templates.status_code, operator_templates.text)
+        self.assertEqual(200, templates.status_code, templates.text)
+        self.assertEqual(2, templates.json()["total"])
+        brand_a = next(
+            item for item in templates.json()["items"]
+            if item["asset_id"] == "pcs.brand-a"
+        )
+        self.assertEqual(
+            ["active_power_raw", "fault_codes_raw", "operating_state_raw"],
+            sorted(item["input_id"] for item in brand_a["inputs"]),
+        )
+        self.assertTrue(all("source_key" in item for item in brand_a["inputs"]))
+        self.assertEqual(201, planned.status_code, planned.text)
+        self.assertEqual("ready", planned.json()["status"])
+        self.assertEqual(403, operator_apply.status_code, operator_apply.text)
+        self.assertEqual(1, count_after_denied)
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual(2, repository.application_count())
+        self.assertEqual(200, operator_trunk.status_code, operator_trunk.text)
+        self.assertTrue(operator_trunk.json()["l2"])
+        self.assertEqual([], operator_trunk.json()["l0"])
+        self.assertNotIn("input_bindings", operator_trunk.json()["l1_summary"])
+        self.assertTrue(engineer_trunk.json()["l0"])
+        self.assertIn("input_bindings", engineer_trunk.json()["l1_summary"])
+        self.assertTrue(
+            any(
+                event.event == "authorization.decision"
+                and event.outcome == "denied"
+                for event in identity_repository.audits
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

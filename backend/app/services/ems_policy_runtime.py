@@ -209,6 +209,7 @@ class EmsPolicyRuntime:
                 "value": value,
                 "unit": source.unit,
                 "observed_at": observation.observed_at.isoformat(),
+                **observation.source_evidence(),
             },
             "condition": dict(policy["condition"]),
         }
@@ -265,6 +266,7 @@ class EmsPolicyRuntime:
                 "value": observation.value,
                 "unit": source.unit,
                 "observed_at": observation.observed_at.isoformat(),
+                **observation.source_evidence(),
             },
         }
 

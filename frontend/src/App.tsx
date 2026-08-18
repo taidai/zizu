@@ -9,6 +9,7 @@ import {
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
 import { clearAcceptanceRetry } from './components/alarm-configuration/acceptanceRetryState'
+import { clearDataTrunkApplyRetry } from './components/data-trunk/dataTrunkRetryState'
 import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard, PackageCheck } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
@@ -188,6 +189,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
       // Local logout is authoritative even when the server is unavailable.
     } finally {
       clearAcceptanceRetry(sessionStorage)
+      clearDataTrunkApplyRetry(sessionStorage)
       onLoggedOut()
     }
   }
@@ -277,7 +279,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
           <Suspense fallback={<PageLoader />}>
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
             {activePage === 'delivery' && <SolutionDeliveryPage canImport={session.user.role === 'admin'} />}
-            {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} />}
+            {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} actorId={session.user.id} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
             {activePage === 'alarm-config' && <AlarmConfigurationPage actorId={session.user.id} onOpenAlarms={() => setActivePage('alarms')} />}
@@ -328,6 +330,7 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = subscribeAuthenticationRequired(() => {
       clearAcceptanceRetry(sessionStorage)
+      clearDataTrunkApplyRetry(sessionStorage)
       setSession(null)
       setRestoreError('')
       setRestoring(false)
@@ -350,6 +353,7 @@ export default function App() {
           <button
             onClick={() => {
               clearAcceptanceRetry(sessionStorage)
+              clearDataTrunkApplyRetry(sessionStorage)
               clearAuthSession()
               setRestoreError('')
               setSession(null)

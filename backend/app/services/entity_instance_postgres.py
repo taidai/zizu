@@ -147,16 +147,33 @@ class PostgresEntityInstanceRepository:
                 for item in plan.items:
                     device_id = UUID(item["device_instance_id"])
                     entity_id = UUID(item["entity_instance_id"])
-                    binding_id = UUID(item["binding_id"])
-                    audit_id = UUID(item["confirmation_audit_id"])
-                    tag_id = UUID(item["selected_tag_id"])
+                    point_conversion_source = (
+                        item.get("source_kind") == "point_conversion"
+                    )
+                    binding_id = (
+                        UUID(item["binding_id"])
+                        if item.get("binding_id")
+                        else None
+                    )
+                    audit_id = (
+                        UUID(item["confirmation_audit_id"])
+                        if item.get("confirmation_audit_id")
+                        else None
+                    )
+                    tag_id = (
+                        UUID(item["selected_tag_id"])
+                        if item.get("selected_tag_id")
+                        else None
+                    )
                     standby_tag_id = (
                         UUID(item["standby_tag_id"])
                         if item.get("standby_tag_id")
                         else None
                     )
                     proposed_failover = (
-                        item.get("failover_policy") == "manual"
+                        not point_conversion_source
+                        and tag_id is not None
+                        and item.get("failover_policy") == "manual"
                         and standby_tag_id is not None
                     )
                     cur.execute(
@@ -187,11 +204,12 @@ class PostgresEntityInstanceRepository:
                         """
                         INSERT INTO t_device_instances
                           (id, identity_installation_id, slot_id, instance_key,
-                           device_category, display_name)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                           device_category, display_name, node_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE
                         SET display_name = EXCLUDED.display_name,
                             device_category = EXCLUDED.device_category,
+                            node_id = COALESCE(EXCLUDED.node_id, t_device_instances.node_id),
                             updated_at = now()
                         """,
                         (
@@ -201,14 +219,16 @@ class PostgresEntityInstanceRepository:
                             item["instance_key"],
                             item["device_category"],
                             item["device_display_name"],
+                            item.get("node_id"),
                         ),
                     )
                     cur.execute(
                         """
                         INSERT INTO t_entity_instances
                           (id, device_instance_id, definition_id, display_name,
-                           data_type, unit, direction, freshness_seconds, control_policy)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           data_type, unit, direction, freshness_seconds,
+                           control_policy, source_kind)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE
                         SET display_name = EXCLUDED.display_name,
                             data_type = EXCLUDED.data_type,
@@ -216,6 +236,7 @@ class PostgresEntityInstanceRepository:
                             direction = EXCLUDED.direction,
                             freshness_seconds = EXCLUDED.freshness_seconds,
                             control_policy = EXCLUDED.control_policy,
+                            source_kind = EXCLUDED.source_kind,
                             updated_at = now()
                         """,
                         (
@@ -228,8 +249,13 @@ class PostgresEntityInstanceRepository:
                             item["direction"],
                             item["freshness_seconds"],
                             json.dumps(item.get("control")) if item.get("control") else None,
+                            item.get("source_kind", "legacy_tag"),
                         ),
                     )
+                    device_ids.append(device_id)
+                    entity_ids.append(entity_id)
+                    if point_conversion_source:
+                        continue
                     try:
                         cur.execute(
                             """
@@ -277,9 +303,8 @@ class PostgresEntityInstanceRepository:
                             tag_id,
                         ),
                     )
-                    device_ids.append(device_id)
-                    entity_ids.append(entity_id)
-                    binding_ids.append(binding_id)
+                    if binding_id is not None:
+                        binding_ids.append(binding_id)
                     try:
                         cur.execute(
                             "DELETE FROM t_entity_source_reservations "
@@ -365,7 +390,30 @@ class PostgresEntityInstanceRepository:
                     (entity_instance_id,),
                 )
                 row = cur.fetchone()
-        return ResolvedEntitySource(*row) if row else None
+                if row is not None:
+                    return ResolvedEntitySource(*row)
+                cur.execute(
+                    """
+                    SELECT ei.id, ei.definition_id, di.instance_key, di.id,
+                           NULL::uuid, NULL::uuid, NULL::text, NULL::uuid,
+                           ei.data_type, ei.unit, ei.direction,
+                           ei.freshness_seconds, 'point_conversion', ei.id,
+                           installed.revision_id,
+                           installed.site_configuration_version
+                    FROM t_entity_instances ei
+                    JOIN t_device_instances di ON di.id = ei.device_instance_id
+                    JOIN t_conversion_output_bindings output
+                      ON output.entity_instance_id = ei.id
+                    JOIN t_installed_point_conversions installed
+                      ON installed.id = output.installed_conversion_id
+                     AND installed.current = TRUE
+                    WHERE ei.id = %s AND ei.active = TRUE AND di.active = TRUE
+                      AND ei.source_kind = 'point_conversion'
+                    """,
+                    (entity_instance_id,),
+                )
+                point_row = cur.fetchone()
+        return ResolvedEntitySource(*point_row) if point_row else None
 
     def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None:
         with _connection() as conn:
@@ -388,11 +436,24 @@ class PostgresEntityInstanceRepository:
                     """
                     SELECT ei.id
                     FROM t_entity_instances ei
-                    JOIN t_entity_instance_bindings binding
-                      ON binding.entity_instance_id = ei.id AND binding.active = TRUE
                     WHERE ei.device_instance_id = %s
                       AND ei.definition_id = %s
                       AND ei.active = TRUE
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM t_entity_instance_bindings binding
+                          WHERE binding.entity_instance_id = ei.id
+                            AND binding.active = TRUE
+                        )
+                        OR EXISTS (
+                          SELECT 1
+                          FROM t_conversion_output_bindings output
+                          JOIN t_installed_point_conversions installed
+                            ON installed.id = output.installed_conversion_id
+                           AND installed.current = TRUE
+                          WHERE output.entity_instance_id = ei.id
+                        )
+                      )
                     """,
                     (device_instance_id, definition_id),
                 )
@@ -414,14 +475,28 @@ class PostgresEntityInstanceRepository:
                     JOIN t_site_configuration_versions site
                       ON site.version = state.current_version
                      AND di.identity_installation_id = site.entity_identity_installation_id
-                    JOIN t_entity_instance_bindings binding
-                      ON binding.entity_instance_id = ei.id AND binding.active = TRUE
-                    JOIN t_entity_binding_confirmations confirmation
-                      ON confirmation.id = binding.confirmation_audit_id
-                     AND confirmation.entity_instance_id = binding.entity_instance_id
-                     AND confirmation.binding_id = binding.id
-                     AND confirmation.selected_tag_id = binding.tag_id
                     WHERE ei.active = TRUE AND di.active = TRUE
+                      AND (
+                        EXISTS (
+                          SELECT 1
+                          FROM t_entity_instance_bindings binding
+                          JOIN t_entity_binding_confirmations confirmation
+                            ON confirmation.id = binding.confirmation_audit_id
+                           AND confirmation.entity_instance_id = binding.entity_instance_id
+                           AND confirmation.binding_id = binding.id
+                           AND confirmation.selected_tag_id = binding.tag_id
+                          WHERE binding.entity_instance_id = ei.id
+                            AND binding.active = TRUE
+                        )
+                        OR EXISTS (
+                          SELECT 1
+                          FROM t_conversion_output_bindings output
+                          JOIN t_installed_point_conversions installed
+                            ON installed.id = output.installed_conversion_id
+                           AND installed.current = TRUE
+                          WHERE output.entity_instance_id = ei.id
+                        )
+                      )
                     ORDER BY di.instance_key, ei.definition_id
                     """
                 )
@@ -580,44 +655,84 @@ class PostgresEntityInstanceRepository:
 
 
 class PostgresObservationCatalog:
-    def latest(self, tag_id: UUID) -> SourceObservation | None:
+    def latest(self, source) -> SourceObservation | None:
         with _connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT tag_id, ts, value_float, value_int, value_bool,
-                           value_str, quality
-                    FROM t_telemetry_latest WHERE tag_id = %s
-                    """,
-                    (tag_id,),
-                )
+                if source.source_kind == "point_conversion":
+                    cur.execute(
+                        """
+                        SELECT entity_instance_id, observed_at,
+                               value_float, value_int, value_bool, value_text,
+                               value_codes, quality, event_id, reason,
+                               received_at, calculated_at,
+                               conversion_revision_id,
+                               site_configuration_version, source_digest
+                        FROM t_l2_latest WHERE entity_instance_id = %s
+                        """,
+                        (source.source_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT tag_id, ts, value_float, value_int, value_bool,
+                               value_str, NULL::text[], quality, NULL::uuid,
+                               NULL::text, NULL::timestamptz, NULL::timestamptz,
+                               NULL::uuid, NULL::bigint, NULL::text
+                        FROM t_telemetry_latest WHERE tag_id = %s
+                        """,
+                        (source.tag_id,),
+                    )
                 row = cur.fetchone()
         if row is None:
             return None
-        value = next((candidate for candidate in row[2:6] if candidate is not None), None)
-        return SourceObservation(row[0], row[1], value, row[6])
+        value = next((candidate for candidate in row[2:7] if candidate is not None), None)
+        return SourceObservation(
+            row[0], row[1], value, row[7], row[8], row[9], row[10], row[11],
+            row[12], row[13], row[14].strip() if row[14] else None,
+        )
 
-    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]:
-        interval = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}.get(range_key)
+    def history(self, source, range_key: str) -> list[SourceObservation]:
+        interval = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}.get(range_key)
         if interval is None:
             raise ValueError("Unsupported history range")
         with _connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT tag_id, ts, value_float, value_int, value_bool,
-                           value_str, quality
-                    FROM t_telemetry
-                    WHERE tag_id = %s AND ts > NOW() - %s::interval
-                    ORDER BY ts ASC
-                    LIMIT 2000
-                    """,
-                    (tag_id, interval),
-                )
+                if source.source_kind == "point_conversion":
+                    cur.execute(
+                        """
+                        SELECT entity_instance_id, observed_at,
+                               value_float, value_int, value_bool, value_text,
+                               value_codes, quality, event_id, reason,
+                               received_at, calculated_at,
+                               conversion_revision_id,
+                               site_configuration_version, source_digest
+                        FROM t_l2_observations
+                        WHERE entity_instance_id = %s
+                          AND observed_at > NOW() - %s::interval
+                        ORDER BY observed_at ASC LIMIT 2000
+                        """,
+                        (source.source_id, interval),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT tag_id, ts, value_float, value_int, value_bool,
+                               value_str, NULL::text[], quality, NULL::uuid,
+                               NULL::text, NULL::timestamptz, NULL::timestamptz,
+                               NULL::uuid, NULL::bigint, NULL::text
+                        FROM t_telemetry
+                        WHERE tag_id = %s AND ts > NOW() - %s::interval
+                        ORDER BY ts ASC LIMIT 2000
+                        """,
+                        (source.tag_id, interval),
+                    )
                 rows = cur.fetchall()
         return [
             SourceObservation(
-                row[0], row[1], next((candidate for candidate in row[2:6] if candidate is not None), None), row[6]
+                row[0], row[1],
+                next((candidate for candidate in row[2:7] if candidate is not None), None),
+                row[7], row[8], row[9], row[10], row[11], row[12], row[13],
+                row[14].strip() if row[14] else None,
             )
             for row in rows
         ]

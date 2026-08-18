@@ -85,6 +85,7 @@ class EmsWorkbench:
                             "ts": observation.observed_at.isoformat(),
                             "value": observation.value,
                             "quality": observation.quality,
+                            **observation.source_evidence(),
                         }
                         for observation in self._runtime.history(descriptor.id, range_key)
                     ],
@@ -135,6 +136,7 @@ class EmsWorkbench:
                         "value": observation.value,
                         "observed_at": observation.observed_at.isoformat(),
                         "quality": observation.quality,
+                        **observation.source_evidence(),
                     }
                 )
         return result

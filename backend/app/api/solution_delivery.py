@@ -48,6 +48,7 @@ from app.services.ems_policy_runtime import (
 from app.services.release_lock import current_release_lock_summary
 from app.services.gateway_readiness import NeuronGatewayReadiness
 from app.services.neuron_client import get_neuron_client
+from app.services.point_conversion_postgres import build_postgres_point_conversion
 
 
 router = APIRouter()
@@ -66,6 +67,7 @@ _entity_instance_catalog = EntityInstanceCatalog(_entity_instance_repository)
 _entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
 _alarm_definition_catalog = PostgresAlarmDefinitionCatalog()
 _alarm_runtime = AlarmRuntime(_alarm_definition_catalog, PostgresAlarmRepository())
+_point_conversions = build_postgres_point_conversion()
 _control_commands = ControlCommandRuntime(
     registry=_entity_instance_registry,
     policies=_entity_instance_repository,
@@ -89,6 +91,7 @@ _delivery = SolutionDelivery(
     control_command_runtime=_control_commands,
     gateway_readiness=NeuronGatewayReadiness(get_neuron_client),
     release_lock_reader=current_release_lock_summary,
+    point_conversions=_point_conversions,
 )
 _ems_workbench = EmsWorkbench(
     _repository,
@@ -156,12 +159,22 @@ class ApplyInstallationRequest(BaseModel):
     plan_digest: str = Field(..., min_length=64, max_length=64)
 
 
+class PointConversionSelection(BaseModel):
+    node_id: UUID
+    template_revision_id: UUID
+    input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=64)
+
+
 class CreateInstallationPlanRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     secret_references: dict[str, str] = Field(default_factory=dict)
     binding_selections: dict[str, UUID] = Field(default_factory=dict)
     binding_overrides: dict[str, UUID] = Field(default_factory=dict)
     upgrade_risk_resolutions: dict[str, str] = Field(default_factory=dict)
+    point_conversions: list[PointConversionSelection] = Field(
+        default_factory=list,
+        max_length=8,
+    )
 
 
 class RunAcceptanceRequest(BaseModel):
@@ -211,6 +224,7 @@ async def create_installation_plan(
             binding_selections=plan_request.binding_selections,
             binding_overrides=plan_request.binding_overrides,
             upgrade_risk_resolutions=plan_request.upgrade_risk_resolutions,
+            point_conversions=[item.model_dump() for item in plan_request.point_conversions],
             actor=principal.actor,
         ).public_dict()
     except DeliveryError as exc:
@@ -230,7 +244,6 @@ async def get_installation_plan(
     principal: Principal = Depends(require_capability("solution.install.plan")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
-    del principal
     try:
         return delivery.get_install_plan(plan_id).public_dict()
     except DeliveryError as exc:
@@ -366,7 +379,6 @@ async def import_solution_package(
     principal: Principal = Depends(require_capability("solution.package.import")),
     delivery: SolutionDelivery = Depends(get_solution_delivery),
 ) -> dict:
-    del principal
     try:
         chunks: list[bytes] = []
         received = 0
@@ -381,7 +393,7 @@ async def import_solution_package(
                     "PACKAGE_LIMIT_EXCEEDED",
                     "ZIP archive exceeds 10 MiB",
                 )
-        package = delivery.import_package(b"".join(chunks))
+        package = delivery.import_package(b"".join(chunks), principal.actor)
         return package.public_dict()
     except DeliveryError as exc:
         raise HTTPException(

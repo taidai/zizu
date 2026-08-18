@@ -717,8 +717,12 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     ORDER BY entity_instance_id
                     """
                 )
+                rows = [
+                    (str(row[0]), *row[1:])
+                    for row in cursor.fetchall()
+                ]
                 self.assertEqual(
-                    cursor.fetchall(),
+                    rows,
                     [
                         (str(STATE_ENTITY_ID), "RUNNING", None, 192, None),
                         (

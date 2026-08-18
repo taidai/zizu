@@ -5,6 +5,7 @@ Phase 1 S0-S5: 集成 F0 数据管道到应用生命周期
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -34,6 +35,9 @@ def get_pipeline():
 
 # F1/F2/F3 调度任务列表
 _scheduler_tasks = []
+_data_trunk_tasks = []
+_data_trunk_stop = None
+_outbox_dispatcher = None
 # 聚合 tick 间隔 (秒)
 AGGREGATION_INTERVAL_SEC = 60
 # F1 公式 tick 间隔 (秒)，比聚合更频繁，保证虚拟点先产出
@@ -61,6 +65,7 @@ APP_VERSION = _load_version()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan — 启停 F0 数据管道 + F3 聚合调度器。"""
     global _pipeline, _scheduler_tasks
+    global _data_trunk_tasks, _data_trunk_stop, _outbox_dispatcher
     import asyncio
 
     # ---- Startup ----
@@ -184,6 +189,63 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error("[Main] Shutting down — no MQTT ingestion without pipeline")
         raise  # fail-fast: 管道是核心组件，死了就不该假装活着
 
+    # L2 freshness and committed outbox delivery share the production DB seam.
+    _data_trunk_tasks = []
+    _data_trunk_stop = asyncio.Event()
+    try:
+        from app.api.websocket import get_entity_observation_broadcaster
+        from app.services.data_trunk_outbox import (
+            OutboxDispatcher,
+            PostgresOutboxRepository,
+        )
+        from app.services.data_trunk_postgres import PostgresDataTrunkRepository
+
+        freshness_repository = PostgresDataTrunkRepository()
+        _outbox_dispatcher = OutboxDispatcher(
+            PostgresOutboxRepository(),
+            get_entity_observation_broadcaster(),
+        )
+
+        async def _wait_or_stop(seconds: float) -> None:
+            try:
+                await asyncio.wait_for(_data_trunk_stop.wait(), timeout=seconds)
+            except TimeoutError:
+                pass
+
+        async def _freshness_loop() -> None:
+            while not _data_trunk_stop.is_set():
+                try:
+                    await asyncio.to_thread(
+                        freshness_repository.mark_expired_outputs_stale,
+                        datetime.now(timezone.utc),
+                    )
+                except Exception as error:
+                    logger.warning("[DataTrunk] freshness tick failed: {}", error)
+                await _wait_or_stop(5.0)
+
+        async def _outbox_loop() -> None:
+            while not _data_trunk_stop.is_set():
+                try:
+                    await _outbox_dispatcher.run_once()
+                except Exception as error:
+                    logger.warning("[DataTrunk] outbox tick failed: {}", error)
+                await _wait_or_stop(0.25)
+
+        _data_trunk_tasks = [
+            asyncio.create_task(_freshness_loop(), name="data_trunk_freshness"),
+            asyncio.create_task(_outbox_loop(), name="data_trunk_outbox"),
+        ]
+        logger.success("[Main] L2 freshness and outbox dispatch started ✅")
+    except Exception as error:
+        from app.core.config import settings
+
+        if settings.deployment_mode == "production":
+            raise RuntimeError("L2 runtime services failed to start") from error
+        logger.warning(
+            "[Main] L2 runtime services unavailable (development): {}",
+            error,
+        )
+
     # Phase 2 S12/S6/S7: 启动 F1/F2/F3 调度器（原生 asyncio，不依赖 APScheduler）
     # 非致命：调度器失败不影响 F0 采集主链路
     _scheduler_tasks = []
@@ -243,8 +305,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await asyncio.gather(*_scheduler_tasks, return_exceptions=True)
         logger.info("[Main] F1/F2/F3 schedulers stopped")
     if _pipeline:
-        await _pipeline.stop()
+        await _pipeline.stop(close_database=False)
         logger.info("[Main] F0 data pipeline stopped")
+    if _data_trunk_stop is not None:
+        _data_trunk_stop.set()
+    if _data_trunk_tasks:
+        await asyncio.gather(*_data_trunk_tasks, return_exceptions=True)
+    if _outbox_dispatcher is not None:
+        try:
+            await _outbox_dispatcher.run_once()
+        except Exception as error:
+            logger.warning("[DataTrunk] final outbox dispatch failed: {}", error)
+    from app.services.telemetry_store import close_db_pool
+
+    close_db_pool()
+    logger.info("[Main] L2 freshness and outbox dispatch stopped")
 
 
 def create_app() -> FastAPI:
@@ -373,6 +448,13 @@ def create_app() -> FastAPI:
 
     from app.api.rpc import router as rpc_router
     app.include_router(rpc_router, prefix="/api/v1", tags=["Control Commands"])
+
+    from app.api.point_conversions import router as point_conversions_router
+    app.include_router(
+        point_conversions_router,
+        prefix="/api/v1",
+        tags=["Point Conversions"],
+    )
 
      # ---- Static Frontend (F0 可视化 V1) ----
     # 后端直接托管前端 dist，无需独立 nginx 容器

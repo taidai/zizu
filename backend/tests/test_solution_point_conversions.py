@@ -28,7 +28,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
         package = SolutionDelivery(
             InMemoryDeliveryRepository(),
             platform_version="0.4.77",
-        ).import_package(builder.build_archive())
+        ).import_package(builder.build_archive(), "user:test-engineer")
 
         assets = point_conversion_assets(package)
 
@@ -68,7 +68,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
                     platform_version="0.4.77",
-                ).import_package(builder.build_archive(source))
+                ).import_package(builder.build_archive(source), "user:test-engineer")
 
     def test_rejects_reversed_numeric_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -90,7 +90,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
                     platform_version="0.4.77",
-                ).import_package(builder.build_archive(source))
+                ).import_package(builder.build_archive(source), "user:test-engineer")
 
     def test_rejects_case_ambiguous_fault_codes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +115,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
                     platform_version="0.4.77",
-                ).import_package(builder.build_archive(source))
+                ).import_package(builder.build_archive(source), "user:test-engineer")
 
 
 if __name__ == "__main__":

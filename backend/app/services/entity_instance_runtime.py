@@ -1,6 +1,8 @@
 """只从确认主绑定读取实体实例观测。"""
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -12,6 +14,11 @@ from app.services.entity_instance_registry import (
     SourceCatalog,
 )
 from app.models.schemas import RawMessage
+from app.services.data_trunk import (
+    DataTrunk,
+    RawObservationAdapter,
+    TagMetadata,
+)
 from app.services.normalizer import normalize
 from app.services.parser import parse_neuron_json
 
@@ -22,12 +29,19 @@ class SourceObservation:
     observed_at: datetime
     value: Any
     quality: int
+    event_id: UUID | None = None
+    reason: str | None = None
+    received_at: datetime | None = None
+    calculated_at: datetime | None = None
+    conversion_revision_id: UUID | None = None
+    site_configuration_version: int | None = None
+    source_digest: str | None = None
 
 
 class ObservationCatalog(Protocol):
-    def latest(self, tag_id: UUID) -> SourceObservation | None: ...
+    def latest(self, source) -> SourceObservation | None: ...
 
-    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]: ...
+    def history(self, source, range_key: str) -> list[SourceObservation]: ...
 
 
 class InMemoryObservationCatalog:
@@ -41,13 +55,15 @@ class InMemoryObservationCatalog:
         if current is None or observation.observed_at >= current.observed_at:
             self._observations[observation.tag_id] = observation
 
-    def latest(self, tag_id: UUID) -> SourceObservation | None:
-        return self._observations.get(tag_id)
+    def latest(self, source) -> SourceObservation | None:
+        source_id = source if isinstance(source, UUID) else source.source_id or source.tag_id
+        return self._observations.get(source_id)
 
-    def history(self, tag_id: UUID, range_key: str) -> list[SourceObservation]:
+    def history(self, source, range_key: str) -> list[SourceObservation]:
         # The in-memory adapter intentionally keeps the public test seam small:
         # the caller still validates the range grammar at its HTTP boundary.
-        return sorted(self._history.get(tag_id, []), key=lambda item: item.observed_at)
+        source_id = source if isinstance(source, UUID) else source.source_id or source.tag_id
+        return sorted(self._history.get(source_id, []), key=lambda item: item.observed_at)
 
 
 class InMemoryNeuronProtocolSimulator:
@@ -57,14 +73,32 @@ class InMemoryNeuronProtocolSimulator:
         self,
         sources: SourceCatalog,
         observations: InMemoryObservationCatalog,
+        *,
+        data_trunk: DataTrunk | None = None,
+        point_tag_catalog: Mapping[str, TagMetadata] | None = None,
     ) -> None:
         self._sources = sources
         self._observations = observations
+        self._data_trunk = data_trunk
+        self._point_tag_catalog = dict(point_tag_catalog or {})
+        self._raw_adapter = RawObservationAdapter()
 
     def publish(self, *, topic: str, payload: bytes, quality: int = 192) -> int:
         parsed = parse_neuron_json(RawMessage(topic=topic, payload=payload))
         if parsed is None:
             return 0
+        trunk_published = 0
+        if self._data_trunk is not None and self._point_tag_catalog:
+            raw_observations = self._raw_adapter.from_parsed(
+                parsed,
+                self._point_tag_catalog,
+                received_at=datetime.now(timezone.utc),
+                source_message_id=hashlib.sha256(payload).hexdigest(),
+                source_sequence=None,
+            )
+            if raw_observations:
+                receipt = self._data_trunk.ingest(raw_observations)
+                trunk_published = receipt.accepted_l0_count
         normalized = normalize(parsed)
         published = 0
         for point in normalized.points:
@@ -86,7 +120,7 @@ class InMemoryNeuronProtocolSimulator:
                 )
             )
             published += 1
-        return published
+        return published + trunk_published
 
 
 @dataclass(frozen=True)
@@ -103,6 +137,28 @@ class EntityInstanceObservation:
     fresh: bool
     quality_good: bool
     max_observation_gap_seconds: float | None = None
+    source_kind: str = "legacy_tag"
+    event_id: UUID | None = None
+    reason: str | None = None
+    received_at: datetime | None = None
+    calculated_at: datetime | None = None
+    conversion_revision_id: UUID | None = None
+    site_configuration_version: int | None = None
+    source_digest: str | None = None
+
+    def source_evidence(self) -> dict[str, Any]:
+        """Return the one source identity every upper-layer consumer records."""
+        return {
+            "source_kind": self.source_kind,
+            "event_id": str(self.event_id) if self.event_id else None,
+            "conversion_revision_id": (
+                str(self.conversion_revision_id)
+                if self.conversion_revision_id
+                else None
+            ),
+            "site_configuration_version": self.site_configuration_version,
+            "source_digest": self.source_digest,
+        }
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +173,12 @@ class EntityInstanceObservation:
             "age_ms": self.age_ms,
             "fresh": self.fresh,
             "quality_good": self.quality_good,
+            **self.source_evidence(),
+            "reason": self.reason,
+            "received_at": self.received_at.isoformat() if self.received_at else None,
+            "calculated_at": (
+                self.calculated_at.isoformat() if self.calculated_at else None
+            ),
         }
 
 
@@ -154,7 +216,7 @@ class EntityInstanceRuntime:
         recovery interval rather than bridging a data-quality gap.
         """
         resolved = self._registry.resolve(entity_instance_id)
-        observation = self._observations.latest(resolved.tag_id)
+        observation = self._observations.latest(resolved)
         if observation is None:
             raise EntityInstanceError(
                 "ENTITY_DATA_MISSING",
@@ -180,6 +242,14 @@ class EntityInstanceRuntime:
             fresh=age_seconds <= resolved.freshness_seconds,
             quality_good=observation.quality == 192,
             max_observation_gap_seconds=resolved.freshness_seconds,
+            source_kind=resolved.source_kind,
+            event_id=observation.event_id,
+            reason=observation.reason,
+            received_at=observation.received_at,
+            calculated_at=observation.calculated_at,
+            conversion_revision_id=observation.conversion_revision_id,
+            site_configuration_version=observation.site_configuration_version,
+            source_digest=observation.source_digest,
         )
 
     def history(self, entity_instance_id: UUID, range_key: str) -> list[EntityInstanceObservation]:
@@ -199,6 +269,14 @@ class EntityInstanceRuntime:
                 fresh=True,
                 quality_good=item.quality == 192,
                 max_observation_gap_seconds=resolved.freshness_seconds,
+                source_kind=resolved.source_kind,
+                event_id=item.event_id,
+                reason=item.reason,
+                received_at=item.received_at,
+                calculated_at=item.calculated_at,
+                conversion_revision_id=item.conversion_revision_id,
+                site_configuration_version=item.site_configuration_version,
+                source_digest=item.source_digest,
             )
-            for item in self._observations.history(resolved.tag_id, range_key)
+            for item in self._observations.history(resolved, range_key)
         ]

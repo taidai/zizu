@@ -152,7 +152,7 @@ class DataPipeline:
             self._mqtt.resubscribe(settings.mqtt_telemetry_topics)
             logger.info("[Pipeline] MQTT topics reloaded: {}", settings.mqtt_telemetry_topics)
 
-    async def stop(self) -> None:
+    async def stop(self, *, close_database: bool = True) -> None:
         """优雅停止。"""
         logger.info("[Pipeline] Stopping F0 data pipeline ...")
         self.metrics.status = PipelineStatus.STOPPING
@@ -183,9 +183,10 @@ class DataPipeline:
             await self._mqtt.stop()
 
         # 关闭连接池
-        from app.services.telemetry_store import close_db_pool
+        if close_database:
+            from app.services.telemetry_store import close_db_pool
 
-        close_db_pool()
+            close_db_pool()
 
         self.metrics.status = PipelineStatus.STOPPED
         logger.info("[Pipeline] F0 pipeline stopped")
