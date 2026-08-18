@@ -6,6 +6,7 @@
 - Brand A→Brand B 真实 PostgreSQL 公共主缝直接核对 `pcs.active_power=13.5`、`pcs.operating_state=RUNNING`、故障码 `COMPRESSOR_FAULT/DC_OVERVOLTAGE`、quality=192，并证明三个 L2 UUID 不随品牌替换变化；生产启动在 migration 039 后逐实体执行单一来源 contract gate，零来源负例 fail closed。
 - 验证证据：完整后端 `362 tests / 71 skipped / 0 failures`；最终数据主干 PostgreSQL 定向 `37/37`；发布脚本门禁 `12/12`；前端生产构建 8189 modules 通过；compileall、diff-check 通过；独立代码审查结论 Ready。
 - 运行版本已从 0.4.80 提升为 0.4.81；候选标签采用 `v0.4.81-rc.1`。本轮仍未连接或部署 1号机，也未进行设备控制；必须在固定镜像摘要生成后，再由维护者确认维护窗口，执行只读数据主干验收和受控低功率验收，才能把同一摘要晋级为正式 v0.4.81。
+- GitHub Actions run `32166361518` 已从源码标签 `v0.4.81-rc.1`（commit `2657e34`）成功生成并校验 Schema 039 双架构制品：linux/arm64 为 `ghcr.io/taidai/zizu@sha256:8adae8e145fe8214519f7001c051394e7cbae9b18cbac6605ad0b684e271d4b3`，linux/amd64 为 `ghcr.io/taidai/zizu@sha256:02228d6540477bbc5a85d1b558ccfacb58bee3cd4ebb4ddda1597b5de12b4e99`；EMS 参考包 SHA-256 为 `5f53d954977a93c90f866b3dcf56f2ff61965f1adfbdf1792acba5b35362e86c`。本地下载后再次通过 release preflight，候选现在具备固定摘要，但仍未获维护窗口与现场部署授权。
 
 
 ## Session 2026-08-19 — v0.4.81 PCS 数据主干主线确认
