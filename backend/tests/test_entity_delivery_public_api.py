@@ -451,6 +451,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             SolutionDelivery,
         )
         from app.services.ems_workbench import EmsWorkbench
+        from app.services.data_trunk_acceptance import DataTrunkAcceptance
 
         delivery_repository = InMemoryDeliveryRepository()
         source_catalog = InMemorySourceCatalog(sources)
@@ -510,6 +511,9 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_runtime=alarm_runtime,
             release_lock_reader=release_lock_reader,
             point_conversions=point_conversions,
+            data_trunk_acceptance=(
+                DataTrunkAcceptance(data_trunk) if data_trunk is not None else None
+            ),
         )
         app.dependency_overrides[get_solution_delivery] = lambda: delivery
         app.state.solution_delivery = delivery

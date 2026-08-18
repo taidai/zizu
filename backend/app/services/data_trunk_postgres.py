@@ -29,6 +29,26 @@ ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 FaultHook = Callable[[str], None]
 
 
+def verify_data_trunk_contract_gate(
+    connection_factory: ConnectionFactory | None = None,
+) -> int:
+    """Fail startup when an L2 entity no longer has exactly one source."""
+    if connection_factory is None:
+        from app.services.telemetry_store import get_connection
+
+        connection_factory = get_connection
+    with connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT assert_entity_instance_single_source(id)
+                FROM t_entity_instances
+                ORDER BY id
+                """
+            )
+            return len(cursor.fetchall())
+
+
 @dataclass(frozen=True)
 class _ConversionSnapshot:
     installed: tuple[InstalledPointConversion, ...]
@@ -168,6 +188,99 @@ class PostgresDataTrunkRepository:
                 "DATA_TRUNK_UNAVAILABLE",
             ) from exc
         return failure_id
+
+    def acceptance_evidence(
+        self,
+        *,
+        solution_installation_id: UUID,
+        entity_definition_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        required = tuple(sorted(set(entity_definition_ids)))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT output.entity_definition_id,
+                                    binding.entity_instance_id,
+                                    installed.revision_id,
+                                    installed.site_configuration_version
+                    FROM t_installed_point_conversions AS installed
+                    JOIN t_conversion_output_bindings AS binding
+                      ON binding.installed_conversion_id = installed.id
+                    JOIN t_point_conversion_outputs AS output
+                      ON output.id = binding.output_id
+                    WHERE installed.solution_installation_id = %s
+                      AND output.entity_definition_id = ANY(%s)
+                    ORDER BY output.entity_definition_id, binding.entity_instance_id
+                    """,
+                    (str(solution_installation_id), list(required)),
+                )
+                bindings = cursor.fetchall()
+                entity_ids = tuple(sorted({row[1] for row in bindings}, key=str))
+                if entity_ids:
+                    cursor.execute(
+                        """
+                        SELECT count(*),
+                               count(DISTINCT observation.event_id),
+                               count(DISTINCT source.l0_observation_id),
+                               count(DISTINCT observation.site_configuration_version),
+                               count(DISTINCT outbox.event_id)
+                        FROM t_l2_observations AS observation
+                        LEFT JOIN t_l2_observation_sources AS source
+                          ON source.l2_event_id = observation.event_id
+                         AND source.l2_observed_at = observation.observed_at
+                         AND source.source_kind = 'l0'
+                        LEFT JOIN t_l2_stream_outbox AS outbox
+                          ON outbox.event_id = observation.event_id
+                        WHERE observation.entity_instance_id = ANY(%s)
+                        """,
+                        (list(entity_ids),),
+                    )
+                    (
+                        l2_count,
+                        committed_count,
+                        source_count,
+                        _site_version_count,
+                        outbox_count,
+                    ) = cursor.fetchone()
+                    cursor.execute(
+                        """
+                        SELECT count(DISTINCT latest.entity_instance_id),
+                               count(DISTINCT latest.entity_instance_id)
+                                 FILTER (WHERE latest.quality = %s),
+                               count(DISTINCT latest.entity_instance_id)
+                                 FILTER (
+                                   WHERE latest.observed_at <= latest.received_at
+                                     AND latest.received_at <= latest.calculated_at
+                                 )
+                        FROM t_l2_latest AS latest
+                        WHERE latest.entity_instance_id = ANY(%s)
+                        """,
+                        (int(TrunkQuality.GOOD), list(entity_ids)),
+                    )
+                    (
+                        latest_count,
+                        good_latest_count,
+                        ordered_timestamp_count,
+                    ) = cursor.fetchone()
+                else:
+                    l2_count = committed_count = source_count = outbox_count = 0
+                    latest_count = good_latest_count = ordered_timestamp_count = 0
+        return {
+            "required_entity_definitions": list(required),
+            "observed_entity_definitions": sorted({row[0] for row in bindings}),
+            "entity_instance_ids": [str(item) for item in entity_ids],
+            "conversion_revision_ids": sorted({str(row[2]) for row in bindings}),
+            "site_configuration_versions": sorted({int(row[3]) for row in bindings}),
+            "l0_observation_count": int(source_count),
+            "l2_observation_count": int(l2_count),
+            "l2_latest_count": int(latest_count),
+            "source_observation_count": int(source_count),
+            "committed_event_count": int(committed_count),
+            "outbox_event_count": int(outbox_count),
+            "good_latest_count": int(good_latest_count),
+            "ordered_timestamp_count": int(ordered_timestamp_count),
+        }
 
     def mark_expired_outputs_stale(self, now: datetime) -> int:
         try:

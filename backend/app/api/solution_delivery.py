@@ -49,6 +49,8 @@ from app.services.release_lock import current_release_lock_summary
 from app.services.gateway_readiness import NeuronGatewayReadiness
 from app.services.neuron_client import get_neuron_client
 from app.services.point_conversion_postgres import build_postgres_point_conversion
+from app.services.data_trunk_acceptance import DataTrunkAcceptance
+from app.services.data_trunk_postgres import build_postgres_data_trunk
 
 
 router = APIRouter()
@@ -68,6 +70,7 @@ _entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
 _alarm_definition_catalog = PostgresAlarmDefinitionCatalog()
 _alarm_runtime = AlarmRuntime(_alarm_definition_catalog, PostgresAlarmRepository())
 _point_conversions = build_postgres_point_conversion()
+_data_trunk_acceptance = DataTrunkAcceptance(build_postgres_data_trunk())
 _control_commands = ControlCommandRuntime(
     registry=_entity_instance_registry,
     policies=_entity_instance_repository,
@@ -92,6 +95,7 @@ _delivery = SolutionDelivery(
     gateway_readiness=NeuronGatewayReadiness(get_neuron_client),
     release_lock_reader=current_release_lock_summary,
     point_conversions=_point_conversions,
+    data_trunk_acceptance=_data_trunk_acceptance,
 )
 _ems_workbench = EmsWorkbench(
     _repository,

@@ -74,6 +74,7 @@ from app.services.point_conversion import (
     PointConversionError,
 )
 from app.services.gateway_readiness import GatewayReadiness
+from app.services.data_trunk_acceptance import DataTrunkAcceptance
 
 __all__ = [
     "DeliveryError",
@@ -146,6 +147,7 @@ class SolutionDelivery:
         gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
         point_conversions: PointConversion | None = None,
+        data_trunk_acceptance: DataTrunkAcceptance | None = None,
     ) -> None:
         self._repository = repository
         self._platform_version = platform_version
@@ -160,6 +162,7 @@ class SolutionDelivery:
         self._gateway_readiness = gateway_readiness
         self._release_lock_reader = release_lock_reader
         self._point_conversions = point_conversions
+        self._data_trunk_acceptance = data_trunk_acceptance
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
         """Attach the runtime after construction to avoid a delivery-policy cycle."""
@@ -1058,14 +1061,40 @@ class SolutionDelivery:
                     "alarm_lifecycle",
                     "policy_execution",
                     "release_lock",
+                    "data_trunk",
                 }
             ):
                 raise DeliveryError(
                     "ASSET_REFERENCE_INVALID",
                     "Unsupported acceptance definition",
                 )
-            timeout_seconds = _parse_timeout(definition.get("timeout"))
             item_started = time.monotonic()
+            if definition["kind"] == "data_trunk":
+                if self._data_trunk_acceptance is None:
+                    items.append(
+                        {
+                            "acceptance_id": acceptance_id,
+                            "status": "failed",
+                            "code": "DATA_TRUNK_ACCEPTANCE_UNAVAILABLE",
+                            "required": bool(definition.get("required", True)),
+                            "duration_ms": max(
+                                0,
+                                round((time.monotonic() - item_started) * 1000),
+                            ),
+                            "evidence": {"data_trunk": "unavailable"},
+                        }
+                    )
+                else:
+                    items.append(
+                        self._data_trunk_acceptance.evaluate(
+                            installation_id=installation.id,
+                            acceptance_id=acceptance_id,
+                            definition=definition,
+                            started_at=item_started,
+                        )
+                    )
+                continue
+            timeout_seconds = _parse_timeout(definition.get("timeout"))
             if definition["kind"] == "entity_readiness":
                 item = self._run_entity_readiness(
                     installation,

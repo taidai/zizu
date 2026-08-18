@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from threading import RLock
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from app.models.schemas import ParsedMessage
@@ -52,6 +52,13 @@ class DataTrunkRepository(Protocol):
         error_code: str,
     ) -> UUID: ...
 
+    def acceptance_evidence(
+        self,
+        *,
+        solution_installation_id: UUID,
+        entity_definition_ids: tuple[str, ...],
+    ) -> dict[str, Any]: ...
+
 
 class DataTrunk:
     """隐藏转换查找、时序推进、来源图、outbox 与事务顺序。"""
@@ -86,6 +93,18 @@ class DataTrunk:
             batch,
             attempts=attempts,
             error_code=error_code,
+        )
+
+    def acceptance_evidence(
+        self,
+        *,
+        solution_installation_id: UUID,
+        entity_definition_ids: Sequence[str],
+    ) -> dict[str, Any]:
+        """Read committed data-trunk evidence without changing runtime state."""
+        return self._repository.acceptance_evidence(
+            solution_installation_id=solution_installation_id,
+            entity_definition_ids=tuple(entity_definition_ids),
         )
 
 
@@ -193,6 +212,89 @@ class InMemoryDataTrunkRepository:
         with self._lock:
             self._failures.add(failure_id)
         return failure_id
+
+    def acceptance_evidence(
+        self,
+        *,
+        solution_installation_id: UUID,
+        entity_definition_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        del solution_installation_id
+        required = set(entity_definition_ids)
+        with self._lock:
+            installed = self._installed_provider()
+            observed = {
+                item.definition_id
+                for item in self._l2_history
+                if item.definition_id in required
+            }
+            revisions = {
+                str(item.revision_id)
+                for item in installed
+                if item.entity_definition_id in required
+            }
+            entity_ids = {
+                str(item.entity_instance_id)
+                for item in installed
+                if item.entity_definition_id in required
+            }
+            site_versions = sorted(
+                {
+                    item.site_configuration_version
+                    for item in self._l2_history
+                    if item.definition_id in required
+                }
+            )
+            source_ids = {
+                str(source_id)
+                for item in self._l2_history
+                if item.definition_id in required
+                for source_id in item.source_observation_ids
+            }
+            latest_by_entity = {}
+            for item in self._l2_history:
+                if item.definition_id not in required:
+                    continue
+                current = latest_by_entity.get(item.entity_instance_id)
+                if current is None or (
+                    item.observed_at,
+                    item.source_order_key,
+                    str(item.event_id),
+                ) > (
+                    current.observed_at,
+                    current.source_order_key,
+                    str(current.event_id),
+                ):
+                    latest_by_entity[item.entity_instance_id] = item
+            good_latest_count = sum(
+                item.quality == TrunkQuality.GOOD
+                for item in latest_by_entity.values()
+            )
+            ordered_timestamp_count = sum(
+                item.observed_at <= item.received_at <= item.calculated_at
+                for item in latest_by_entity.values()
+            )
+            return {
+                "required_entity_definitions": sorted(required),
+                "observed_entity_definitions": sorted(observed),
+                "entity_instance_ids": sorted(entity_ids),
+                "conversion_revision_ids": sorted(revisions),
+                "site_configuration_versions": site_versions,
+                "l0_observation_count": len(self._l0_history),
+                "l2_observation_count": sum(
+                    item.definition_id in required for item in self._l2_history
+                ),
+                "l2_latest_count": len(latest_by_entity),
+                "source_observation_count": len(source_ids),
+                "committed_event_count": sum(
+                    item.definition_id in required for item in self._l2_history
+                ),
+                "outbox_event_count": sum(
+                    item.definition_id in required for item in self._l2_history
+                ),
+                "good_latest_count": good_latest_count,
+                "ordered_timestamp_count": ordered_timestamp_count,
+            }
 
 
 def _raw_order_key(observation: RawObservation) -> str:

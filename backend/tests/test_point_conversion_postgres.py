@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
@@ -305,6 +306,119 @@ class PointConversionPostgresTest(unittest.TestCase):
                     {row[1] for row in rows},
                     set(outcome.entity_instance_ids) & {row[1] for row in rows},
                 )
+
+    def test_039_rejects_a_direct_tag_binding_for_a_converted_entity(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                DataTrunkMigrationPostgresTest._apply_039(cursor)
+
+        delivery, plan, _ = self._plan_reference_solution()
+        delivery.apply_install(
+            plan.id,
+            plan.digest,
+            "solution-contract-gate",
+            "user:engineer-install",
+        )
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            with psycopg2.connect(**self.connection_kwargs) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT entity.id, tag.id
+                        FROM t_entity_instances AS entity
+                        CROSS JOIN LATERAL (
+                          SELECT id FROM t_tags ORDER BY id LIMIT 1
+                        ) AS tag
+                        WHERE entity.source_kind = 'point_conversion'
+                        ORDER BY entity.id
+                        LIMIT 1
+                        """
+                    )
+                    entity_id, tag_id = cursor.fetchone()
+                    confirmation_id = UUID(
+                        "86000000-0000-0000-0009-000000000001"
+                    )
+                    binding_id = UUID("86000000-0000-0000-0009-000000000002")
+                    cursor.execute(
+                        """
+                        INSERT INTO t_entity_binding_confirmations
+                          (id, entity_instance_id, binding_id, actor, matcher_id,
+                           reason, plan_digest, selected_tag_id)
+                        VALUES (%s, %s, %s, 'user:engineer', 'forbidden-direct',
+                                'contract-negative', %s, %s)
+                        """,
+                        (confirmation_id, entity_id, binding_id, "f" * 64, tag_id),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_entity_instance_bindings
+                          (id, entity_instance_id, tag_id, matcher_id,
+                           confirmation_audit_id, active)
+                        VALUES (%s, %s, %s, 'forbidden-direct', %s, TRUE)
+                        """,
+                        (binding_id, entity_id, tag_id, confirmation_id),
+                    )
+
+    def test_production_gate_rejects_a_preexisting_zero_source_entity(self) -> None:
+        from app.services.data_trunk_postgres import (
+            verify_data_trunk_contract_gate,
+        )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                DataTrunkMigrationPostgresTest._apply_039(cursor)
+
+        delivery, plan, _ = self._plan_reference_solution()
+        delivery.apply_install(
+            plan.id,
+            plan.digest,
+            "startup-gate-solution-install",
+            "user:engineer-install",
+        )
+
+        @contextmanager
+        def connection_factory():
+            connection = psycopg2.connect(**self.connection_kwargs)
+            try:
+                yield connection
+            finally:
+                connection.close()
+
+        self.assertGreater(verify_data_trunk_contract_gate(connection_factory), 0)
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    ALTER TABLE t_conversion_output_bindings
+                    DISABLE TRIGGER trg_conversion_output_binding_single_source
+                    """
+                )
+                cursor.execute(
+                    """
+                    DELETE FROM t_conversion_output_bindings
+                    WHERE entity_instance_id = (
+                      SELECT id
+                      FROM t_entity_instances
+                      WHERE source_kind = 'point_conversion'
+                      ORDER BY id
+                      LIMIT 1
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE t_conversion_output_bindings
+                    ENABLE TRIGGER trg_conversion_output_binding_single_source
+                    """
+                )
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            verify_data_trunk_contract_gate(connection_factory)
 
     def test_output_binding_failure_rolls_back_entire_solution_install(self) -> None:
         from app.services.solution_delivery_contracts import DeliveryError

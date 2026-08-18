@@ -95,6 +95,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("[Main] {} (development mode)", message)
         if settings.deployment_mode == "production":
             verify_legacy_alarm_history_gate()
+            from app.services.data_trunk_postgres import (
+                verify_data_trunk_contract_gate,
+            )
+
+            verified_entities = verify_data_trunk_contract_gate()
+            logger.info(
+                "[Main] Data trunk contract verified for {} entities",
+                verified_entities,
+            )
         try:
             from app.services.identity import verify_identity_schema
 

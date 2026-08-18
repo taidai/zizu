@@ -77,6 +77,7 @@ assets:
   - {id: acceptance.grid-import-lifecycle, kind: acceptance, path: acceptance/grid-import-lifecycle.yaml}
   - {id: acceptance.policy-grid-import-cap, kind: acceptance, path: acceptance/policy-grid-import-cap.yaml}
   - {id: acceptance.release-lock, kind: acceptance, path: acceptance/release-lock.yaml}
+  - {id: acceptance.pcs-data-trunk, kind: acceptance, path: acceptance/pcs-data-trunk.yaml}
 acceptance:
   - acceptance.platform-liveness
   - acceptance.neuron-gateway
@@ -92,3 +93,4 @@ acceptance:
   - acceptance.grid-import-lifecycle
   - acceptance.policy-grid-import-cap
   - acceptance.release-lock
+  - acceptance.pcs-data-trunk

@@ -31,7 +31,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         imported = SolutionDelivery(
             InMemoryDeliveryRepository(), platform_version="0.4.77"
-        ).import_package(first)
+        ).import_package(first, "user:test-engineer")
         self.assertEqual(imported.package_id, "org.zizu.pv-storage-charging-ems")
         self.assertEqual(imported.version, "1.0.0")
         self.assertEqual(len(imported.manifest["_entity_slots"]), 5)
@@ -44,13 +44,35 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 "acceptance.pv", "acceptance.evse", "acceptance.meter", "acceptance.meter-history",
                 "acceptance.operation-audit", "acceptance.operator-configuration-denied", "acceptance.manual-pcs-setpoint",
                 "acceptance.grid-import-lifecycle", "acceptance.policy-grid-import-cap",
-                "acceptance.release-lock",
+                "acceptance.release-lock", "acceptance.pcs-data-trunk",
             },
         )
 
     async def test_reference_package_completes_the_public_ems_delivery_trial(self) -> None:
         """The published package, not a private fixture, drives every delivery seam."""
-        from app.services.entity_instance_registry import SourceDescriptor
+        from app.services.entity_instance_registry import (
+            InMemoryEntityInstanceRepository,
+            SourceDescriptor,
+        )
+        from app.services.entity_instance_runtime import (
+            InMemoryObservationCatalog,
+            SourceObservation,
+        )
+        from app.services.data_trunk import (
+            DataTrunk,
+            InMemoryDataTrunkRepository,
+            TagMetadata,
+        )
+        from app.services.point_conversion import (
+            InMemoryPointConversionCatalog,
+            InMemoryPointConversionRepository,
+            PointConversion,
+            PointConversionSource,
+        )
+        from app.services.solution_point_conversions import (
+            point_conversion_assets,
+            point_conversion_revision_id,
+        )
 
         release_lock = {"status": "missing"}
         sources = (
@@ -63,10 +85,90 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             SourceDescriptor(UUID("70000000-0000-0000-0000-000000000007"), "EVSE-01", "EVSE-01", "ActivePower", "FLOAT", "kW", "R", True),
             SourceDescriptor(UUID("70000000-0000-0000-0000-000000000008"), "METER-01", "METER-01", "ActivePower", "FLOAT", "kW", "R", True),
         )
+        pcs_node_id = UUID("70000000-0000-0000-0001-000000000001")
+        point_sources = (
+            PointConversionSource(UUID("70000000-0000-0000-0000-000000000009"), "l0", pcs_node_id, "ActivePowerRaw", "FLOAT", "W", True),
+            PointConversionSource(UUID("70000000-0000-0000-0000-000000000010"), "l0", pcs_node_id, "RunningState", "STRING", None, True),
+            PointConversionSource(UUID("70000000-0000-0000-0000-000000000011"), "l0", pcs_node_id, "FaultCodeText", "STRING", None, True),
+        )
+        parsed_package = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.77",
+        ).import_package(builder.build_archive(), "user:test-engineer")
+        assets = point_conversion_assets(parsed_package)
+        templates = {point_conversion_revision_id(asset): asset for asset in assets}
+        brand_a_revision = next(
+            revision_id
+            for revision_id, asset in templates.items()
+            if asset.asset_id == "pcs.brand-a"
+        )
+        entity_repository = InMemoryEntityInstanceRepository()
+        point_repository = InMemoryPointConversionRepository(
+            on_applied=lambda application: entity_repository.activate_point_conversion_outputs(
+                application.revision_id,
+                application.site_configuration_version,
+                application.output_entity_instance_ids,
+            )
+        )
+        point_catalog = InMemoryPointConversionCatalog(
+            templates=templates,
+            sources=point_sources,
+            node_source_keys={pcs_node_id: "PCS-01"},
+        )
+        point_conversions = PointConversion(point_repository, point_catalog)
+        observations = InMemoryObservationCatalog()
+
+        def publish_l2(committed) -> None:
+            for item in committed:
+                observations.publish(
+                    SourceObservation(
+                        tag_id=item.entity_instance_id,
+                        observed_at=item.observed_at,
+                        value=item.value.value,
+                        quality=int(item.quality),
+                        event_id=item.event_id,
+                        reason=item.reason,
+                        received_at=item.received_at,
+                        calculated_at=item.calculated_at,
+                        conversion_revision_id=item.conversion_revision_id,
+                        site_configuration_version=(
+                            item.site_configuration_version
+                        ),
+                        source_digest=item.source_digest,
+                    )
+                )
+
+        data_trunk = DataTrunk(
+            InMemoryDataTrunkRepository(
+                installed_provider=lambda: point_repository.installed_conversions(
+                    point_catalog
+                ),
+                site_configuration_version=(
+                    point_repository.site_configuration_version
+                ),
+                on_l2_committed=publish_l2,
+                clock=lambda: datetime.now(timezone.utc),
+            )
+        )
+        point_tag_catalog = {
+            item.stable_source_key: TagMetadata(
+                node_id=pcs_node_id,
+                tag_id=item.source_id,
+                stable_source_key=item.stable_source_key,
+                data_type=item.data_type,
+                unit=item.unit,
+            )
+            for item in point_sources
+        }
         app, dispatcher = ControlCommandPublicApiTest.build_app(
             high_risk=True,
             sources=sources,
             release_lock_reader=lambda: release_lock,
+            point_conversions=point_conversions,
+            entity_repository=entity_repository,
+            observations=observations,
+            data_trunk=data_trunk,
+            point_tag_catalog=point_tag_catalog,
         )
         async with AuthenticatedDeliveryClient(app) as client:
             imported = await client.post(
@@ -86,6 +188,12 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                         "meter.device_key": "METER-01",
                     },
                     "secret_references": {"gateway.credentials": "secret://reference/gateway"},
+                    "point_conversions": [
+                        {
+                            "node_id": str(pcs_node_id),
+                            "template_revision_id": str(brand_a_revision),
+                        }
+                    ],
                 },
             )
             self.assertEqual(201, plan.status_code, plan.text)
@@ -120,7 +228,18 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 return response.json()
 
             initial_at = datetime.now(timezone.utc)
-            await publish("PCS-01", {"ActivePower": 20.0, "ActivePowerSetpoint": 0.0, "ActivePowerReadback": 0.0, "BmsReady": True}, initial_at)
+            await publish(
+                "PCS-01",
+                {
+                    "ActivePowerRaw": 20_000.0,
+                    "RunningState": "2",
+                    "FaultCodeText": "E30",
+                    "ActivePowerSetpoint": 0.0,
+                    "ActivePowerReadback": 0.0,
+                    "BmsReady": True,
+                },
+                initial_at,
+            )
             await publish("BMS-01", {"StateOfCharge": 65.0}, initial_at)
             await publish("PV-01", {"ActivePower": 80.0}, initial_at)
             await publish("EVSE-01", {"ActivePower": 25.0}, initial_at)

@@ -697,20 +697,15 @@ def _validate_acceptance_definition(
             "required",
             "deviceCategory",
             "entityDefinitions",
-            "templateAssets",
             "checks",
         }
         allowed_checks = {
-            "l0_history_latest",
-            "numeric_enum_fault_conversion",
-            "quality_time_semantics",
-            "atomic_rollback_and_idempotency",
-            "committed_websocket",
-            "restart_persistence",
-            "brand_replacement_identity",
+            "l0_source_lineage_and_l2_latest",
+            "declared_outputs_observed",
+            "quality_and_timestamps",
+            "committed_outbox",
         }
         entities = definition.get("entityDefinitions")
-        templates = definition.get("templateAssets")
         checks = definition.get("checks")
         if (
             set(definition) != allowed_fields
@@ -722,10 +717,6 @@ def _validate_acceptance_definition(
             or not entities
             or len(entities) != len(set(entities))
             or not all(isinstance(item, str) and item for item in entities)
-            or not isinstance(templates, list)
-            or len(templates) < 2
-            or len(templates) != len(set(templates))
-            or not all(isinstance(item, str) and item for item in templates)
             or not isinstance(checks, list)
             or set(checks) != allowed_checks
             or len(checks) != len(allowed_checks)
@@ -857,6 +848,7 @@ def _validate_acceptance_definition(
             "ASSET_REFERENCE_INVALID",
             "Unsupported acceptance definition",
         )
+    _validate_timeout(definition.get("timeout"))
 
 
 def validate_data_trunk_acceptances(
@@ -886,13 +878,6 @@ def validate_data_trunk_acceptances(
                 raise DeliveryError(
                     "ASSET_REFERENCE_INVALID",
                     "Data trunk acceptance entity reference is invalid",
-                )
-        for template_id in definition["templateAssets"]:
-            target = declarations.get(template_id)
-            if target is None or target.get("kind") != "point_conversion_template":
-                raise DeliveryError(
-                    "ASSET_REFERENCE_INVALID",
-                    "Data trunk acceptance template reference is invalid",
                 )
 
 

@@ -36,6 +36,7 @@ MIGRATIONS_THROUGH_037 = tuple(
 )
 MIGRATION_024 = MIGRATIONS_ROOT / "migration_024_entity_instances.sql"
 MIGRATION_038 = MIGRATIONS_ROOT / "migration_038_pcs_data_trunk.sql"
+MIGRATION_039 = MIGRATIONS_ROOT / "migration_039_pcs_data_trunk_contract_gate.sql"
 
 
 @unittest.skipUnless(
@@ -71,6 +72,43 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     @staticmethod
     def _apply_038(cursor) -> None:
         cursor.execute(MIGRATION_038.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_039(cursor) -> None:
+        cursor.execute(MIGRATION_039.read_text(encoding="utf-8"))
+
+    def test_039_upgrades_038_and_replays_contract_triggers(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_037(cursor)
+                self._apply_038(cursor)
+                self._apply_039(cursor)
+                self._apply_039(cursor)
+
+                cursor.execute(
+                    """
+                    SELECT tgname
+                    FROM pg_trigger
+                    WHERE NOT tgisinternal
+                      AND tgname IN (
+                        'trg_entity_instance_binding_single_source',
+                        'trg_conversion_output_binding_single_source',
+                        'trg_entity_instance_kind_single_source',
+                        'trg_installed_conversion_single_source'
+                      )
+                    ORDER BY tgname
+                    """
+                )
+                self.assertEqual(
+                    [row[0] for row in cursor.fetchall()],
+                    [
+                        "trg_conversion_output_binding_single_source",
+                        "trg_entity_instance_binding_single_source",
+                        "trg_entity_instance_kind_single_source",
+                        "trg_installed_conversion_single_source",
+                    ],
+                )
 
     def test_038_upgrades_037_and_replays(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

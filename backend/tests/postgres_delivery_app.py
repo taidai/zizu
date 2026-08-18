@@ -14,10 +14,14 @@ from app.api.control_commands import router as control_commands_router
 from app.api.neuron import router as neuron_router
 from app.api.rpc import router as rpc_router
 from app.api.rules import router as rules_router
+from app.api.point_conversions import router as point_conversions_router
+from app.api.websocket import router as websocket_router
 from app.core.config import settings
 from app.services.telemetry_store import init_db_pool
 from app.services.data_trunk_postgres import build_postgres_data_trunk
 from app.services.pipeline import DataPipeline
+from app.services.data_trunk_outbox import OutboxDispatcher, PostgresOutboxRepository
+from app.api.websocket import get_entity_observation_broadcaster
 
 
 init_db_pool(min_conn=1, max_conn=4)
@@ -33,6 +37,8 @@ app.include_router(control_commands_router, prefix="/api/v1")
 app.include_router(neuron_router, prefix="/api/v1")
 app.include_router(rpc_router, prefix="/api/v1")
 app.include_router(rules_router, prefix="/api/v1")
+app.include_router(point_conversions_router, prefix="/api/v1")
+app.include_router(websocket_router, prefix="/api/v1")
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,10 @@ class _SimulatedMqttMessage:
 
 
 _protocol_pipeline = DataPipeline(data_trunk=build_postgres_data_trunk())
+_protocol_outbox = OutboxDispatcher(
+    PostgresOutboxRepository(),
+    get_entity_observation_broadcaster(),
+)
 
 
 @app.post("/protocol-simulator/neuron")
@@ -58,6 +68,7 @@ async def publish_neuron_observation(payload: dict) -> dict:
         )
     )
     await _protocol_pipeline.flush_now()
+    await _protocol_outbox.run_once()
     return {
         "messages_received": (
             _protocol_pipeline.metrics.messages_received - received_before

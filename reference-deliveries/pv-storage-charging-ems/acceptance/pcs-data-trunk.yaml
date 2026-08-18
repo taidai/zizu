@@ -1,0 +1,14 @@
+schemaVersion: zizu.acceptance/v1alpha1
+id: acceptance.pcs-data-trunk
+kind: data_trunk
+required: true
+deviceCategory: PCS
+entityDefinitions:
+  - pcs.active_power
+  - pcs.operating_state
+  - pcs.fault_codes
+checks:
+  - l0_source_lineage_and_l2_latest
+  - declared_outputs_observed
+  - quality_and_timestamps
+  - committed_outbox
