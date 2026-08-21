@@ -1,5 +1,12 @@
 ---
 
+## Session 2026-08-21 — v0.4.81-rc.1 现场部署等待执行权限
+
+- 维护者已明确确认 1号机进入部署窗口，目标仍为固定 linux/arm64 摘要 `ghcr.io/taidai/zizu@sha256:8adae8e145fe8214519f7001c051394e7cbae9b18cbac6605ad0b684e271d4b3`，预期 Schema 039；先备份/预检，再只替换 backend，保留 host network 与 `/dev/mqueue` tmpfs，不执行设备控制。
+- 本次 Codex 会话被 managed sandbox 禁止出站 SSH（PuTTY 返回本地 `Network error: Permission denied`），同时禁止读取 `C:\Users\chent\.ssh\zizu_1_key` 与 `known_hosts`；当前工具集中没有 SSH/远程执行连接器，Computer Use 安全规则也禁止自动化终端与认证对话。因此没有建立远程会话、没有拉镜像、没有备份/迁移/重启，1号机保持原状态。
+- 下一次继续前须给任务开放到 `e606.hlszh.com:13122` 的出站网络，并允许只读访问 `C:\Users\chent\.ssh\zizu_1_key` 和 `C:\Users\chent\.ssh\known_hosts`；恢复后从固定主机密钥只读预检开始，不得跳过备份、Schema 037 基线、镜像架构/版本或回滚门禁。
+
+
 ## Session 2026-08-19 — v0.4.81-rc.1 本地候选收口
 
 - PCS 数据主干完成提交 `3641443 feat(data): certify PCS data trunk`：公开机器验收只报告已提交、可观测的 L0 来源谱系、L2 latest、质量/时间戳和 outbox 事实，不把品牌替换、WebSocket、重启或幂等测试冒充运行时报告证据。
