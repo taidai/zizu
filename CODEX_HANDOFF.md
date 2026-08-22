@@ -1,5 +1,31 @@
 ---
 
+## Session 2026-08-22 — v0.4.81-rc.1 已部署到 1号机
+
+- 已在固定 SSH 主机密钥校验下完成 1号机 backend-only 维护切换；目标为
+  `ghcr.io/taidai/zizu@sha256:8adae8e145fe8214519f7001c051394e7cbae9b18cbac6605ad0b684e271d4b3`
+  （linux/arm64，OCI version `0.4.81`，本地 image ID
+  `sha256:82dc807351854a5918e00d72ee739495c142ff83bcb2c06a2f271629b0169b899`）。新容器
+  `zizu-release-test-backend-1` healthy、restart count 0，保持 `network_mode: host`、
+  `/dev/mqueue` tmpfs 与 `unless-stopped`；未启动 Caddy、未申请 TLS、未重建 PostgreSQL/NanoMQ/Neuron。
+- 切换前 Schema 为 037；migration 038、039 均成功应用且 `errors=0`，切换后 Schema 精确为 039。
+  公网 `GET /api/v1/health/live` 返回 `alive / 0.4.81`，首页返回 HTTP 200、标题 `ZiZu`，入口 JS、
+  vendor/Monaco/GoRules 及 CSS 哈希资源全部 HTTP 200；TSDB、NanoMQ 均保持 healthy。
+- 切换前创建并验证 PostgreSQL custom-format 备份
+  `/opt/zizu-backups/zizu_iot-before-0.4.81-rc.1-20260822T044629Z.dump`，大小 1,927,043 bytes，
+  SHA-256 `f77b0c9b2541837bf56a884e14f0cfcf6c567527b199cb2fa974ade3db9fdb96`；配套 `.sha256`
+  文件保留在同目录，且 `pg_restore -l` 已通过运行中的 TSDB 容器验证。
+- 旧 `zizu`（image ID
+  `sha256:503200817eacd2627d31404b51b229eeef77519171ec6a2809e66e907db7c9f6`）已停止并设为
+  `restart=no`，作为人工回滚容器保留，避免重启后抢占 9000 端口。新发布目录为
+  `/opt/zizu-release-test-0.4.81-rc.1`，继续复用权限受限的既有 runtime env，不复制 Secret 到仓库或记录。
+- 本轮只读数据主干验收时：`t_l0_observation_dedup=11200`、`t_entity_instances=1`、
+  `t_installed_point_conversions=0`、L2 history/latest/source/outbox 均为 0、ingestion failures 为 0。
+  这证明 L0 持续入库及 038/039 骨架已落地，但现场尚未安装 PCS 点位转换，不能声称 L1→L2 业务链已激活。
+- 运行配置仍记录 `ALLOW_INSECURE_DEV_SECRETS` 的 development 警告；当前只能按已确认的 HTTP
+  联网测试/维护部署对待，不可宣称符合正式生产安全基线。本轮没有执行策略验证、控制命令或任何设备写入；
+  受控低功率验收及正式 v0.4.81 晋级仍需另行确认。
+
 ## Session 2026-08-21 — v0.4.81-rc.1 现场部署等待执行权限
 
 - 维护者已明确确认 1号机进入部署窗口，目标仍为固定 linux/arm64 摘要 `ghcr.io/taidai/zizu@sha256:8adae8e145fe8214519f7001c051394e7cbae9b18cbac6605ad0b684e271d4b3`，预期 Schema 039；先备份/预检，再只替换 backend，保留 host network 与 `/dev/mqueue` tmpfs，不执行设备控制。
