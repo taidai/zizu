@@ -18,7 +18,7 @@ from app.services.data_trunk_contracts import (
     EnumTransform,
     FaultCodeTransform,
     InputReference,
-    InstalledPointConversion,
+    InstalledPointProcessing,
     L2Observation,
     RawObservation,
     TrunkQuality,
@@ -51,7 +51,7 @@ def verify_data_trunk_contract_gate(
 
 @dataclass(frozen=True)
 class _ConversionSnapshot:
-    installed: tuple[InstalledPointConversion, ...]
+    installed: tuple[InstalledPointProcessing, ...]
     site_configuration_version: int
 
 
@@ -204,10 +204,10 @@ class PostgresDataTrunkRepository:
                                     binding.entity_instance_id,
                                     installed.revision_id,
                                     installed.site_configuration_version
-                    FROM t_installed_point_conversions AS installed
-                    JOIN t_conversion_output_bindings AS binding
-                      ON binding.installed_conversion_id = installed.id
-                    JOIN t_point_conversion_outputs AS output
+                    FROM t_installed_point_processings AS installed
+                    JOIN t_point_processing_output_bindings AS binding
+                      ON binding.installed_processing_id = installed.id
+                    JOIN t_point_processing_outputs AS output
                       ON output.id = binding.output_id
                     WHERE installed.solution_installation_id = %s
                       AND output.entity_definition_id = ANY(%s)
@@ -270,7 +270,7 @@ class PostgresDataTrunkRepository:
             "required_entity_definitions": list(required),
             "observed_entity_definitions": sorted({row[0] for row in bindings}),
             "entity_instance_ids": [str(item) for item in entity_ids],
-            "conversion_revision_ids": sorted({str(row[2]) for row in bindings}),
+            "processing_revision_ids": sorted({str(row[2]) for row in bindings}),
             "site_configuration_versions": sorted({int(row[3]) for row in bindings}),
             "l0_observation_count": int(source_count),
             "l2_observation_count": int(l2_count),
@@ -329,7 +329,7 @@ class PostgresDataTrunkRepository:
               latest.event_id,
               latest.observed_at,
               latest.source_digest,
-              latest.conversion_revision_id,
+              latest.processing_revision_id,
               latest.site_configuration_version,
               output.entity_definition_id,
               output.data_type,
@@ -338,12 +338,12 @@ class PostgresDataTrunkRepository:
                 + output.freshness_seconds * INTERVAL '1 second'
                 AS freshness_deadline
             FROM t_l2_latest AS latest
-            JOIN t_conversion_output_bindings AS output_binding
+            JOIN t_point_processing_output_bindings AS output_binding
               ON output_binding.entity_instance_id = latest.entity_instance_id
-            JOIN t_installed_point_conversions AS installed
-              ON installed.id = output_binding.installed_conversion_id
+            JOIN t_installed_point_processings AS installed
+              ON installed.id = output_binding.installed_processing_id
              AND installed.current = TRUE
-            JOIN t_point_conversion_outputs AS output
+            JOIN t_point_processing_outputs AS output
               ON output.id = output_binding.output_id
             WHERE latest.quality <> %s
               AND latest.observed_at
@@ -391,7 +391,7 @@ class PostgresDataTrunkRepository:
                 observed_at=deadline,
                 received_at=now,
                 calculated_at=now,
-                conversion_revision_id=UUID(str(revision_id)),
+                processing_revision_id=UUID(str(revision_id)),
                 site_configuration_version=site_configuration_version,
                 source_observation_ids=(),
                 source_digest=freshness_digest,
@@ -585,11 +585,11 @@ class PostgresDataTrunkRepository:
               numeric.maximum,
               enum_rule.output_id IS NOT NULL,
               fault_rule.delimiter
-            FROM t_installed_point_conversions AS installed
-            JOIN t_point_conversion_outputs AS output
+            FROM t_installed_point_processings AS installed
+            JOIN t_point_processing_outputs AS output
               ON output.revision_id = installed.revision_id
-            JOIN t_conversion_output_bindings AS output_binding
-              ON output_binding.installed_conversion_id = installed.id
+            JOIN t_point_processing_output_bindings AS output_binding
+              ON output_binding.installed_processing_id = installed.id
              AND output_binding.output_id = output.id
             LEFT JOIN t_numeric_transform_rules AS numeric
               ON numeric.output_id = output.id
@@ -597,14 +597,14 @@ class PostgresDataTrunkRepository:
               ON enum_rule.output_id = output.id
             LEFT JOIN t_fault_code_transform_rules AS fault_rule
               ON fault_rule.output_id = output.id
-            JOIN t_point_conversion_inputs AS input
+            JOIN t_point_processing_inputs AS input
               ON input.id = COALESCE(
                 numeric.input_id,
                 enum_rule.input_id,
                 fault_rule.input_id
               )
-            JOIN t_conversion_input_bindings AS input_binding
-              ON input_binding.installed_conversion_id = installed.id
+            JOIN t_point_processing_input_bindings AS input_binding
+              ON input_binding.installed_processing_id = installed.id
              AND input_binding.input_id = input.id
              AND input_binding.source_kind = 'l0'
             WHERE installed.current = TRUE
@@ -618,7 +618,7 @@ class PostgresDataTrunkRepository:
             """,
             ([str(tag_id) for tag_id in tag_ids],),
         )
-        installed_items: list[InstalledPointConversion] = []
+        installed_items: list[InstalledPointProcessing] = []
         rows = cursor.fetchall()
         for row in rows:
             (
@@ -643,10 +643,10 @@ class PostgresDataTrunkRepository:
             if scale is not None:
                 if output_type != ValueKind.FLOAT.value:
                     raise DataTrunkError(
-                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
                         "numeric transform output must be FLOAT",
                     )
-                item = InstalledPointConversion.numeric(
+                item = InstalledPointProcessing.numeric(
                     installation_id=UUID(str(installation_id)),
                     revision_id=UUID(str(revision_id)),
                     input_tag_id=UUID(str(input_tag_id)),
@@ -662,7 +662,7 @@ class PostgresDataTrunkRepository:
             elif has_enum_rule:
                 if output_type != ValueKind.ENUM.value:
                     raise DataTrunkError(
-                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
                         "enum transform output must be ENUM",
                     )
                 cursor.execute(
@@ -674,7 +674,7 @@ class PostgresDataTrunkRepository:
                     """,
                     (str(output_id),),
                 )
-                item = InstalledPointConversion(
+                item = InstalledPointProcessing(
                     installation_id=UUID(str(installation_id)),
                     revision_id=UUID(str(revision_id)),
                     entity_instance_id=UUID(str(entity_instance_id)),
@@ -693,7 +693,7 @@ class PostgresDataTrunkRepository:
                     or fault_delimiter is None
                 ):
                     raise DataTrunkError(
-                        "POINT_CONVERSION_CONFIGURATION_INVALID",
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
                         "fault-code transform output must be CODE_SET",
                     )
                 cursor.execute(
@@ -705,7 +705,7 @@ class PostgresDataTrunkRepository:
                     """,
                     (str(output_id),),
                 )
-                item = InstalledPointConversion(
+                item = InstalledPointProcessing(
                     installation_id=UUID(str(installation_id)),
                     revision_id=UUID(str(revision_id)),
                     entity_instance_id=UUID(str(entity_instance_id)),
@@ -733,7 +733,7 @@ class PostgresDataTrunkRepository:
         site_row = cursor.fetchone()
         if site_row is None:
             raise DataTrunkError(
-                "POINT_CONVERSION_CONFIGURATION_INVALID",
+                "POINT_PROCESSING_CONFIGURATION_INVALID",
                 "site configuration state is unavailable",
             )
         return _ConversionSnapshot(
@@ -788,7 +788,7 @@ class PostgresDataTrunkRepository:
                   (observed_at, event_id, entity_instance_id,
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
-                   conversion_revision_id, site_configuration_version,
+                   processing_revision_id, site_configuration_version,
                    source_digest, source_order_key)
                 VALUES (
                   %s, %s, %s,
@@ -808,7 +808,7 @@ class PostgresDataTrunkRepository:
                     *values,
                     int(observation.quality),
                     observation.reason,
-                    str(observation.conversion_revision_id),
+                    str(observation.processing_revision_id),
                     observation.site_configuration_version,
                     observation.source_digest,
                     observation.source_order_key,
@@ -829,7 +829,7 @@ class PostgresDataTrunkRepository:
                   (entity_instance_id, event_id, observed_at,
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
-                   conversion_revision_id, site_configuration_version,
+                   processing_revision_id, site_configuration_version,
                    source_digest, source_order_key)
                 VALUES (
                   %s, %s, %s,
@@ -850,7 +850,7 @@ class PostgresDataTrunkRepository:
                   value_codes = EXCLUDED.value_codes,
                   quality = EXCLUDED.quality,
                   reason = EXCLUDED.reason,
-                  conversion_revision_id = EXCLUDED.conversion_revision_id,
+                  processing_revision_id = EXCLUDED.processing_revision_id,
                   site_configuration_version = EXCLUDED.site_configuration_version,
                   source_digest = EXCLUDED.source_digest,
                   source_order_key = EXCLUDED.source_order_key
@@ -871,7 +871,7 @@ class PostgresDataTrunkRepository:
                     *values,
                     int(observation.quality),
                     observation.reason,
-                    str(observation.conversion_revision_id),
+                    str(observation.processing_revision_id),
                     observation.site_configuration_version,
                     observation.source_digest,
                     observation.source_order_key,
@@ -898,7 +898,7 @@ class PostgresDataTrunkRepository:
             sources = cursor.fetchall()
             if len(sources) != len(observation.source_observation_ids):
                 raise DataTrunkError(
-                    "POINT_CONVERSION_SOURCE_MISSING",
+                    "POINT_PROCESSING_SOURCE_MISSING",
                     "L2 source observation is unavailable",
                 )
             for source_id, source_digest in sources:
@@ -936,8 +936,8 @@ class PostgresDataTrunkRepository:
                 "observed_at": observation.observed_at.isoformat(),
                 "received_at": observation.received_at.isoformat(),
                 "calculated_at": observation.calculated_at.isoformat(),
-                "conversion_revision_id": str(
-                    observation.conversion_revision_id
+                "processing_revision_id": str(
+                    observation.processing_revision_id
                 ),
                 "site_configuration_version": (
                     observation.site_configuration_version
@@ -1017,7 +1017,7 @@ def _l2_columns(
     if value.kind is ValueKind.CODE_SET:
         return None, None, None, None, list(value.value)
     raise DataTrunkError(
-        "POINT_CONVERSION_VALUE_INVALID",
+        "POINT_PROCESSING_VALUE_INVALID",
         "Unsupported L2 typed value",
     )
 

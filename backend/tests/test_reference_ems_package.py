@@ -63,15 +63,15 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             InMemoryDataTrunkRepository,
             TagMetadata,
         )
-        from app.services.point_conversion import (
-            InMemoryPointConversionCatalog,
-            InMemoryPointConversionRepository,
-            PointConversion,
-            PointConversionSource,
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingDelivery,
+            PointProcessingSource,
         )
-        from app.services.solution_point_conversions import (
-            point_conversion_assets,
-            point_conversion_revision_id,
+        from app.services.solution_point_processings import (
+            point_processing_assets,
+            point_processing_revision_id,
         )
 
         release_lock = {"status": "missing"}
@@ -87,35 +87,35 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
         )
         pcs_node_id = UUID("70000000-0000-0000-0001-000000000001")
         point_sources = (
-            PointConversionSource(UUID("70000000-0000-0000-0000-000000000009"), "l0", pcs_node_id, "ActivePowerRaw", "FLOAT", "W", True),
-            PointConversionSource(UUID("70000000-0000-0000-0000-000000000010"), "l0", pcs_node_id, "RunningState", "STRING", None, True),
-            PointConversionSource(UUID("70000000-0000-0000-0000-000000000011"), "l0", pcs_node_id, "FaultCodeText", "STRING", None, True),
+            PointProcessingSource(UUID("70000000-0000-0000-0000-000000000009"), "l0", pcs_node_id, "ActivePowerRaw", "FLOAT", "W", True),
+            PointProcessingSource(UUID("70000000-0000-0000-0000-000000000010"), "l0", pcs_node_id, "RunningState", "STRING", None, True),
+            PointProcessingSource(UUID("70000000-0000-0000-0000-000000000011"), "l0", pcs_node_id, "FaultCodeText", "STRING", None, True),
         )
         parsed_package = SolutionDelivery(
             InMemoryDeliveryRepository(),
             platform_version="0.4.77",
         ).import_package(builder.build_archive(), "user:test-engineer")
-        assets = point_conversion_assets(parsed_package)
-        templates = {point_conversion_revision_id(asset): asset for asset in assets}
+        assets = point_processing_assets(parsed_package)
+        templates = {point_processing_revision_id(asset): asset for asset in assets}
         brand_a_revision = next(
             revision_id
             for revision_id, asset in templates.items()
             if asset.asset_id == "pcs.brand-a"
         )
         entity_repository = InMemoryEntityInstanceRepository()
-        point_repository = InMemoryPointConversionRepository(
-            on_applied=lambda application: entity_repository.activate_point_conversion_outputs(
+        point_repository = InMemoryPointProcessingRepository(
+            on_applied=lambda application: entity_repository.activate_point_processing_outputs(
                 application.revision_id,
                 application.site_configuration_version,
                 application.output_entity_instance_ids,
             )
         )
-        point_catalog = InMemoryPointConversionCatalog(
+        point_catalog = InMemoryPointProcessingCatalog(
             templates=templates,
             sources=point_sources,
             node_source_keys={pcs_node_id: "PCS-01"},
         )
-        point_conversions = PointConversion(point_repository, point_catalog)
+        point_processings = PointProcessingDelivery(point_repository, point_catalog)
         observations = InMemoryObservationCatalog()
 
         def publish_l2(committed) -> None:
@@ -130,7 +130,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                         reason=item.reason,
                         received_at=item.received_at,
                         calculated_at=item.calculated_at,
-                        conversion_revision_id=item.conversion_revision_id,
+                        processing_revision_id=item.processing_revision_id,
                         site_configuration_version=(
                             item.site_configuration_version
                         ),
@@ -140,7 +140,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
 
         data_trunk = DataTrunk(
             InMemoryDataTrunkRepository(
-                installed_provider=lambda: point_repository.installed_conversions(
+                installed_provider=lambda: point_repository.installed_processings(
                     point_catalog
                 ),
                 site_configuration_version=(
@@ -164,7 +164,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             high_risk=True,
             sources=sources,
             release_lock_reader=lambda: release_lock,
-            point_conversions=point_conversions,
+            point_processings=point_processings,
             entity_repository=entity_repository,
             observations=observations,
             data_trunk=data_trunk,
@@ -188,7 +188,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                         "meter.device_key": "METER-01",
                     },
                     "secret_references": {"gateway.credentials": "secret://reference/gateway"},
-                    "point_conversions": [
+                    "point_processings": [
                         {
                             "node_id": str(pcs_node_id),
                             "template_revision_id": str(brand_a_revision),

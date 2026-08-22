@@ -1024,9 +1024,9 @@ export interface AlarmCondition {
 // ── L0 -> L1 -> L2 Data Trunk ──
 
 export type DataTrunkQuality = 0 | 1 | 64 | 192
-export type PointConversionPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
+export type PointProcessingPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
 
-export interface PointConversionTemplateInput {
+export interface PointProcessingTemplateInput {
   input_id: string
   source_kind: 'l0' | 'l2'
   source_key: string
@@ -1036,7 +1036,7 @@ export interface PointConversionTemplateInput {
   required: boolean
 }
 
-export interface PointConversionTemplate {
+export interface PointProcessingTemplate {
   revision_id: string
   asset_id: string
   display_name: string
@@ -1046,7 +1046,7 @@ export interface PointConversionTemplate {
   revision: number
   status: 'active' | 'retired'
   content_digest: string
-  inputs: PointConversionTemplateInput[]
+  inputs: PointProcessingTemplateInput[]
   outputs: Array<{
     output_key: string
     entity_definition_id: string
@@ -1075,10 +1075,10 @@ export interface NodeDataTrunk {
   }>
 }
 
-export interface PointConversionPlanItem {
+export interface PointProcessingPlanItem {
   item_key: string
   kind: 'input_binding' | 'output_binding'
-  action: PointConversionPlanAction
+  action: PointProcessingPlanAction
   input_id?: string
   candidate_source_ids?: string[]
   selected_source_id?: string | null
@@ -1087,18 +1087,18 @@ export interface PointConversionPlanItem {
   entity_definition_id?: string
 }
 
-export interface PointConversionPlan {
+export interface PointProcessingPlan {
   id: string
   node_id: string
   template_revision_id: string
   base_site_configuration_version: number
   status: 'ready' | 'blocked' | 'applied'
-  items: PointConversionPlanItem[]
+  items: PointProcessingPlanItem[]
   blockers: Array<{ code: string; input_id: string }>
   digest: string
 }
 
-export interface PointConversionApplication {
+export interface PointProcessingApplication {
   id: string
   plan_id: string
   installed_conversion_id: string
@@ -1166,10 +1166,10 @@ async function dataTrunkError(response: Response, fallback: string): Promise<Dat
   )
 }
 
-export async function fetchPointConversionTemplates(deviceCategory: string): Promise<PointConversionTemplate[]> {
-  const response = await apiFetch(`${API_BASE}/point-conversion-templates?device_category=${encodeURIComponent(deviceCategory)}`)
-  if (!response.ok) throw await dataTrunkError(response, `读取点位转换模板失败：${response.status}`)
-  return (await response.json() as { items: PointConversionTemplate[] }).items
+export async function fetchPointProcessingTemplates(deviceCategory: string): Promise<PointProcessingTemplate[]> {
+  const response = await apiFetch(`${API_BASE}/point-processing-templates?device_category=${encodeURIComponent(deviceCategory)}`)
+  if (!response.ok) throw await dataTrunkError(response, `读取点位加工模板失败：${response.status}`)
+  return (await response.json() as { items: PointProcessingTemplate[] }).items
 }
 
 export async function fetchNodeDataTrunk(nodeId: string): Promise<NodeDataTrunk> {
@@ -1178,36 +1178,36 @@ export async function fetchNodeDataTrunk(nodeId: string): Promise<NodeDataTrunk>
   return response.json()
 }
 
-export async function createPointConversionPlan(
+export async function createPointProcessingPlan(
   nodeId: string,
   body: { template_revision_id: string; input_selections: Record<string, string> },
-): Promise<PointConversionPlan> {
-  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-conversion-plans`, {
+): Promise<PointProcessingPlan> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-plans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!response.ok) throw await dataTrunkError(response, `生成点位转换计划失败：${response.status}`)
+  if (!response.ok) throw await dataTrunkError(response, `生成点位加工计划失败：${response.status}`)
   return response.json()
 }
 
-export async function fetchPointConversionPlan(planId: string): Promise<PointConversionPlan> {
-  const response = await apiFetch(`${API_BASE}/point-conversion-plans/${encodeURIComponent(planId)}`)
-  if (!response.ok) throw await dataTrunkError(response, `读取点位转换计划失败：${response.status}`)
+export async function fetchPointProcessingPlan(planId: string): Promise<PointProcessingPlan> {
+  const response = await apiFetch(`${API_BASE}/point-processing-plans/${encodeURIComponent(planId)}`)
+  if (!response.ok) throw await dataTrunkError(response, `读取点位加工计划失败：${response.status}`)
   return response.json()
 }
 
-export async function applyPointConversionPlan(
+export async function applyPointProcessingPlan(
   planId: string,
   planDigest: string,
   idempotencyKey: string,
-): Promise<PointConversionApplication> {
-  const response = await apiFetch(`${API_BASE}/point-conversion-plans/${encodeURIComponent(planId)}/apply`, {
+): Promise<PointProcessingApplication> {
+  const response = await apiFetch(`${API_BASE}/point-processing-plans/${encodeURIComponent(planId)}/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify({ plan_digest: planDigest }),
   })
-  if (!response.ok) throw await dataTrunkError(response, `应用点位转换计划失败：${response.status}`)
+  if (!response.ok) throw await dataTrunkError(response, `应用点位加工计划失败：${response.status}`)
   try { return await response.json() }
   catch (cause) { throw new DataTrunkResultUnknownError(cause) }
 }

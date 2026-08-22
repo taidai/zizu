@@ -13,7 +13,7 @@ from app.services.data_trunk_contracts import (
     EnumTransform,
     FaultCodeTransform,
     InputReference,
-    InstalledPointConversion,
+    InstalledPointProcessing,
     L2Observation,
     NumericTransform,
     RawObservation,
@@ -23,9 +23,9 @@ from app.services.data_trunk_contracts import (
 )
 
 
-def evaluate_conversion(
+def evaluate_processing(
     *,
-    installed: tuple[InstalledPointConversion, ...],
+    installed: tuple[InstalledPointProcessing, ...],
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
     site_configuration_version: int,
     calculated_at: datetime,
@@ -44,7 +44,7 @@ def evaluate_conversion(
 
 
 def _evaluate_output(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
     site_configuration_version: int,
     calculated_at: datetime,
@@ -65,13 +65,13 @@ def _evaluate_output(
         )
     if not isinstance(installed.transform, NumericTransform):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "unsupported point conversion transform",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "unsupported point processing transform",
         )
     if installed.output_kind is not ValueKind.FLOAT:
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "numeric conversion output must be FLOAT",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "numeric processing output must be FLOAT",
         )
 
     source = current_inputs.get(installed.transform.input)
@@ -84,7 +84,7 @@ def _evaluate_output(
         )
     if not isinstance(source, RawObservation):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
             "numeric L2 inputs are not supported by this revision",
         )
 
@@ -113,7 +113,7 @@ def _evaluate_output(
         for value in (installed.transform.scale, installed.transform.offset)
     ):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
             "numeric scale and offset must be finite",
         )
     value = (raw_value * installed.transform.scale) + installed.transform.offset
@@ -160,21 +160,21 @@ def _evaluate_output(
 
 
 def _evaluate_fault_code_output(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
     site_configuration_version: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if installed.output_kind is not ValueKind.CODE_SET:
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "fault-code conversion output must be CODE_SET",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "fault-code processing output must be CODE_SET",
         )
     transform = installed.transform
     if not isinstance(transform, FaultCodeTransform):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "fault-code conversion requires a fault-code transform",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "fault-code processing requires a fault-code transform",
         )
     source = current_inputs.get(transform.input)
     if source is None:
@@ -186,8 +186,8 @@ def _evaluate_fault_code_output(
         )
     if not isinstance(source, RawObservation):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "fault-code conversion requires an L0 input",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "fault-code processing requires an L0 input",
         )
     if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM} or not isinstance(
         source.value.value,
@@ -243,7 +243,7 @@ def _evaluate_fault_code_output(
 
 
 def _fault_code_observation(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     source: RawObservation,
     site_configuration_version: int,
     calculated_at: datetime,
@@ -268,21 +268,21 @@ def _fault_code_observation(
 
 
 def _evaluate_enum_output(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
     site_configuration_version: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if installed.output_kind is not ValueKind.ENUM:
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "enum conversion output must be ENUM",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "enum processing output must be ENUM",
         )
     transform = installed.transform
     if not isinstance(transform, EnumTransform):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "enum conversion requires an enum transform",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "enum processing requires an enum transform",
         )
     source = current_inputs.get(transform.input)
     if source is None:
@@ -294,8 +294,8 @@ def _evaluate_enum_output(
         )
     if not isinstance(source, RawObservation):
         raise DataTrunkError(
-            "POINT_CONVERSION_CONFIGURATION_INVALID",
-            "enum conversion requires an L0 input",
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "enum processing requires an L0 input",
         )
     if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM} or not isinstance(
         source.value.value,
@@ -348,7 +348,7 @@ def _evaluate_enum_output(
 
 
 def _runtime_failure_from_source(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     source: RawObservation,
     site_configuration_version: int,
     calculated_at: datetime,
@@ -370,7 +370,7 @@ def _runtime_failure_from_source(
 
 
 def _runtime_failure(
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     site_configuration_version: int,
     calculated_at: datetime,
     reason: str,
@@ -402,7 +402,7 @@ def _input_quality_reason(quality: TrunkQuality) -> str | None:
 
 def _observation(
     *,
-    installed: InstalledPointConversion,
+    installed: InstalledPointProcessing,
     value: TypedValue,
     quality: TrunkQuality,
     reason: str | None,
@@ -439,7 +439,7 @@ def _observation(
         observed_at=observed_at,
         received_at=received_at,
         calculated_at=calculated_at,
-        conversion_revision_id=installed.revision_id,
+        processing_revision_id=installed.revision_id,
         site_configuration_version=site_configuration_version,
         source_observation_ids=tuple(sorted(source_observation_ids, key=str)),
         source_digest=source_digest,

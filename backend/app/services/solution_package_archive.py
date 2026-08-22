@@ -179,7 +179,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "alarm_definition",
             "ems_workbench",
             "ems_policy",
-            "point_conversion_template",
+            "point_processing_template",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
@@ -299,12 +299,12 @@ def _validate_entity_assets(
         for required in required_entities:
             if not isinstance(required, dict) or set(required) not in (
                 {"definition", "matcher"},
-                {"definition", "sourceKind", "conversionOutputKey"},
+                {"definition", "sourceKind", "processingOutputKey"},
             ):
                 raise DeliveryError("ASSET_REFERENCE_INVALID", "Entity slot reference is invalid")
             definition = definitions.get(required["definition"])
-            if required.get("sourceKind") == "point_conversion":
-                output_key = required.get("conversionOutputKey")
+            if required.get("sourceKind") == "point_processing":
+                output_key = required.get("processingOutputKey")
                 if (
                     definition is None
                     or definition["id"] in required_definition_ids
@@ -315,7 +315,7 @@ def _validate_entity_assets(
                 ):
                     raise DeliveryError(
                         "ASSET_REFERENCE_INVALID",
-                        "Point-conversion entity slot reference is invalid",
+                        "Point-processing entity slot reference is invalid",
                     )
                 required_definition_ids.add(definition["id"])
                 normalized_definitions.append(
@@ -325,8 +325,8 @@ def _validate_entity_assets(
                         "data_type": definition["dataType"],
                         "unit": definition.get("unit"),
                         "direction": definition["direction"],
-                        "source_kind": "point_conversion",
-                        "conversion_output_key": output_key,
+                        "source_kind": "point_processing",
+                        "processing_output_key": output_key,
                     }
                 )
                 continue

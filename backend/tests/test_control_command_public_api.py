@@ -45,7 +45,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         dispatcher_fails: bool = False,
         sources: tuple | None = None,
         release_lock_reader=None,
-        point_conversions=None,
+        point_processings=None,
         entity_repository=None,
         observations=None,
         data_trunk=None,
@@ -80,7 +80,7 @@ class ControlCommandPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app = entity_delivery_test.EntityDeliveryPublicApiTest.build_app(
             sources=sources or default_sources,
             release_lock_reader=release_lock_reader,
-            point_conversions=point_conversions,
+            point_processings=point_processings,
             entity_repository=entity_repository,
             observations=observations,
             data_trunk=data_trunk,

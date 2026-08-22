@@ -402,7 +402,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
         sources: tuple,
         legacy_entities: tuple = (),
         release_lock_reader=None,
-        point_conversions=None,
+        point_processings=None,
         entity_repository=None,
         observations=None,
         data_trunk=None,
@@ -510,7 +510,7 @@ class EntityDeliveryPublicApiTest(unittest.IsolatedAsyncioTestCase):
             alarm_definitions=alarm_definitions,
             alarm_runtime=alarm_runtime,
             release_lock_reader=release_lock_reader,
-            point_conversions=point_conversions,
+            point_processings=point_processings,
             data_trunk_acceptance=(
                 DataTrunkAcceptance(data_trunk) if data_trunk is not None else None
             ),

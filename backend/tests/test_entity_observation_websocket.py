@@ -244,11 +244,11 @@ class PostgresEntityObservationOutboxTest(unittest.TestCase):
         )
         from app.services.data_trunk_outbox import PostgresOutboxRepository
         from app.services.data_trunk_postgres import build_postgres_data_trunk
-        from tests.test_point_conversion_postgres import (
-            PointConversionPostgresTest,
+        from tests.test_point_processing_postgres import (
+            PointProcessingPostgresTest,
         )
 
-        helper = PointConversionPostgresTest(
+        helper = PointProcessingPostgresTest(
             "test_solution_install_creates_entities_and_conversion_in_one_transaction"
         )
         helper.connection_kwargs = self.connection_kwargs

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from app.services.data_trunk import DataTrunk, InMemoryDataTrunkRepository
 from app.services.data_trunk_contracts import (
-    InstalledPointConversion,
+    InstalledPointProcessing,
     RawObservation,
     TrunkQuality,
     TypedValue,
@@ -29,7 +29,7 @@ class InMemoryDataTrunkTest(unittest.TestCase):
             source_sequence=None,
             source_digest="a" * 64,
         )
-        installed = InstalledPointConversion.numeric(
+        installed = InstalledPointProcessing.numeric(
             installation_id=UUID("00000000-0000-0000-0000-000000000201"),
             revision_id=UUID("00000000-0000-0000-0000-000000000202"),
             input_tag_id=raw.tag_id,

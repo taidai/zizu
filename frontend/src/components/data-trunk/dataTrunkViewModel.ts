@@ -1,5 +1,5 @@
 export type DataTrunkQuality = 0 | 1 | 64 | 192
-export type PointConversionPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
+export type PointProcessingPlanAction = 'add' | 'update' | 'preserve' | 'delete_candidate' | 'block'
 
 interface PlanLike {
   status: 'ready' | 'blocked' | 'applied'
@@ -14,11 +14,11 @@ const INPUT_LABELS: Record<string, string> = {
 }
 
 const BLOCKER_ACTIONS: Record<string, (input: string) => string> = {
-  POINT_CONVERSION_INPUT_AMBIGUOUS: (input) => `请选择“${input}”对应的原始点位`,
-  POINT_CONVERSION_INPUT_MISSING: (input) => `请先采集“${input}”原始点位`,
-  POINT_CONVERSION_INPUT_INCOMPATIBLE: (input) => `请修正“${input}”的数据类型或单位`,
-  POINT_CONVERSION_INPUT_SELECTION_INVALID: (input) => `请重新选择“${input}”原始点位`,
-  POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH: () => '输出实体契约已变化，请重新安装解决方案',
+  POINT_PROCESSING_INPUT_AMBIGUOUS: (input) => `请选择“${input}”对应的原始点位`,
+  POINT_PROCESSING_INPUT_MISSING: (input) => `请先采集“${input}”原始点位`,
+  POINT_PROCESSING_INPUT_INCOMPATIBLE: (input) => `请修正“${input}”的数据类型或单位`,
+  POINT_PROCESSING_INPUT_SELECTION_INVALID: (input) => `请重新选择“${input}”原始点位`,
+  POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH: () => '输出实体契约已变化，请重新安装解决方案',
 }
 
 export function qualityLabel(quality: number): string {
@@ -44,8 +44,8 @@ export function projectEntityValue(observation: { value: unknown; quality: numbe
   }
 }
 
-export function planActionLabel(action: PointConversionPlanAction): string {
-  const labels: Record<PointConversionPlanAction, string> = {
+export function planActionLabel(action: PointProcessingPlanAction): string {
+  const labels: Record<PointProcessingPlanAction, string> = {
     add: '新增',
     update: '更新',
     preserve: '保持',
@@ -56,7 +56,7 @@ export function planActionLabel(action: PointConversionPlanAction): string {
 }
 
 export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
-  const counts: Record<PointConversionPlanAction, number> = {
+  const counts: Record<PointProcessingPlanAction, number> = {
     add: 0,
     update: 0,
     preserve: 0,
@@ -64,7 +64,7 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
     block: 0,
   }
   for (const item of plan?.items || []) {
-    if (item.action && item.action in counts) counts[item.action as PointConversionPlanAction] += 1
+    if (item.action && item.action in counts) counts[item.action as PointProcessingPlanAction] += 1
   }
   if (plan?.blockers.length && counts.block === 0) counts.block = plan.blockers.length
   const blocker = plan?.blockers[0]
@@ -73,10 +73,10 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
   const nextAction = blocker
     ? (BLOCKER_ACTIONS[blocker.code] || (() => '请处理计划中的阻断项'))(inputLabel)
     : plan?.status === 'ready'
-      ? '核对变更后应用点位转换'
+      ? '核对变更后应用点位加工'
       : plan?.status === 'applied'
         ? '查看全局实体实时值与验收证据'
-        : '选择点位转换模板并生成计划'
+        : '选择点位加工模板并生成计划'
   return {
     canApply: plan?.status === 'ready' && !plan.blockers.length,
     nextAction,

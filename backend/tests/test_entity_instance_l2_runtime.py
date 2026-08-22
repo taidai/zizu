@@ -43,9 +43,9 @@ class PointSourceRepository:
             unit="kW",
             direction="R",
             freshness_seconds=30,
-            source_kind="point_conversion",
+            source_kind="point_processing",
             source_id=ENTITY_ID,
-            conversion_revision_id=REVISION_ID,
+            processing_revision_id=REVISION_ID,
             site_configuration_version=1,
         )
 
@@ -118,7 +118,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 value,
                 192,
                 event_id=EVENT_ID,
-                conversion_revision_id=REVISION_ID,
+                processing_revision_id=REVISION_ID,
                 site_configuration_version=1,
                 source_digest="b" * 64,
             )
@@ -126,12 +126,12 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
 
     def assert_l2_provenance(self, value: dict) -> None:
         self.assertEqual(value["event_id"], str(EVENT_ID))
-        self.assertEqual(value["source_kind"], "point_conversion")
-        self.assertEqual(value["conversion_revision_id"], str(REVISION_ID))
+        self.assertEqual(value["source_kind"], "point_processing")
+        self.assertEqual(value["processing_revision_id"], str(REVISION_ID))
         self.assertEqual(value["site_configuration_version"], 1)
         self.assertEqual(value["source_digest"], "b" * 64)
 
-    def test_point_conversion_entity_reads_l2_latest_and_history(self) -> None:
+    def test_point_processing_entity_reads_l2_latest_and_history(self) -> None:
         now = datetime.now(timezone.utc)
         first_event = UUID("87000000-0000-0000-0000-000000000011")
         second_event = UUID("87000000-0000-0000-0000-000000000012")
@@ -142,7 +142,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 11.5,
                 192,
                 event_id=first_event,
-                conversion_revision_id=REVISION_ID,
+                processing_revision_id=REVISION_ID,
                 site_configuration_version=1,
                 source_digest="a" * 64,
             )
@@ -154,7 +154,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 12.345,
                 192,
                 event_id=second_event,
-                conversion_revision_id=REVISION_ID,
+                processing_revision_id=REVISION_ID,
                 site_configuration_version=1,
                 source_digest="b" * 64,
             )
@@ -163,8 +163,8 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
         latest = self.runtime.read(ENTITY_ID)
         history = self.runtime.history(ENTITY_ID, "1h")
         self.assertEqual(latest.value, 12.345)
-        self.assertEqual(latest.source_kind, "point_conversion")
-        self.assertEqual(latest.conversion_revision_id, REVISION_ID)
+        self.assertEqual(latest.source_kind, "point_processing")
+        self.assertEqual(latest.processing_revision_id, REVISION_ID)
         self.assertEqual(latest.event_id, second_event)
         self.assertEqual(len(history), 2)
 

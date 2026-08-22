@@ -1,4 +1,4 @@
-"""Authenticated public HTTP seam for point-conversion planning and apply."""
+"""Authenticated public HTTP seam for point-processing planning and apply."""
 from __future__ import annotations
 
 import importlib.util
@@ -23,16 +23,16 @@ from app.services.identity import (
     UserIdentity,
     hash_password,
 )
-from app.services.point_conversion import (
-    ApplyPointConversionPlan,
-    InMemoryPointConversionCatalog,
-    InMemoryPointConversionRepository,
-    PlanPointConversion,
-    PointConversion,
-    PointConversionSource,
+from app.services.point_processing import (
+    ApplyPointProcessingPlan,
+    InMemoryPointProcessingCatalog,
+    InMemoryPointProcessingRepository,
+    PreviewPointProcessing,
+    PointProcessingDelivery,
+    PointProcessingSource,
 )
 from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
-from app.services.solution_point_conversions import point_conversion_assets
+from app.services.solution_point_processings import point_processing_assets
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +49,7 @@ BRAND_A_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000a")
 BRAND_B_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000b")
 
 
-class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
+class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.password = "correct horse battery staple"
@@ -58,32 +58,32 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
             salt=b"point-conv-auth",
         )
 
-    def build_app(self) -> tuple[FastAPI, InMemoryIdentityRepository, InMemoryPointConversionRepository]:
+    def build_app(self) -> tuple[FastAPI, InMemoryIdentityRepository, InMemoryPointProcessingRepository]:
         package = SolutionDelivery(
             InMemoryDeliveryRepository(),
             platform_version="0.4.77",
         ).import_package(builder.build_archive(), "user:test-engineer")
-        assets = {item.asset_id: item for item in point_conversion_assets(package)}
-        repository = InMemoryPointConversionRepository()
-        service = PointConversion(
+        assets = {item.asset_id: item for item in point_processing_assets(package)}
+        repository = InMemoryPointProcessingRepository()
+        service = PointProcessingDelivery(
             repository,
-            InMemoryPointConversionCatalog(
+            InMemoryPointProcessingCatalog(
                 templates={
                     BRAND_A_REVISION_ID: assets["pcs.brand-a"],
                     BRAND_B_REVISION_ID: assets["pcs.brand-b"],
                 },
                 sources=(
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000001"), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000002"), "l0", NODE_ID, "RunningState", "STRING", None, True),
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000003"), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000011"), "l0", NODE_ID, "PActKw", "FLOAT", "kW", True),
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000012"), "l0", NODE_ID, "ModeCode", "STRING", None, True),
-                    PointConversionSource(UUID("85000000-0000-0000-0000-000000000013"), "l0", NODE_ID, "AlarmList", "STRING", None, True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000001"), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000002"), "l0", NODE_ID, "RunningState", "STRING", None, True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000003"), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000011"), "l0", NODE_ID, "PActKw", "FLOAT", "kW", True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000012"), "l0", NODE_ID, "ModeCode", "STRING", None, True),
+                    PointProcessingSource(UUID("85000000-0000-0000-0000-000000000013"), "l0", NODE_ID, "AlarmList", "STRING", None, True),
                 ),
             ),
         )
-        initial_plan = service.plan(
-            PlanPointConversion(
+        initial_plan = service.preview(
+            PreviewPointProcessing(
                 node_id=NODE_ID,
                 template_revision_id=BRAND_A_REVISION_ID,
                 input_selections={},
@@ -93,7 +93,7 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         service.apply(
-            ApplyPointConversionPlan(
+            ApplyPointProcessingPlan(
                 initial_plan.id,
                 initial_plan.digest,
                 "initial-brand-a",
@@ -110,12 +110,12 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         app.include_router(auth_router, prefix="/api/v1")
         try:
-            from app.api.point_conversions import get_point_conversions, router
+            from app.api.point_processings import get_point_processings, router
         except ImportError:
             pass
         else:
             app.include_router(router, prefix="/api/v1")
-            app.dependency_overrides[get_point_conversions] = lambda: service
+            app.dependency_overrides[get_point_processings] = lambda: service
         app.dependency_overrides[get_identity] = lambda: Identity(identity_repository)
         return app, identity_repository, repository
 
@@ -135,20 +135,23 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
             base_url="https://testserver",
         ) as client:
             anonymous = await client.get(
-                "/api/v1/point-conversion-templates?device_category=PCS"
+                "/api/v1/point-processing-templates?device_category=PCS"
+            )
+            legacy_route = await client.get(
+                "/api/v1/point-conversion-templates"
             )
             operator_headers = await self.login(client, "operator")
             engineer_headers = await self.login(client, "engineer")
             operator_templates = await client.get(
-                "/api/v1/point-conversion-templates?device_category=PCS",
+                "/api/v1/point-processing-templates?device_category=PCS",
                 headers=operator_headers,
             )
             templates = await client.get(
-                "/api/v1/point-conversion-templates?device_category=PCS",
+                "/api/v1/point-processing-templates?device_category=PCS",
                 headers=engineer_headers,
             )
             planned = await client.post(
-                f"/api/v1/nodes/{NODE_ID}/point-conversion-plans",
+                f"/api/v1/nodes/{NODE_ID}/point-processing-plans",
                 headers=engineer_headers,
                 json={
                     "template_revision_id": str(BRAND_B_REVISION_ID),
@@ -157,13 +160,13 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(201, planned.status_code, planned.text)
             operator_apply = await client.post(
-                f"/api/v1/point-conversion-plans/{planned.json()['id']}/apply",
+                f"/api/v1/point-processing-plans/{planned.json()['id']}/apply",
                 headers={**operator_headers, "Idempotency-Key": "operator-denied"},
                 json={"plan_digest": planned.json()["digest"]},
             )
             count_after_denied = repository.application_count()
             applied = await client.post(
-                f"/api/v1/point-conversion-plans/{planned.json()['id']}/apply",
+                f"/api/v1/point-processing-plans/{planned.json()['id']}/apply",
                 headers={**engineer_headers, "Idempotency-Key": "engineer-apply"},
                 json={"plan_digest": planned.json()["digest"]},
             )
@@ -177,6 +180,7 @@ class PointConversionPublicApiTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(401, anonymous.status_code, anonymous.text)
+        self.assertEqual(404, legacy_route.status_code, legacy_route.text)
         self.assertEqual(403, operator_templates.status_code, operator_templates.text)
         self.assertEqual(200, templates.status_code, templates.text)
         self.assertEqual(2, templates.json()["total"])

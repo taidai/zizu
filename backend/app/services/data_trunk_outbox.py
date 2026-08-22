@@ -273,7 +273,7 @@ def _public_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             "received_at": payload.get("received_at"),
             "calculated_at": payload.get("calculated_at"),
             "age_ms": age_ms,
-            "conversion_revision_id": payload.get("conversion_revision_id"),
+            "processing_revision_id": payload.get("processing_revision_id"),
             "site_configuration_version": payload.get(
                 "site_configuration_version"
             ),

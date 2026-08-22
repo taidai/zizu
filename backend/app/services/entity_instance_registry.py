@@ -115,7 +115,7 @@ class ResolvedEntitySource:
     freshness_seconds: float
     source_kind: str = "legacy_tag"
     source_id: UUID | None = None
-    conversion_revision_id: UUID | None = None
+    processing_revision_id: UUID | None = None
     site_configuration_version: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
@@ -287,7 +287,7 @@ class InMemoryEntityInstanceRepository:
             }
             device_ids.append(device_id)
             entity_ids.append(entity_id)
-            if item.get("source_kind") == "point_conversion":
+            if item.get("source_kind") == "point_processing":
                 continue
             tag_id = UUID(item["selected_tag_id"])
             standby_tag_id = (
@@ -376,7 +376,7 @@ class InMemoryEntityInstanceRepository:
             entity_instance_id
         )
 
-    def activate_point_conversion_outputs(
+    def activate_point_processing_outputs(
         self,
         revision_id: UUID,
         site_configuration_version: int,
@@ -386,10 +386,10 @@ class InMemoryEntityInstanceRepository:
         pending: dict[UUID, ResolvedEntitySource] = {}
         for entity_instance_id in entity_instance_ids:
             entity = self._entities.get(entity_instance_id)
-            if entity is None or entity.get("source_kind") != "point_conversion":
+            if entity is None or entity.get("source_kind") != "point_processing":
                 raise EntityInstanceError(
                     "ENTITY_SOURCE_INVALID",
-                    "Point conversion output does not belong to an installed entity",
+                    "Point processing output does not belong to an installed entity",
                 )
             device = self._devices[entity["device_instance_id"]]
             pending[entity_instance_id] = ResolvedEntitySource(
@@ -405,9 +405,9 @@ class InMemoryEntityInstanceRepository:
                 unit=entity["unit"],
                 direction=entity["direction"],
                 freshness_seconds=entity["freshness_seconds"],
-                source_kind="point_conversion",
+                source_kind="point_processing",
                 source_id=entity_instance_id,
-                conversion_revision_id=revision_id,
+                processing_revision_id=revision_id,
                 site_configuration_version=site_configuration_version,
             )
         self._point_sources.update(pending)
@@ -438,7 +438,7 @@ class InMemoryEntityInstanceRepository:
         for entity_id, entity in self._entities.items():
             if (
                 entity_id not in self._bindings
-                and entity.get("source_kind") != "point_conversion"
+                and entity.get("source_kind") != "point_processing"
             ):
                 continue
             device = self._devices[entity["device_instance_id"]]
@@ -664,15 +664,15 @@ class EntityInstanceRegistry:
                 "ENTITY_INSTANCE_NOT_BOUND",
                 "Entity instance has no confirmed active primary binding",
             )
-        if source.source_kind == "point_conversion":
+        if source.source_kind == "point_processing":
             if (
                 source.source_id != source.entity_instance_id
-                or source.conversion_revision_id is None
+                or source.processing_revision_id is None
                 or source.site_configuration_version is None
             ):
                 raise EntityInstanceError(
                     "ENTITY_SOURCE_INVALID",
-                    "Point conversion entity source evidence is incomplete",
+                    "Point processing entity source evidence is incomplete",
                 )
             return source
         if source.source_kind != "legacy_tag" or source.tag_id is None:
@@ -734,7 +734,7 @@ def _plan_definition(
         slot["id"],
         slot["instance_key"],
     )
-    if definition.get("source_kind") == "point_conversion":
+    if definition.get("source_kind") == "point_processing":
         return {
             "slot_id": slot["id"],
             "device_category": slot["device_category"],
@@ -745,8 +745,8 @@ def _plan_definition(
             "definition_display_name": definition["display_name"],
             "device_instance_id": str(device_id),
             "entity_instance_id": str(entity_id),
-            "source_kind": "point_conversion",
-            "conversion_output_key": definition["conversion_output_key"],
+            "source_kind": "point_processing",
+            "processing_output_key": definition["processing_output_key"],
             "matcher_id": None,
             "expected_tag_name": None,
             "candidates": (),
@@ -755,8 +755,8 @@ def _plan_definition(
             "selected_tag_id": None,
             "failover_policy": None,
             "standby_tag_id": None,
-            "selection_source": "point_conversion_plan",
-            "selection_reason": "Output is bound by the point-conversion subplan",
+            "selection_source": "point_processing_plan",
+            "selection_reason": "Output is bound by the point-processing subplan",
             "binding_id": None,
             "confirmation_audit_id": None,
             "data_type": definition["data_type"],
@@ -765,7 +765,7 @@ def _plan_definition(
             "freshness_seconds": float(slot["freshness_seconds"]),
             "control": definition.get("control"),
             "status": "ready",
-            "code": "ENTITY_POINT_CONVERSION_READY",
+            "code": "ENTITY_POINT_PROCESSING_READY",
             "action": "add",
         }, None
     matcher = definition["matcher"]
@@ -988,15 +988,15 @@ def _validated_slot(value: dict[str, Any]) -> dict[str, Any]:
         if definition["id"] in definition_ids:
             raise EntityInstanceError("ENTITY_SLOT_INVALID", "Entity definition ids must be unique")
         definition_ids.add(definition["id"])
-        if definition.get("source_kind") == "point_conversion":
+        if definition.get("source_kind") == "point_processing":
             if (
-                not isinstance(definition.get("conversion_output_key"), str)
-                or not definition["conversion_output_key"]
+                not isinstance(definition.get("processing_output_key"), str)
+                or not definition["processing_output_key"]
                 or definition["direction"] not in {"R", "RW"}
             ):
                 raise EntityInstanceError(
                     "ENTITY_SLOT_INVALID",
-                    "Point-conversion entity definition is invalid",
+                    "Point-processing entity definition is invalid",
                 )
             continue
         matcher = definition.get("matcher")

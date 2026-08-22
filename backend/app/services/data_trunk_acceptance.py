@@ -59,8 +59,8 @@ class DataTrunkAcceptance:
             "entity_instance_ids": sorted(
                 str(item) for item in snapshot.get("entity_instance_ids", ())
             ),
-            "conversion_revision_ids": sorted(
-                str(item) for item in snapshot.get("conversion_revision_ids", ())
+            "processing_revision_ids": sorted(
+                str(item) for item in snapshot.get("processing_revision_ids", ())
             ),
             "site_configuration_versions": sorted(
                 int(item) for item in snapshot.get("site_configuration_versions", ())

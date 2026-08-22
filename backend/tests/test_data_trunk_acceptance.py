@@ -22,7 +22,7 @@ class _Evidence:
                 "93000000-0000-0000-0000-000000000012",
                 "93000000-0000-0000-0000-000000000013",
             ],
-            "conversion_revision_ids": [
+            "processing_revision_ids": [
                 "93000000-0000-0000-0000-000000000021",
             ],
             "site_configuration_versions": [1],

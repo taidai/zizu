@@ -313,7 +313,7 @@ class PostgresDeliveryRepository:
             entity_identity_installation_id=row[14],
             entity_plan=row[15],
             alarm_plan=row[16],
-            point_conversion_plans=tuple(row[17] or ()),
+            point_processing_plans=tuple(row[17] or ()),
             digest=row[18],
         )
 
@@ -376,8 +376,8 @@ class PostgresDeliveryRepository:
         return {path: bytes(content) for path, content in cur.fetchall()}
 
     def save_package(self, package: PackageImport, actor: str) -> PackageImport:
-        from app.services.point_conversion_postgres import (
-            persist_point_conversion_assets,
+        from app.services.point_processing_postgres import (
+            persist_point_processing_assets,
         )
 
         with self._connection() as conn:
@@ -410,7 +410,7 @@ class PostgresDeliveryRepository:
                             "(package_record_id, path, content) VALUES (%s, %s, %s)",
                             (package.id, path, content),
                         )
-                    persist_point_conversion_assets(cur, package, actor)
+                    persist_point_processing_assets(cur, package, actor)
                     conn.commit()
                     return package
 
@@ -433,7 +433,7 @@ class PostgresDeliveryRepository:
                     )
                 assets = self._load_assets(cur, row[0])
                 existing_package = self._package_from_row(row, assets)
-                persist_point_conversion_assets(cur, existing_package, actor)
+                persist_point_processing_assets(cur, existing_package, actor)
                 conn.commit()
                 return existing_package
 
@@ -499,7 +499,7 @@ class PostgresDeliveryRepository:
                        parameter_sources, parameter_metadata,
                        configuration_digest, target_installation_id,
                        entity_identity_installation_id, entity_plan, alarm_plan,
-                       point_conversion_plans, digest)
+                       point_processing_plans, digest)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (digest) DO NOTHING
                     RETURNING id, package_record_id, package_digest,
@@ -509,7 +509,7 @@ class PostgresDeliveryRepository:
                               parameter_metadata, configuration_digest,
                               target_installation_id,
                               entity_identity_installation_id, entity_plan, alarm_plan,
-                              point_conversion_plans, digest
+                              point_processing_plans, digest
                     """,
                     (
                         plan.id,
@@ -529,7 +529,7 @@ class PostgresDeliveryRepository:
                         plan.entity_identity_installation_id,
                         Json(plan.entity_plan) if plan.entity_plan is not None else None,
                         Json(plan.alarm_plan) if plan.alarm_plan is not None else None,
-                        Json(list(plan.point_conversion_plans)),
+                        Json(list(plan.point_processing_plans)),
                         plan.digest,
                     ),
                 )
@@ -544,7 +544,7 @@ class PostgresDeliveryRepository:
                                parameter_metadata, configuration_digest,
                                target_installation_id,
                                entity_identity_installation_id, entity_plan, alarm_plan,
-                               point_conversion_plans, digest
+                               point_processing_plans, digest
                         FROM t_solution_install_plans WHERE digest = %s
                         """,
                         (plan.digest,),
@@ -565,7 +565,7 @@ class PostgresDeliveryRepository:
                            parameter_sources, parameter_metadata,
                            configuration_digest, target_installation_id,
                            entity_identity_installation_id, entity_plan, alarm_plan,
-                           point_conversion_plans, digest
+                           point_processing_plans, digest
                     FROM t_solution_install_plans WHERE id = %s
                     """,
                     (plan_id,),

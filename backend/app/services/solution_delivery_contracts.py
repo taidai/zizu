@@ -81,7 +81,7 @@ class InstallationPlan:
     entity_plan: dict[str, Any] | None
     digest: str
     alarm_plan: dict[str, Any] | None = None
-    point_conversion_plans: tuple[dict[str, Any], ...] = ()
+    point_processing_plans: tuple[dict[str, Any], ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)

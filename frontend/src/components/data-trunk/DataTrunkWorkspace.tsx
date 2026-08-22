@@ -2,21 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   DataTrunkApiError,
   DataTrunkResultUnknownError,
-  applyPointConversionPlan,
+  applyPointProcessingPlan,
   connectEntityObservationWS,
-  createPointConversionPlan,
+  createPointProcessingPlan,
   fetchEntityInstanceHistory,
   fetchEntityInstances,
   fetchNodeDataTrunk,
-  fetchPointConversionPlan,
-  fetchPointConversionTemplates,
+  fetchPointProcessingPlan,
+  fetchPointProcessingTemplates,
   type EntityInstance,
   type EntityInstanceObservation,
   type Node,
   type NodeDataTrunk,
-  type PointConversionApplication,
-  type PointConversionPlan,
-  type PointConversionTemplate,
+  type PointProcessingApplication,
+  type PointProcessingPlan,
+  type PointProcessingTemplate,
 } from '../../api/client'
 import {
   clearDataTrunkApplyRetry,
@@ -25,9 +25,9 @@ import {
   saveDataTrunkApplyRetry,
 } from './dataTrunkRetryState'
 import NodeTrunkOverview from './NodeTrunkOverview'
-import PointConversionPlanPanel from './PointConversionPlanPanel'
+import PointProcessingPlanPanel from './PointProcessingPlanPanel'
 
-const STAGES = ['连接点位', '选择点位转换', '匹配预览', '处理阻断', '安装验收']
+const STAGES = ['连接点位', '选择点位加工', '匹配预览', '处理阻断', '安装验收']
 
 export default function DataTrunkWorkspace({
   node,
@@ -39,11 +39,11 @@ export default function DataTrunkWorkspace({
   actorId: string
 }) {
   const [trunk, setTrunk] = useState<NodeDataTrunk | null>(null)
-  const [templates, setTemplates] = useState<PointConversionTemplate[]>([])
+  const [templates, setTemplates] = useState<PointProcessingTemplate[]>([])
   const [selectedRevisionId, setSelectedRevisionId] = useState('')
   const [selections, setSelections] = useState<Record<string, string>>({})
-  const [plan, setPlan] = useState<PointConversionPlan | null>(null)
-  const [application, setApplication] = useState<PointConversionApplication | null>(null)
+  const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
+  const [application, setApplication] = useState<PointProcessingApplication | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
   const [observations, setObservations] = useState<Map<string, EntityInstanceObservation>>(new Map())
   const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
@@ -84,13 +84,13 @@ export default function DataTrunkWorkspace({
     try {
       const nextTrunk = await loadRuntime()
       if (!readOnly) {
-        const nextTemplates = await fetchPointConversionTemplates((node.node_type || 'PCS').toUpperCase())
+        const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
         setTemplates(nextTemplates)
         setSelectedRevisionId((current) => current || nextTrunk.l1_summary.revision_id || nextTemplates[0]?.revision_id || '')
         const retry = findDataTrunkApplyRetry(sessionStorage, actorId, node.id)
         if (retry) {
           try {
-            const restoredPlan = await fetchPointConversionPlan(retry.planId)
+            const restoredPlan = await fetchPointProcessingPlan(retry.planId)
             if (readDataTrunkApplyRetry(sessionStorage, {
               actorId,
               nodeId: node.id,
@@ -169,7 +169,7 @@ export default function DataTrunkWorkspace({
     clearDataTrunkApplyRetry(sessionStorage)
     setResultUnknown(false)
     try {
-      setPlan(await createPointConversionPlan(node.id, {
+      setPlan(await createPointProcessingPlan(node.id, {
         template_revision_id: selectedTemplate.revision_id,
         input_selections: Object.fromEntries(Object.entries(selections).filter(([, value]) => value)),
       }))
@@ -189,7 +189,7 @@ export default function DataTrunkWorkspace({
     const retry = existing || { ...identity, idempotencyKey: crypto.randomUUID() }
     saveDataTrunkApplyRetry(sessionStorage, retry)
     try {
-      const result = await applyPointConversionPlan(plan.id, plan.digest, retry.idempotencyKey)
+      const result = await applyPointProcessingPlan(plan.id, plan.digest, retry.idempotencyKey)
       setApplication(result)
       setPlan({ ...plan, status: 'applied' })
       clearDataTrunkApplyRetry(sessionStorage)
@@ -201,7 +201,7 @@ export default function DataTrunkWorkspace({
         || (reason instanceof DataTrunkApiError && reason.retryable)
       if (!shouldKeep) clearDataTrunkApplyRetry(sessionStorage)
       setResultUnknown(shouldKeep)
-      setError(reason instanceof Error ? reason.message : '应用点位转换失败')
+      setError(reason instanceof Error ? reason.message : '应用点位加工失败')
     } finally {
       setBusy(null)
     }
@@ -236,7 +236,7 @@ export default function DataTrunkWorkspace({
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h2 className="text-base font-semibold text-gray-900">{node.name} 数据主干</h2>
-            <p className="mt-1 text-xs text-gray-500">原始点位经过点位转换形成稳定全局实体，上层功能不再直接依赖品牌地址。</p>
+            <p className="mt-1 text-xs text-gray-500">原始点位经过点位加工形成稳定全局实体，上层功能不再直接依赖品牌地址。</p>
           </div>
           <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
             {STAGES.map((label, index) => (
@@ -273,7 +273,7 @@ export default function DataTrunkWorkspace({
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">运行验收</div><div className="mt-1 text-sm font-semibold text-gray-900">{application ? '准备执行机器验收' : '应用后生成'}</div></div>
             </div>
           </div>
-          <PointConversionPlanPanel
+          <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}
             selectedTemplate={selectedTemplate}

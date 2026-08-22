@@ -294,7 +294,7 @@ async def write_neuron_tag(
     principal: Principal = Depends(principal_for(CONTROL_WRITE)),
     compatibility: ControlCommandCompatibility = Depends(get_control_compatibility),
 ) -> dict:
-    """兼容入口：仅把已确认的 Neuron 点位转换为统一控制命令。"""
+    """兼容入口：仅把已确认的 Neuron 点位加工为统一控制命令。"""
     command = compatibility.submit_neuron(
         actor=principal.actor,
         node=req.node,
@@ -307,4 +307,3 @@ async def write_neuron_tag(
     if command.status == "rejected":
         raise compatibility_error(command)
     return compatibility_response(command)
-

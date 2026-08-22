@@ -10,13 +10,13 @@ from app.services.data_trunk_contracts import (
     EnumTransform,
     FaultCodeTransform,
     InputReference,
-    InstalledPointConversion,
+    InstalledPointProcessing,
     RawObservation,
     TrunkQuality,
     TypedValue,
     ValueKind,
 )
-from app.services.data_trunk_conversion import evaluate_conversion
+from app.services.data_trunk_conversion import evaluate_processing
 
 
 class PcsNumericConversionTest(unittest.TestCase):
@@ -36,7 +36,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             source_sequence=1,
             source_digest="a" * 64,
         )
-        installed = InstalledPointConversion.numeric(
+        installed = InstalledPointProcessing.numeric(
             installation_id=UUID("00000000-0000-0000-0000-000000000201"),
             revision_id=UUID("00000000-0000-0000-0000-000000000202"),
             input_tag_id=raw.tag_id,
@@ -59,7 +59,7 @@ class PcsNumericConversionTest(unittest.TestCase):
     def test_scales_raw_watts_to_stable_kw_entity(self) -> None:
         fixture = self.fixture()
         raw = next(iter(fixture["current_inputs"].values()))
-        result = evaluate_conversion(**fixture)
+        result = evaluate_processing(**fixture)
 
         self.assertEqual(result[0].value, TypedValue.float(12.345))
         self.assertEqual(result[0].unit, "kW")
@@ -77,7 +77,7 @@ class PcsNumericConversionTest(unittest.TestCase):
         wrong_unit = replace(raw, raw_unit="A")
         fixture["current_inputs"] = {InputReference.l0(raw.tag_id): wrong_unit}
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.float(None))
         self.assertEqual(
@@ -87,8 +87,8 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(output.source_observation_ids, (raw.observation_id,))
 
     def test_same_inputs_produce_same_event_id(self) -> None:
-        first = evaluate_conversion(**self.fixture())
-        second = evaluate_conversion(**self.fixture())
+        first = evaluate_processing(**self.fixture())
+        second = evaluate_processing(**self.fixture())
 
         self.assertEqual(first[0].event_id, second[0].event_id)
 
@@ -121,7 +121,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             ),
         )
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.enum("RUNNING"))
         self.assertEqual(output.quality, TrunkQuality.GOOD)
@@ -149,7 +149,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             ),
         )
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.enum(None))
         self.assertEqual(
@@ -184,7 +184,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             ),
         )
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(
             output.value,
@@ -207,7 +207,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             )
         }
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.float(None))
         self.assertEqual(
@@ -219,7 +219,7 @@ class PcsNumericConversionTest(unittest.TestCase):
         fixture = self.fixture()
         fixture["current_inputs"] = {}
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.float(None))
         self.assertEqual(
@@ -237,7 +237,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             )
         }
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.float(None))
         self.assertEqual(
@@ -284,7 +284,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             ),
         )
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(
             output.value,
@@ -314,7 +314,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             ),
         )
 
-        output = evaluate_conversion(**fixture)[0]
+        output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(output.value, TypedValue.enum(None))
         self.assertEqual(

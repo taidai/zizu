@@ -16,21 +16,21 @@ from app.services.data_trunk_contracts import (
     CommitReceipt,
     DataTrunkError,
     InputReference,
-    InstalledPointConversion,
+    InstalledPointProcessing,
     L2Observation,
     RawObservation,
     TrunkQuality,
     TypedValue,
     ValueKind,
 )
-from app.services.data_trunk_conversion import evaluate_conversion
+from app.services.data_trunk_conversion import evaluate_processing
 
 
 class ConversionEvaluator(Protocol):
     def __call__(
         self,
         *,
-        installed: tuple[InstalledPointConversion, ...],
+        installed: tuple[InstalledPointProcessing, ...],
         current_inputs: Mapping[InputReference, RawObservation | L2Observation],
         site_configuration_version: int,
         calculated_at: datetime,
@@ -73,7 +73,7 @@ class DataTrunk:
                 "DATA_TRUNK_BATCH_EMPTY",
                 "Raw observation batch is empty",
             )
-        return self._repository.transact(batch, evaluate_conversion)
+        return self._repository.transact(batch, evaluate_processing)
 
     def record_failure(
         self,
@@ -114,7 +114,7 @@ class InMemoryDataTrunkRepository:
     def __init__(
         self,
         *,
-        installed_provider: Callable[[], tuple[InstalledPointConversion, ...]],
+        installed_provider: Callable[[], tuple[InstalledPointProcessing, ...]],
         site_configuration_version: Callable[[], int],
         on_l2_committed: Callable[[tuple[L2Observation, ...]], None] | None = None,
         clock: Callable[[], datetime],
@@ -278,7 +278,7 @@ class InMemoryDataTrunkRepository:
                 "required_entity_definitions": sorted(required),
                 "observed_entity_definitions": sorted(observed),
                 "entity_instance_ids": sorted(entity_ids),
-                "conversion_revision_ids": sorted(revisions),
+                "processing_revision_ids": sorted(revisions),
                 "site_configuration_versions": site_versions,
                 "l0_observation_count": len(self._l0_history),
                 "l2_observation_count": sum(

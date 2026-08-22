@@ -8,7 +8,7 @@ test('blockers disable apply and expose one concrete next action', async () => {
       status: 'blocked',
       items: [],
       blockers: [{
-        code: 'POINT_CONVERSION_INPUT_AMBIGUOUS',
+        code: 'POINT_PROCESSING_INPUT_AMBIGUOUS',
         input_id: 'operating_state_raw',
       }],
     },

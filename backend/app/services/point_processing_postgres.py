@@ -1,4 +1,4 @@
-"""PostgreSQL adapters for immutable L1 point-conversion assets and plans."""
+"""PostgreSQL adapters for immutable L1 point-processing assets and plans."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -12,44 +12,44 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import psycopg2
 from psycopg2.extras import Json
 
-from app.services.point_conversion import (
-    ApplyPointConversionPlan,
-    CurrentPointConversionContext,
-    PointConversion,
-    PointConversionApplication,
-    PointConversionCatalog,
-    PointConversionError,
-    PointConversionPlan,
-    PointConversionSource,
-    PointConversionTemplateSummary,
+from app.services.point_processing import (
+    ApplyPointProcessingPlan,
+    CurrentPointProcessingContext,
+    PointProcessingDelivery,
+    PointProcessingApplication,
+    PointProcessingCatalog,
+    PointProcessingError,
+    PointProcessingPlan,
+    PointProcessingSource,
+    PointProcessingTemplateSummary,
     _template_source_catalog_digest,
 )
 from app.services.solution_delivery_contracts import DeliveryError, PackageImport
-from app.services.solution_point_conversions import (
-    PointConversionAsset,
-    PointConversionInput,
-    PointConversionOutput,
-    point_conversion_assets,
-    point_conversion_revision_id,
-    point_conversion_template_id,
+from app.services.solution_point_processings import (
+    PointProcessingAsset,
+    PointProcessingInput,
+    PointProcessingOutput,
+    point_processing_assets,
+    point_processing_revision_id,
+    point_processing_template_id,
 )
 
 
 def _input_id(revision_id: UUID, input_key: str) -> UUID:
     return uuid5(
         NAMESPACE_URL,
-        f"zizu/point-conversion-input/{revision_id}/{input_key}",
+        f"zizu/point-processing-input/{revision_id}/{input_key}",
     )
 
 
 def _output_id(revision_id: UUID, output_key: str) -> UUID:
     return uuid5(
         NAMESPACE_URL,
-        f"zizu/point-conversion-output/{revision_id}/{output_key}",
+        f"zizu/point-processing-output/{revision_id}/{output_key}",
     )
 
 
-def persist_point_conversion_assets(
+def persist_point_processing_assets(
     cursor: Any,
     package: PackageImport,
     actor: str,
@@ -61,11 +61,11 @@ def persist_point_conversion_assets(
             "Package import actor is required",
         )
     try:
-        for asset in point_conversion_assets(package):
-            template_id = point_conversion_template_id(asset)
+        for asset in point_processing_assets(package):
+            template_id = point_processing_template_id(asset)
             cursor.execute(
                 """
-                INSERT INTO t_point_conversion_templates
+                INSERT INTO t_point_processing_templates
                   (id, asset_id, device_category, brand, model,
                    display_name, status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -84,7 +84,7 @@ def persist_point_conversion_assets(
             cursor.execute(
                 """
                 SELECT id, device_category, display_name, status
-                FROM t_point_conversion_templates
+                FROM t_point_processing_templates
                 WHERE asset_id = %s AND brand = %s AND model = %s
                 FOR UPDATE
                 """,
@@ -93,8 +93,8 @@ def persist_point_conversion_assets(
             template_row = cursor.fetchone()
             if template_row is None:
                 raise DeliveryError(
-                    "POINT_CONVERSION_CATALOG_UNAVAILABLE",
-                    "Point conversion template row disappeared",
+                    "POINT_PROCESSING_CATALOG_UNAVAILABLE",
+                    "Point processing template row disappeared",
                 )
             template_id = template_row[0]
             if (
@@ -102,13 +102,13 @@ def persist_point_conversion_assets(
                 or template_row[2] != asset.display_name
             ):
                 raise DeliveryError(
-                    "POINT_CONVERSION_TEMPLATE_CONFLICT",
-                    "Point conversion template identity conflicts with stored content",
+                    "POINT_PROCESSING_TEMPLATE_CONFLICT",
+                    "Point processing template identity conflicts with stored content",
                 )
             if template_row[3] != asset.status:
                 cursor.execute(
                     """
-                    UPDATE t_point_conversion_templates
+                    UPDATE t_point_processing_templates
                     SET status = %s
                     WHERE id = %s
                     """,
@@ -118,13 +118,13 @@ def persist_point_conversion_assets(
                     """
                     INSERT INTO t_audit_events
                       (id, event, outcome, actor, target, details)
-                    VALUES (%s, 'point_conversion.template_status', 'allowed',
+                    VALUES (%s, 'point_processing.template_status', 'allowed',
                             %s, %s, %s)
                     """,
                     (
                         uuid4(),
                         actor,
-                        f"point-conversion-template:{template_id}",
+                        f"point-processing-template:{template_id}",
                         Json(
                             {
                                 "asset_id": asset.asset_id,
@@ -138,11 +138,11 @@ def persist_point_conversion_assets(
 
             revision_id = uuid5(
                 NAMESPACE_URL,
-                f"zizu/point-conversion-revision/{template_id}/{asset.revision}",
+                f"zizu/point-processing-revision/{template_id}/{asset.revision}",
             )
             cursor.execute(
                 """
-                INSERT INTO t_point_conversion_revisions
+                INSERT INTO t_point_processing_revisions
                   (id, template_id, revision, content_digest, published_at)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (template_id, revision) DO NOTHING
@@ -158,7 +158,7 @@ def persist_point_conversion_assets(
             cursor.execute(
                 """
                 SELECT id, content_digest
-                FROM t_point_conversion_revisions
+                FROM t_point_processing_revisions
                 WHERE template_id = %s AND revision = %s
                 """,
                 (template_id, asset.revision),
@@ -166,13 +166,13 @@ def persist_point_conversion_assets(
             revision_row = cursor.fetchone()
             if revision_row is None or revision_row[1].strip() != asset.content_digest:
                 raise DeliveryError(
-                    "POINT_CONVERSION_REVISION_CONFLICT",
-                    "Immutable point conversion revision has different content",
+                    "POINT_PROCESSING_REVISION_CONFLICT",
+                    "Immutable point processing revision has different content",
                 )
             revision_id = revision_row[0]
             cursor.execute(
                 """
-                INSERT INTO t_solution_point_conversion_assets
+                INSERT INTO t_solution_point_processing_assets
                   (package_record_id, template_revision_id, asset_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (package_record_id, asset_id) DO NOTHING
@@ -182,7 +182,7 @@ def persist_point_conversion_assets(
             cursor.execute(
                 """
                 SELECT template_revision_id
-                FROM t_solution_point_conversion_assets
+                FROM t_solution_point_processing_assets
                 WHERE package_record_id = %s AND asset_id = %s
                 """,
                 (package.id, asset.asset_id),
@@ -190,8 +190,8 @@ def persist_point_conversion_assets(
             relation = cursor.fetchone()
             if relation is None or relation[0] != revision_id:
                 raise DeliveryError(
-                    "POINT_CONVERSION_REVISION_CONFLICT",
-                    "Package point conversion relation conflicts with stored content",
+                    "POINT_PROCESSING_REVISION_CONFLICT",
+                    "Package point processing relation conflicts with stored content",
                 )
 
             input_ids: dict[str, UUID] = {}
@@ -200,7 +200,7 @@ def persist_point_conversion_assets(
                 input_ids[item.input_id] = input_id
                 cursor.execute(
                     """
-                    INSERT INTO t_point_conversion_inputs
+                    INSERT INTO t_point_processing_inputs
                       (id, revision_id, input_key, source_kind, data_type, unit,
                        required, stable_source_key, aliases)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -223,7 +223,7 @@ def persist_point_conversion_assets(
                 output_id = _output_id(revision_id, output.output_id)
                 cursor.execute(
                     """
-                    INSERT INTO t_point_conversion_outputs
+                    INSERT INTO t_point_processing_outputs
                       (id, revision_id, output_key, entity_definition_id,
                        data_type, unit, freshness_seconds)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -291,8 +291,8 @@ def persist_point_conversion_assets(
                             """
                             INSERT INTO t_fault_code_mapping_entries
                               (output_id, raw_code, canonical_code,
-                               display_name, default_severity)
-                            VALUES (%s, %s, %s, %s, %s)
+                               display_name)
+                            VALUES (%s, %s, %s, %s)
                             ON CONFLICT (output_id, raw_code) DO NOTHING
                             """,
                             (
@@ -300,19 +300,18 @@ def persist_point_conversion_assets(
                                 raw_code,
                                 entry["code"],
                                 entry["name"],
-                                entry["defaultSeverity"],
                             ),
                         )
     except DeliveryError:
         raise
     except psycopg2.Error as exc:
         raise DeliveryError(
-            "POINT_CONVERSION_CATALOG_UNAVAILABLE",
-            "Point conversion catalog could not be persisted",
+            "POINT_PROCESSING_CATALOG_UNAVAILABLE",
+            "Point processing catalog could not be persisted",
         ) from exc
 
 
-class PostgresPointConversionCatalog:
+class PostgresPointProcessingCatalog:
     @staticmethod
     @contextmanager
     def _connection():
@@ -321,7 +320,7 @@ class PostgresPointConversionCatalog:
         with get_connection() as connection:
             yield connection
 
-    def get_template(self, revision_id: UUID) -> PointConversionAsset | None:
+    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 return self._load_asset(cursor, revision_id)
@@ -329,14 +328,14 @@ class PostgresPointConversionCatalog:
     def list_templates(
         self,
         device_category: str,
-    ) -> tuple[PointConversionTemplateSummary, ...]:
+    ) -> tuple[PointProcessingTemplateSummary, ...]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     SELECT revision.id
-                    FROM t_point_conversion_revisions AS revision
-                    JOIN t_point_conversion_templates AS template
+                    FROM t_point_processing_revisions AS revision
+                    JOIN t_point_processing_templates AS template
                       ON template.id = revision.template_id
                     WHERE upper(template.device_category) = upper(%s)
                       AND template.status = 'active'
@@ -346,7 +345,7 @@ class PostgresPointConversionCatalog:
                 )
                 revision_ids = tuple(row[0] for row in cursor.fetchall())
                 return tuple(
-                    PointConversionTemplateSummary(revision_id, asset)
+                    PointProcessingTemplateSummary(revision_id, asset)
                     for revision_id in revision_ids
                     if (asset := self._load_asset(cursor, revision_id)) is not None
                 )
@@ -373,7 +372,7 @@ class PostgresPointConversionCatalog:
                 row = cursor.fetchone()
                 return row[0] if row is not None else None
 
-    def list_sources(self, node_id: UUID) -> tuple[PointConversionSource, ...]:
+    def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 return self.list_sources_with_cursor(cursor, node_id)
@@ -382,7 +381,7 @@ class PostgresPointConversionCatalog:
     def list_sources_with_cursor(
         cursor: Any,
         node_id: UUID,
-    ) -> tuple[PointConversionSource, ...]:
+    ) -> tuple[PointProcessingSource, ...]:
         cursor.execute(
             """
             SELECT tag.id, 'l0', tag.node_id, tag.name,
@@ -407,9 +406,9 @@ class PostgresPointConversionCatalog:
                   )
                OR EXISTS (
                     SELECT 1
-                    FROM t_conversion_output_bindings AS output_binding
-                    JOIN t_installed_point_conversions AS installed
-                      ON installed.id = output_binding.installed_conversion_id
+                    FROM t_point_processing_output_bindings AS output_binding
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id = output_binding.installed_processing_id
                      AND installed.current = TRUE
                     WHERE output_binding.entity_instance_id = entity.id
                   )
@@ -417,17 +416,17 @@ class PostgresPointConversionCatalog:
             """,
             (node_id,),
         )
-        return tuple(PointConversionSource(*row) for row in cursor.fetchall())
+        return tuple(PointProcessingSource(*row) for row in cursor.fetchall())
 
     @staticmethod
-    def _load_asset(cursor: Any, revision_id: UUID) -> PointConversionAsset | None:
+    def _load_asset(cursor: Any, revision_id: UUID) -> PointProcessingAsset | None:
         cursor.execute(
             """
             SELECT template.asset_id, template.display_name,
                    template.device_category, template.brand, template.model,
                    revision.revision, template.status, revision.content_digest
-            FROM t_point_conversion_revisions AS revision
-            JOIN t_point_conversion_templates AS template
+            FROM t_point_processing_revisions AS revision
+            JOIN t_point_processing_templates AS template
               ON template.id = revision.template_id
             WHERE revision.id = %s
             """,
@@ -440,14 +439,14 @@ class PostgresPointConversionCatalog:
             """
             SELECT input_key, source_kind, stable_source_key, aliases,
                    data_type, unit, required
-            FROM t_point_conversion_inputs
+            FROM t_point_processing_inputs
             WHERE revision_id = %s
             ORDER BY input_key
             """,
             (revision_id,),
         )
         inputs = tuple(
-            PointConversionInput(
+            PointProcessingInput(
                 input_id=item[0],
                 source_kind=item[1],
                 source_key=item[2],
@@ -462,21 +461,21 @@ class PostgresPointConversionCatalog:
             """
             SELECT id, output_key, entity_definition_id, data_type, unit,
                    freshness_seconds
-            FROM t_point_conversion_outputs
+            FROM t_point_processing_outputs
             WHERE revision_id = %s
             ORDER BY entity_definition_id
             """,
             (revision_id,),
         )
         outputs = tuple(
-            PointConversionOutput(
+            PointProcessingOutput(
                 output_id=output_row[1],
                 entity_definition_id=output_row[2],
                 data_type=output_row[3],
                 unit=output_row[4],
                 freshness_seconds=float(output_row[5]),
                 transform=MappingProxyType(
-                    PostgresPointConversionCatalog._load_transform(
+                    PostgresPointProcessingCatalog._load_transform(
                         cursor,
                         output_row[0],
                     )
@@ -484,7 +483,7 @@ class PostgresPointConversionCatalog:
             )
             for output_row in cursor.fetchall()
         )
-        return PointConversionAsset(
+        return PointProcessingAsset(
             asset_id=row[0],
             display_name=row[1],
             device_category=row[2],
@@ -504,7 +503,7 @@ class PostgresPointConversionCatalog:
             SELECT input.input_key, rule.scale, rule."offset",
                    rule.minimum, rule.maximum
             FROM t_numeric_transform_rules AS rule
-            JOIN t_point_conversion_inputs AS input ON input.id = rule.input_id
+            JOIN t_point_processing_inputs AS input ON input.id = rule.input_id
             WHERE rule.output_id = %s
             """,
             (output_id,),
@@ -523,7 +522,7 @@ class PostgresPointConversionCatalog:
             """
             SELECT input.input_key
             FROM t_enum_transform_rules AS rule
-            JOIN t_point_conversion_inputs AS input ON input.id = rule.input_id
+            JOIN t_point_processing_inputs AS input ON input.id = rule.input_id
             WHERE rule.output_id = %s
             """,
             (output_id,),
@@ -547,20 +546,20 @@ class PostgresPointConversionCatalog:
             """
             SELECT input.input_key, rule.delimiter
             FROM t_fault_code_transform_rules AS rule
-            JOIN t_point_conversion_inputs AS input ON input.id = rule.input_id
+            JOIN t_point_processing_inputs AS input ON input.id = rule.input_id
             WHERE rule.output_id = %s
             """,
             (output_id,),
         )
         row = cursor.fetchone()
         if row is None:
-            raise PointConversionError(
-                "POINT_CONVERSION_CATALOG_INVALID",
-                "Point conversion output has no transform",
+            raise PointProcessingError(
+                "POINT_PROCESSING_CATALOG_INVALID",
+                "Point processing output has no transform",
             )
         cursor.execute(
             """
-            SELECT raw_code, canonical_code, display_name, default_severity
+            SELECT raw_code, canonical_code, display_name
             FROM t_fault_code_mapping_entries
             WHERE output_id = %s ORDER BY raw_code
             """,
@@ -571,7 +570,6 @@ class PostgresPointConversionCatalog:
                 {
                     "code": item[1],
                     "name": item[2],
-                    "defaultSeverity": item[3],
                 }
             )
             for item in cursor.fetchall()
@@ -584,7 +582,7 @@ class PostgresPointConversionCatalog:
         }
 
 
-class PostgresPointConversionRepository:
+class PostgresPointProcessingRepository:
     @staticmethod
     @contextmanager
     def _connection(transaction: Any | None = None):
@@ -613,7 +611,7 @@ class PostgresPointConversionRepository:
     def current_context(
         self,
         node_id: UUID,
-    ) -> CurrentPointConversionContext | None:
+    ) -> CurrentPointProcessingContext | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -621,7 +619,7 @@ class PostgresPointConversionRepository:
                     SELECT installed.id, installed.solution_installation_id,
                            installed.revision_id,
                            site.entity_identity_installation_id
-                    FROM t_installed_point_conversions AS installed
+                    FROM t_installed_point_processings AS installed
                     JOIN t_site_configuration_versions AS site
                       ON site.version = installed.site_configuration_version
                     WHERE installed.node_id = %s AND installed.current = TRUE
@@ -635,10 +633,10 @@ class PostgresPointConversionRepository:
                     """
                     SELECT input.input_key,
                            COALESCE(binding.l0_tag_id, binding.l2_entity_instance_id)
-                    FROM t_conversion_input_bindings AS binding
-                    JOIN t_point_conversion_inputs AS input
+                    FROM t_point_processing_input_bindings AS binding
+                    JOIN t_point_processing_inputs AS input
                       ON input.id = binding.input_id
-                    WHERE binding.installed_conversion_id = %s
+                    WHERE binding.installed_processing_id = %s
                     ORDER BY input.input_key
                     """,
                     (installed[0],),
@@ -647,16 +645,16 @@ class PostgresPointConversionRepository:
                 cursor.execute(
                     """
                     SELECT output.output_key, binding.entity_instance_id
-                    FROM t_conversion_output_bindings AS binding
-                    JOIN t_point_conversion_outputs AS output
+                    FROM t_point_processing_output_bindings AS binding
+                    JOIN t_point_processing_outputs AS output
                       ON output.id = binding.output_id
-                    WHERE binding.installed_conversion_id = %s
+                    WHERE binding.installed_processing_id = %s
                     ORDER BY output.output_key
                     """,
                     (installed[0],),
                 )
                 output_ids = dict(cursor.fetchall())
-                return CurrentPointConversionContext(
+                return CurrentPointProcessingContext(
                     entity_identity_installation_id=installed[3],
                     solution_installation_id=installed[1],
                     revision_id=installed[2],
@@ -664,13 +662,13 @@ class PostgresPointConversionRepository:
                     output_entity_ids=output_ids,
                 )
 
-    def save_plan(self, plan: PointConversionPlan) -> PointConversionPlan:
+    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan:
         try:
             with self._connection() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """
-                        INSERT INTO t_point_conversion_plans
+                        INSERT INTO t_point_processing_plans
                           (id, node_id, template_revision_id,
                            entity_identity_installation_id,
                            solution_installation_id,
@@ -697,30 +695,31 @@ class PostgresPointConversionRepository:
                         ),
                     )
                     cursor.execute(
-                        "SELECT digest FROM t_point_conversion_plans WHERE id = %s",
+                        "SELECT digest FROM t_point_processing_plans WHERE id = %s",
                         (plan.id,),
                     )
                     stored = cursor.fetchone()
                     if stored is None or stored[0].strip() != plan.digest:
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_CONFLICT",
-                            "Point conversion plan identity conflicts with stored evidence",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_CONFLICT",
+                            "Point processing plan identity conflicts with stored evidence",
                         )
                     self._persist_plan_items(cursor, plan)
                     return plan
-        except PointConversionError:
+        except PointProcessingError:
             raise
         except psycopg2.Error as exc:
-            raise PointConversionError(
+            raise PointProcessingError(
                 "DATA_TRUNK_UNAVAILABLE",
-                "Point conversion plan could not be persisted",
+                "Point processing plan could not be persisted",
             ) from exc
 
     @staticmethod
-    def _persist_plan_items(cursor: Any, plan: PointConversionPlan) -> None:
+    def _persist_plan_items(cursor: Any, plan: PointProcessingPlan) -> None:
         for item in plan.items:
             input_id = None
             output_id = None
+            layer = "L1"
             source_kind = None
             selected_tag_id = None
             selected_entity_id = None
@@ -728,16 +727,16 @@ class PostgresPointConversionRepository:
                 cursor.execute(
                     """
                     SELECT id, source_kind
-                    FROM t_point_conversion_inputs
+                    FROM t_point_processing_inputs
                     WHERE revision_id = %s AND input_key = %s
                     """,
                     (plan.template_revision_id, item["input_id"]),
                 )
                 relation = cursor.fetchone()
                 if relation is None:
-                    raise PointConversionError(
-                        "POINT_CONVERSION_PLAN_STALE",
-                        "Point conversion input relation is missing",
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Point processing input relation is missing",
                     )
                 input_id, source_kind = relation
                 selected = item.get("selected_source_id")
@@ -747,33 +746,35 @@ class PostgresPointConversionRepository:
                     else:
                         selected_entity_id = UUID(selected)
             else:
+                layer = "L2"
                 cursor.execute(
                     """
-                    SELECT id FROM t_point_conversion_outputs
+                    SELECT id FROM t_point_processing_outputs
                     WHERE revision_id = %s AND output_key = %s
                     """,
                     (plan.template_revision_id, item["output_id"]),
                 )
                 relation = cursor.fetchone()
                 if relation is None:
-                    raise PointConversionError(
-                        "POINT_CONVERSION_PLAN_STALE",
-                        "Point conversion output relation is missing",
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Point processing output relation is missing",
                     )
                 output_id = relation[0]
             cursor.execute(
                 """
-                INSERT INTO t_point_conversion_plan_items
-                  (plan_id, item_key, action, input_id, output_id, source_kind,
+                INSERT INTO t_point_processing_plan_items
+                  (plan_id, item_key, layer, action, input_id, output_id, source_kind,
                    selected_tag_id, selected_entity_instance_id,
                    output_entity_instance_id, blocker_code, before_value,
                    after_value)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s)
                 ON CONFLICT (plan_id, item_key) DO NOTHING
                 """,
                 (
                     plan.id,
                     item["item_key"],
+                    layer,
                     item["action"],
                     input_id,
                     output_id,
@@ -790,7 +791,7 @@ class PostgresPointConversionRepository:
                 ),
             )
 
-    def get_plan(self, plan_id: UUID) -> PointConversionPlan | None:
+    def get_plan(self, plan_id: UUID) -> PointProcessingPlan | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -801,7 +802,7 @@ class PostgresPointConversionRepository:
                            base_site_configuration_version,
                            source_catalog_digest, status, items, blockers,
                            digest, planned_by
-                    FROM t_point_conversion_plans WHERE id = %s
+                    FROM t_point_processing_plans WHERE id = %s
                     """,
                     (plan_id,),
                 )
@@ -810,16 +811,16 @@ class PostgresPointConversionRepository:
 
     def apply_plan(
         self,
-        command: ApplyPointConversionPlan,
-        catalog: PointConversionCatalog,
+        command: ApplyPointProcessingPlan,
+        catalog: PointProcessingCatalog,
         *,
         transaction: Any | None = None,
-    ) -> PointConversionApplication:
+    ) -> PointProcessingApplication:
         del catalog
         if not command.actor.strip() or not command.idempotency_key.strip():
-            raise PointConversionError(
-                "POINT_CONVERSION_APPLY_INVALID",
-                "Point conversion apply actor and idempotency key are required",
+            raise PointProcessingError(
+                "POINT_PROCESSING_APPLY_INVALID",
+                "Point processing apply actor and idempotency key are required",
             )
         request_digest = _digest(
             {
@@ -833,23 +834,23 @@ class PostgresPointConversionRepository:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"point-conversion:{command.actor}:{command.idempotency_key}",),
+                        (f"point-processing:{command.actor}:{command.idempotency_key}",),
                     )
                     cursor.execute(
                         """
                         SELECT application.id, application.plan_id,
-                               application.installed_conversion_id,
+                               application.installed_processing_id,
                                application.solution_installation_id,
                                installed.revision_id,
                                application.site_configuration_version,
                                application.output_entity_instance_ids,
                                application.actor,
                                idempotency.request_digest
-                        FROM t_point_conversion_idempotency AS idempotency
-                        JOIN t_point_conversion_applications AS application
+                        FROM t_point_processing_idempotency AS idempotency
+                        JOIN t_point_processing_applications AS application
                           ON application.id = idempotency.application_id
-                        JOIN t_installed_point_conversions AS installed
-                          ON installed.id = application.installed_conversion_id
+                        JOIN t_installed_point_processings AS installed
+                          ON installed.id = application.installed_processing_id
                         WHERE idempotency.actor = %s
                           AND idempotency.idempotency_key = %s
                         """,
@@ -858,8 +859,8 @@ class PostgresPointConversionRepository:
                     existing = cursor.fetchone()
                     if existing is not None:
                         if existing[8].strip() != request_digest:
-                            raise PointConversionError(
-                                "POINT_CONVERSION_IDEMPOTENCY_KEY_REUSED",
+                            raise PointProcessingError(
+                                "POINT_PROCESSING_IDEMPOTENCY_KEY_REUSED",
                                 "Idempotency key was already used for a different request",
                             )
                         return _application_from_row(existing[:8])
@@ -881,7 +882,7 @@ class PostgresPointConversionRepository:
                                base_site_configuration_version,
                                source_catalog_digest, status, items, blockers,
                                digest, planned_by
-                        FROM t_point_conversion_plans
+                        FROM t_point_processing_plans
                         WHERE id = %s
                         FOR UPDATE
                         """,
@@ -889,24 +890,24 @@ class PostgresPointConversionRepository:
                     )
                     row = cursor.fetchone()
                     if row is None:
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_NOT_FOUND",
-                            "Point conversion plan was not found",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_NOT_FOUND",
+                            "Point processing plan was not found",
                         )
                     plan = _plan_from_row(row)
                     if plan.digest != command.plan_digest:
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_DIGEST_MISMATCH",
-                            "Point conversion plan digest does not match",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_DIGEST_MISMATCH",
+                            "Point processing plan digest does not match",
                         )
                     if plan.status != "ready" or plan.blockers:
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_STALE",
-                            "Point conversion plan is no longer ready",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
+                            "Point processing plan is no longer ready",
                         )
                     if current_version != plan.base_site_configuration_version:
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_STALE",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
                             "Site configuration changed after planning",
                         )
 
@@ -915,39 +916,39 @@ class PostgresPointConversionRepository:
                         LOCK TABLE t_tags, t_entity_instances,
                                    t_entity_instance_bindings,
                                    t_entity_binding_confirmations,
-                                   t_conversion_output_bindings,
-                                   t_installed_point_conversions
+                                   t_point_processing_output_bindings,
+                                   t_installed_point_processings
                         IN SHARE MODE
                         """
                     )
-                    sources = PostgresPointConversionCatalog.list_sources_with_cursor(
+                    sources = PostgresPointProcessingCatalog.list_sources_with_cursor(
                         cursor,
                         plan.node_id,
                     )
-                    template = PostgresPointConversionCatalog._load_asset(
+                    template = PostgresPointProcessingCatalog._load_asset(
                         cursor,
                         plan.template_revision_id,
                     )
                     if template is None or template.status != "active":
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_STALE",
-                            "Point conversion template changed after planning",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
+                            "Point processing template changed after planning",
                         )
                     if plan.source_catalog_digest != _template_source_catalog_digest(
                         template,
                         sources,
                         plan.node_id,
                     ):
-                        raise PointConversionError(
-                            "POINT_CONVERSION_PLAN_STALE",
-                            "Point conversion source catalog changed after planning",
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
+                            "Point processing source catalog changed after planning",
                         )
                     self._verify_package_ownership(cursor, plan, current_version)
 
                     cursor.execute(
                         """
                         SELECT id
-                        FROM t_installed_point_conversions
+                        FROM t_installed_point_processings
                         WHERE node_id = %s AND current = TRUE
                         FOR UPDATE
                         """,
@@ -957,7 +958,7 @@ class PostgresPointConversionRepository:
                     if current_installed is not None:
                         cursor.execute(
                             """
-                            UPDATE t_installed_point_conversions
+                            UPDATE t_installed_point_processings
                             SET current = FALSE
                             WHERE id = %s
                             """,
@@ -979,18 +980,18 @@ class PostgresPointConversionRepository:
 
                     installed_id = uuid5(
                         NAMESPACE_URL,
-                        f"zizu/installed-point-conversion/{plan.id}",
+                        f"zizu/installed-point-processing/{plan.id}",
                     )
                     application_id = uuid5(
                         NAMESPACE_URL,
                         (
-                            "zizu/point-conversion-application/"
+                            "zizu/point-processing-application/"
                             f"{command.actor}/{command.idempotency_key}"
                         ),
                     )
                     cursor.execute(
                         """
-                        INSERT INTO t_installed_point_conversions
+                        INSERT INTO t_installed_point_processings
                           (id, node_id, revision_id, source_plan_id,
                            solution_installation_id, site_configuration_version,
                            installed_by, current)
@@ -1014,8 +1015,8 @@ class PostgresPointConversionRepository:
                     )
                     cursor.execute(
                         """
-                        INSERT INTO t_point_conversion_applications
-                          (id, plan_id, installed_conversion_id,
+                        INSERT INTO t_point_processing_applications
+                          (id, plan_id, installed_processing_id,
                            solution_installation_id, site_configuration_version,
                            actor, output_entity_instance_ids)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -1032,7 +1033,7 @@ class PostgresPointConversionRepository:
                     )
                     cursor.execute(
                         """
-                        INSERT INTO t_point_conversion_idempotency
+                        INSERT INTO t_point_processing_idempotency
                           (actor, idempotency_key, request_digest, application_id)
                         VALUES (%s, %s, %s, %s)
                         """,
@@ -1044,7 +1045,7 @@ class PostgresPointConversionRepository:
                         ),
                     )
                     cursor.execute(
-                        "UPDATE t_point_conversion_plans SET status = 'applied' WHERE id = %s",
+                        "UPDATE t_point_processing_plans SET status = 'applied' WHERE id = %s",
                         (plan.id,),
                     )
                     cursor.execute(
@@ -1052,15 +1053,15 @@ class PostgresPointConversionRepository:
                         INSERT INTO t_audit_events
                           (id, event, outcome, reason, actor, target, details)
                         VALUES (%s, 'configuration.change', 'applied',
-                                'reviewed point conversion plan', %s, %s, %s)
+                                'reviewed point processing plan', %s, %s, %s)
                         """,
                         (
                             uuid4(),
                             command.actor,
-                            f"POST /api/v1/point-conversion-plans/{plan.id}/apply",
+                            f"POST /api/v1/point-processing-plans/{plan.id}/apply",
                             Json(
                                 {
-                                    "kind": "point_conversion",
+                                    "kind": "point_processing",
                                     "plan_id": str(plan.id),
                                     "plan_digest": plan.digest,
                                     "node_id": str(plan.node_id),
@@ -1069,34 +1070,34 @@ class PostgresPointConversionRepository:
                             ),
                         ),
                     )
-                    return PointConversionApplication(
+                    return PointProcessingApplication(
                         id=application_id,
                         plan_id=plan.id,
-                        installed_conversion_id=installed_id,
+                        installed_processing_id=installed_id,
                         solution_installation_id=solution_installation_id,
                         revision_id=plan.template_revision_id,
                         site_configuration_version=next_version,
                         output_entity_instance_ids=output_ids,
                         actor=command.actor,
                     )
-        except PointConversionError:
+        except PointProcessingError:
             raise
         except psycopg2.Error as exc:
-            raise PointConversionError(
+            raise PointProcessingError(
                 "DATA_TRUNK_UNAVAILABLE",
-                "Point conversion application could not be committed",
+                "Point processing application could not be committed",
             ) from exc
 
     @staticmethod
     def _verify_package_ownership(
         cursor: Any,
-        plan: PointConversionPlan,
+        plan: PointProcessingPlan,
         current_version: int,
     ) -> None:
         cursor.execute(
             """
             SELECT 1
-            FROM t_solution_point_conversion_assets AS asset
+            FROM t_solution_point_processing_assets AS asset
             WHERE asset.template_revision_id = %s
               AND asset.package_record_id = COALESCE(
                 (
@@ -1118,45 +1119,45 @@ class PostgresPointConversionRepository:
             ),
         )
         if cursor.fetchone() is None:
-            raise PointConversionError(
-                "POINT_CONVERSION_PLAN_STALE",
-                "Point conversion revision does not belong to the installed solution",
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Point processing revision does not belong to the installed solution",
             )
 
     @staticmethod
     def _install_bindings(
         cursor: Any,
-        plan: PointConversionPlan,
+        plan: PointProcessingPlan,
         installed_id: UUID,
         actor: str,
     ) -> tuple[UUID, ...]:
         output_entity_ids: list[UUID] = []
         for item in plan.items:
             if item["action"] == "block":
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_BLOCKED",
-                    "Point conversion plan contains a blocked item",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_BLOCKED",
+                    "Point processing plan contains a blocked item",
                 )
             if item["kind"] == "input_binding":
                 cursor.execute(
                     """
                     SELECT id, source_kind
-                    FROM t_point_conversion_inputs
+                    FROM t_point_processing_inputs
                     WHERE revision_id = %s AND input_key = %s
                     """,
                     (plan.template_revision_id, item["input_id"]),
                 )
                 relation = cursor.fetchone()
                 if relation is None or item.get("selected_source_id") is None:
-                    raise PointConversionError(
-                        "POINT_CONVERSION_PLAN_STALE",
-                        "Point conversion input relation is no longer available",
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Point processing input relation is no longer available",
                     )
                 selected_id = UUID(item["selected_source_id"])
                 cursor.execute(
                     """
-                    INSERT INTO t_conversion_input_bindings
-                      (installed_conversion_id, input_id, source_kind,
+                    INSERT INTO t_point_processing_input_bindings
+                      (installed_processing_id, input_id, source_kind,
                        l0_tag_id, l2_entity_instance_id, confirmed_by)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     """,
@@ -1173,16 +1174,16 @@ class PostgresPointConversionRepository:
             cursor.execute(
                 """
                 SELECT id, entity_definition_id, data_type, unit
-                FROM t_point_conversion_outputs
+                FROM t_point_processing_outputs
                 WHERE revision_id = %s AND output_key = %s
                 """,
                 (plan.template_revision_id, item["output_id"]),
             )
             relation = cursor.fetchone()
             if relation is None:
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_STALE",
-                    "Point conversion output relation is no longer available",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_STALE",
+                    "Point processing output relation is no longer available",
                 )
             entity_id = UUID(item["output_entity_instance_id"])
             cursor.execute(
@@ -1197,16 +1198,16 @@ class PostgresPointConversionRepository:
                 relation[1],
                 relation[2],
                 relation[3],
-                "point_conversion",
+                "point_processing",
             ):
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_STALE",
-                    "Point conversion output entity contract changed after planning",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_STALE",
+                    "Point processing output entity contract changed after planning",
                 )
             cursor.execute(
                 """
-                INSERT INTO t_conversion_output_bindings
-                  (installed_conversion_id, output_id, entity_instance_id)
+                INSERT INTO t_point_processing_output_bindings
+                  (installed_processing_id, output_id, entity_instance_id)
                 VALUES (%s, %s, %s)
                 """,
                 (installed_id, relation[0], entity_id),
@@ -1217,7 +1218,7 @@ class PostgresPointConversionRepository:
     @staticmethod
     def _create_derived_solution_lineage(
         cursor: Any,
-        plan: PointConversionPlan,
+        plan: PointProcessingPlan,
         actor: str,
         current_version: int,
     ) -> tuple[UUID, int]:
@@ -1243,33 +1244,33 @@ class PostgresPointConversionRepository:
         )
         current = cursor.fetchone()
         if current is None:
-            raise PointConversionError(
-                "POINT_CONVERSION_PLAN_STALE",
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
                 "An installed solution is required before an independent replacement",
             )
         next_version = current_version + 1
         configuration_digest = _digest(
             {
                 "previous_configuration_digest": current[7].strip(),
-                "point_conversion_plan_digest": plan.digest,
+                "point_processing_plan_digest": plan.digest,
             }
         )
         derived_plan_digest = _digest(
             {
-                "kind": "point_conversion",
-                "point_conversion_plan_id": str(plan.id),
-                "point_conversion_plan_digest": plan.digest,
+                "kind": "point_processing",
+                "point_processing_plan_id": str(plan.id),
+                "point_processing_plan_digest": plan.digest,
                 "base_site_configuration_version": current_version,
                 "site_configuration_version": next_version,
             }
         )
         derived_plan_id = uuid5(
             NAMESPACE_URL,
-            f"zizu/derived-point-conversion-plan/{derived_plan_digest}",
+            f"zizu/derived-point-processing-plan/{derived_plan_digest}",
         )
         derived_installation_id = uuid5(
             NAMESPACE_URL,
-            f"zizu/derived-point-conversion-installation/{derived_plan_digest}",
+            f"zizu/derived-point-processing-installation/{derived_plan_digest}",
         )
         public_plan = plan.public_dict()
         cursor.execute(
@@ -1280,7 +1281,7 @@ class PostgresPointConversionRepository:
                parameter_contracts, parameters, secret_references,
                parameter_sources, parameter_metadata, configuration_digest,
                target_installation_id, entity_identity_installation_id,
-               entity_plan, alarm_plan, point_conversion_plans, digest)
+               entity_plan, alarm_plan, point_processing_plans, digest)
             VALUES (%s, %s, %s, %s, 'ready', %s, '[]', %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
@@ -1293,9 +1294,9 @@ class PostgresPointConversionRepository:
                     [
                         {
                             "asset_id": str(plan.node_id),
-                            "kind": "point_conversion",
+                            "kind": "point_processing",
                             "action": "update",
-                            "point_conversion_plan_id": str(plan.id),
+                            "point_processing_plan_id": str(plan.id),
                         }
                     ]
                 ),
@@ -1358,8 +1359,8 @@ class PostgresPointConversionRepository:
         )
         details = {
             "plan_id": str(derived_plan_id),
-            "point_conversion_plan_id": str(plan.id),
-            "point_conversion_plan_digest": plan.digest,
+            "point_processing_plan_id": str(plan.id),
+            "point_processing_plan_digest": plan.digest,
             "configuration_digest": configuration_digest,
         }
         cursor.execute(
@@ -1402,15 +1403,15 @@ class PostgresPointConversionRepository:
         return derived_installation_id, next_version
 
 
-def build_postgres_point_conversion() -> PointConversion:
-    return PointConversion(
-        PostgresPointConversionRepository(),
-        PostgresPointConversionCatalog(),
+def build_postgres_point_processing() -> PointProcessingDelivery:
+    return PointProcessingDelivery(
+        PostgresPointProcessingRepository(),
+        PostgresPointProcessingCatalog(),
     )
 
 
-def _plan_from_row(row: tuple[Any, ...]) -> PointConversionPlan:
-    return PointConversionPlan(
+def _plan_from_row(row: tuple[Any, ...]) -> PointProcessingPlan:
+    return PointProcessingPlan(
         id=row[0],
         node_id=row[1],
         template_revision_id=row[2],
@@ -1426,11 +1427,11 @@ def _plan_from_row(row: tuple[Any, ...]) -> PointConversionPlan:
     )
 
 
-def _application_from_row(row: tuple[Any, ...]) -> PointConversionApplication:
-    return PointConversionApplication(
+def _application_from_row(row: tuple[Any, ...]) -> PointProcessingApplication:
+    return PointProcessingApplication(
         id=row[0],
         plan_id=row[1],
-        installed_conversion_id=row[2],
+        installed_processing_id=row[2],
         solution_installation_id=row[3],
         revision_id=row[4],
         site_configuration_version=int(row[5]),

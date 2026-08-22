@@ -27,14 +27,14 @@ SPEC.loader.exec_module(builder)
 
 @unittest.skipUnless(
     os.environ.get("ZIZU_POSTGRES_TEST") == "1",
-    "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL point-conversion tests",
+    "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL point-processing tests",
 )
-class PointConversionPostgresTest(unittest.TestCase):
+class PointProcessingPostgresTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.db_name = os.environ.get("DB_NAME", "")
         if not cls.db_name.endswith("_test"):
-            raise RuntimeError("Point-conversion tests require a *_test database")
+            raise RuntimeError("Point-processing tests require a *_test database")
         cls.connection_kwargs = {
             "host": os.environ["DB_HOST"],
             "port": int(os.environ["DB_PORT"]),
@@ -57,11 +57,13 @@ class PointConversionPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 DataTrunkMigrationPostgresTest._reset_through_037(cursor)
                 DataTrunkMigrationPostgresTest._apply_038(cursor)
+                DataTrunkMigrationPostgresTest._apply_039(cursor)
+                DataTrunkMigrationPostgresTest._apply_040(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     def test_package_import_persists_complete_versioned_catalog_atomically(self) -> None:
-        from app.services.point_conversion_postgres import (
-            PostgresPointConversionCatalog,
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
         )
         from app.services.solution_delivery import (
             PostgresDeliveryRepository,
@@ -77,7 +79,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             actor="user:engineer-import",
         )
 
-        summaries = PostgresPointConversionCatalog().list_templates("PCS")
+        summaries = PostgresPointProcessingCatalog().list_templates("PCS")
         self.assertEqual(
             [item.asset.asset_id for item in summaries],
             ["pcs.brand-a", "pcs.brand-b"],
@@ -96,20 +98,20 @@ class PointConversionPostgresTest(unittest.TestCase):
                     """
                     SELECT
                       (SELECT count(*) FROM t_solution_packages),
-                      (SELECT count(*) FROM t_point_conversion_templates),
-                      (SELECT count(*) FROM t_point_conversion_revisions),
-                      (SELECT count(*) FROM t_point_conversion_inputs),
-                      (SELECT count(*) FROM t_point_conversion_outputs),
+                      (SELECT count(*) FROM t_point_processing_templates),
+                      (SELECT count(*) FROM t_point_processing_revisions),
+                      (SELECT count(*) FROM t_point_processing_inputs),
+                      (SELECT count(*) FROM t_point_processing_outputs),
                       (SELECT count(*) FROM t_enum_mapping_entries),
                       (SELECT count(*) FROM t_fault_code_mapping_entries),
-                      (SELECT count(*) FROM t_solution_point_conversion_assets)
+                      (SELECT count(*) FROM t_solution_point_processing_assets)
                     """
                 )
                 self.assertEqual(cursor.fetchone(), (1, 2, 2, 6, 6, 8, 4, 2))
                 cursor.execute(
                     """
                     SELECT count(*)
-                    FROM t_solution_point_conversion_assets
+                    FROM t_solution_point_processing_assets
                     WHERE package_record_id = %s
                     """,
                     (package.id,),
@@ -117,13 +119,13 @@ class PointConversionPostgresTest(unittest.TestCase):
                 self.assertEqual(cursor.fetchone(), (2,))
 
     def test_independent_brand_replacement_preserves_l2_ids_and_advances_lineage(self) -> None:
-        from app.services.point_conversion import (
-            ApplyPointConversionPlan,
-            PlanPointConversion,
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PreviewPointProcessing,
         )
-        from app.services.point_conversion_postgres import (
-            PostgresPointConversionCatalog,
-            build_postgres_point_conversion,
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            build_postgres_point_processing,
         )
 
         package, brand_a_revision, brand_b_revision = self._import_reference_package()
@@ -141,9 +143,9 @@ class PointConversionPostgresTest(unittest.TestCase):
             entity_ids,
         )
 
-        service = build_postgres_point_conversion()
-        plan = service.plan(
-            PlanPointConversion(
+        service = build_postgres_point_processing()
+        plan = service.preview(
+            PreviewPointProcessing(
                 node_id=node_id,
                 template_revision_id=brand_b_revision,
                 input_selections={},
@@ -160,7 +162,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             {"preserve"},
         )
 
-        command = ApplyPointConversionPlan(
+        command = ApplyPointProcessingPlan(
             plan.id,
             plan.digest,
             "replace-brand-b",
@@ -173,7 +175,7 @@ class PointConversionPostgresTest(unittest.TestCase):
         self.assertEqual(application.site_configuration_version, 2)
         self.assertEqual(set(application.output_entity_instance_ids), set(entity_ids.values()))
 
-        current = service.inspect_node(node_id, include_engineering=True).public_dict()
+        current = service.inspect(node_id, include_engineering=True).public_dict()
         self.assertEqual(current["l1_summary"]["revision_id"], str(brand_b_revision))
         self.assertEqual(
             {item["entity_instance_id"] for item in current["l2"]},
@@ -184,10 +186,10 @@ class PointConversionPostgresTest(unittest.TestCase):
                 cursor.execute(
                     """
                     SELECT current_version,
-                           (SELECT count(*) FROM t_point_conversion_applications),
-                           (SELECT count(*) FROM t_point_conversion_idempotency),
+                           (SELECT count(*) FROM t_point_processing_applications),
+                           (SELECT count(*) FROM t_point_processing_idempotency),
                            (SELECT count(*) FROM t_solution_installations),
-                           (SELECT count(*) FROM t_installed_point_conversions
+                           (SELECT count(*) FROM t_installed_point_processings
                             WHERE current = TRUE)
                     FROM t_site_configuration_state
                     WHERE singleton = TRUE
@@ -205,12 +207,12 @@ class PointConversionPostgresTest(unittest.TestCase):
                 self.assertEqual(cursor.fetchone(), (2,))
 
     def test_concurrent_same_plan_allows_one_apply_and_one_stale(self) -> None:
-        from app.services.point_conversion import (
-            ApplyPointConversionPlan,
-            PlanPointConversion,
-            PointConversionError,
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PreviewPointProcessing,
+            PointProcessingError,
         )
-        from app.services.point_conversion_postgres import build_postgres_point_conversion
+        from app.services.point_processing_postgres import build_postgres_point_processing
 
         package, brand_a_revision, brand_b_revision = self._import_reference_package()
         node_id = UUID("85000000-0000-0000-0000-000000000001")
@@ -226,9 +228,9 @@ class PointConversionPostgresTest(unittest.TestCase):
             node_id,
             entity_ids,
         )
-        service = build_postgres_point_conversion()
-        plan = service.plan(
-            PlanPointConversion(
+        service = build_postgres_point_processing()
+        plan = service.preview(
+            PreviewPointProcessing(
                 node_id=node_id,
                 template_revision_id=brand_b_revision,
                 input_selections={},
@@ -241,7 +243,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             barrier.wait(timeout=5)
             try:
                 service.apply(
-                    ApplyPointConversionPlan(
+                    ApplyPointProcessingPlan(
                         plan.id,
                         plan.digest,
                         key,
@@ -249,17 +251,17 @@ class PointConversionPostgresTest(unittest.TestCase):
                     )
                 )
                 return "APPLIED"
-            except PointConversionError as exc:
+            except PointProcessingError as exc:
                 return exc.code
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = sorted(pool.map(apply, ("replace-a", "replace-b")))
-        self.assertEqual(outcomes, ["APPLIED", "POINT_CONVERSION_PLAN_STALE"])
+        self.assertEqual(outcomes, ["APPLIED", "POINT_PROCESSING_PLAN_STALE"])
 
     def test_solution_install_creates_entities_and_conversion_in_one_transaction(self) -> None:
         delivery, plan, pcs_node_id = self._plan_reference_solution()
         self.assertEqual(plan.status, "ready", plan.blockers)
-        self.assertEqual(len(plan.point_conversion_plans), 1)
+        self.assertEqual(len(plan.point_processing_plans), 1)
         outcome = delivery.apply_install(
             plan.id,
             plan.digest,
@@ -280,10 +282,10 @@ class PointConversionPostgresTest(unittest.TestCase):
                     """
                     SELECT
                       (SELECT count(*) FROM t_entity_instances),
-                      (SELECT count(*) FROM t_installed_point_conversions
+                      (SELECT count(*) FROM t_installed_point_processings
                        WHERE current = TRUE),
-                      (SELECT count(*) FROM t_conversion_output_bindings),
-                      (SELECT count(*) FROM t_point_conversion_applications),
+                      (SELECT count(*) FROM t_point_processing_output_bindings),
+                      (SELECT count(*) FROM t_point_processing_applications),
                       (SELECT current_version FROM t_site_configuration_state
                        WHERE singleton = TRUE)
                     """
@@ -295,7 +297,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                     FROM t_entity_instances AS entity
                     JOIN t_device_instances AS device
                       ON device.id = entity.device_instance_id
-                    WHERE entity.source_kind = 'point_conversion'
+                    WHERE entity.source_kind = 'point_processing'
                     ORDER BY entity.definition_id
                     """
                 )
@@ -307,12 +309,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                     set(outcome.entity_instance_ids) & {row[1] for row in rows},
                 )
 
-    def test_039_rejects_a_direct_tag_binding_for_a_converted_entity(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            connection.autocommit = True
-            with connection.cursor() as cursor:
-                DataTrunkMigrationPostgresTest._apply_039(cursor)
-
+    def test_040_rejects_a_direct_tag_binding_for_a_processed_entity(self) -> None:
         delivery, plan, _ = self._plan_reference_solution()
         delivery.apply_install(
             plan.id,
@@ -331,7 +328,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                         CROSS JOIN LATERAL (
                           SELECT id FROM t_tags ORDER BY id LIMIT 1
                         ) AS tag
-                        WHERE entity.source_kind = 'point_conversion'
+                        WHERE entity.source_kind = 'point_processing'
                         ORDER BY entity.id
                         LIMIT 1
                         """
@@ -366,11 +363,6 @@ class PointConversionPostgresTest(unittest.TestCase):
             verify_data_trunk_contract_gate,
         )
 
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            connection.autocommit = True
-            with connection.cursor() as cursor:
-                DataTrunkMigrationPostgresTest._apply_039(cursor)
-
         delivery, plan, _ = self._plan_reference_solution()
         delivery.apply_install(
             plan.id,
@@ -394,17 +386,17 @@ class PointConversionPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    ALTER TABLE t_conversion_output_bindings
-                    DISABLE TRIGGER trg_conversion_output_binding_single_source
+                    ALTER TABLE t_point_processing_output_bindings
+                    DISABLE TRIGGER trg_processing_output_binding_single_source
                     """
                 )
                 cursor.execute(
                     """
-                    DELETE FROM t_conversion_output_bindings
+                    DELETE FROM t_point_processing_output_bindings
                     WHERE entity_instance_id = (
                       SELECT id
                       FROM t_entity_instances
-                      WHERE source_kind = 'point_conversion'
+                      WHERE source_kind = 'point_processing'
                       ORDER BY id
                       LIMIT 1
                     )
@@ -412,8 +404,8 @@ class PointConversionPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(
                     """
-                    ALTER TABLE t_conversion_output_bindings
-                    ENABLE TRIGGER trg_conversion_output_binding_single_source
+                    ALTER TABLE t_point_processing_output_bindings
+                    ENABLE TRIGGER trg_processing_output_binding_single_source
                     """
                 )
 
@@ -428,7 +420,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    CREATE OR REPLACE FUNCTION fail_point_conversion_output_binding()
+                    CREATE OR REPLACE FUNCTION fail_point_processing_output_binding()
                     RETURNS trigger LANGUAGE plpgsql AS $$
                     BEGIN
                       RAISE EXCEPTION 'simulated output binding failure';
@@ -438,9 +430,9 @@ class PointConversionPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(
                     """
-                    CREATE TRIGGER trg_fail_point_conversion_output_binding
-                    BEFORE INSERT ON t_conversion_output_bindings
-                    FOR EACH ROW EXECUTE FUNCTION fail_point_conversion_output_binding()
+                    CREATE TRIGGER trg_fail_point_processing_output_binding
+                    BEFORE INSERT ON t_point_processing_output_bindings
+                    FOR EACH ROW EXECUTE FUNCTION fail_point_processing_output_binding()
                     """
                 )
         with self.assertRaises(DeliveryError) as raised:
@@ -460,8 +452,8 @@ class PointConversionPostgresTest(unittest.TestCase):
                       (SELECT count(*) FROM t_solution_installations),
                       (SELECT count(*) FROM t_site_configuration_versions
                        WHERE installation_id IS NOT NULL),
-                      (SELECT count(*) FROM t_installed_point_conversions),
-                      (SELECT count(*) FROM t_point_conversion_applications),
+                      (SELECT count(*) FROM t_installed_point_processings),
+                      (SELECT count(*) FROM t_point_processing_applications),
                       (SELECT count(*) FROM t_solution_delivery_audit),
                       (SELECT current_version FROM t_site_configuration_state
                        WHERE singleton = TRUE)
@@ -547,8 +539,8 @@ class PointConversionPostgresTest(unittest.TestCase):
         latest = runtime.read(entity_id)
         history = runtime.history(entity_id, "1h")
         self.assertEqual(latest.value, 12.345)
-        self.assertEqual(latest.source_kind, "point_conversion")
-        self.assertIsNotNone(latest.conversion_revision_id)
+        self.assertEqual(latest.source_kind, "point_processing")
+        self.assertIsNotNone(latest.processing_revision_id)
         self.assertEqual(len(history), 1)
 
     def test_template_catalog_failure_rolls_back_package_and_catalog(self) -> None:
@@ -588,7 +580,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             )
         self.assertEqual(
             raised.exception.code,
-            "POINT_CONVERSION_CATALOG_UNAVAILABLE",
+            "POINT_PROCESSING_CATALOG_UNAVAILABLE",
         )
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -597,17 +589,17 @@ class PointConversionPostgresTest(unittest.TestCase):
                     SELECT
                       (SELECT count(*) FROM t_solution_packages),
                       (SELECT count(*) FROM t_solution_package_assets),
-                      (SELECT count(*) FROM t_point_conversion_templates),
-                      (SELECT count(*) FROM t_point_conversion_revisions),
-                      (SELECT count(*) FROM t_point_conversion_inputs),
-                      (SELECT count(*) FROM t_point_conversion_outputs)
+                      (SELECT count(*) FROM t_point_processing_templates),
+                      (SELECT count(*) FROM t_point_processing_revisions),
+                      (SELECT count(*) FROM t_point_processing_inputs),
+                      (SELECT count(*) FROM t_point_processing_outputs)
                     """
                 )
                 self.assertEqual(cursor.fetchone(), (0, 0, 0, 0, 0, 0))
 
     def test_admin_retirement_hides_new_candidate_but_keeps_installed_revision(self) -> None:
-        from app.services.point_conversion_postgres import (
-            PostgresPointConversionCatalog,
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
         )
         from app.services.solution_delivery import (
             PostgresDeliveryRepository,
@@ -635,7 +627,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 cursor.execute(
                     """
                     SELECT id, revision_id
-                    FROM t_installed_point_conversions
+                    FROM t_installed_point_processings
                     WHERE current = TRUE
                     """
                 )
@@ -653,7 +645,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            asset_path = retired_source / "point-conversions" / "pcs-brand-a.yaml"
+            asset_path = retired_source / "point-processings" / "pcs-brand-a.yaml"
             retired_asset = asset_path.read_text(encoding="utf-8")
             retired_asset = retired_asset.replace("revision: 1", "revision: 2", 1)
             retired_asset = retired_asset.replace(
@@ -672,7 +664,7 @@ class PointConversionPostgresTest(unittest.TestCase):
 
         active_assets = {
             item.asset.asset_id
-            for item in PostgresPointConversionCatalog().list_templates("PCS")
+            for item in PostgresPointProcessingCatalog().list_templates("PCS")
         }
         self.assertEqual(active_assets, {"pcs.brand-b"})
         with psycopg2.connect(**self.connection_kwargs) as connection:
@@ -680,7 +672,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 cursor.execute(
                     """
                     SELECT id, revision_id
-                    FROM t_installed_point_conversions
+                    FROM t_installed_point_processings
                     WHERE current = TRUE
                     """
                 )
@@ -689,7 +681,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                     """
                     SELECT actor, outcome, details->>'before', details->>'after'
                     FROM t_audit_events
-                    WHERE event = 'point_conversion.template_status'
+                    WHERE event = 'point_processing.template_status'
                     ORDER BY created_at DESC
                     LIMIT 1
                     """
@@ -706,9 +698,9 @@ class PointConversionPostgresTest(unittest.TestCase):
             PostgresSourceCatalog,
         )
         from app.services.entity_instance_registry import EntityInstanceRegistry
-        from app.services.point_conversion_postgres import (
-            PostgresPointConversionCatalog,
-            build_postgres_point_conversion,
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            build_postgres_point_processing,
         )
         from app.services.solution_delivery import (
             PostgresDeliveryRepository,
@@ -726,7 +718,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 repository.site_configuration_version,
             ),
             alarm_definitions=PostgresAlarmDefinitionCatalog(),
-            point_conversions=build_postgres_point_conversion(),
+            point_processings=build_postgres_point_processing(),
         )
         package = delivery.import_package(
             builder.build_archive(),
@@ -734,7 +726,7 @@ class PointConversionPostgresTest(unittest.TestCase):
         )
         brand_a_revision = next(
             item.revision_id
-            for item in PostgresPointConversionCatalog().list_templates("PCS")
+            for item in PostgresPointProcessingCatalog().list_templates("PCS")
             if item.asset.asset_id == "pcs.brand-a"
         )
         pcs_node_id = UUID("86000000-0000-0000-0000-000000000001")
@@ -759,7 +751,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             secret_references={
                 "gateway.credentials": "secret://reference/gateway"
             },
-            point_conversions=[
+            point_processings=[
                 {
                     "node_id": pcs_node_id,
                     "template_revision_id": brand_a_revision,
@@ -769,7 +761,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             actor="user:engineer-install",
         )
         self.assertEqual(plan.status, "ready", plan.blockers)
-        self.assertEqual(len(plan.point_conversion_plans), 1)
+        self.assertEqual(len(plan.point_processing_plans), 1)
         return delivery, plan, pcs_node_id
 
     def _seed_reference_sources(self) -> None:
@@ -834,7 +826,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                         )
 
     def _import_reference_package(self):
-        from app.services.point_conversion_postgres import PostgresPointConversionCatalog
+        from app.services.point_processing_postgres import PostgresPointProcessingCatalog
         from app.services.solution_delivery import (
             PostgresDeliveryRepository,
             SolutionDelivery,
@@ -844,7 +836,7 @@ class PointConversionPostgresTest(unittest.TestCase):
             PostgresDeliveryRepository(),
             platform_version="0.4.77",
         ).import_package(builder.build_archive(), "user:engineer-import")
-        summaries = PostgresPointConversionCatalog().list_templates("PCS")
+        summaries = PostgresPointProcessingCatalog().list_templates("PCS")
         by_asset = {item.asset.asset_id: item.revision_id for item in summaries}
         return package, by_asset["pcs.brand-a"], by_asset["pcs.brand-b"]
 
@@ -897,7 +889,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                        parameter_contracts, parameters, secret_references,
                        parameter_sources, parameter_metadata, configuration_digest,
                        target_installation_id, entity_identity_installation_id,
-                       entity_plan, alarm_plan, point_conversion_plans, digest)
+                       entity_plan, alarm_plan, point_processing_plans, digest)
                     VALUES (%s, %s, %s, 0, 'ready', '[]', '[]', '[]', '{}', '{}',
                             '{}', '{}', %s, %s, %s, NULL, NULL, '[]', %s)
                     """,
@@ -963,7 +955,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                            data_type, unit, direction, freshness_seconds,
                            source_kind)
                         VALUES (%s, %s, %s, %s, %s, %s, 'R', 30,
-                                'point_conversion')
+                                'point_processing')
                         """,
                         (
                             entity_ids[output_key],
@@ -976,7 +968,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                     )
                 cursor.execute(
                     """
-                    INSERT INTO t_point_conversion_plans
+                    INSERT INTO t_point_processing_plans
                       (id, node_id, template_revision_id,
                        entity_identity_installation_id, solution_installation_id,
                        base_site_configuration_version, source_catalog_digest,
@@ -996,7 +988,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(
                     """
-                    INSERT INTO t_installed_point_conversions
+                    INSERT INTO t_installed_point_processings
                       (id, node_id, revision_id, source_plan_id,
                        solution_installation_id, site_configuration_version,
                        installed_by, current)
@@ -1007,7 +999,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(
                     """
-                    SELECT id, input_key FROM t_point_conversion_inputs
+                    SELECT id, input_key FROM t_point_processing_inputs
                     WHERE revision_id = %s
                     """,
                     (revision_id,),
@@ -1020,8 +1012,8 @@ class PointConversionPostgresTest(unittest.TestCase):
                 for input_id, input_key in cursor.fetchall():
                     cursor.execute(
                         """
-                        INSERT INTO t_conversion_input_bindings
-                          (installed_conversion_id, input_id, source_kind,
+                        INSERT INTO t_point_processing_input_bindings
+                          (installed_processing_id, input_id, source_kind,
                            l0_tag_id, confirmed_by)
                         VALUES (%s, %s, 'l0', %s, 'user:engineer-install')
                         """,
@@ -1029,7 +1021,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                     )
                 cursor.execute(
                     """
-                    SELECT id, output_key FROM t_point_conversion_outputs
+                    SELECT id, output_key FROM t_point_processing_outputs
                     WHERE revision_id = %s
                     """,
                     (revision_id,),
@@ -1037,16 +1029,16 @@ class PointConversionPostgresTest(unittest.TestCase):
                 for output_id, output_key in cursor.fetchall():
                     cursor.execute(
                         """
-                        INSERT INTO t_conversion_output_bindings
-                          (installed_conversion_id, output_id, entity_instance_id)
+                        INSERT INTO t_point_processing_output_bindings
+                          (installed_processing_id, output_id, entity_instance_id)
                         VALUES (%s, %s, %s)
                         """,
                         (installed_id, output_id, entity_ids[output_key]),
                     )
                 cursor.execute(
                     """
-                    INSERT INTO t_point_conversion_applications
-                      (id, plan_id, installed_conversion_id,
+                    INSERT INTO t_point_processing_applications
+                      (id, plan_id, installed_processing_id,
                        solution_installation_id, site_configuration_version,
                        actor, output_entity_instance_ids)
                     VALUES (%s, %s, %s, %s, 1, 'user:engineer-install', %s)
@@ -1061,7 +1053,7 @@ class PointConversionPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(
                     """
-                    INSERT INTO t_point_conversion_idempotency
+                    INSERT INTO t_point_processing_idempotency
                       (actor, idempotency_key, request_digest, application_id)
                     VALUES ('user:engineer-install', 'initial-brand-a', %s, %s)
                     """,

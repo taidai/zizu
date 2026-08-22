@@ -62,6 +62,8 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     cursor
                 )
                 migration_support.DataTrunkMigrationPostgresTest._apply_038(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_039(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
                 self._seed_installed_numeric_conversion(cursor)
         self.repository = PostgresDataTrunkRepository(
             connection_factory=self._connection,
@@ -113,9 +115,9 @@ class DataTrunkPostgresTest(unittest.TestCase):
               'kW',
               'R',
               30,
-              'point_conversion'
+              'point_processing'
             );
-            INSERT INTO t_point_conversion_templates
+            INSERT INTO t_point_processing_templates
               (id, asset_id, device_category, brand, model,
                display_name, status)
             VALUES (
@@ -127,7 +129,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               'Brand A PCS',
               'active'
             );
-            INSERT INTO t_point_conversion_revisions
+            INSERT INTO t_point_processing_revisions
               (id, template_id, revision, content_digest, published_at)
             VALUES (
               %s,
@@ -136,7 +138,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               %s,
               '2026-08-17T00:00:00Z'
             );
-            INSERT INTO t_point_conversion_inputs
+            INSERT INTO t_point_processing_inputs
               (id, revision_id, input_key, source_kind, data_type, unit,
                required, stable_source_key, aliases)
             VALUES (
@@ -150,7 +152,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               'ActivePowerRaw',
               ARRAY['ActivePower']
             );
-            INSERT INTO t_point_conversion_outputs
+            INSERT INTO t_point_processing_outputs
               (id, revision_id, output_key, entity_definition_id,
                data_type, unit, freshness_seconds)
             VALUES (
@@ -172,7 +174,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               -500,
               500
             );
-            INSERT INTO t_point_conversion_plans
+            INSERT INTO t_point_processing_plans
               (id, node_id, template_revision_id,
                entity_identity_installation_id, solution_installation_id,
                base_site_configuration_version, source_catalog_digest,
@@ -191,7 +193,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               %s,
               'user:installer'
             );
-            INSERT INTO t_installed_point_conversions
+            INSERT INTO t_installed_point_processings
               (id, node_id, revision_id, source_plan_id,
                solution_installation_id, site_configuration_version,
                installed_by, current)
@@ -205,8 +207,8 @@ class DataTrunkPostgresTest(unittest.TestCase):
               'user:installer',
               TRUE
             );
-            INSERT INTO t_conversion_input_bindings
-              (installed_conversion_id, input_id, source_kind, l0_tag_id,
+            INSERT INTO t_point_processing_input_bindings
+              (installed_processing_id, input_id, source_kind, l0_tag_id,
                confirmed_by)
             VALUES (
               %s,
@@ -215,8 +217,8 @@ class DataTrunkPostgresTest(unittest.TestCase):
               %s,
               'user:installer'
             );
-            INSERT INTO t_conversion_output_bindings
-              (installed_conversion_id, output_id, entity_instance_id)
+            INSERT INTO t_point_processing_output_bindings
+              (installed_processing_id, output_id, entity_instance_id)
             VALUES (
               %s,
               '00000000-0000-0000-0000-000000000208',
@@ -315,11 +317,11 @@ class DataTrunkPostgresTest(unittest.TestCase):
             VALUES
               (%s, '00000000-0000-0000-0000-000000000302',
                'pcs.operating_state', 'PCS 01 运行状态',
-               'ENUM', NULL, 'R', 30, 'point_conversion'),
+               'ENUM', NULL, 'R', 30, 'point_processing'),
               (%s, '00000000-0000-0000-0000-000000000302',
                'pcs.fault_codes', 'PCS 01 故障码',
-               'CODE_SET', NULL, 'R', 30, 'point_conversion');
-            INSERT INTO t_point_conversion_inputs
+               'CODE_SET', NULL, 'R', 30, 'point_processing');
+            INSERT INTO t_point_processing_inputs
               (id, revision_id, input_key, source_kind, data_type, unit,
                required, stable_source_key, aliases)
             VALUES
@@ -329,7 +331,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
               ('00000000-0000-0000-0000-000000000210', %s,
                'fault_codes_raw', 'l0', 'STRING', NULL, TRUE,
                'FaultCodesRaw', '{}');
-            INSERT INTO t_point_conversion_outputs
+            INSERT INTO t_point_processing_outputs
               (id, revision_id, output_key, entity_definition_id,
                data_type, unit, freshness_seconds)
             VALUES
@@ -357,23 +359,22 @@ class DataTrunkPostgresTest(unittest.TestCase):
               ('00000000-0000-0000-0000-000000000211', '0', 'STOPPED'),
               ('00000000-0000-0000-0000-000000000211', '2', 'RUNNING');
             INSERT INTO t_fault_code_mapping_entries
-              (output_id, raw_code, canonical_code, display_name,
-               default_severity)
+              (output_id, raw_code, canonical_code, display_name)
             VALUES
               ('00000000-0000-0000-0000-000000000212', 'E30',
-               'COMPRESSOR_FAULT', '压缩机故障', 'MAJOR'),
+               'COMPRESSOR_FAULT', '压缩机故障'),
               ('00000000-0000-0000-0000-000000000212', 'E11',
-               'DC_OVERVOLTAGE', '直流过压', 'MAJOR');
-            INSERT INTO t_conversion_input_bindings
-              (installed_conversion_id, input_id, source_kind, l0_tag_id,
+               'DC_OVERVOLTAGE', '直流过压');
+            INSERT INTO t_point_processing_input_bindings
+              (installed_processing_id, input_id, source_kind, l0_tag_id,
                confirmed_by)
             VALUES
               (%s, '00000000-0000-0000-0000-000000000209', 'l0', %s,
                'user:installer'),
               (%s, '00000000-0000-0000-0000-000000000210', 'l0', %s,
                'user:installer');
-            INSERT INTO t_conversion_output_bindings
-              (installed_conversion_id, output_id, entity_instance_id)
+            INSERT INTO t_point_processing_output_bindings
+              (installed_processing_id, output_id, entity_instance_id)
             VALUES
               (%s, '00000000-0000-0000-0000-000000000211', %s),
               (%s, '00000000-0000-0000-0000-000000000212', %s);

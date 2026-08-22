@@ -62,16 +62,16 @@ from app.services.solution_policies import (
     validate_ems_policy_assets,
     validate_policy_execution_acceptances,
 )
-from app.services.solution_point_conversions import (
-    point_conversion_assets,
-    point_conversion_revision_id,
-    validate_point_conversion_assets,
+from app.services.solution_point_processings import (
+    point_processing_assets,
+    point_processing_revision_id,
+    validate_point_processing_assets,
 )
-from app.services.point_conversion import (
-    ApplyPointConversionPlan,
-    PlanPointConversion,
-    PointConversion,
-    PointConversionError,
+from app.services.point_processing import (
+    ApplyPointProcessingPlan,
+    PreviewPointProcessing,
+    PointProcessingDelivery,
+    PointProcessingError,
 )
 from app.services.gateway_readiness import GatewayReadiness
 from app.services.data_trunk_acceptance import DataTrunkAcceptance
@@ -146,7 +146,7 @@ class SolutionDelivery:
         authorization_evidence_runtime: AuthorizationEvidenceRuntime | None = None,
         gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
-        point_conversions: PointConversion | None = None,
+        point_processings: PointProcessingDelivery | None = None,
         data_trunk_acceptance: DataTrunkAcceptance | None = None,
     ) -> None:
         self._repository = repository
@@ -161,7 +161,7 @@ class SolutionDelivery:
         self._authorization_evidence_runtime = authorization_evidence_runtime
         self._gateway_readiness = gateway_readiness
         self._release_lock_reader = release_lock_reader
-        self._point_conversions = point_conversions
+        self._point_processings = point_processings
         self._data_trunk_acceptance = data_trunk_acceptance
 
     def set_policy_runtime(self, policy_runtime: PolicyExecutionRuntime) -> None:
@@ -260,13 +260,13 @@ class SolutionDelivery:
         )
         if normalized_policies:
             manifest["_policy_assets"] = list(normalized_policies)
-        normalized_point_conversions = validate_point_conversion_assets(
+        normalized_point_processings = validate_point_processing_assets(
             manifest,
             declared_assets,
             _load_mapping,
         )
-        if normalized_point_conversions:
-            manifest["_point_conversion_assets"] = list(normalized_point_conversions)
+        if normalized_point_processings:
+            manifest["_point_processing_assets"] = list(normalized_point_processings)
         validate_data_trunk_acceptances(manifest, declared_assets)
         validate_policy_execution_acceptances(
             manifest,
@@ -305,7 +305,7 @@ class SolutionDelivery:
         binding_selections: dict[str, UUID] | None = None,
         binding_overrides: dict[str, UUID] | None = None,
         upgrade_risk_resolutions: dict[str, str] | None = None,
-        point_conversions: list[dict[str, Any]] | None = None,
+        point_processings: list[dict[str, Any]] | None = None,
         actor: str = "system:delivery-plan",
     ) -> InstallationPlan:
         package = self._repository.get_package(package_record_id)
@@ -427,9 +427,9 @@ class SolutionDelivery:
         entity_items: tuple[dict[str, Any], ...] = ()
         entity_blockers: tuple[dict[str, str], ...] = ()
         alarm_plan: AlarmDefinitionPlan | None = None
-        point_conversion_plans: tuple[dict[str, Any], ...] = ()
-        point_conversion_items: tuple[dict[str, Any], ...] = ()
-        point_conversion_selection_by_instance: dict[str, dict[str, Any]] = {}
+        point_processing_plans: tuple[dict[str, Any], ...] = ()
+        point_processing_items: tuple[dict[str, Any], ...] = ()
+        point_processing_selection_by_instance: dict[str, dict[str, Any]] = {}
         alarm_items: tuple[dict[str, Any], ...] = ()
         alarm_assets = tuple(package.manifest.get("_alarm_assets", ()))
         policy_assets = tuple(package.manifest.get("_policy_assets", ()))
@@ -458,11 +458,11 @@ class SolutionDelivery:
                 tuple(package.manifest["_entity_slots"]),
                 parameter_values,
             )
-            entity_slots, point_conversion_selection_by_instance, selection_blockers = (
-                self._resolve_point_conversion_selections(
+            entity_slots, point_processing_selection_by_instance, selection_blockers = (
+                self._resolve_point_processing_selections(
                     package,
                     entity_slots,
-                    tuple(point_conversions or ()),
+                    tuple(point_processings or ()),
                     parameter_values,
                 )
             )
@@ -520,7 +520,7 @@ class SolutionDelivery:
             # derived only after this content determines the installation ID.
             "alarm_definitions": list(alarm_assets) if alarm_assets else None,
             "ems_policies": list(policy_assets) if policy_assets else None,
-            "point_conversions": [
+            "point_processings": [
                 {
                     "instance_key": instance_key,
                     "node_id": str(selection["node_id"]),
@@ -531,7 +531,7 @@ class SolutionDelivery:
                     },
                 }
                 for instance_key, selection in sorted(
-                    point_conversion_selection_by_instance.items()
+                    point_processing_selection_by_instance.items()
                 )
             ],
         }
@@ -558,27 +558,27 @@ class SolutionDelivery:
                 f"{configuration_digest}"
             ),
         )
-        if point_conversion_selection_by_instance:
-            if self._point_conversions is None or entity_plan is None:
+        if point_processing_selection_by_instance:
+            if self._point_processings is None or entity_plan is None:
                 raise DeliveryError(
-                    "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
-                    "Point conversion planning is not configured",
+                    "POINT_PROCESSING_RUNTIME_UNAVAILABLE",
+                    "Point processing planning is not configured",
                 )
             point_plans: list[dict[str, Any]] = []
             point_items: list[dict[str, Any]] = []
             entity_outputs: dict[str, dict[str, UUID]] = {}
             for item in entity_plan.items:
-                if item.get("source_kind") != "point_conversion":
+                if item.get("source_kind") != "point_processing":
                     continue
                 entity_outputs.setdefault(item["instance_key"], {})[
-                    item["conversion_output_key"]
+                    item["processing_output_key"]
                 ] = UUID(item["entity_instance_id"])
             for instance_key, selection in sorted(
-                point_conversion_selection_by_instance.items()
+                point_processing_selection_by_instance.items()
             ):
                 try:
-                    child = self._point_conversions.plan(
-                        PlanPointConversion(
+                    child = self._point_processings.preview(
+                        PreviewPointProcessing(
                             node_id=selection["node_id"],
                             template_revision_id=selection["template_revision_id"],
                             input_selections=selection["input_selections"],
@@ -593,7 +593,7 @@ class SolutionDelivery:
                             solution_installation_id=target_installation_id,
                         )
                     )
-                except PointConversionError as exc:
+                except PointProcessingError as exc:
                     raise DeliveryError(exc.code, str(exc)) from exc
                 public_child = child.public_dict()
                 public_child["instance_key"] = instance_key
@@ -601,16 +601,16 @@ class SolutionDelivery:
                 point_items.append(
                     {
                         "asset_id": instance_key,
-                        "kind": "point_conversion",
+                        "kind": "point_processing",
                         "action": "add" if base_version == 0 else "update",
                         "node_id": str(child.node_id),
-                        "point_conversion_plan_id": str(child.id),
-                        "point_conversion_plan_digest": child.digest,
+                        "point_processing_plan_id": str(child.id),
+                        "point_processing_plan_digest": child.digest,
                     }
                 )
                 blockers = (*blockers, *child.blockers)
-            point_conversion_plans = tuple(point_plans)
-            point_conversion_items = tuple(point_items)
+            point_processing_plans = tuple(point_plans)
+            point_processing_items = tuple(point_items)
         if alarm_assets:
             # A definition belongs to this immutable installation, not to the
             # stable entity-identity installation used for binding resolution.
@@ -657,7 +657,7 @@ class SolutionDelivery:
             *acceptance_items,
             *parameter_items,
             *entity_items,
-            *point_conversion_items,
+            *point_processing_items,
             *alarm_items,
             *policy_items,
             *_removed_manifest_asset_items(asset_actions),
@@ -686,7 +686,7 @@ class SolutionDelivery:
             ),
             "entity_plan": entity_plan.public_dict() if entity_plan else None,
             "alarm_plan": alarm_plan.public_dict() if alarm_plan else None,
-            "point_conversion_plans": list(point_conversion_plans),
+            "point_processing_plans": list(point_processing_plans),
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -720,11 +720,11 @@ class SolutionDelivery:
                 entity_plan=entity_plan.public_dict() if entity_plan else None,
                 digest=digest,
                 alarm_plan=alarm_plan.public_dict() if alarm_plan else None,
-                point_conversion_plans=point_conversion_plans,
+                point_processing_plans=point_processing_plans,
             )
         )
 
-    def _resolve_point_conversion_selections(
+    def _resolve_point_processing_selections(
         self,
         package: PackageImport,
         entity_slots: tuple[dict[str, Any], ...],
@@ -740,7 +740,7 @@ class SolutionDelivery:
             for slot in entity_slots
             if slot["device_category"].casefold() == "pcs"
             and any(
-                item.get("source_kind") == "point_conversion"
+                item.get("source_kind") == "point_processing"
                 for item in slot["definitions"]
             )
         }
@@ -752,21 +752,21 @@ class SolutionDelivery:
                 {},
                 tuple(
                     {
-                        "code": "POINT_CONVERSION_SELECTION_REQUIRED",
+                        "code": "POINT_PROCESSING_SELECTION_REQUIRED",
                         "asset_id": instance_key,
-                        "message": "PCS instance requires one point conversion selection",
+                        "message": "PCS instance requires one point processing selection",
                     }
                     for instance_key in sorted(point_slots)
                 ),
             )
-        if self._point_conversions is None:
+        if self._point_processings is None:
             raise DeliveryError(
-                "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
-                "Point conversion planning is not configured",
+                "POINT_PROCESSING_RUNTIME_UNAVAILABLE",
+                "Point processing planning is not configured",
             )
         allowed_revisions = {
-            point_conversion_revision_id(asset)
-            for asset in point_conversion_assets(package)
+            point_processing_revision_id(asset)
+            for asset in point_processing_assets(package)
         }
         pcs_instances = parameters.get("pcs.instances", [])
         slot_by_device_key = {
@@ -793,15 +793,15 @@ class SolutionDelivery:
                 )
             ):
                 raise DeliveryError(
-                    "POINT_CONVERSION_SELECTION_INVALID",
-                    "Point conversion selection is invalid",
+                    "POINT_PROCESSING_SELECTION_INVALID",
+                    "Point processing selection is invalid",
                 )
-            source_key = self._point_conversions.node_source_key(node_id)
+            source_key = self._point_processings.node_source_key(node_id)
             instance_key = slot_by_device_key.get(source_key or "")
             if node_id in seen_nodes or instance_key is None or instance_key in by_instance:
                 blockers.append(
                     {
-                        "code": "POINT_CONVERSION_NODE_MISMATCH",
+                        "code": "POINT_PROCESSING_NODE_MISMATCH",
                         "asset_id": str(node_id),
                         "message": "PCS node does not match exactly one declared PCS instance",
                     }
@@ -811,9 +811,9 @@ class SolutionDelivery:
             if revision_id not in allowed_revisions:
                 blockers.append(
                     {
-                        "code": "POINT_CONVERSION_REVISION_NOT_IN_PACKAGE",
+                        "code": "POINT_PROCESSING_REVISION_NOT_IN_PACKAGE",
                         "asset_id": str(revision_id),
-                        "message": "Point conversion revision is not owned by this package",
+                        "message": "Point processing revision is not owned by this package",
                     }
                 )
                 continue
@@ -826,9 +826,9 @@ class SolutionDelivery:
             if instance_key not in by_instance:
                 blockers.append(
                     {
-                        "code": "POINT_CONVERSION_SELECTION_REQUIRED",
+                        "code": "POINT_PROCESSING_SELECTION_REQUIRED",
                         "asset_id": instance_key,
-                        "message": "PCS instance requires one point conversion selection",
+                        "message": "PCS instance requires one point processing selection",
                     }
                 )
         resolved = tuple(
@@ -898,7 +898,7 @@ class SolutionDelivery:
             )
         entity_plan = plan.entity_plan
         alarm_plan = plan.alarm_plan
-        point_conversion_plans = plan.point_conversion_plans
+        point_processing_plans = plan.point_processing_plans
 
         def apply_entities(transaction: Any | None) -> tuple[UUID, ...]:
             if entity_plan is None:
@@ -923,19 +923,19 @@ class SolutionDelivery:
 
         def apply_configuration(transaction: Any | None) -> tuple[UUID, ...]:
             entity_ids = apply_entities(transaction)
-            if point_conversion_plans:
-                if self._point_conversions is None:
+            if point_processing_plans:
+                if self._point_processings is None:
                     raise DeliveryError(
-                        "POINT_CONVERSION_RUNTIME_UNAVAILABLE",
-                        "Point conversion application is not configured",
+                        "POINT_PROCESSING_RUNTIME_UNAVAILABLE",
+                        "Point processing application is not configured",
                     )
                 for child in sorted(
-                    point_conversion_plans,
+                    point_processing_plans,
                     key=lambda item: item["node_id"],
                 ):
                     try:
-                        self._point_conversions.apply(
-                            ApplyPointConversionPlan(
+                        self._point_processings.apply(
+                            ApplyPointProcessingPlan(
                                 plan_id=UUID(child["id"]),
                                 plan_digest=child["digest"],
                                 idempotency_key=(
@@ -945,7 +945,7 @@ class SolutionDelivery:
                             ),
                             transaction=transaction,
                         )
-                    except PointConversionError as exc:
+                    except PointProcessingError as exc:
                         raise DeliveryError(exc.code, str(exc)) from exc
             if alarm_plan is not None:
                 if self._alarm_definitions is None:
@@ -968,7 +968,7 @@ class SolutionDelivery:
                 apply_configuration
                 if entity_plan is not None
                 or alarm_plan is not None
-                or point_conversion_plans
+                or point_processing_plans
                 else None
             ),
         )
@@ -2253,7 +2253,7 @@ def _resolve_entity_slots(
             for instance in instances:
                 definitions = []
                 for definition in slot["definitions"]:
-                    if definition.get("source_kind") == "point_conversion":
+                    if definition.get("source_kind") == "point_processing":
                         definitions.append(dict(definition))
                         continue
                     matcher = {
@@ -2294,7 +2294,7 @@ def _resolve_entity_slots(
             )
         definitions: list[dict[str, Any]] = []
         for definition in slot["definitions"]:
-            if definition.get("source_kind") == "point_conversion":
+            if definition.get("source_kind") == "point_processing":
                 definitions.append(dict(definition))
                 continue
             device_key = parameters.get(

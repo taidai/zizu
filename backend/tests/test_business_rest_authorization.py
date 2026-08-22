@@ -32,7 +32,7 @@ from app.api.health import router as health_router
 from app.api.nanomq import router as nanomq_router
 from app.api.neuron import router as neuron_router
 from app.api.nodes import router as nodes_router
-from app.api.point_conversions import router as point_conversions_router
+from app.api.point_processings import router as point_processings_router
 from app.api.rule_templates import router as rule_templates_router
 from app.api.rules import router as rules_router
 from app.api.security import get_identity
@@ -293,20 +293,20 @@ ALARM_CONFIGURATION_CAPABILITIES = {
     ("GET", "/api/v1/alarm-configuration-reports/{report_id}"): "runtime.read",
 }
 
-POINT_CONVERSION_CAPABILITIES = {
-    ("GET", "/api/v1/point-conversion-templates"): "configuration.read",
+POINT_PROCESSING_CAPABILITIES = {
+    ("GET", "/api/v1/point-processing-templates"): "configuration.read",
     ("GET", "/api/v1/nodes/{node_id}/data-trunk"): "runtime.read",
     (
         "POST",
-        "/api/v1/nodes/{node_id}/point-conversion-plans",
+        "/api/v1/nodes/{node_id}/point-processing-plans",
     ): "configuration.write",
     (
         "GET",
-        "/api/v1/point-conversion-plans/{plan_id}",
+        "/api/v1/point-processing-plans/{plan_id}",
     ): "configuration.read",
     (
         "POST",
-        "/api/v1/point-conversion-plans/{plan_id}/apply",
+        "/api/v1/point-processing-plans/{plan_id}/apply",
     ): "configuration.write",
 }
 
@@ -338,7 +338,7 @@ FULL_API_ROUTERS: tuple[APIRouter, ...] = (
     entity_instances_router,
     control_commands_router,
     rpc_router,
-    point_conversions_router,
+    point_processings_router,
 )
 
 
@@ -1048,7 +1048,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
         self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
         self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 12)
-        self.assertEqual(len(POINT_CONVERSION_CAPABILITIES), 5)
+        self.assertEqual(len(POINT_PROCESSING_CAPABILITIES), 5)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1061,7 +1061,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             set(TICKET_15_CAPABILITIES),
             set(TICKET_16_CAPABILITIES),
             set(ALARM_CONFIGURATION_CAPABILITIES),
-            set(POINT_CONVERSION_CAPABILITIES),
+            set(POINT_PROCESSING_CAPABILITIES),
             ANONYMOUS_LIVENESS,
         )
         for index, left in enumerate(partitions):
@@ -1128,7 +1128,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
             self.assertEqual(operation.get("x-zizu-capability"), capability)
             self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])
 
-        for (method, path), capability in sorted(POINT_CONVERSION_CAPABILITIES.items()):
+        for (method, path), capability in sorted(POINT_PROCESSING_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]
             self.assertEqual(operation.get("x-zizu-capability"), capability)
             self.assertEqual(operation.get("security"), [{"HTTPBearer": []}])

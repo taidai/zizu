@@ -1,6 +1,6 @@
-schemaVersion: zizu.point-conversion/v1alpha1
+schemaVersion: zizu.point-processing/v1alpha1
 id: pcs.brand-a
-kind: point_conversion_template
+kind: point_processing_template
 displayName: PCS 通用品牌 A
 deviceCategory: PCS
 brand: GENERIC_A
@@ -37,5 +37,5 @@ outputs:
       input: fault_codes_raw
       delimiter: semicolon
       entries:
-        E11: {code: DC_OVERVOLTAGE, name: 直流过压, defaultSeverity: MAJOR}
-        E30: {code: COMPRESSOR_FAULT, name: 压缩机故障, defaultSeverity: WARNING}
+        E11: {code: DC_OVERVOLTAGE, name: 直流过压}
+        E30: {code: COMPRESSOR_FAULT, name: 压缩机故障}

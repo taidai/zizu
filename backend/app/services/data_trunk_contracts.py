@@ -122,7 +122,7 @@ Transform = NumericTransform | EnumTransform | FaultCodeTransform
 
 
 @dataclass(frozen=True)
-class InstalledPointConversion:
+class InstalledPointProcessing:
     installation_id: UUID
     revision_id: UUID
     entity_instance_id: UUID
@@ -147,7 +147,7 @@ class InstalledPointConversion:
         output_unit: str | None,
         minimum: float | None,
         maximum: float | None,
-    ) -> "InstalledPointConversion":
+    ) -> "InstalledPointProcessing":
         return cls(
             installation_id=installation_id,
             revision_id=revision_id,
@@ -179,7 +179,7 @@ class L2Observation:
     observed_at: datetime
     received_at: datetime
     calculated_at: datetime
-    conversion_revision_id: UUID
+    processing_revision_id: UUID
     site_configuration_version: int
     source_observation_ids: tuple[UUID, ...]
     source_digest: str

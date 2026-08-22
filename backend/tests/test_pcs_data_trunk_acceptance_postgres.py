@@ -53,6 +53,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 data_migration_test.DataTrunkMigrationPostgresTest._reset_through_037(cursor)
                 data_migration_test.DataTrunkMigrationPostgresTest._apply_038(cursor)
                 data_migration_test.DataTrunkMigrationPostgresTest._apply_039(cursor)
+                data_migration_test.DataTrunkMigrationPostgresTest._apply_040(cursor)
                 cls._seed_sources(cursor)
 
         cls.port = cls._free_port()
@@ -239,7 +240,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
             )
             self.assertEqual(201, imported.status_code, imported.text)
             templates = client.get(
-                "/api/v1/point-conversion-templates?device_category=PCS",
+                "/api/v1/point-processing-templates?device_category=PCS",
                 headers=engineer,
             )
             self.assertEqual(200, templates.status_code, templates.text)
@@ -272,7 +273,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                     "secret_references": {
                         "gateway.credentials": "secret://reference/gateway"
                     },
-                    "point_conversions": [
+                    "point_processings": [
                         {
                             "node_id": node_id,
                             "template_revision_id": by_asset["pcs.brand-a"],
@@ -292,7 +293,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 item["definition_id"]: item["entity_instance_id"]
                 for item in planned.json()["items"]
                 if item["kind"] == "entity_binding"
-                and item.get("source_kind") == "point_conversion"
+                and item.get("source_kind") == "point_processing"
             }
             self.assertEqual(
                 {"pcs.active_power", "pcs.operating_state", "pcs.fault_codes"},
@@ -360,13 +361,13 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 self.assertEqual(3, len({item["event_id"] for item in events}))
 
             replacement = client.post(
-                f"/api/v1/nodes/{node_id}/point-conversion-plans",
+                f"/api/v1/nodes/{node_id}/point-processing-plans",
                 headers=engineer,
                 json={"template_revision_id": by_asset["pcs.brand-b"]},
             )
             self.assertEqual(201, replacement.status_code, replacement.text)
             replaced = client.post(
-                f"/api/v1/point-conversion-plans/{replacement.json()['id']}/apply",
+                f"/api/v1/point-processing-plans/{replacement.json()['id']}/apply",
                 headers={**engineer, "Idempotency-Key": "pcs-brand-b-replace"},
                 json={"plan_digest": replacement.json()["digest"]},
             )

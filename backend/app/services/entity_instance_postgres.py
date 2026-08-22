@@ -147,8 +147,8 @@ class PostgresEntityInstanceRepository:
                 for item in plan.items:
                     device_id = UUID(item["device_instance_id"])
                     entity_id = UUID(item["entity_instance_id"])
-                    point_conversion_source = (
-                        item.get("source_kind") == "point_conversion"
+                    point_processing_source = (
+                        item.get("source_kind") == "point_processing"
                     )
                     binding_id = (
                         UUID(item["binding_id"])
@@ -171,7 +171,7 @@ class PostgresEntityInstanceRepository:
                         else None
                     )
                     proposed_failover = (
-                        not point_conversion_source
+                        not point_processing_source
                         and tag_id is not None
                         and item.get("failover_policy") == "manual"
                         and standby_tag_id is not None
@@ -254,7 +254,7 @@ class PostgresEntityInstanceRepository:
                     )
                     device_ids.append(device_id)
                     entity_ids.append(entity_id)
-                    if point_conversion_source:
+                    if point_processing_source:
                         continue
                     try:
                         cur.execute(
@@ -397,18 +397,18 @@ class PostgresEntityInstanceRepository:
                     SELECT ei.id, ei.definition_id, di.instance_key, di.id,
                            NULL::uuid, NULL::uuid, NULL::text, NULL::uuid,
                            ei.data_type, ei.unit, ei.direction,
-                           ei.freshness_seconds, 'point_conversion', ei.id,
+                           ei.freshness_seconds, 'point_processing', ei.id,
                            installed.revision_id,
                            installed.site_configuration_version
                     FROM t_entity_instances ei
                     JOIN t_device_instances di ON di.id = ei.device_instance_id
-                    JOIN t_conversion_output_bindings output
+                    JOIN t_point_processing_output_bindings output
                       ON output.entity_instance_id = ei.id
-                    JOIN t_installed_point_conversions installed
-                      ON installed.id = output.installed_conversion_id
+                    JOIN t_installed_point_processings installed
+                      ON installed.id = output.installed_processing_id
                      AND installed.current = TRUE
                     WHERE ei.id = %s AND ei.active = TRUE AND di.active = TRUE
-                      AND ei.source_kind = 'point_conversion'
+                      AND ei.source_kind = 'point_processing'
                     """,
                     (entity_instance_id,),
                 )
@@ -447,9 +447,9 @@ class PostgresEntityInstanceRepository:
                         )
                         OR EXISTS (
                           SELECT 1
-                          FROM t_conversion_output_bindings output
-                          JOIN t_installed_point_conversions installed
-                            ON installed.id = output.installed_conversion_id
+                          FROM t_point_processing_output_bindings output
+                          JOIN t_installed_point_processings installed
+                            ON installed.id = output.installed_processing_id
                            AND installed.current = TRUE
                           WHERE output.entity_instance_id = ei.id
                         )
@@ -490,9 +490,9 @@ class PostgresEntityInstanceRepository:
                         )
                         OR EXISTS (
                           SELECT 1
-                          FROM t_conversion_output_bindings output
-                          JOIN t_installed_point_conversions installed
-                            ON installed.id = output.installed_conversion_id
+                          FROM t_point_processing_output_bindings output
+                          JOIN t_installed_point_processings installed
+                            ON installed.id = output.installed_processing_id
                            AND installed.current = TRUE
                           WHERE output.entity_instance_id = ei.id
                         )
@@ -658,14 +658,14 @@ class PostgresObservationCatalog:
     def latest(self, source) -> SourceObservation | None:
         with _connection() as conn:
             with conn.cursor() as cur:
-                if source.source_kind == "point_conversion":
+                if source.source_kind == "point_processing":
                     cur.execute(
                         """
                         SELECT entity_instance_id, observed_at,
                                value_float, value_int, value_bool, value_text,
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
-                               conversion_revision_id,
+                               processing_revision_id,
                                site_configuration_version, source_digest
                         FROM t_l2_latest WHERE entity_instance_id = %s
                         """,
@@ -697,14 +697,14 @@ class PostgresObservationCatalog:
             raise ValueError("Unsupported history range")
         with _connection() as conn:
             with conn.cursor() as cur:
-                if source.source_kind == "point_conversion":
+                if source.source_kind == "point_processing":
                     cur.execute(
                         """
                         SELECT entity_instance_id, observed_at,
                                value_float, value_int, value_bool, value_text,
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
-                               conversion_revision_id,
+                               processing_revision_id,
                                site_configuration_version, source_digest
                         FROM t_l2_observations
                         WHERE entity_instance_id = %s

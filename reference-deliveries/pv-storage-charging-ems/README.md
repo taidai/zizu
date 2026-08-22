@@ -15,14 +15,14 @@
 `ActivePowerReadback` 与 `BmsReady` 仍使用独立、显式的直接控制匹配，不从读取转换反推写地址。
 名称是可迁移的公开配置契约，不是现场地址。
 
-## PCS 点位转换资产
+## PCS 点位加工资产
 
-`point-conversions/` 发布两套不可变 PCS 模板修订。Brand A 将 W 制有功功率、数字运行状态和
+`point-processings/` 发布两套不可变 PCS 模板修订。Brand A 将 W 制有功功率、数字运行状态和
 分号分隔故障码转换为标准 L2；Brand B 将 kW 制有功功率、字母运行状态和逗号分隔故障码转换为
 完全相同的 `pcs.active_power`、`pcs.operating_state`、`pcs.fault_codes` 三个实体定义。更换品牌时
 只替换模板修订和 L0 输入绑定，不改变 L2 实体身份或上层告警、策略、画面引用。
 
-公开格式为 `zizu.point-conversion/v1alpha1`，顶层固定声明 `id`、`deviceCategory`、`brand`、
+公开格式为 `zizu.point-processing/v1alpha1`，顶层固定声明 `id`、`deviceCategory`、`brand`、
 `model`、正整数 `revision`、`active|retired` 状态、强类型 `inputs` 与 `outputs`。每个输入只允许
 `l0|l2` 来源、稳定源键和别名；每个输出必须引用已声明且类型、单位一致的实体定义，并给出正数
 `freshness`。转换规则只允许：
@@ -32,7 +32,7 @@
 - `fault_codes`：显式分隔符及原始故障码到标准码、中文名称、默认严重度映射。
 
 任意表达式、脚本、动态求值或未声明字段都会在包导入阶段被拒绝。`retired` 修订继续保留完整
-审计契约和既有安装，但不能用于生成新的点位转换计划。
+审计契约和既有安装，但不能用于生成新的点位加工计划。
 
 ## 交付后的机器验收
 

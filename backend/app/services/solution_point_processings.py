@@ -1,4 +1,4 @@
-"""Versioned solution-package assets for L1 point conversions."""
+"""Versioned solution-package assets for L1 point processing."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -17,18 +17,17 @@ if TYPE_CHECKING:
     from app.services.solution_delivery_contracts import PackageImport
 
 
-_SCHEMA_VERSION = "zizu.point-conversion/v1alpha1"
+_SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
 _OUTPUT_TYPES = {
     "numeric": "FLOAT",
     "enum": "ENUM",
     "fault_codes": "CODE_SET",
 }
-_SEVERITIES = {"INFO", "WARNING", "MAJOR", "CRITICAL"}
 
 
 @dataclass(frozen=True)
-class PointConversionInput:
+class PointProcessingInput:
     input_id: str
     source_kind: str
     source_key: str
@@ -39,7 +38,7 @@ class PointConversionInput:
 
 
 @dataclass(frozen=True)
-class PointConversionOutput:
+class PointProcessingOutput:
     output_id: str
     entity_definition_id: str
     data_type: str
@@ -49,7 +48,7 @@ class PointConversionOutput:
 
 
 @dataclass(frozen=True)
-class PointConversionAsset:
+class PointProcessingAsset:
     asset_id: str
     display_name: str
     device_category: str
@@ -58,38 +57,38 @@ class PointConversionAsset:
     revision: int
     status: str
     content_digest: str
-    inputs: tuple[PointConversionInput, ...]
-    outputs: tuple[PointConversionOutput, ...]
+    inputs: tuple[PointProcessingInput, ...]
+    outputs: tuple[PointProcessingOutput, ...]
 
 
-class PointConversionAssetError(ValueError):
+class PointProcessingAssetError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-def point_conversion_template_id(asset: PointConversionAsset) -> UUID:
+def point_processing_template_id(asset: PointProcessingAsset) -> UUID:
     return uuid5(
         NAMESPACE_URL,
         (
-            "zizu/point-conversion-template/"
+            "zizu/point-processing-template/"
             f"{asset.asset_id}/{asset.brand}/{asset.model}"
         ),
     )
 
 
-def point_conversion_revision_id(asset: PointConversionAsset) -> UUID:
+def point_processing_revision_id(asset: PointProcessingAsset) -> UUID:
     return uuid5(
         NAMESPACE_URL,
-        f"zizu/point-conversion-revision/{point_conversion_template_id(asset)}/{asset.revision}",
+        f"zizu/point-processing-revision/{point_processing_template_id(asset)}/{asset.revision}",
     )
 
 
-def parse_point_conversion_asset(
+def parse_point_processing_asset(
     raw: Mapping[str, Any],
     *,
     entity_definitions: Mapping[str, Mapping[str, Any]] | None = None,
-) -> PointConversionAsset:
+) -> PointProcessingAsset:
     fields = {
         "schemaVersion",
         "id",
@@ -104,25 +103,25 @@ def parse_point_conversion_asset(
         "outputs",
     }
     if set(raw) != fields or raw.get("schemaVersion") != _SCHEMA_VERSION:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_ASSET_INVALID",
-            "Point conversion asset schema is invalid",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_ASSET_INVALID",
+            "Point processing asset schema is invalid",
         )
-    if raw.get("kind") != "point_conversion_template":
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_ASSET_INVALID",
-            "Point conversion asset kind is invalid",
+    if raw.get("kind") != "point_processing_template":
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_ASSET_INVALID",
+            "Point processing asset kind is invalid",
         )
     for field in ("id", "displayName", "deviceCategory", "brand", "model"):
         if not isinstance(raw.get(field), str) or not raw[field].strip():
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_ASSET_INVALID",
-                "Point conversion asset identity is invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_ASSET_INVALID",
+                "Point processing asset identity is invalid",
             )
     if raw["deviceCategory"] != "PCS":
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_DEVICE_CATEGORY_UNSUPPORTED",
-            "Only PCS point conversion assets are supported",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_DEVICE_CATEGORY_UNSUPPORTED",
+            "Only PCS point processing assets are supported",
         )
     if (
         not isinstance(raw.get("revision"), int)
@@ -130,9 +129,9 @@ def parse_point_conversion_asset(
         or raw["revision"] < 1
         or raw.get("status") not in {"active", "retired"}
     ):
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_ASSET_INVALID",
-            "Point conversion revision or status is invalid",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_ASSET_INVALID",
+            "Point processing revision or status is invalid",
         )
 
     inputs = _parse_inputs(raw.get("inputs"))
@@ -143,7 +142,7 @@ def parse_point_conversion_asset(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return PointConversionAsset(
+    return PointProcessingAsset(
         asset_id=raw["id"],
         display_name=raw["displayName"],
         device_category=raw["deviceCategory"],
@@ -157,7 +156,7 @@ def parse_point_conversion_asset(
     )
 
 
-def validate_point_conversion_assets(
+def validate_point_processing_assets(
     manifest: Mapping[str, Any],
     assets: Mapping[str, bytes],
     load_mapping,
@@ -175,7 +174,7 @@ def validate_point_conversion_assets(
 
     normalized = []
     for declaration in declarations:
-        if declaration.get("kind") != "point_conversion_template":
+        if declaration.get("kind") != "point_processing_template":
             continue
         raw = load_mapping(
             assets.get(declaration["path"]),
@@ -184,45 +183,45 @@ def validate_point_conversion_assets(
         if raw.get("id") != declaration["id"]:
             raise DeliveryError(
                 "ASSET_REFERENCE_INVALID",
-                "Point conversion asset identity does not match its declaration",
+                "Point processing asset identity does not match its declaration",
             )
         try:
-            parsed = parse_point_conversion_asset(
+            parsed = parse_point_processing_asset(
                 raw,
                 entity_definitions=definitions,
             )
-        except PointConversionAssetError as exc:
+        except PointProcessingAssetError as exc:
             raise DeliveryError(exc.code, f"{exc.code}: {exc}") from exc
         normalized.append(_asset_dict(parsed))
     return tuple(sorted(normalized, key=lambda item: (item["asset_id"], item["revision"])))
 
 
-def point_conversion_assets(package: "PackageImport") -> tuple[PointConversionAsset, ...]:
+def point_processing_assets(package: "PackageImport") -> tuple[PointProcessingAsset, ...]:
     return tuple(
         _asset_from_dict(raw)
-        for raw in package.manifest.get("_point_conversion_assets", ())
+        for raw in package.manifest.get("_point_processing_assets", ())
     )
 
 
-def _parse_inputs(raw_inputs: Any) -> tuple[PointConversionInput, ...]:
+def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
     if not isinstance(raw_inputs, list) or not raw_inputs:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_INPUT_INVALID",
-            "Point conversion inputs must be a non-empty list",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_INPUT_INVALID",
+            "Point processing inputs must be a non-empty list",
         )
     parsed = []
     seen: set[str] = set()
     for raw in raw_inputs:
         if not isinstance(raw, Mapping):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_INPUT_INVALID",
-                "Point conversion input is invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing input is invalid",
             )
         required_fields = {"id", "sourceKind", "sourceKey", "aliases", "dataType", "required"}
         if set(raw) - (required_fields | {"unit"}) or not required_fields.issubset(raw):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_INPUT_INVALID",
-                "Point conversion input fields are invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing input fields are invalid",
             )
         input_id = raw.get("id")
         aliases = raw.get("aliases")
@@ -240,13 +239,13 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointConversionInput, ...]:
             or not isinstance(raw.get("required"), bool)
             or not isinstance(raw.get("unit"), (str, type(None)))
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_INPUT_INVALID",
-                "Point conversion input contract is invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing input contract is invalid",
             )
         seen.add(input_id)
         parsed.append(
-            PointConversionInput(
+            PointProcessingInput(
                 input_id=input_id,
                 source_kind=raw["sourceKind"],
                 source_key=raw["sourceKey"],
@@ -261,13 +260,13 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointConversionInput, ...]:
 
 def _parse_outputs(
     raw_outputs: Any,
-    inputs: tuple[PointConversionInput, ...],
+    inputs: tuple[PointProcessingInput, ...],
     entity_definitions: Mapping[str, Mapping[str, Any]],
-) -> tuple[PointConversionOutput, ...]:
+) -> tuple[PointProcessingOutput, ...]:
     if not isinstance(raw_outputs, list) or not raw_outputs:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_OUTPUT_INVALID",
-            "Point conversion outputs must be a non-empty list",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_OUTPUT_INVALID",
+            "Point processing outputs must be a non-empty list",
         )
     input_by_id = {item.input_id: item for item in inputs}
     parsed = []
@@ -276,9 +275,9 @@ def _parse_outputs(
         if not isinstance(raw, Mapping) or set(raw) != {
             "id", "entityDefinition", "dataType", "unit", "freshness", "transform"
         }:
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_OUTPUT_INVALID",
-                "Point conversion output fields are invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_OUTPUT_INVALID",
+                "Point processing output fields are invalid",
             )
         output_id = raw.get("id")
         entity_id = raw.get("entityDefinition")
@@ -293,15 +292,15 @@ def _parse_outputs(
             or data_type not in _DATA_TYPES
             or not isinstance(unit, (str, type(None)))
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_OUTPUT_INVALID",
-                "Point conversion output contract is invalid",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_OUTPUT_INVALID",
+                "Point processing output contract is invalid",
             )
         freshness = _duration_seconds(raw.get("freshness"))
         transform = _parse_transform(raw.get("transform"), input_by_id)
         if _OUTPUT_TYPES[transform["kind"]] != data_type:
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_OUTPUT_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_OUTPUT_INVALID",
                 "Transform kind and output data type do not match",
             )
         definition = entity_definitions.get(entity_id)
@@ -311,18 +310,18 @@ def _parse_outputs(
             or str(definition.get("deviceCategory", "")).casefold() != "pcs"
             or definition.get("direction") not in {"R", "RW"}
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_OUTPUT_INCOMPATIBLE",
-                "Point conversion output does not match its entity definition",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_OUTPUT_INCOMPATIBLE",
+                "Point processing output does not match its entity definition",
             )
         if entity_definitions and definition is None:
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_OUTPUT_INCOMPATIBLE",
-                "Point conversion output entity definition is missing",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_OUTPUT_INCOMPATIBLE",
+                "Point processing output entity definition is missing",
             )
         seen.add(output_id)
         parsed.append(
-            PointConversionOutput(
+            PointProcessingOutput(
                 output_id=output_id,
                 entity_definition_id=entity_id,
                 data_type=data_type,
@@ -336,24 +335,24 @@ def _parse_outputs(
 
 def _parse_transform(
     raw: Any,
-    inputs: Mapping[str, PointConversionInput],
+    inputs: Mapping[str, PointProcessingInput],
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or raw.get("kind") not in _OUTPUT_TYPES:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_RULE_INVALID",
-            "Point conversion transform kind is invalid",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_RULE_INVALID",
+            "Point processing transform kind is invalid",
         )
     kind = raw["kind"]
     input_id = raw.get("input")
     if not isinstance(input_id, str) or input_id not in inputs:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_RULE_INVALID",
-            "Point conversion transform input is invalid",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_RULE_INVALID",
+            "Point processing transform input is invalid",
         )
     if kind == "numeric":
         if set(raw) != {"kind", "input", "scale", "offset", "minimum", "maximum"}:
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_RULE_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
                 "Numeric transform fields are invalid",
             )
         numbers = (raw["scale"], raw["offset"], raw["minimum"], raw["maximum"])
@@ -365,15 +364,15 @@ def _parse_transform(
         ) or inputs[input_id].data_type not in {"FLOAT", "INT"} or (
             float(raw["minimum"]) > float(raw["maximum"])
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_RULE_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
                 "Numeric transform values are invalid",
             )
         return {**raw, **{field: float(raw[field]) for field in ("scale", "offset", "minimum", "maximum")}}
     if kind == "enum":
         if set(raw) != {"kind", "input", "entries"}:
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_RULE_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
                 "Enum transform fields are invalid",
             )
         entries = raw.get("entries")
@@ -388,8 +387,8 @@ def _parse_transform(
                 for key, value in entries.items()
             )
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_RULE_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
                 "Enum transform entries are invalid",
             )
         return {"kind": kind, "input": input_id, "entries": dict(sorted(entries.items()))}
@@ -397,14 +396,14 @@ def _parse_transform(
     if set(raw) != {"kind", "input", "delimiter", "entries"} or raw.get("delimiter") not in {
         "semicolon", "comma", "pipe", "whitespace"
     }:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_RULE_INVALID",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_RULE_INVALID",
             "Fault-code transform fields are invalid",
         )
     entries = raw.get("entries")
     if not isinstance(entries, Mapping) or not entries:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_RULE_INVALID",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_RULE_INVALID",
             "Fault-code transform entries are invalid",
         )
     normalized_entries: dict[str, dict[str, str]] = {}
@@ -415,21 +414,19 @@ def _parse_transform(
             or not raw_code.strip()
             or normalized_raw_code in normalized_entries
             or not isinstance(value, Mapping)
-            or set(value) != {"code", "name", "defaultSeverity"}
+            or set(value) != {"code", "name"}
             or not isinstance(value.get("code"), str)
             or not value["code"].strip()
             or not isinstance(value.get("name"), str)
             or not value["name"].strip()
-            or value.get("defaultSeverity") not in _SEVERITIES
         ):
-            raise PointConversionAssetError(
-                "POINT_CONVERSION_RULE_INVALID",
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
                 "Fault-code transform entry is invalid",
             )
         normalized_entries[normalized_raw_code] = {
             "code": value["code"],
             "name": value["name"],
-            "defaultSeverity": value["defaultSeverity"],
         }
     return {
         "kind": kind,
@@ -442,9 +439,9 @@ def _parse_transform(
 def _duration_seconds(value: Any) -> float:
     match = re.fullmatch(r"([1-9]\d*)s", value) if isinstance(value, str) else None
     if match is None:
-        raise PointConversionAssetError(
-            "POINT_CONVERSION_OUTPUT_INVALID",
-            "Point conversion freshness is invalid",
+        raise PointProcessingAssetError(
+            "POINT_PROCESSING_OUTPUT_INVALID",
+            "Point processing freshness is invalid",
         )
     return float(match.group(1))
 
@@ -465,7 +462,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _asset_dict(asset: PointConversionAsset) -> dict[str, Any]:
+def _asset_dict(asset: PointProcessingAsset) -> dict[str, Any]:
     return {
         "asset_id": asset.asset_id,
         "display_name": asset.display_name,
@@ -501,8 +498,8 @@ def _asset_dict(asset: PointConversionAsset) -> dict[str, Any]:
     }
 
 
-def _asset_from_dict(raw: Mapping[str, Any]) -> PointConversionAsset:
-    return PointConversionAsset(
+def _asset_from_dict(raw: Mapping[str, Any]) -> PointProcessingAsset:
+    return PointProcessingAsset(
         asset_id=raw["asset_id"],
         display_name=raw["display_name"],
         device_category=raw["device_category"],
@@ -512,7 +509,7 @@ def _asset_from_dict(raw: Mapping[str, Any]) -> PointConversionAsset:
         status=raw["status"],
         content_digest=raw["content_digest"],
         inputs=tuple(
-            PointConversionInput(
+            PointProcessingInput(
                 input_id=item["input_id"],
                 source_kind=item["source_kind"],
                 source_key=item["source_key"],
@@ -524,7 +521,7 @@ def _asset_from_dict(raw: Mapping[str, Any]) -> PointConversionAsset:
             for item in raw["inputs"]
         ),
         outputs=tuple(
-            PointConversionOutput(
+            PointProcessingOutput(
                 output_id=item["output_id"],
                 entity_definition_id=item["entity_definition_id"],
                 data_type=item["data_type"],

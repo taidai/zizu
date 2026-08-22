@@ -1,4 +1,4 @@
-"""Deterministic planning and application of installed L1 conversions."""
+"""Deterministic planning and application of installed L1 point-processing rules."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -14,21 +14,21 @@ from app.services.data_trunk_contracts import (
     EnumTransform,
     FaultCodeTransform,
     InputReference,
-    InstalledPointConversion,
+    InstalledPointProcessing,
     NumericTransform,
     ValueKind,
 )
-from app.services.solution_point_conversions import PointConversionAsset
+from app.services.solution_point_processings import PointProcessingAsset
 
 
-class PointConversionError(ValueError):
+class PointProcessingError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
 @dataclass(frozen=True)
-class PointConversionSource:
+class PointProcessingSource:
     source_id: UUID
     source_kind: str
     node_id: UUID | None
@@ -39,7 +39,7 @@ class PointConversionSource:
 
 
 @dataclass(frozen=True)
-class CurrentPointConversionContext:
+class CurrentPointProcessingContext:
     entity_identity_installation_id: UUID
     solution_installation_id: UUID
     revision_id: UUID
@@ -60,7 +60,7 @@ class CurrentPointConversionContext:
 
 
 @dataclass(frozen=True)
-class PlanPointConversion:
+class PreviewPointProcessing:
     node_id: UUID
     template_revision_id: UUID
     input_selections: Mapping[str, UUID]
@@ -83,7 +83,7 @@ class PlanPointConversion:
 
 
 @dataclass(frozen=True)
-class ApplyPointConversionPlan:
+class ApplyPointProcessingPlan:
     plan_id: UUID
     plan_digest: str
     idempotency_key: str
@@ -91,7 +91,7 @@ class ApplyPointConversionPlan:
 
 
 @dataclass(frozen=True)
-class PointConversionPlan:
+class PointProcessingPlan:
     id: UUID
     node_id: UUID
     template_revision_id: UUID
@@ -124,10 +124,10 @@ class PointConversionPlan:
 
 
 @dataclass(frozen=True)
-class PointConversionApplication:
+class PointProcessingApplication:
     id: UUID
     plan_id: UUID
-    installed_conversion_id: UUID
+    installed_processing_id: UUID
     solution_installation_id: UUID
     revision_id: UUID
     site_configuration_version: int
@@ -138,7 +138,7 @@ class PointConversionApplication:
         return {
             "id": str(self.id),
             "plan_id": str(self.plan_id),
-            "installed_conversion_id": str(self.installed_conversion_id),
+            "installed_processing_id": str(self.installed_processing_id),
             "solution_installation_id": str(self.solution_installation_id),
             "revision_id": str(self.revision_id),
             "site_configuration_version": self.site_configuration_version,
@@ -149,9 +149,9 @@ class PointConversionApplication:
 
 
 @dataclass(frozen=True)
-class PointConversionTemplateSummary:
+class PointProcessingTemplateSummary:
     revision_id: UUID
-    asset: PointConversionAsset
+    asset: PointProcessingAsset
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -204,53 +204,53 @@ class NodeDataTrunkView:
         }
 
 
-class PointConversionCatalog(Protocol):
-    def get_template(self, revision_id: UUID) -> PointConversionAsset | None: ...
+class PointProcessingCatalog(Protocol):
+    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None: ...
 
-    def list_sources(self, node_id: UUID) -> tuple[PointConversionSource, ...]: ...
+    def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]: ...
 
     def list_templates(
         self,
         device_category: str,
-    ) -> tuple[PointConversionTemplateSummary, ...]: ...
+    ) -> tuple[PointProcessingTemplateSummary, ...]: ...
 
     def node_source_key(self, node_id: UUID) -> str | None: ...
 
 
-class PointConversionRepository(Protocol):
+class PointProcessingRepository(Protocol):
     def site_configuration_version(self) -> int: ...
 
     def current_context(
         self,
         node_id: UUID,
-    ) -> CurrentPointConversionContext | None: ...
+    ) -> CurrentPointProcessingContext | None: ...
 
-    def save_plan(self, plan: PointConversionPlan) -> PointConversionPlan: ...
+    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan: ...
 
-    def get_plan(self, plan_id: UUID) -> PointConversionPlan | None: ...
+    def get_plan(self, plan_id: UUID) -> PointProcessingPlan | None: ...
 
     def apply_plan(
         self,
-        command: ApplyPointConversionPlan,
-        catalog: PointConversionCatalog,
+        command: ApplyPointProcessingPlan,
+        catalog: PointProcessingCatalog,
         *,
         transaction: Any | None = None,
-    ) -> PointConversionApplication: ...
+    ) -> PointProcessingApplication: ...
 
 
-class PointConversion:
+class PointProcessingDelivery:
     """Hide deterministic matching, stable L2 identity and apply preconditions."""
 
     def __init__(
         self,
-        repository: PointConversionRepository,
-        catalog: PointConversionCatalog,
+        repository: PointProcessingRepository,
+        catalog: PointProcessingCatalog,
     ) -> None:
         self._repository = repository
         self._catalog = catalog
 
-    def plan(self, command: PlanPointConversion) -> PointConversionPlan:
-        plan = compile_point_conversion_plan(
+    def preview(self, command: PreviewPointProcessing) -> PointProcessingPlan:
+        plan = compile_point_processing_plan(
             command,
             self._catalog,
             self._repository,
@@ -260,13 +260,13 @@ class PointConversion:
     def list_templates(
         self,
         device_category: str,
-    ) -> tuple[PointConversionTemplateSummary, ...]:
+    ) -> tuple[PointProcessingTemplateSummary, ...]:
         return self._catalog.list_templates(device_category)
 
     def node_source_key(self, node_id: UUID) -> str | None:
         return self._catalog.node_source_key(node_id)
 
-    def inspect_node(
+    def inspect(
         self,
         node_id: UUID,
         *,
@@ -324,21 +324,21 @@ class PointConversion:
             l2=l2,
         )
 
-    def get_plan(self, plan_id: UUID) -> PointConversionPlan:
+    def get_plan(self, plan_id: UUID) -> PointProcessingPlan:
         plan = self._repository.get_plan(plan_id)
         if plan is None:
-            raise PointConversionError(
-                "POINT_CONVERSION_PLAN_NOT_FOUND",
-                "Point conversion plan was not found",
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_NOT_FOUND",
+                "Point processing plan was not found",
             )
         return plan
 
     def apply(
         self,
-        command: ApplyPointConversionPlan,
+        command: ApplyPointProcessingPlan,
         *,
         transaction: Any | None = None,
-    ) -> PointConversionApplication:
+    ) -> PointProcessingApplication:
         return self._repository.apply_plan(
             command,
             self._catalog,
@@ -346,22 +346,22 @@ class PointConversion:
         )
 
 
-class InMemoryPointConversionCatalog:
+class InMemoryPointProcessingCatalog:
     def __init__(
         self,
         *,
-        templates: Mapping[UUID, PointConversionAsset],
-        sources: tuple[PointConversionSource, ...] = (),
+        templates: Mapping[UUID, PointProcessingAsset],
+        sources: tuple[PointProcessingSource, ...] = (),
         node_source_keys: Mapping[UUID, str] | None = None,
     ) -> None:
         self._templates = dict(templates)
         self._sources = tuple(sources)
         self._node_source_keys = dict(node_source_keys or {})
 
-    def get_template(self, revision_id: UUID) -> PointConversionAsset | None:
+    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None:
         return self._templates.get(revision_id)
 
-    def list_sources(self, node_id: UUID) -> tuple[PointConversionSource, ...]:
+    def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]:
         return tuple(
             item
             for item in self._sources
@@ -371,9 +371,9 @@ class InMemoryPointConversionCatalog:
     def list_templates(
         self,
         device_category: str,
-    ) -> tuple[PointConversionTemplateSummary, ...]:
+    ) -> tuple[PointProcessingTemplateSummary, ...]:
         return tuple(
-            PointConversionTemplateSummary(revision_id, asset)
+            PointProcessingTemplateSummary(revision_id, asset)
             for revision_id, asset in sorted(
                 self._templates.items(),
                 key=lambda item: (item[1].asset_id, item[1].revision, str(item[0])),
@@ -384,20 +384,20 @@ class InMemoryPointConversionCatalog:
     def node_source_key(self, node_id: UUID) -> str | None:
         return self._node_source_keys.get(node_id)
 
-    def replace_sources(self, sources: tuple[PointConversionSource, ...]) -> None:
+    def replace_sources(self, sources: tuple[PointProcessingSource, ...]) -> None:
         self._sources = tuple(sources)
 
 
-class InMemoryPointConversionRepository:
+class InMemoryPointProcessingRepository:
     def __init__(
         self,
         *,
-        on_applied: Callable[[PointConversionApplication], None] | None = None,
+        on_applied: Callable[[PointProcessingApplication], None] | None = None,
     ) -> None:
-        self._plans: dict[UUID, PointConversionPlan] = {}
-        self._applications: dict[UUID, PointConversionApplication] = {}
+        self._plans: dict[UUID, PointProcessingPlan] = {}
+        self._applications: dict[UUID, PointProcessingApplication] = {}
         self._idempotency: dict[tuple[str, str], tuple[str, UUID]] = {}
-        self._current: dict[UUID, CurrentPointConversionContext] = {}
+        self._current: dict[UUID, CurrentPointProcessingContext] = {}
         self._installed_ids: dict[UUID, UUID] = {}
         self._site_version = 0
         self._lock = RLock()
@@ -409,30 +409,30 @@ class InMemoryPointConversionRepository:
     def current_context(
         self,
         node_id: UUID,
-    ) -> CurrentPointConversionContext | None:
+    ) -> CurrentPointProcessingContext | None:
         return self._current.get(node_id)
 
-    def save_plan(self, plan: PointConversionPlan) -> PointConversionPlan:
+    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan:
         existing = self._plans.get(plan.id)
         if existing is not None and existing != plan:
-            raise PointConversionError(
-                "POINT_CONVERSION_PLAN_CONFLICT",
-                "Point conversion plan identity conflicts with stored evidence",
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_CONFLICT",
+                "Point processing plan identity conflicts with stored evidence",
             )
         self._plans[plan.id] = plan
         return plan
 
-    def get_plan(self, plan_id: UUID) -> PointConversionPlan | None:
+    def get_plan(self, plan_id: UUID) -> PointProcessingPlan | None:
         return self._plans.get(plan_id)
 
     def application_count(self) -> int:
         return len(self._applications)
 
-    def installed_conversions(
+    def installed_processings(
         self,
-        catalog: PointConversionCatalog,
-    ) -> tuple[InstalledPointConversion, ...]:
-        installed: list[InstalledPointConversion] = []
+        catalog: PointProcessingCatalog,
+    ) -> tuple[InstalledPointProcessing, ...]:
+        installed: list[InstalledPointProcessing] = []
         for node_id, current in sorted(self._current.items(), key=lambda item: str(item[0])):
             asset = catalog.get_template(current.revision_id)
             installation_id = self._installed_ids.get(node_id)
@@ -472,7 +472,7 @@ class InMemoryPointConversionRepository:
                         },
                     )
                 installed.append(
-                    InstalledPointConversion(
+                    InstalledPointProcessing(
                         installation_id=installation_id,
                         revision_id=current.revision_id,
                         entity_instance_id=current.output_entity_ids[
@@ -489,16 +489,16 @@ class InMemoryPointConversionRepository:
 
     def apply_plan(
         self,
-        command: ApplyPointConversionPlan,
-        catalog: PointConversionCatalog,
+        command: ApplyPointProcessingPlan,
+        catalog: PointProcessingCatalog,
         *,
         transaction: Any | None = None,
-    ) -> PointConversionApplication:
+    ) -> PointProcessingApplication:
         del transaction
         if not command.actor.strip() or not command.idempotency_key.strip():
-            raise PointConversionError(
-                "POINT_CONVERSION_APPLY_INVALID",
-                "Point conversion apply actor and idempotency key are required",
+            raise PointProcessingError(
+                "POINT_PROCESSING_APPLY_INVALID",
+                "Point processing apply actor and idempotency key are required",
             )
         request_digest = _digest(
             {
@@ -512,33 +512,33 @@ class InMemoryPointConversionRepository:
             if existing_binding is not None:
                 stored_digest, application_id = existing_binding
                 if stored_digest != request_digest:
-                    raise PointConversionError(
-                        "POINT_CONVERSION_IDEMPOTENCY_KEY_REUSED",
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_IDEMPOTENCY_KEY_REUSED",
                         "Idempotency key was already used for a different request",
                     )
                 return self._applications[application_id]
 
             plan = self._plans.get(command.plan_id)
             if plan is None:
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_NOT_FOUND",
-                    "Point conversion plan was not found",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_NOT_FOUND",
+                    "Point processing plan was not found",
                 )
             if plan.digest != command.plan_digest:
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_DIGEST_MISMATCH",
-                    "Point conversion plan digest does not match",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_DIGEST_MISMATCH",
+                    "Point processing plan digest does not match",
                 )
             if plan.status != "ready" or plan.blockers:
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_BLOCKED",
-                    "Point conversion plan is not ready",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_BLOCKED",
+                    "Point processing plan is not ready",
                 )
             template = catalog.get_template(plan.template_revision_id)
             if template is None or template.status != "active":
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_STALE",
-                    "Point conversion template changed after planning",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_STALE",
+                    "Point processing template changed after planning",
                 )
             if (
                 plan.base_site_configuration_version != self._site_version
@@ -549,9 +549,9 @@ class InMemoryPointConversionRepository:
                     plan.node_id,
                 )
             ):
-                raise PointConversionError(
-                    "POINT_CONVERSION_PLAN_STALE",
-                    "Point conversion sources or site configuration changed after planning",
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_STALE",
+                    "Point processing sources or site configuration changed after planning",
                 )
 
             output_ids = {
@@ -579,16 +579,16 @@ class InMemoryPointConversionRepository:
             next_version = self._site_version + 1
             installed_id = uuid5(
                 NAMESPACE_URL,
-                f"zizu/installed-point-conversion/{plan.id}",
+                f"zizu/installed-point-processing/{plan.id}",
             )
             application_id = uuid5(
                 NAMESPACE_URL,
-                f"zizu/point-conversion-application/{command.actor}/{command.idempotency_key}",
+                f"zizu/point-processing-application/{command.actor}/{command.idempotency_key}",
             )
-            application = PointConversionApplication(
+            application = PointProcessingApplication(
                 id=application_id,
                 plan_id=plan.id,
-                installed_conversion_id=installed_id,
+                installed_processing_id=installed_id,
                 solution_installation_id=solution_id,
                 revision_id=plan.template_revision_id,
                 site_configuration_version=next_version,
@@ -600,7 +600,7 @@ class InMemoryPointConversionRepository:
             self._on_applied(application)
             self._applications[application.id] = application
             self._idempotency[key] = (request_digest, application.id)
-            self._current[plan.node_id] = CurrentPointConversionContext(
+            self._current[plan.node_id] = CurrentPointProcessingContext(
                 entity_identity_installation_id=plan.entity_identity_installation_id,
                 solution_installation_id=solution_id,
                 revision_id=plan.template_revision_id,
@@ -613,26 +613,26 @@ class InMemoryPointConversionRepository:
             return application
 
 
-def compile_point_conversion_plan(
-    command: PlanPointConversion,
-    catalog: PointConversionCatalog,
-    repository: PointConversionRepository,
-) -> PointConversionPlan:
+def compile_point_processing_plan(
+    command: PreviewPointProcessing,
+    catalog: PointProcessingCatalog,
+    repository: PointProcessingRepository,
+) -> PointProcessingPlan:
     if not command.actor.strip():
-        raise PointConversionError(
-            "POINT_CONVERSION_ACTOR_INVALID",
-            "Point conversion plan actor is required",
+        raise PointProcessingError(
+            "POINT_PROCESSING_ACTOR_INVALID",
+            "Point processing plan actor is required",
         )
     template = catalog.get_template(command.template_revision_id)
     if template is None:
-        raise PointConversionError(
-            "POINT_CONVERSION_TEMPLATE_NOT_FOUND",
-            "Point conversion template revision was not found",
+        raise PointProcessingError(
+            "POINT_PROCESSING_TEMPLATE_NOT_FOUND",
+            "Point processing template revision was not found",
         )
     if template.status != "active":
-        raise PointConversionError(
-            "POINT_CONVERSION_TEMPLATE_RETIRED",
-            "Retired point conversion revisions cannot be selected for a new plan",
+        raise PointProcessingError(
+            "POINT_PROCESSING_TEMPLATE_RETIRED",
+            "Retired point processing revisions cannot be selected for a new plan",
         )
     current = repository.current_context(command.node_id)
     identity_id = command.entity_identity_installation_id or (
@@ -642,8 +642,8 @@ def compile_point_conversion_plan(
         current.solution_installation_id if current is not None else None
     )
     if identity_id is None or solution_id is None:
-        raise PointConversionError(
-            "POINT_CONVERSION_INSTALLATION_CONTEXT_REQUIRED",
+        raise PointProcessingError(
+            "POINT_PROCESSING_INSTALLATION_CONTEXT_REQUIRED",
             "Entity identity and solution installation context are required",
         )
 
@@ -665,11 +665,11 @@ def compile_point_conversion_plan(
         )
         code: str | None = None
         if selected_id is not None and selected is None:
-            code = "POINT_CONVERSION_INPUT_SELECTION_INVALID"
+            code = "POINT_PROCESSING_INPUT_SELECTION_INVALID"
         elif not candidates and input_contract.required:
-            code = "POINT_CONVERSION_INPUT_MISSING"
+            code = "POINT_PROCESSING_INPUT_MISSING"
         elif selected is None and len(candidates) > 1:
-            code = "POINT_CONVERSION_INPUT_AMBIGUOUS"
+            code = "POINT_PROCESSING_INPUT_AMBIGUOUS"
         elif selected is None and candidates:
             selected = candidates[0]
         if selected is not None and (
@@ -677,7 +677,7 @@ def compile_point_conversion_plan(
             or (selected.unit or None) != (input_contract.unit or None)
             or (selected.source_kind == "l2" and not selected.confirmed)
         ):
-            code = "POINT_CONVERSION_INPUT_INCOMPATIBLE"
+            code = "POINT_PROCESSING_INPUT_INCOMPATIBLE"
             selected = None
         if code is not None:
             blocker = MappingProxyType(
@@ -737,7 +737,7 @@ def compile_point_conversion_plan(
             blockers.append(
                 MappingProxyType(
                     {
-                        "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
+                        "code": "POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH",
                         "input_id": "outputs",
                     }
                 )
@@ -746,7 +746,7 @@ def compile_point_conversion_plan(
         blockers.append(
             MappingProxyType(
                 {
-                    "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
+                    "code": "POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH",
                     "input_id": "outputs",
                 }
             )
@@ -769,7 +769,7 @@ def compile_point_conversion_plan(
             blockers.append(
                 MappingProxyType(
                     {
-                        "code": "POINT_CONVERSION_OUTPUT_CONTRACT_MISMATCH",
+                        "code": "POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH",
                         "input_id": output.output_id,
                     }
                 )
@@ -806,8 +806,8 @@ def compile_point_conversion_plan(
         "planned_by": command.actor,
     }
     digest = _digest(content)
-    return PointConversionPlan(
-        id=uuid5(NAMESPACE_URL, f"zizu/point-conversion-plan/{digest}"),
+    return PointProcessingPlan(
+        id=uuid5(NAMESPACE_URL, f"zizu/point-processing-plan/{digest}"),
         node_id=command.node_id,
         template_revision_id=command.template_revision_id,
         entity_identity_installation_id=identity_id,
@@ -861,7 +861,7 @@ def _stable_output_entity_id(
     )
 
 
-def _source_catalog_digest(sources: tuple[PointConversionSource, ...]) -> str:
+def _source_catalog_digest(sources: tuple[PointProcessingSource, ...]) -> str:
     return _digest(
         [
             {
@@ -875,8 +875,8 @@ def _source_catalog_digest(sources: tuple[PointConversionSource, ...]) -> str:
 
 
 def _template_source_catalog_digest(
-    template: PointConversionAsset,
-    sources: tuple[PointConversionSource, ...],
+    template: PointProcessingAsset,
+    sources: tuple[PointProcessingSource, ...],
     node_id: UUID,
 ) -> str:
     relevant = {

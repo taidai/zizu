@@ -48,7 +48,7 @@ from app.services.ems_policy_runtime import (
 from app.services.release_lock import current_release_lock_summary
 from app.services.gateway_readiness import NeuronGatewayReadiness
 from app.services.neuron_client import get_neuron_client
-from app.services.point_conversion_postgres import build_postgres_point_conversion
+from app.services.point_processing_postgres import build_postgres_point_processing
 from app.services.data_trunk_acceptance import DataTrunkAcceptance
 from app.services.data_trunk_postgres import build_postgres_data_trunk
 
@@ -69,7 +69,7 @@ _entity_instance_catalog = EntityInstanceCatalog(_entity_instance_repository)
 _entity_instance_failover = EntityFailoverPolicy(_entity_instance_repository)
 _alarm_definition_catalog = PostgresAlarmDefinitionCatalog()
 _alarm_runtime = AlarmRuntime(_alarm_definition_catalog, PostgresAlarmRepository())
-_point_conversions = build_postgres_point_conversion()
+_point_processings = build_postgres_point_processing()
 _data_trunk_acceptance = DataTrunkAcceptance(build_postgres_data_trunk())
 _control_commands = ControlCommandRuntime(
     registry=_entity_instance_registry,
@@ -94,7 +94,7 @@ _delivery = SolutionDelivery(
     control_command_runtime=_control_commands,
     gateway_readiness=NeuronGatewayReadiness(get_neuron_client),
     release_lock_reader=current_release_lock_summary,
-    point_conversions=_point_conversions,
+    point_processings=_point_processings,
     data_trunk_acceptance=_data_trunk_acceptance,
 )
 _ems_workbench = EmsWorkbench(
@@ -163,7 +163,7 @@ class ApplyInstallationRequest(BaseModel):
     plan_digest: str = Field(..., min_length=64, max_length=64)
 
 
-class PointConversionSelection(BaseModel):
+class PointProcessingSelection(BaseModel):
     node_id: UUID
     template_revision_id: UUID
     input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=64)
@@ -175,7 +175,7 @@ class CreateInstallationPlanRequest(BaseModel):
     binding_selections: dict[str, UUID] = Field(default_factory=dict)
     binding_overrides: dict[str, UUID] = Field(default_factory=dict)
     upgrade_risk_resolutions: dict[str, str] = Field(default_factory=dict)
-    point_conversions: list[PointConversionSelection] = Field(
+    point_processings: list[PointProcessingSelection] = Field(
         default_factory=list,
         max_length=8,
     )
@@ -228,7 +228,7 @@ async def create_installation_plan(
             binding_selections=plan_request.binding_selections,
             binding_overrides=plan_request.binding_overrides,
             upgrade_risk_resolutions=plan_request.upgrade_risk_resolutions,
-            point_conversions=[item.model_dump() for item in plan_request.point_conversions],
+            point_processings=[item.model_dump() for item in plan_request.point_processings],
             actor=principal.actor,
         ).public_dict()
     except DeliveryError as exc:

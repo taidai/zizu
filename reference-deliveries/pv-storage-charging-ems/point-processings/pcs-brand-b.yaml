@@ -1,6 +1,6 @@
-schemaVersion: zizu.point-conversion/v1alpha1
+schemaVersion: zizu.point-processing/v1alpha1
 id: pcs.brand-b
-kind: point_conversion_template
+kind: point_processing_template
 displayName: PCS 通用品牌 B
 deviceCategory: PCS
 brand: GENERIC_B
@@ -37,5 +37,5 @@ outputs:
       input: fault_codes_raw
       delimiter: comma
       entries:
-        D11: {code: DC_OVERVOLTAGE, name: 直流过压, defaultSeverity: MAJOR}
-        C30: {code: COMPRESSOR_FAULT, name: 压缩机故障, defaultSeverity: WARNING}
+        D11: {code: DC_OVERVOLTAGE, name: 直流过压}
+        C30: {code: COMPRESSOR_FAULT, name: 压缩机故障}

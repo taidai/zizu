@@ -458,11 +458,11 @@ def create_app() -> FastAPI:
     from app.api.rpc import router as rpc_router
     app.include_router(rpc_router, prefix="/api/v1", tags=["Control Commands"])
 
-    from app.api.point_conversions import router as point_conversions_router
+    from app.api.point_processings import router as point_processings_router
     app.include_router(
-        point_conversions_router,
+        point_processings_router,
         prefix="/api/v1",
-        tags=["Point Conversions"],
+        tags=["Point Processing"],
     )
 
      # ---- Static Frontend (F0 可视化 V1) ----

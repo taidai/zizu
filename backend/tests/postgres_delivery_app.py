@@ -14,7 +14,7 @@ from app.api.control_commands import router as control_commands_router
 from app.api.neuron import router as neuron_router
 from app.api.rpc import router as rpc_router
 from app.api.rules import router as rules_router
-from app.api.point_conversions import router as point_conversions_router
+from app.api.point_processings import router as point_processings_router
 from app.api.websocket import router as websocket_router
 from app.core.config import settings
 from app.services.telemetry_store import init_db_pool
@@ -37,7 +37,7 @@ app.include_router(control_commands_router, prefix="/api/v1")
 app.include_router(neuron_router, prefix="/api/v1")
 app.include_router(rpc_router, prefix="/api/v1")
 app.include_router(rules_router, prefix="/api/v1")
-app.include_router(point_conversions_router, prefix="/api/v1")
+app.include_router(point_processings_router, prefix="/api/v1")
 app.include_router(websocket_router, prefix="/api/v1")
 
 

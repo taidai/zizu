@@ -33,7 +33,7 @@ class SourceObservation:
     reason: str | None = None
     received_at: datetime | None = None
     calculated_at: datetime | None = None
-    conversion_revision_id: UUID | None = None
+    processing_revision_id: UUID | None = None
     site_configuration_version: int | None = None
     source_digest: str | None = None
 
@@ -142,7 +142,7 @@ class EntityInstanceObservation:
     reason: str | None = None
     received_at: datetime | None = None
     calculated_at: datetime | None = None
-    conversion_revision_id: UUID | None = None
+    processing_revision_id: UUID | None = None
     site_configuration_version: int | None = None
     source_digest: str | None = None
 
@@ -151,9 +151,9 @@ class EntityInstanceObservation:
         return {
             "source_kind": self.source_kind,
             "event_id": str(self.event_id) if self.event_id else None,
-            "conversion_revision_id": (
-                str(self.conversion_revision_id)
-                if self.conversion_revision_id
+            "processing_revision_id": (
+                str(self.processing_revision_id)
+                if self.processing_revision_id
                 else None
             ),
             "site_configuration_version": self.site_configuration_version,
@@ -247,7 +247,7 @@ class EntityInstanceRuntime:
             reason=observation.reason,
             received_at=observation.received_at,
             calculated_at=observation.calculated_at,
-            conversion_revision_id=observation.conversion_revision_id,
+            processing_revision_id=observation.processing_revision_id,
             site_configuration_version=observation.site_configuration_version,
             source_digest=observation.source_digest,
         )
@@ -274,7 +274,7 @@ class EntityInstanceRuntime:
                 reason=item.reason,
                 received_at=item.received_at,
                 calculated_at=item.calculated_at,
-                conversion_revision_id=item.conversion_revision_id,
+                processing_revision_id=item.processing_revision_id,
                 site_configuration_version=item.site_configuration_version,
                 source_digest=item.source_digest,
             )

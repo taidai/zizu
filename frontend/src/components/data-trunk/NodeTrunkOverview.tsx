@@ -2,7 +2,7 @@ import type {
   EntityInstance,
   EntityInstanceObservation,
   NodeDataTrunk,
-  PointConversionTemplate,
+  PointProcessingTemplate,
 } from '../../api/client'
 import EntityObservationCard from './EntityObservationCard'
 
@@ -27,7 +27,7 @@ export default function NodeTrunkOverview({
   readOnly,
 }: {
   trunk: NodeDataTrunk
-  installedTemplate: PointConversionTemplate | null
+  installedTemplate: PointProcessingTemplate | null
   descriptors: Map<string, EntityInstance>
   observations: Map<string, EntityInstanceObservation>
   histories: Map<string, EntityInstanceObservation[]>
@@ -61,7 +61,7 @@ export default function NodeTrunkOverview({
       {!readOnly && (
         <div className="rounded-xl border border-blue-200 bg-blue-50/55 p-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold text-blue-950">L1 点位转换</h3>
+            <h3 className="text-xs font-semibold text-blue-950">L1 点位加工</h3>
             <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${trunk.l1_summary.installed ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>
               {trunk.l1_summary.installed ? '已安装' : '未安装'}
             </span>
@@ -100,7 +100,7 @@ export default function NodeTrunkOverview({
           ))}
           {entityRows.length === 0 && (
             <div className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-xs text-gray-500">
-              当前节点尚未形成 L2 全局实体。请先安装解决方案并完成点位转换。
+              当前节点尚未形成 L2 全局实体。请先安装解决方案并完成点位加工。
             </div>
           )}
         </div>

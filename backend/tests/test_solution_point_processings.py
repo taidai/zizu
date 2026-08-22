@@ -1,4 +1,4 @@
-"""PCS point-conversion assets are validated through solution import."""
+"""PCS point-processing assets are validated through solution import."""
 from __future__ import annotations
 
 import importlib.util
@@ -21,16 +21,16 @@ builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
 
 
-class SolutionPointConversionAssetTest(unittest.TestCase):
+class SolutionPointProcessingAssetTest(unittest.TestCase):
     def test_imports_two_pcs_templates_with_same_three_outputs(self) -> None:
-        from app.services.solution_point_conversions import point_conversion_assets
+        from app.services.solution_point_processings import point_processing_assets
 
         package = SolutionDelivery(
             InMemoryDeliveryRepository(),
             platform_version="0.4.77",
         ).import_package(builder.build_archive(), "user:test-engineer")
 
-        assets = point_conversion_assets(package)
+        assets = point_processing_assets(package)
 
         self.assertEqual(
             {item.asset_id for item in assets},
@@ -50,7 +50,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "package"
             shutil.copytree(builder.DEFAULT_SOURCE, source)
-            asset_path = source / "point-conversions" / "pcs-brand-a.yaml"
+            asset_path = source / "point-processings" / "pcs-brand-a.yaml"
             asset = yaml.safe_load(asset_path.read_text(encoding="utf-8"))
             asset["outputs"][0]["transform"] = {
                 "kind": "expression",
@@ -63,7 +63,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 DeliveryError,
-                "POINT_CONVERSION_RULE_INVALID",
+                "POINT_PROCESSING_RULE_INVALID",
             ):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
@@ -74,7 +74,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "package"
             shutil.copytree(builder.DEFAULT_SOURCE, source)
-            asset_path = source / "point-conversions" / "pcs-brand-a.yaml"
+            asset_path = source / "point-processings" / "pcs-brand-a.yaml"
             asset = yaml.safe_load(asset_path.read_text(encoding="utf-8"))
             asset["outputs"][0]["transform"]["minimum"] = 10
             asset["outputs"][0]["transform"]["maximum"] = -10
@@ -85,7 +85,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 DeliveryError,
-                "POINT_CONVERSION_RULE_INVALID",
+                "POINT_PROCESSING_RULE_INVALID",
             ):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
@@ -96,12 +96,11 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "package"
             shutil.copytree(builder.DEFAULT_SOURCE, source)
-            asset_path = source / "point-conversions" / "pcs-brand-a.yaml"
+            asset_path = source / "point-processings" / "pcs-brand-a.yaml"
             asset = yaml.safe_load(asset_path.read_text(encoding="utf-8"))
             asset["outputs"][2]["transform"]["entries"]["e11"] = {
                 "code": "ANOTHER_FAULT",
                 "name": "重复原始码",
-                "defaultSeverity": "INFO",
             }
             asset_path.write_text(
                 yaml.safe_dump(asset, allow_unicode=True, sort_keys=False),
@@ -110,7 +109,7 @@ class SolutionPointConversionAssetTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 DeliveryError,
-                "POINT_CONVERSION_RULE_INVALID",
+                "POINT_PROCESSING_RULE_INVALID",
             ):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
