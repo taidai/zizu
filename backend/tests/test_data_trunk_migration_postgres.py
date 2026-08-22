@@ -37,6 +37,7 @@ MIGRATIONS_THROUGH_037 = tuple(
 MIGRATION_024 = MIGRATIONS_ROOT / "migration_024_entity_instances.sql"
 MIGRATION_038 = MIGRATIONS_ROOT / "migration_038_pcs_data_trunk.sql"
 MIGRATION_039 = MIGRATIONS_ROOT / "migration_039_pcs_data_trunk_contract_gate.sql"
+MIGRATION_040 = MIGRATIONS_ROOT / "migration_040_point_processing.sql"
 
 
 @unittest.skipUnless(
@@ -76,6 +77,80 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     @staticmethod
     def _apply_039(cursor) -> None:
         cursor.execute(MIGRATION_039.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_040(cursor) -> None:
+        cursor.execute(MIGRATION_040.read_text(encoding="utf-8"))
+
+    def test_040_hard_cuts_point_conversion_to_point_processing(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_037(cursor)
+                self._apply_038(cursor)
+                self._apply_039(cursor)
+                self._apply_040(cursor)
+
+                cursor.execute(
+                    """
+                    SELECT to_regclass('t_point_processing_templates'),
+                           to_regclass('t_point_conversion_templates'),
+                           to_regclass('t_installed_point_processings'),
+                           to_regclass('t_boolean_set_transform_rules')
+                    """
+                )
+                self.assertEqual(
+                    cursor.fetchone(),
+                    (
+                        "t_point_processing_templates",
+                        None,
+                        "t_installed_point_processings",
+                        "t_boolean_set_transform_rules",
+                    ),
+                )
+
+                cursor.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_tags'
+                      AND column_name IN (
+                        'wire_data_type', 'value_data_type', 'source_address',
+                        'decimal', 'read_only'
+                      )
+                    ORDER BY column_name
+                    """
+                )
+                self.assertEqual(
+                    [row[0] for row in cursor.fetchall()],
+                    [
+                        "decimal",
+                        "read_only",
+                        "source_address",
+                        "value_data_type",
+                        "wire_data_type",
+                    ],
+                )
+
+    def test_040_replays_without_reintroducing_legacy_schema(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_037(cursor)
+                self._apply_038(cursor)
+                self._apply_039(cursor)
+                self._apply_040(cursor)
+                self._apply_040(cursor)
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name LIKE '%point_conversion%'
+                    """
+                )
+                self.assertEqual(cursor.fetchone(), (0,))
 
     def test_039_upgrades_038_and_replays_contract_triggers(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
