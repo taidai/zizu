@@ -73,6 +73,7 @@ class PostgresDataTrunkRepository:
         connection_factory: ConnectionFactory | None = None,
         clock: Callable[[], datetime] | None = None,
         fault_hook: FaultHook | None = None,
+        state_heartbeat_seconds: float = 60.0,
     ) -> None:
         if connection_factory is None:
             from app.services.telemetry_store import get_connection
@@ -81,6 +82,9 @@ class PostgresDataTrunkRepository:
         self._connection = connection_factory
         self._clock = clock or (lambda: datetime.now(UTC))
         self._fault_hook = fault_hook or (lambda _stage: None)
+        if state_heartbeat_seconds <= 0:
+            raise ValueError("state heartbeat must be positive")
+        self._state_heartbeat_seconds = state_heartbeat_seconds
 
     def transact(
         self,
@@ -104,6 +108,10 @@ class PostgresDataTrunkRepository:
                                 accepted,
                                 evaluator,
                                 calculated_at=self._clock(),
+                            )
+                            produced = self._select_history_observations(
+                                cursor,
+                                produced,
                             )
                             self._insert_l2(cursor, produced)
                             advanced = self._advance_l2_latest(cursor, produced)
@@ -926,6 +934,57 @@ class PostgresDataTrunkRepository:
             )
         return tuple(produced)
 
+    def _select_history_observations(
+        self,
+        cursor,
+        observations: tuple[L2Observation, ...],
+    ) -> tuple[L2Observation, ...]:
+        """Keep numeric samples; deduplicate state until change or heartbeat."""
+        selected: list[L2Observation] = []
+        previous: dict[UUID, tuple[tuple[object, ...], int, datetime]] = {}
+        for observation in observations:
+            if observation.value.kind not in {ValueKind.ENUM, ValueKind.CODE_SET}:
+                selected.append(observation)
+                continue
+            state = previous.get(observation.entity_instance_id)
+            if state is None:
+                cursor.execute(
+                    """
+                    SELECT value_float, value_int, value_bool, value_text,
+                           value_codes, quality, observed_at
+                    FROM t_l2_latest
+                    WHERE entity_instance_id = %s
+                    FOR UPDATE
+                    """,
+                    (str(observation.entity_instance_id),),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    state = (
+                        _normalized_l2_columns(row[:5]),
+                        int(row[5]),
+                        row[6],
+                    )
+            current = (
+                _normalized_l2_columns(_l2_columns(observation.value)),
+                int(observation.quality),
+                observation.observed_at,
+            )
+            if state is None or (
+                current[0] != state[0]
+                or current[1] != state[1]
+                or (
+                    current[2] >= state[2]
+                    and (current[2] - state[2]).total_seconds()
+                    >= self._state_heartbeat_seconds
+                )
+            ):
+                selected.append(observation)
+                previous[observation.entity_instance_id] = current
+            else:
+                previous[observation.entity_instance_id] = state
+        return tuple(selected)
+
     @staticmethod
     def _insert_l2(cursor, observations: tuple[L2Observation, ...]) -> None:
         for observation in observations:
@@ -1168,6 +1227,10 @@ def _l2_columns(
         "POINT_PROCESSING_VALUE_INVALID",
         "Unsupported L2 typed value",
     )
+
+
+def _normalized_l2_columns(values: tuple[object, ...]) -> tuple[object, ...]:
+    return (*values[:4], None if values[4] is None else tuple(values[4]))
 
 
 def build_postgres_data_trunk() -> DataTrunk:

@@ -313,8 +313,9 @@ class DataTrunkPostgresTest(unittest.TestCase):
         value: bool,
         sequence: int,
         quality: TrunkQuality = TrunkQuality.GOOD,
+        observed_at: datetime | None = None,
     ) -> RawObservation:
-        observed_at = datetime(2026, 8, 17, tzinfo=UTC)
+        observed_at = observed_at or datetime(2026, 8, 17, tzinfo=UTC)
         return RawObservation(
             observation_id=UUID(int=0x300 + sequence),
             node_id=NODE_ID,
@@ -900,6 +901,67 @@ class DataTrunkPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     (["EN9_405890_01"], 192, None),
+                    cursor.fetchone(),
+                )
+
+    def test_fault_set_writes_on_change_or_sixty_second_heartbeat(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_boolean_set_processing(cursor)
+        started = datetime(2026, 8, 17, tzinfo=UTC)
+        first = self.trunk.ingest(
+            (
+                self.raw_bool(
+                    tag_id=BOOLEAN_FAULT_A_TAG_ID,
+                    source_key="EPO故障",
+                    value=True,
+                    sequence=10,
+                    observed_at=started,
+                ),
+                self.raw_bool(
+                    tag_id=BOOLEAN_FAULT_B_TAG_ID,
+                    source_key="风扇故障",
+                    value=False,
+                    sequence=11,
+                    observed_at=started,
+                ),
+            )
+        )
+        duplicate = self.trunk.ingest(
+            (self.raw_bool(
+                tag_id=BOOLEAN_FAULT_A_TAG_ID,
+                source_key="EPO故障",
+                value=True,
+                sequence=12,
+                observed_at=started + timedelta(seconds=10),
+            ),)
+        )
+        heartbeat = self.trunk.ingest(
+            (self.raw_bool(
+                tag_id=BOOLEAN_FAULT_A_TAG_ID,
+                source_key="EPO故障",
+                value=True,
+                sequence=13,
+                observed_at=started + timedelta(seconds=60),
+            ),)
+        )
+
+        self.assertEqual((1, 0, 1), tuple(
+            len(receipt.l2_event_ids)
+            for receipt in (first, duplicate, heartbeat)
+        ))
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*), max(observed_at)
+                    FROM t_l2_observations
+                    WHERE entity_instance_id = %s
+                    """,
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (2, started + timedelta(seconds=60)),
                     cursor.fetchone(),
                 )
 
