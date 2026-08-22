@@ -1077,7 +1077,8 @@ export interface NodeDataTrunk {
 
 export interface PointProcessingPlanItem {
   item_key: string
-  kind: 'input_binding' | 'output_binding'
+  kind: 'l0_point' | 'input_binding' | 'output_binding'
+  layer: 'L0' | 'L1' | 'L2'
   action: PointProcessingPlanAction
   input_id?: string
   candidate_source_ids?: string[]
@@ -1101,7 +1102,7 @@ export interface PointProcessingPlan {
 export interface PointProcessingApplication {
   id: string
   plan_id: string
-  installed_conversion_id: string
+  installed_processing_id: string
   solution_installation_id: string
   revision_id: string
   site_configuration_version: number

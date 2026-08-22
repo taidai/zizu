@@ -46,3 +46,24 @@ test('delete candidate explains runtime stop without erasing history', async () 
     '应用后停止生成新的 L2 观测；历史值与来源证据保留',
   )
 })
+
+test('delivery wizard exposes five steps and the L0 L1 L2 backbone', async () => {
+  const viewModel = await import('./dataTrunkViewModel.ts')
+  const view = viewModel.buildDataTrunkViewModel({
+    plan: {
+      status: 'blocked',
+      items: [
+        { action: 'add', layer: 'L0' },
+        { action: 'add', layer: 'L1' },
+        { action: 'block', layer: 'L2' },
+      ],
+      blockers: [{ code: 'NEURON_POINT_ADDRESS_DUPLICATE' }],
+    },
+  })
+
+  assert.equal(view.steps.map((step) => step.key).join(','), 'target,scan,preview,apply,acceptance')
+  assert.deepEqual(view.layers, ['L0', 'L1', 'L2'])
+  assert.equal(view.canApply, false)
+  assert.equal(view.labels.l1, 'L1 点位加工')
+  assert.deepEqual(view.layerCounts, { L0: 1, L1: 1, L2: 1 })
+})

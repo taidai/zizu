@@ -39,6 +39,7 @@ export default function PointProcessingPlanPanel({
   onApply: () => void
 }) {
   const model = buildDataTrunkViewModel({ plan })
+  const scanDriven = selectedTemplate?.asset_id === 'pcs.en9'
   const isSwap = Boolean(
     trunk.l1_summary.revision_id
     && selectedTemplate
@@ -77,7 +78,13 @@ export default function PointProcessingPlanPanel({
 
       {selectedTemplate && (
         <div className="mt-4 space-y-3">
-          {selectedTemplate.inputs.map((input) => (
+          {scanDriven && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-[11px] leading-5 text-blue-900">
+              <div className="font-semibold">Neuron 只读扫描</div>
+              <div>系统将核对 {selectedTemplate.inputs.length} 个 L0 点位，生成 L1 加工和 {selectedTemplate.outputs.length} 个 L2 全局实体；不会改写驱动、点位或设备参数。</div>
+            </div>
+          )}
+          {!scanDriven && selectedTemplate.inputs.map((input) => (
             <label key={input.input_id} className="block text-[11px] font-medium text-gray-700">
               {inputName(input.input_id)}{input.required ? '（必需）' : ''}
               <select
@@ -100,7 +107,7 @@ export default function PointProcessingPlanPanel({
             disabled={busy !== null}
             className="neu-btn w-full px-3 py-2 text-xs font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy === 'plan' ? '正在生成计划...' : '生成匹配计划'}
+            {busy === 'plan' ? '正在只读扫描并生成计划...' : scanDriven ? '扫描并生成统一计划' : '生成匹配计划'}
           </button>
         </div>
       )}
@@ -124,17 +131,34 @@ export default function PointProcessingPlanPanel({
               </div>
             ))}
           </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center text-[10px]">
+            {model.layers.map((layer) => (
+              <div key={layer} className="rounded-lg border border-gray-200 bg-white px-2 py-2">
+                <div className="font-mono-value text-base font-semibold text-gray-900">{model.layerCounts[layer]}</div>
+                <div className="mt-0.5 text-gray-500">{layer === 'L0' ? '原始点位' : layer === 'L1' ? '点位加工' : '全局实体'}</div>
+              </div>
+            ))}
+          </div>
           <div className={`mt-3 rounded-lg p-3 text-xs ${model.canApply ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
             <span className="font-semibold">下一步：</span>{model.nextAction}
           </div>
-          {plan.items.filter((item) => item.action !== 'preserve').length > 0 && (
-            <div className="mt-3 max-h-32 space-y-1 overflow-y-auto text-[10px] text-gray-600">
-              {plan.items.filter((item) => item.action !== 'preserve').map((item) => (
-                <div key={item.item_key} className="flex justify-between gap-2 border-b border-gray-200 py-1 last:border-b-0">
-                  <span className="truncate">{inputName(item.input_id || item.output_id || item.item_key)}</span>
-                  <span className="shrink-0 font-medium">{planActionLabel(item.action)}</span>
-                </div>
-              ))}
+          {plan.items.length > 0 && (
+            <div className="mt-3 max-h-56 space-y-3 overflow-y-auto text-[10px] text-gray-600">
+              {model.layers.map((layer) => {
+                const items = plan.items.filter((item) => item.layer === layer)
+                if (!items.length) return null
+                return (
+                  <div key={layer}>
+                    <div className="sticky top-0 bg-white/95 py-1 font-semibold text-gray-800">{layer} · {items.length} 项</div>
+                    {items.map((item) => (
+                      <div key={item.item_key} className="flex justify-between gap-2 border-b border-gray-200 py-1 last:border-b-0">
+                        <span className="truncate">{inputName(item.input_id || item.output_id || item.item_key)}</span>
+                        <span className="shrink-0 font-medium">{planActionLabel(item.action)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
             </div>
           )}
           {resultUnknown && (

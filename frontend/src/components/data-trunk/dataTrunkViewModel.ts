@@ -3,9 +3,19 @@ export type PointProcessingPlanAction = 'add' | 'update' | 'preserve' | 'delete_
 
 interface PlanLike {
   status: 'ready' | 'blocked' | 'applied'
-  items: { action?: string }[]
+  items: { action?: string; layer?: string }[]
   blockers: { code: string; input_id?: string; input_key?: string }[]
 }
+
+export const DATA_TRUNK_STEPS = [
+  { key: 'target', label: '选择设备' },
+  { key: 'scan', label: '只读扫描' },
+  { key: 'preview', label: '统一预览' },
+  { key: 'apply', label: '原子应用' },
+  { key: 'acceptance', label: '机器验收' },
+] as const
+
+export const DATA_TRUNK_LAYERS = ['L0', 'L1', 'L2'] as const
 
 const INPUT_LABELS: Record<string, string> = {
   active_power_raw: '有功功率',
@@ -66,6 +76,12 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
   for (const item of plan?.items || []) {
     if (item.action && item.action in counts) counts[item.action as PointProcessingPlanAction] += 1
   }
+  const layerCounts = { L0: 0, L1: 0, L2: 0 }
+  for (const item of plan?.items || []) {
+    if (item.layer === 'L0' || item.layer === 'L1' || item.layer === 'L2') {
+      layerCounts[item.layer] += 1
+    }
+  }
   if (plan?.blockers.length && counts.block === 0) counts.block = plan.blockers.length
   const blocker = plan?.blockers[0]
   const inputId = blocker?.input_id || blocker?.input_key || '目标输入'
@@ -78,8 +94,12 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
         ? '查看全局实体实时值与验收证据'
         : '选择点位加工模板并生成计划'
   return {
+    steps: DATA_TRUNK_STEPS,
+    layers: [...DATA_TRUNK_LAYERS],
+    labels: { l0: 'L0 原始点位', l1: 'L1 点位加工', l2: 'L2 全局实体' },
     canApply: plan?.status === 'ready' && !plan.blockers.length,
     nextAction,
     counts,
+    layerCounts,
   }
 }

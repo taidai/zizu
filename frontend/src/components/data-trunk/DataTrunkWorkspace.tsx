@@ -26,8 +26,7 @@ import {
 } from './dataTrunkRetryState'
 import NodeTrunkOverview from './NodeTrunkOverview'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
-
-const STAGES = ['连接点位', '选择点位加工', '匹配预览', '处理阻断', '安装验收']
+import { DATA_TRUNK_STEPS } from './dataTrunkViewModel'
 
 export default function DataTrunkWorkspace({
   node,
@@ -239,9 +238,9 @@ export default function DataTrunkWorkspace({
             <p className="mt-1 text-xs text-gray-500">原始点位经过点位加工形成稳定全局实体，上层功能不再直接依赖品牌地址。</p>
           </div>
           <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
-            {STAGES.map((label, index) => (
-              <div key={label} className={`rounded-lg border px-2 py-2 text-center text-[10px] font-medium ${index <= completedStage ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
-                {label}
+            {DATA_TRUNK_STEPS.map((step, index) => (
+              <div key={step.key} className={`rounded-lg border px-2 py-2 text-center text-[10px] font-medium ${index <= completedStage ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
+                {step.label}
               </div>
             ))}
           </div>
@@ -270,7 +269,7 @@ export default function DataTrunkWorkspace({
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">已安装输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div>
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">站点配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.site_configuration_version ?? observations.values().next().value?.site_configuration_version ?? '等待安装'}</div></div>
-              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">运行验收</div><div className="mt-1 text-sm font-semibold text-gray-900">{application ? '准备执行机器验收' : '应用后生成'}</div></div>
+              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">运行验收</div><div className="mt-1 text-sm font-semibold text-gray-900">{application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div></div>
             </div>
           </div>
           <PointProcessingPlanPanel

@@ -46,7 +46,7 @@ export default function NodeTrunkOverview({
             <span className="text-[10px] text-gray-500">{trunk.l0.length} 个</span>
           </div>
           <p className="mt-1 text-[10px] leading-4 text-gray-500">协议采集的原始值，只作为转换输入，不供上层业务直接引用。</p>
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 max-h-[34rem] space-y-2 overflow-y-auto pr-1">
             {trunk.l0.map((source) => (
               <div key={source.source_id} className="border-l-2 border-gray-300 pl-2">
                 <div className="text-xs font-medium text-gray-700">{sourceDisplayName(source.source_key)}</div>
