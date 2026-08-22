@@ -1,4 +1,4 @@
-"""Deterministic planning and application of L1 point conversions."""
+"""Deterministic planning and application of L1 point processing."""
 from __future__ import annotations
 
 import importlib.util
@@ -22,6 +22,7 @@ ENTITY_IDENTITY_INSTALLATION_ID = UUID("81000000-0000-0000-0000-000000000002")
 SOLUTION_INSTALLATION_ID = UUID("81000000-0000-0000-0000-000000000003")
 BRAND_A_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000a")
 BRAND_B_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000b")
+EN9_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000c")
 
 
 def _assets():
@@ -33,6 +34,141 @@ def _assets():
 
 
 class PointProcessingTest(unittest.TestCase):
+    def test_en9_scan_produces_one_unified_l0_l1_l2_plan(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PreviewPointProcessing,
+            PointProcessingDelivery,
+        )
+        from tests.test_neuron_point_processing_catalog import FakeNeuron
+
+        assets = _assets()
+        repository = InMemoryPointProcessingRepository()
+        neuron = FakeNeuron()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={EN9_REVISION_ID: assets["pcs.en9"]},
+            node_source_keys={NODE_ID: "EN9-PCS"},
+        )
+        service = PointProcessingDelivery(
+            repository,
+            catalog,
+            point_scanner=NeuronPointCatalog(neuron),
+        )
+
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=NODE_ID,
+                template_revision_id=EN9_REVISION_ID,
+                input_selections={},
+                actor="user:engineer",
+                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
+                solution_installation_id=SOLUTION_INSTALLATION_ID,
+            )
+        )
+
+        self.assertEqual("ready", plan.status)
+        self.assertEqual((), plan.blockers)
+        self.assertEqual({"L0", "L1", "L2"}, {item["layer"] for item in plan.items})
+        self.assertEqual(
+            {"L0": 90, "L1": 90, "L2": 3},
+            {
+                layer: sum(item["layer"] == layer for item in plan.items)
+                for layer in ("L0", "L1", "L2")
+            },
+        )
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "install-en9",
+                "user:engineer",
+            )
+        )
+        snapshot = repository.installed_processings(catalog)
+        fault_processing = next(
+            item for item in snapshot
+            if item.entity_definition_id == "pcs.fault_codes"
+        )
+        self.assertEqual(3, len(snapshot))
+        self.assertEqual(
+            application.installed_processing_id,
+            fault_processing.installation_id,
+        )
+        self.assertEqual(88, len(fault_processing.transform.inputs))
+        power = next(
+            item for item in plan.items
+            if item["layer"] == "L0" and item["resource_key"] == "1!424634"
+        )
+        self.assertEqual(
+            {
+                "wire_data_type": "INT16",
+                "value_data_type": "FLOAT",
+                "decimal": 0.1,
+                "read_only": True,
+                "freshness_seconds": 5.0,
+            },
+            {
+                key: power["after"][key]
+                for key in (
+                    "wire_data_type",
+                    "value_data_type",
+                    "decimal",
+                    "read_only",
+                    "freshness_seconds",
+                )
+            },
+        )
+
+    def test_en9_apply_rejects_point_catalog_changed_after_preview(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingDelivery,
+            PointProcessingError,
+            PreviewPointProcessing,
+        )
+        from tests.test_neuron_point_processing_catalog import FakeNeuron
+
+        assets = _assets()
+        repository = InMemoryPointProcessingRepository()
+        neuron = FakeNeuron()
+        service = PointProcessingDelivery(
+            repository,
+            InMemoryPointProcessingCatalog(
+                templates={EN9_REVISION_ID: assets["pcs.en9"]},
+                node_source_keys={NODE_ID: "EN9-PCS"},
+            ),
+            point_scanner=NeuronPointCatalog(neuron),
+        )
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=NODE_ID,
+                template_revision_id=EN9_REVISION_ID,
+                input_selections={},
+                actor="user:engineer",
+                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
+                solution_installation_id=SOLUTION_INSTALLATION_ID,
+            )
+        )
+        neuron.tags[0]["decimal"] = 1.0
+
+        with self.assertRaises(PointProcessingError) as caught:
+            service.apply(
+                ApplyPointProcessingPlan(
+                    plan.id,
+                    plan.digest,
+                    "stale-en9",
+                    "user:engineer",
+                )
+            )
+
+        self.assertEqual("POINT_PROCESSING_PLAN_STALE", caught.exception.code)
+
     def test_applied_template_exposes_installed_runtime_snapshot(self) -> None:
         from app.services.data_trunk_contracts import (
             EnumTransform,

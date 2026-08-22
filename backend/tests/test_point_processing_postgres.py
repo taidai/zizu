@@ -30,6 +30,89 @@ SPEC.loader.exec_module(builder)
     "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL point-processing tests",
 )
 class PointProcessingPostgresTest(unittest.TestCase):
+    def test_en9_unified_plan_applies_l0_l1_l2_atomically(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingDelivery,
+            PreviewPointProcessing,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+        )
+        from tests.test_neuron_point_processing_catalog import FakeNeuron
+
+        package, brand_a_revision, _brand_b_revision = self._import_reference_package()
+        catalog = PostgresPointProcessingCatalog()
+        en9_revision = next(
+            item.revision_id for item in catalog.list_templates("PCS")
+            if item.asset.asset_id == "pcs.en9"
+        )
+        node_id = UUID("85000000-0000-0000-0000-000000000001")
+        entity_ids = {
+            "active_power": UUID("85000000-0000-0000-0000-000000000101"),
+            "operating_state": UUID("85000000-0000-0000-0000-000000000102"),
+            "fault_codes": UUID("85000000-0000-0000-0000-000000000103"),
+        }
+        self._seed_brand_a_site(
+            package.id,
+            package.digest,
+            brand_a_revision,
+            node_id,
+            entity_ids,
+        )
+        service = PointProcessingDelivery(
+            PostgresPointProcessingRepository(),
+            catalog,
+            point_scanner=NeuronPointCatalog(FakeNeuron()),
+        )
+
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=node_id,
+                template_revision_id=en9_revision,
+                input_selections={},
+                actor="user:engineer-en9",
+            )
+        )
+        self.assertEqual("ready", plan.status)
+        self.assertEqual({"L0", "L1", "L2"}, {item["layer"] for item in plan.items})
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "apply-en9-unified",
+                "user:engineer-en9",
+            )
+        )
+
+        self.assertEqual(en9_revision, application.revision_id)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM t_tags
+                       WHERE node_id = %s AND source_address IS NOT NULL),
+                      (SELECT count(*) FROM t_point_processing_input_bindings
+                       WHERE installed_processing_id = %s),
+                      (SELECT count(*) FROM t_point_processing_output_bindings
+                       WHERE installed_processing_id = %s),
+                      (SELECT count(*) FROM t_tags
+                       WHERE node_id = %s
+                         AND source_address IS NOT NULL
+                         AND read_only IS NOT TRUE)
+                    """,
+                    (
+                        str(node_id),
+                        str(application.installed_processing_id),
+                        str(application.installed_processing_id),
+                        str(node_id),
+                    ),
+                )
+                self.assertEqual((90, 90, 3, 0), cursor.fetchone())
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.db_name = os.environ.get("DB_NAME", "")

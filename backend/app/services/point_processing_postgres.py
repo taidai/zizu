@@ -1,6 +1,7 @@
 """PostgreSQL adapters for immutable L1 point-processing assets and plans."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -785,7 +786,9 @@ class PostgresPointProcessingRepository:
             source_kind = None
             selected_tag_id = None
             selected_entity_id = None
-            if item["kind"] == "input_binding":
+            if item["kind"] == "l0_point":
+                layer = "L0"
+            elif item["kind"] == "input_binding":
                 cursor.execute(
                     """
                     SELECT id, source_kind
@@ -804,10 +807,17 @@ class PostgresPointProcessingRepository:
                 selected = item.get("selected_source_id")
                 if selected is not None:
                     if source_kind == "l0":
-                        selected_tag_id = UUID(selected)
+                        cursor.execute(
+                            "SELECT 1 FROM t_tags WHERE id = %s",
+                            (UUID(selected),),
+                        )
+                        if cursor.fetchone() is not None:
+                            selected_tag_id = UUID(selected)
+                        else:
+                            source_kind = None
                     else:
                         selected_entity_id = UUID(selected)
-            else:
+            elif item["kind"] == "output_binding":
                 layer = "L2"
                 cursor.execute(
                     """
@@ -877,6 +887,7 @@ class PostgresPointProcessingRepository:
         catalog: PointProcessingCatalog,
         *,
         transaction: Any | None = None,
+        verified_source_catalog_digest: str | None = None,
     ) -> PointProcessingApplication:
         del catalog
         if not command.actor.strip() or not command.idempotency_key.strip():
@@ -980,12 +991,8 @@ class PostgresPointProcessingRepository:
                                    t_entity_binding_confirmations,
                                    t_point_processing_output_bindings,
                                    t_installed_point_processings
-                        IN SHARE MODE
+                        IN SHARE ROW EXCLUSIVE MODE
                         """
-                    )
-                    sources = PostgresPointProcessingCatalog.list_sources_with_cursor(
-                        cursor,
-                        plan.node_id,
                     )
                     template = PostgresPointProcessingCatalog._load_asset(
                         cursor,
@@ -996,16 +1003,24 @@ class PostgresPointProcessingRepository:
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing template changed after planning",
                         )
-                    if plan.source_catalog_digest != _template_source_catalog_digest(
-                        template,
-                        sources,
-                        plan.node_id,
-                    ):
+                    actual_source_digest = verified_source_catalog_digest
+                    if actual_source_digest is None:
+                        sources = PostgresPointProcessingCatalog.list_sources_with_cursor(
+                            cursor,
+                            plan.node_id,
+                        )
+                        actual_source_digest = _template_source_catalog_digest(
+                            template,
+                            sources,
+                            plan.node_id,
+                        )
+                    if plan.source_catalog_digest != actual_source_digest:
                         raise PointProcessingError(
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing source catalog changed after planning",
                         )
                     self._verify_package_ownership(cursor, plan, current_version)
+                    self._apply_l0_plan_items(cursor, plan)
 
                     cursor.execute(
                         """
@@ -1151,6 +1166,74 @@ class PostgresPointProcessingRepository:
             ) from exc
 
     @staticmethod
+    def _apply_l0_plan_items(cursor: Any, plan: PointProcessingPlan) -> None:
+        cursor.execute(
+            """
+            SELECT EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 't_tags'
+                AND column_name = 'tag_type'
+            )
+            """
+        )
+        has_tag_type = bool(cursor.fetchone()[0])
+        for item in plan.items:
+            if item.get("kind") != "l0_point":
+                continue
+            after = item.get("after")
+            if (
+                item.get("action") == "block"
+                or not isinstance(after, Mapping)
+                or after.get("read_only") is not True
+            ):
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_BLOCKED",
+                    "L0 point plan contains an unsafe item",
+                )
+            columns = "id, node_id, name, data_type, unit"
+            values = "%s, %s, %s, %s, %s"
+            if has_tag_type:
+                columns += ", tag_type"
+                values += ", 'PHYSICAL'"
+            cursor.execute(
+                f"""
+                INSERT INTO t_tags
+                  ({columns}, read_write, enabled,
+                   wire_data_type, value_data_type, source_address,
+                   decimal, read_only)
+                VALUES (
+                  {values},
+                  'R', TRUE, %s, %s, %s, %s, TRUE
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                  name = EXCLUDED.name,
+                  data_type = EXCLUDED.data_type,
+                  unit = EXCLUDED.unit,
+                  read_write = 'R',
+                  enabled = TRUE,
+                  wire_data_type = EXCLUDED.wire_data_type,
+                  value_data_type = EXCLUDED.value_data_type,
+                  source_address = EXCLUDED.source_address,
+                  decimal = EXCLUDED.decimal,
+                  read_only = TRUE
+                WHERE t_tags.node_id = EXCLUDED.node_id
+                """,
+                (
+                    UUID(str(after["source_id"])),
+                    plan.node_id,
+                    after["name"],
+                    after["value_data_type"],
+                    after.get("unit"),
+                    after["wire_data_type"],
+                    after["value_data_type"],
+                    after["source_address"],
+                    after.get("decimal"),
+                ),
+            )
+
+    @staticmethod
     def _verify_package_ownership(
         cursor: Any,
         plan: PointProcessingPlan,
@@ -1232,6 +1315,8 @@ class PostgresPointProcessingRepository:
                         actor,
                     ),
                 )
+                continue
+            if item["kind"] == "l0_point":
                 continue
             cursor.execute(
                 """
@@ -1466,9 +1551,13 @@ class PostgresPointProcessingRepository:
 
 
 def build_postgres_point_processing() -> PointProcessingDelivery:
+    from app.services.neuron_client import get_neuron_client
+    from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+
     return PointProcessingDelivery(
         PostgresPointProcessingRepository(),
         PostgresPointProcessingCatalog(),
+        point_scanner=NeuronPointCatalog(get_neuron_client()),
     )
 
 
