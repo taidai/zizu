@@ -7,6 +7,8 @@ from typing import Any
 from uuid import UUID
 
 from app.services.data_trunk_contracts import (
+    BooleanCodeInput,
+    BooleanSetTransform,
     EnumTransform,
     FaultCodeTransform,
     InputReference,
@@ -125,6 +127,34 @@ class PcsNumericConversionTest(unittest.TestCase):
 
         self.assertEqual(output.value, TypedValue.enum("RUNNING"))
         self.assertEqual(output.quality, TrunkQuality.GOOD)
+
+    def test_maps_integer_operating_state_enum(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw,
+                value=TypedValue(ValueKind.INT, 4),
+                raw_unit=None,
+            )
+        }
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.ENUM,
+                output_unit=None,
+                transform=EnumTransform(
+                    input=base.transform.input,
+                    entries={"4": "GRID_CONNECTED"},
+                ),
+            ),
+        )
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.enum("GRID_CONNECTED"), output.value)
+        self.assertEqual(TrunkQuality.GOOD, output.quality)
 
     def test_unknown_enum_is_bad_without_current_value(self) -> None:
         fixture = self.fixture()
@@ -321,6 +351,107 @@ class PcsNumericConversionTest(unittest.TestCase):
             (output.quality, output.reason),
             (TrunkQuality.BAD, "REQUIRED_INPUT_MISSING"),
         )
+
+    def test_boolean_set_collects_true_codes_in_canonical_order(self) -> None:
+        fixture = self._boolean_set_fixture()
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(
+            TypedValue.code_set(("EN9_405889_00", "EN9_405896_15")),
+            output.value,
+        )
+        self.assertEqual(TrunkQuality.GOOD, output.quality)
+        self.assertEqual(88, len(output.source_observation_ids))
+
+    def test_boolean_set_fails_closed_when_one_required_input_is_stale(self) -> None:
+        fixture = self._boolean_set_fixture()
+        stale_key = next(iter(fixture["current_inputs"]))
+        stale = replace(
+            fixture["current_inputs"][stale_key],
+            quality=TrunkQuality.STALE,
+        )
+        fixture["current_inputs"] = {
+            **fixture["current_inputs"],
+            stale_key: stale,
+        }
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.code_set(None), output.value)
+        self.assertEqual(
+            (TrunkQuality.STALE, "INPUT_STALE"),
+            (output.quality, output.reason),
+        )
+
+    def test_boolean_set_fails_closed_when_one_required_input_is_missing(self) -> None:
+        fixture = self._boolean_set_fixture()
+        missing_key = next(iter(fixture["current_inputs"]))
+        fixture["current_inputs"] = {
+            key: value for key, value in fixture["current_inputs"].items()
+            if key != missing_key
+        }
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.code_set(None), output.value)
+        self.assertEqual(
+            (TrunkQuality.BAD, "REQUIRED_INPUT_MISSING"),
+            (output.quality, output.reason),
+        )
+
+    def _boolean_set_fixture(self) -> dict[str, Any]:
+        base = self.fixture()
+        installed = base["installed"][0]
+        references = tuple(
+            InputReference.l0(UUID(int=0x1000 + index))
+            for index in range(88)
+        )
+        observations = {
+            reference: RawObservation(
+                observation_id=UUID(int=0x2000 + index),
+                node_id=UUID("00000000-0000-0000-0000-000000000001"),
+                tag_id=reference.source_id,
+                source_key=f"Fault{index:02d}",
+                value=TypedValue(
+                    ValueKind.BOOL,
+                    index in {0, 87},
+                ),
+                raw_unit=None,
+                quality=TrunkQuality.GOOD,
+                source_timestamp=datetime(2026, 8, 17, tzinfo=UTC),
+                received_at=datetime(2026, 8, 17, 0, 0, 1, tzinfo=UTC),
+                source_message_id="msg-en9",
+                source_sequence=index,
+                source_digest=f"{index:064x}",
+            )
+            for index, reference in enumerate(references)
+        }
+        return {
+            "installed": (
+                replace(
+                    installed,
+                    output_kind=ValueKind.CODE_SET,
+                    output_unit=None,
+                    transform=BooleanSetTransform(
+                        inputs=tuple(
+                            BooleanCodeInput(
+                                input=reference,
+                                code=(
+                                    "EN9_405889_00" if index == 0
+                                    else "EN9_405896_15" if index == 87
+                                    else f"EN9_FAULT_{index:02d}"
+                                ),
+                            )
+                            for index, reference in enumerate(references)
+                        ),
+                    ),
+                ),
+            ),
+            "current_inputs": observations,
+            "site_configuration_version": 4,
+            "calculated_at": datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
+        }
 
 
 if __name__ == "__main__":

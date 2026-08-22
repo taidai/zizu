@@ -248,7 +248,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 item["asset_id"]: item["revision_id"]
                 for item in templates.json()["items"]
             }
-            self.assertEqual({"pcs.brand-a", "pcs.brand-b"}, set(by_asset))
+            self.assertEqual({"pcs.brand-a", "pcs.brand-b", "pcs.en9"}, set(by_asset))
             node_id = "87000000-0000-0000-0000-000000000001"
             planned = client.post(
                 f"/api/v1/solution-packages/{imported.json()['id']}/install-plans",

@@ -240,8 +240,8 @@ def persist_point_processing_assets(
                     ),
                 )
                 transform = output.transform
-                transform_input_id = input_ids[str(transform["input"])]
                 if transform["kind"] == "numeric":
+                    transform_input_id = input_ids[str(transform["input"])]
                     cursor.execute(
                         """
                         INSERT INTO t_numeric_transform_rules
@@ -259,6 +259,7 @@ def persist_point_processing_assets(
                         ),
                     )
                 elif transform["kind"] == "enum":
+                    transform_input_id = input_ids[str(transform["input"])]
                     cursor.execute(
                         """
                         INSERT INTO t_enum_transform_rules (output_id, input_id)
@@ -276,7 +277,8 @@ def persist_point_processing_assets(
                             """,
                             (output_id, raw_value, canonical_value),
                         )
-                else:
+                elif transform["kind"] == "fault_codes":
+                    transform_input_id = input_ids[str(transform["input"])]
                     cursor.execute(
                         """
                         INSERT INTO t_fault_code_transform_rules
@@ -300,6 +302,31 @@ def persist_point_processing_assets(
                                 raw_code,
                                 entry["code"],
                                 entry["name"],
+                            ),
+                        )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_boolean_set_transform_rules (output_id)
+                        VALUES (%s) ON CONFLICT (output_id) DO NOTHING
+                        """,
+                        (output_id,),
+                    )
+                    for entry in transform["entries"]:
+                        cursor.execute(
+                            """
+                            INSERT INTO t_boolean_set_mapping_entries
+                              (output_id, input_id, canonical_code,
+                               display_name, fault_category)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (output_id, input_id) DO NOTHING
+                            """,
+                            (
+                                output_id,
+                                input_ids[entry["input"]],
+                                entry["code"],
+                                entry["name"],
+                                entry["category"],
                             ),
                         )
     except DeliveryError:
@@ -541,6 +568,41 @@ class PostgresPointProcessingCatalog:
                 "kind": "enum",
                 "input": row[0],
                 "entries": MappingProxyType(dict(cursor.fetchall())),
+            }
+        cursor.execute(
+            """
+            SELECT rule.output_id
+            FROM t_boolean_set_transform_rules AS rule
+            WHERE rule.output_id = %s
+            """,
+            (output_id,),
+        )
+        if cursor.fetchone() is not None:
+            cursor.execute(
+                """
+                SELECT input.input_key, entry.canonical_code,
+                       entry.display_name, entry.fault_category
+                FROM t_boolean_set_mapping_entries AS entry
+                JOIN t_point_processing_inputs AS input
+                  ON input.id = entry.input_id
+                WHERE entry.output_id = %s
+                ORDER BY entry.canonical_code
+                """,
+                (output_id,),
+            )
+            return {
+                "kind": "boolean_set",
+                "entries": tuple(
+                    MappingProxyType(
+                        {
+                            "input": item[0],
+                            "code": item[1],
+                            "name": item[2],
+                            "category": item[3],
+                        }
+                    )
+                    for item in cursor.fetchall()
+                ),
             }
         cursor.execute(
             """

@@ -23,6 +23,7 @@ _OUTPUT_TYPES = {
     "numeric": "FLOAT",
     "enum": "ENUM",
     "fault_codes": "CODE_SET",
+    "boolean_set": "CODE_SET",
 }
 
 
@@ -343,6 +344,57 @@ def _parse_transform(
             "Point processing transform kind is invalid",
         )
     kind = raw["kind"]
+    if kind == "boolean_set":
+        if set(raw) != {"kind", "entries"}:
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Boolean-set transform fields are invalid",
+            )
+        entries = raw.get("entries")
+        if not isinstance(entries, list) or not entries:
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Boolean-set transform entries are invalid",
+            )
+        normalized_entries = []
+        seen_inputs: set[str] = set()
+        seen_codes: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {
+                "input", "code", "name", "category"
+            }:
+                raise PointProcessingAssetError(
+                    "POINT_PROCESSING_RULE_INVALID",
+                    "Boolean-set transform entry fields are invalid",
+                )
+            entry_input = entry.get("input")
+            code = entry.get("code")
+            if (
+                not isinstance(entry_input, str)
+                or entry_input not in inputs
+                or inputs[entry_input].data_type != "BOOL"
+                or not inputs[entry_input].required
+                or entry_input in seen_inputs
+                or not isinstance(code, str)
+                or not code.strip()
+                or code in seen_codes
+                or not isinstance(entry.get("name"), str)
+                or not entry["name"].strip()
+                or not isinstance(entry.get("category"), str)
+                or not entry["category"].strip()
+            ):
+                raise PointProcessingAssetError(
+                    "POINT_PROCESSING_RULE_INVALID",
+                    "Boolean-set transform entry is invalid",
+                )
+            seen_inputs.add(entry_input)
+            seen_codes.add(code)
+            normalized_entries.append(dict(entry))
+        return {
+            "kind": kind,
+            "entries": sorted(normalized_entries, key=lambda item: item["code"]),
+        }
+
     input_id = raw.get("input")
     if not isinstance(input_id, str) or input_id not in inputs:
         raise PointProcessingAssetError(

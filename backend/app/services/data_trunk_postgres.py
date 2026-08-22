@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -13,6 +13,8 @@ from psycopg2.extras import Json
 
 from app.services.data_trunk import ConversionEvaluator, DataTrunk
 from app.services.data_trunk_contracts import (
+    BooleanCodeInput,
+    BooleanSetTransform,
     CommitReceipt,
     DataTrunkError,
     EnumTransform,
@@ -53,6 +55,7 @@ def verify_data_trunk_contract_gate(
 class _ConversionSnapshot:
     installed: tuple[InstalledPointProcessing, ...]
     site_configuration_version: int
+    current_inputs: Mapping[InputReference, RawObservation]
 
 
 @dataclass(frozen=True)
@@ -725,6 +728,131 @@ class PostgresDataTrunkRepository:
 
         cursor.execute(
             """
+            SELECT installed.id, installed.revision_id,
+                   output_binding.entity_instance_id, output.id,
+                   output.entity_definition_id, output.data_type,
+                   output.unit, output.freshness_seconds
+            FROM t_installed_point_processings AS installed
+            JOIN t_point_processing_outputs AS output
+              ON output.revision_id = installed.revision_id
+            JOIN t_point_processing_output_bindings AS output_binding
+              ON output_binding.installed_processing_id = installed.id
+             AND output_binding.output_id = output.id
+            JOIN t_boolean_set_transform_rules AS boolean_rule
+              ON boolean_rule.output_id = output.id
+            WHERE installed.current = TRUE
+              AND EXISTS (
+                SELECT 1
+                FROM t_boolean_set_mapping_entries AS entry
+                JOIN t_point_processing_input_bindings AS input_binding
+                  ON input_binding.installed_processing_id = installed.id
+                 AND input_binding.input_id = entry.input_id
+                 AND input_binding.source_kind = 'l0'
+                WHERE entry.output_id = output.id
+                  AND input_binding.l0_tag_id = ANY(%s::uuid[])
+              )
+            ORDER BY output_binding.entity_instance_id, installed.id
+            """,
+            ([str(tag_id) for tag_id in tag_ids],),
+        )
+        boolean_tag_ids: set[UUID] = set()
+        for (
+            installation_id,
+            revision_id,
+            entity_instance_id,
+            output_id,
+            definition_id,
+            output_type,
+            output_unit,
+            freshness_seconds,
+        ) in cursor.fetchall():
+            if output_type != ValueKind.CODE_SET.value:
+                raise DataTrunkError(
+                    "POINT_PROCESSING_CONFIGURATION_INVALID",
+                    "boolean-set transform output must be CODE_SET",
+                )
+            cursor.execute(
+                """
+                SELECT input_binding.l0_tag_id, entry.canonical_code
+                FROM t_boolean_set_mapping_entries AS entry
+                JOIN t_point_processing_input_bindings AS input_binding
+                  ON input_binding.installed_processing_id = %s
+                 AND input_binding.input_id = entry.input_id
+                 AND input_binding.source_kind = 'l0'
+                WHERE entry.output_id = %s
+                ORDER BY entry.canonical_code
+                """,
+                (str(installation_id), str(output_id)),
+            )
+            boolean_inputs = tuple(
+                BooleanCodeInput(
+                    input=InputReference.l0(UUID(str(input_tag_id))),
+                    code=canonical_code,
+                )
+                for input_tag_id, canonical_code in cursor.fetchall()
+            )
+            boolean_tag_ids.update(item.input.source_id for item in boolean_inputs)
+            installed_items.append(
+                InstalledPointProcessing(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(entity_instance_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind.CODE_SET,
+                    output_unit=output_unit,
+                    freshness_seconds=freshness_seconds,
+                    transform=BooleanSetTransform(inputs=boolean_inputs),
+                )
+            )
+
+        current_inputs: dict[InputReference, RawObservation] = {}
+        if boolean_tag_ids:
+            cursor.execute(
+                """
+                SELECT latest.node_id, latest.tag_id, tag.name,
+                       latest.raw_value_bool, latest.raw_unit, latest.quality,
+                       latest.ts, latest.updated_at, latest.observation_id,
+                       latest.source_message_id, latest.source_sequence,
+                       latest.source_digest
+                FROM t_telemetry_latest AS latest
+                JOIN t_tags AS tag ON tag.id = latest.tag_id
+                WHERE latest.tag_id = ANY(%s::uuid[])
+                ORDER BY latest.tag_id
+                """,
+                ([str(tag_id) for tag_id in sorted(boolean_tag_ids, key=str)],),
+            )
+            for row in cursor.fetchall():
+                (
+                    node_id,
+                    input_tag_id,
+                    source_key,
+                    raw_value_bool,
+                    raw_unit,
+                    quality,
+                    source_timestamp,
+                    received_at,
+                    observation_id,
+                    source_message_id,
+                    source_sequence,
+                    source_digest,
+                ) = row
+                current_inputs[InputReference.l0(UUID(str(input_tag_id)))] = RawObservation(
+                    observation_id=UUID(str(observation_id)),
+                    node_id=UUID(str(node_id)),
+                    tag_id=UUID(str(input_tag_id)),
+                    source_key=source_key,
+                    value=TypedValue(ValueKind.BOOL, raw_value_bool),
+                    raw_unit=raw_unit,
+                    quality=TrunkQuality(quality),
+                    source_timestamp=source_timestamp,
+                    received_at=received_at,
+                    source_message_id=source_message_id,
+                    source_sequence=source_sequence,
+                    source_digest=source_digest.strip(),
+                )
+
+        cursor.execute(
+            """
             SELECT current_version
             FROM t_site_configuration_state
             WHERE singleton = TRUE
@@ -739,6 +867,7 @@ class PostgresDataTrunkRepository:
         return _ConversionSnapshot(
             installed=tuple(installed_items),
             site_configuration_version=site_row[0],
+            current_inputs=current_inputs,
         )
 
     @staticmethod
@@ -750,6 +879,10 @@ class PostgresDataTrunkRepository:
         calculated_at: datetime,
     ) -> tuple[L2Observation, ...]:
         produced: list[L2Observation] = []
+        accepted_inputs = {
+            InputReference.l0(observation.tag_id): observation
+            for observation in observations
+        }
         for observation in sorted(
             observations,
             key=lambda item: (
@@ -762,7 +895,8 @@ class PostgresDataTrunkRepository:
             affected = tuple(
                 item
                 for item in snapshot.installed
-                if item.transform.input == input_reference
+                if not isinstance(item.transform, BooleanSetTransform)
+                and item.transform.input == input_reference
             )
             if not affected:
                 continue
@@ -773,6 +907,20 @@ class PostgresDataTrunkRepository:
                     site_configuration_version=(
                         snapshot.site_configuration_version
                     ),
+                    calculated_at=calculated_at,
+                )
+            )
+        boolean_affected = tuple(
+            item for item in snapshot.installed
+            if isinstance(item.transform, BooleanSetTransform)
+            and any(entry.input in accepted_inputs for entry in item.transform.inputs)
+        )
+        if boolean_affected:
+            produced.extend(
+                evaluator(
+                    installed=boolean_affected,
+                    current_inputs={**snapshot.current_inputs, **accepted_inputs},
+                    site_configuration_version=snapshot.site_configuration_version,
                     calculated_at=calculated_at,
                 )
             )

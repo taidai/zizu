@@ -40,7 +40,7 @@ def get_point_processings() -> PointProcessingDelivery:
 class PointProcessingPlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     template_revision_id: UUID
-    input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=64)
+    input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=256)
 
     def to_command(self, *, node_id: UUID, actor: str) -> PreviewPointProcessing:
         return PreviewPointProcessing(

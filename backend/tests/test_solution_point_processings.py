@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -22,7 +23,7 @@ SPEC.loader.exec_module(builder)
 
 
 class SolutionPointProcessingAssetTest(unittest.TestCase):
-    def test_imports_two_pcs_templates_with_same_three_outputs(self) -> None:
+    def test_imports_three_pcs_templates_with_same_three_outputs(self) -> None:
         from app.services.solution_point_processings import point_processing_assets
 
         package = SolutionDelivery(
@@ -34,7 +35,7 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
 
         self.assertEqual(
             {item.asset_id for item in assets},
-            {"pcs.brand-a", "pcs.brand-b"},
+            {"pcs.brand-a", "pcs.brand-b", "pcs.en9"},
         )
         for asset in assets:
             self.assertEqual(
@@ -45,6 +46,52 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
                     "pcs.operating_state",
                 ),
             )
+
+    def test_en9_asset_has_exact_read_only_contract(self) -> None:
+        from app.services.solution_point_processings import point_processing_assets
+
+        package = SolutionDelivery(
+            InMemoryDeliveryRepository(),
+            platform_version="0.4.82",
+        ).import_package(builder.build_archive(), "user:test-engineer")
+        asset = next(
+            item for item in point_processing_assets(package)
+            if item.asset_id == "pcs.en9"
+        )
+
+        self.assertEqual(90, len(asset.inputs))
+        self.assertTrue(all(item.source_kind == "l0" for item in asset.inputs))
+        self.assertTrue(all(item.required for item in asset.inputs))
+        self.assertEqual(3, len(asset.outputs))
+        by_definition = {
+            item.entity_definition_id: item for item in asset.outputs
+        }
+        self.assertEqual(
+            1.0,
+            by_definition["pcs.active_power"].transform["scale"],
+        )
+        self.assertEqual(
+            88,
+            len(by_definition["pcs.fault_codes"].transform["entries"]),
+        )
+        fixture = json.loads(
+            (REPO_ROOT / "backend" / "tests" / "fixtures" / "en9_pcs_catalog.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {"totalInputs": 90, "faultInputs": 88, "readOnly": True},
+            fixture["contract"],
+        )
+        self.assertTrue(all(point["readOnly"] for point in fixture["points"]))
+        self.assertEqual(0.1, fixture["points"][0]["decimal"])
+        self.assertEqual(
+            {entry["code"] for entry in by_definition["pcs.fault_codes"].transform["entries"]},
+            {
+                f"EN9_{point['address'].split('!')[1].replace('.', '_').rsplit('_', 1)[0]}_"
+                f"{int(point['address'].rsplit('.', 1)[1]):02d}"
+                for point in fixture["points"][2:]
+            },
+        )
 
     def test_rejects_arbitrary_expression_rule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

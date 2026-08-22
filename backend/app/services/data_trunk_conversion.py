@@ -9,6 +9,7 @@ from datetime import datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import (
+    BooleanSetTransform,
     DataTrunkError,
     EnumTransform,
     FaultCodeTransform,
@@ -49,6 +50,13 @@ def _evaluate_output(
     site_configuration_version: int,
     calculated_at: datetime,
 ) -> L2Observation:
+    if isinstance(installed.transform, BooleanSetTransform):
+        return _evaluate_boolean_set_output(
+            installed,
+            current_inputs,
+            site_configuration_version,
+            calculated_at,
+        )
     if isinstance(installed.transform, FaultCodeTransform):
         return _evaluate_fault_code_output(
             installed,
@@ -156,6 +164,119 @@ def _evaluate_output(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+    )
+
+
+def _evaluate_boolean_set_output(
+    installed: InstalledPointProcessing,
+    current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+    site_configuration_version: int,
+    calculated_at: datetime,
+) -> L2Observation:
+    if installed.output_kind is not ValueKind.CODE_SET:
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "boolean-set processing output must be CODE_SET",
+        )
+    transform = installed.transform
+    if not isinstance(transform, BooleanSetTransform):
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "boolean-set processing requires a boolean-set transform",
+        )
+
+    sources: list[RawObservation] = []
+    active_codes: list[str] = []
+    for item in transform.inputs:
+        source = current_inputs.get(item.input)
+        if source is None:
+            if item.required:
+                return _boolean_set_observation(
+                    installed,
+                    sources,
+                    site_configuration_version,
+                    calculated_at,
+                    value=None,
+                    quality=TrunkQuality.BAD,
+                    reason="REQUIRED_INPUT_MISSING",
+                )
+            continue
+        if not isinstance(source, RawObservation):
+            raise DataTrunkError(
+                "POINT_PROCESSING_CONFIGURATION_INVALID",
+                "boolean-set processing requires L0 inputs",
+            )
+        sources.append(source)
+        if source.value.kind is not ValueKind.BOOL or not isinstance(
+            source.value.value,
+            bool,
+        ):
+            return _boolean_set_observation(
+                installed,
+                sources,
+                site_configuration_version,
+                calculated_at,
+                value=None,
+                quality=TrunkQuality.BAD,
+                reason="TYPE_MISMATCH",
+            )
+        if source.value.value:
+            active_codes.append(item.code)
+
+    quality = min((source.quality for source in sources), default=TrunkQuality.GOOD)
+    if quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+        return _boolean_set_observation(
+            installed,
+            sources,
+            site_configuration_version,
+            calculated_at,
+            value=None,
+            quality=quality,
+            reason=_input_quality_reason(quality),
+        )
+    return _boolean_set_observation(
+        installed,
+        sources,
+        site_configuration_version,
+        calculated_at,
+        value=tuple(active_codes),
+        quality=quality,
+        reason=_input_quality_reason(quality),
+    )
+
+
+def _boolean_set_observation(
+    installed: InstalledPointProcessing,
+    sources: list[RawObservation],
+    site_configuration_version: int,
+    calculated_at: datetime,
+    *,
+    value: tuple[str, ...] | None,
+    quality: TrunkQuality,
+    reason: str | None,
+) -> L2Observation:
+    source_digests = sorted(source.source_digest for source in sources)
+    aggregate_digest = hashlib.sha256(
+        "|".join(source_digests).encode("ascii")
+    ).hexdigest()
+    return _observation(
+        installed=installed,
+        value=TypedValue.code_set(value),
+        quality=quality,
+        reason=reason,
+        observed_at=max(
+            (source.source_timestamp for source in sources),
+            default=calculated_at,
+        ),
+        received_at=max(
+            (source.received_at for source in sources),
+            default=calculated_at,
+        ),
+        calculated_at=calculated_at,
+        site_configuration_version=site_configuration_version,
+        source_observation_ids=tuple(source.observation_id for source in sources),
+        source_digest=aggregate_digest,
+        source_order_key=f"B:{len(sources):04d}:{aggregate_digest}",
     )
 
 
@@ -297,9 +418,9 @@ def _evaluate_enum_output(
             "POINT_PROCESSING_CONFIGURATION_INVALID",
             "enum processing requires an L0 input",
         )
-    if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM} or not isinstance(
-        source.value.value,
-        str,
+    if source.value.kind not in {ValueKind.STRING, ValueKind.ENUM, ValueKind.INT} or (
+        not isinstance(source.value.value, (str, int))
+        or isinstance(source.value.value, bool)
     ):
         return _observation(
             installed=installed,
@@ -314,7 +435,7 @@ def _evaluate_enum_output(
             source_digest=source.source_digest,
             source_order_key=_raw_order_key(source),
         )
-    mapped = transform.entries.get(source.value.value)
+    mapped = transform.entries.get(str(source.value.value))
     if mapped is None:
         return _observation(
             installed=installed,

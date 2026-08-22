@@ -31,8 +31,11 @@ REVISION_ID = UUID("00000000-0000-0000-0000-000000000202")
 ENTITY_ID = UUID("00000000-0000-0000-0000-000000000301")
 STATE_TAG_ID = UUID("00000000-0000-0000-0000-000000000012")
 FAULT_TAG_ID = UUID("00000000-0000-0000-0000-000000000013")
+BOOLEAN_FAULT_A_TAG_ID = UUID("00000000-0000-0000-0000-000000000014")
+BOOLEAN_FAULT_B_TAG_ID = UUID("00000000-0000-0000-0000-000000000015")
 STATE_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000303")
 FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000304")
+BOOLEAN_FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000305")
 EXPECTED_EVENT_ID = UUID("c5320566-2b3d-50c5-b320-bf082d7533f3")
 
 
@@ -300,6 +303,103 @@ class DataTrunkPostgresTest(unittest.TestCase):
             source_message_id=f"message-{sequence}",
             source_sequence=sequence,
             source_digest=digest_character * 64,
+        )
+
+    @staticmethod
+    def raw_bool(
+        *,
+        tag_id: UUID,
+        source_key: str,
+        value: bool,
+        sequence: int,
+        quality: TrunkQuality = TrunkQuality.GOOD,
+    ) -> RawObservation:
+        observed_at = datetime(2026, 8, 17, tzinfo=UTC)
+        return RawObservation(
+            observation_id=UUID(int=0x300 + sequence),
+            node_id=NODE_ID,
+            tag_id=tag_id,
+            source_key=source_key,
+            value=TypedValue(ValueKind.BOOL, value),
+            raw_unit=None,
+            quality=quality,
+            source_timestamp=observed_at,
+            received_at=observed_at + timedelta(seconds=1),
+            source_message_id=f"message-bool-{sequence}",
+            source_sequence=sequence,
+            source_digest=f"{sequence:064x}",
+        )
+
+    @staticmethod
+    def _seed_boolean_set_processing(cursor) -> None:
+        cursor.execute(
+            """
+            INSERT INTO t_tags
+              (id, node_id, name, data_type, unit, read_write, enabled)
+            VALUES
+              (%s, %s, 'EPO故障', 'BOOL', NULL, 'R', TRUE),
+              (%s, %s, '风扇故障', 'BOOL', NULL, 'R', TRUE);
+            INSERT INTO t_entity_instances
+              (id, device_instance_id, definition_id, display_name,
+               data_type, unit, direction, freshness_seconds, source_kind)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000302',
+              'pcs.fault_codes', 'PCS 01 布尔故障集合',
+              'CODE_SET', NULL, 'R', 30, 'point_processing'
+            );
+            INSERT INTO t_point_processing_inputs
+              (id, revision_id, input_key, source_kind, data_type, unit,
+               required, stable_source_key, aliases)
+            VALUES
+              ('00000000-0000-0000-0000-000000000213', %s,
+               'fault_405889_00', 'l0', 'BOOL', NULL, TRUE,
+               'EPO故障', '{}'),
+              ('00000000-0000-0000-0000-000000000214', %s,
+               'fault_405890_01', 'l0', 'BOOL', NULL, TRUE,
+               '风扇故障', '{}');
+            INSERT INTO t_point_processing_outputs
+              (id, revision_id, output_key, entity_definition_id,
+               data_type, unit, freshness_seconds)
+            VALUES (
+              '00000000-0000-0000-0000-000000000215', %s,
+              'boolean_fault_codes', 'pcs.fault_codes',
+              'CODE_SET', NULL, 30
+            );
+            INSERT INTO t_boolean_set_transform_rules (output_id)
+            VALUES ('00000000-0000-0000-0000-000000000215');
+            INSERT INTO t_boolean_set_mapping_entries
+              (output_id, input_id, canonical_code, display_name,
+               fault_category)
+            VALUES
+              ('00000000-0000-0000-0000-000000000215',
+               '00000000-0000-0000-0000-000000000213',
+               'EN9_405889_00', 'EPO故障', 'HARDWARE'),
+              ('00000000-0000-0000-0000-000000000215',
+               '00000000-0000-0000-0000-000000000214',
+               'EN9_405890_01', '风扇故障', 'HARDWARE');
+            INSERT INTO t_point_processing_input_bindings
+              (installed_processing_id, input_id, source_kind, l0_tag_id,
+               confirmed_by)
+            VALUES
+              (%s, '00000000-0000-0000-0000-000000000213', 'l0', %s,
+               'user:installer'),
+              (%s, '00000000-0000-0000-0000-000000000214', 'l0', %s,
+               'user:installer');
+            INSERT INTO t_point_processing_output_bindings
+              (installed_processing_id, output_id, entity_instance_id)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000215', %s
+            );
+            """,
+            (
+                str(BOOLEAN_FAULT_A_TAG_ID), str(NODE_ID),
+                str(BOOLEAN_FAULT_B_TAG_ID), str(NODE_ID),
+                str(BOOLEAN_FAULT_ENTITY_ID),
+                str(REVISION_ID), str(REVISION_ID), str(REVISION_ID),
+                str(CONVERSION_ID), str(BOOLEAN_FAULT_A_TAG_ID),
+                str(CONVERSION_ID), str(BOOLEAN_FAULT_B_TAG_ID),
+                str(CONVERSION_ID), str(BOOLEAN_FAULT_ENTITY_ID),
+            ),
         )
 
     @staticmethod
@@ -738,6 +838,69 @@ class DataTrunkPostgresTest(unittest.TestCase):
                             "UNMAPPED_FAULT_CODE",
                         ),
                     ],
+                )
+
+    def test_boolean_set_uses_all_current_inputs_and_persists_source_evidence(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_boolean_set_processing(cursor)
+
+        incomplete = self.trunk.ingest(
+            (self.raw_bool(
+                tag_id=BOOLEAN_FAULT_A_TAG_ID,
+                source_key="EPO故障",
+                value=False,
+                sequence=4,
+            ),)
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_codes, quality, reason
+                    FROM t_l2_latest
+                    WHERE entity_instance_id = %s
+                    """,
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (None, int(TrunkQuality.BAD), "REQUIRED_INPUT_MISSING"),
+                    cursor.fetchone(),
+                )
+        receipt = self.trunk.ingest(
+            (self.raw_bool(
+                tag_id=BOOLEAN_FAULT_B_TAG_ID,
+                source_key="风扇故障",
+                value=True,
+                sequence=5,
+            ),)
+        )
+
+        self.assertEqual(1, incomplete.accepted_l0_count)
+        self.assertEqual(1, len(incomplete.l2_event_ids))
+        self.assertEqual(1, receipt.accepted_l0_count)
+        self.assertEqual(1, len(receipt.l2_event_ids))
+        self.assert_counts(
+            l0=2,
+            l0_latest=2,
+            l2=2,
+            l2_latest=1,
+            sources=3,
+            outbox=2,
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_codes, quality, reason
+                    FROM t_l2_latest
+                    WHERE entity_instance_id = %s
+                    """,
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (["EN9_405890_01"], 192, None),
+                    cursor.fetchone(),
                 )
 
     def test_freshness_scheduler_writes_stale_state_atomically_and_idempotently(

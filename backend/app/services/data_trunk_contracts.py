@@ -118,7 +118,34 @@ class FaultCodeTransform:
         )
 
 
-Transform = NumericTransform | EnumTransform | FaultCodeTransform
+@dataclass(frozen=True)
+class BooleanCodeInput:
+    input: InputReference
+    code: str
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.code.strip():
+            raise ValueError("boolean-set code is required")
+        object.__setattr__(self, "code", self.code.strip())
+
+
+@dataclass(frozen=True)
+class BooleanSetTransform:
+    inputs: tuple[BooleanCodeInput, ...]
+
+    def __post_init__(self) -> None:
+        canonical = tuple(sorted(self.inputs, key=lambda item: item.code))
+        if (
+            not canonical
+            or len({item.input for item in canonical}) != len(canonical)
+            or len({item.code for item in canonical}) != len(canonical)
+        ):
+            raise ValueError("boolean-set inputs and codes must be unique")
+        object.__setattr__(self, "inputs", canonical)
+
+
+Transform = NumericTransform | EnumTransform | FaultCodeTransform | BooleanSetTransform
 
 
 @dataclass(frozen=True)

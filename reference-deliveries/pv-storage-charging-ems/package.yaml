@@ -46,6 +46,7 @@ assets:
   - {id: pcs.fault_codes, kind: entity_definition, path: entities/pcs-fault-codes.yaml}
   - {id: pcs.brand-a, kind: point_processing_template, path: point-processings/pcs-brand-a.yaml}
   - {id: pcs.brand-b, kind: point_processing_template, path: point-processings/pcs-brand-b.yaml}
+  - {id: pcs.en9, kind: point_processing_template, path: point-processings/pcs-en9.yaml}
   - {id: pcs.setpoint, kind: entity_definition, path: entities/pcs-setpoint.yaml}
   - {id: pcs.readback, kind: entity_definition, path: entities/pcs-readback.yaml}
   - {id: bms.soc, kind: entity_definition, path: entities/bms-soc.yaml}

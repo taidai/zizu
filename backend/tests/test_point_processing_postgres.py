@@ -82,11 +82,11 @@ class PointProcessingPostgresTest(unittest.TestCase):
         summaries = PostgresPointProcessingCatalog().list_templates("PCS")
         self.assertEqual(
             [item.asset.asset_id for item in summaries],
-            ["pcs.brand-a", "pcs.brand-b"],
+            ["pcs.brand-a", "pcs.brand-b", "pcs.en9"],
         )
         self.assertEqual(
             [item.asset.display_name for item in summaries],
-            ["PCS 通用品牌 A", "PCS 通用品牌 B"],
+            ["PCS 通用品牌 A", "PCS 通用品牌 B", "恩玖 EN9 PCS"],
         )
         brand_a = next(item for item in summaries if item.asset.asset_id == "pcs.brand-a")
         self.assertEqual(len(brand_a.asset.inputs), 3)
@@ -104,10 +104,14 @@ class PointProcessingPostgresTest(unittest.TestCase):
                       (SELECT count(*) FROM t_point_processing_outputs),
                       (SELECT count(*) FROM t_enum_mapping_entries),
                       (SELECT count(*) FROM t_fault_code_mapping_entries),
+                      (SELECT count(*) FROM t_boolean_set_mapping_entries),
                       (SELECT count(*) FROM t_solution_point_processing_assets)
                     """
                 )
-                self.assertEqual(cursor.fetchone(), (1, 2, 2, 6, 6, 8, 4, 2))
+                self.assertEqual(
+                    cursor.fetchone(),
+                    (1, 3, 3, 96, 9, 15, 4, 88, 3),
+                )
                 cursor.execute(
                     """
                     SELECT count(*)
@@ -116,7 +120,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     """,
                     (package.id,),
                 )
-                self.assertEqual(cursor.fetchone(), (2,))
+                self.assertEqual(cursor.fetchone(), (3,))
 
     def test_independent_brand_replacement_preserves_l2_ids_and_advances_lineage(self) -> None:
         from app.services.point_processing import (
@@ -666,7 +670,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
             item.asset.asset_id
             for item in PostgresPointProcessingCatalog().list_templates("PCS")
         }
-        self.assertEqual(active_assets, {"pcs.brand-b"})
+        self.assertEqual(active_assets, {"pcs.brand-b", "pcs.en9"})
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
