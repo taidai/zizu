@@ -1,0 +1,8 @@
+schemaVersion: zizu.entity-definition/v1alpha1
+id: site.total_pcs_power
+kind: entity_definition
+displayName: 全站 PCS 总有功功率
+deviceCategory: SITE
+dataType: FLOAT
+unit: kW
+direction: R

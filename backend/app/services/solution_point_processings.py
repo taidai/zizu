@@ -464,6 +464,12 @@ def _parse_transform(
                 "POINT_PROCESSING_FORMULA_INVALID",
                 "Point processing formula fields are invalid",
             )
+        source_kinds = {item.source_kind for item in inputs.values()}
+        if "l2" in source_kinds and source_kinds != {"l2"}:
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_FORMULA_INVALID",
+                "Cross-node formulas can only read standardized L2 inputs",
+            )
         try:
             compiled = compile_formula(
                 raw["expression"],

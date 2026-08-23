@@ -55,7 +55,8 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_point_processing_selectors') IS NULL
                      OR to_regclass('public.t_point_processing_selector_members') IS NULL
                      OR to_regclass('public.t_point_processing_dependencies') IS NULL
-                     OR to_regclass('public.t_point_processing_formula_runs') IS NULL THEN
+                     OR to_regclass('public.t_point_processing_formula_runs') IS NULL
+                     OR to_regclass('public.t_cross_node_processing_acceptance_reports') IS NULL THEN
                     RAISE EXCEPTION 'schema 042 point-processing contract is incomplete'
                       USING ERRCODE = '55000';
                   END IF;

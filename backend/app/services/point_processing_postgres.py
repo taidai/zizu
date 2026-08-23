@@ -1391,6 +1391,18 @@ class PostgresPointProcessingRepository:
                     )
                     cursor.execute(
                         """
+                        UPDATE t_solution_installations
+                        SET entity_instance_ids = ARRAY(
+                          SELECT DISTINCT value
+                          FROM unnest(entity_instance_ids || %s::uuid[]) AS value
+                          ORDER BY value
+                        )
+                        WHERE id = %s
+                        """,
+                        ([str(item) for item in output_ids], solution_installation_id),
+                    )
+                    cursor.execute(
+                        """
                         INSERT INTO t_point_processing_applications
                           (id, plan_id, installed_processing_id,
                            solution_installation_id, site_configuration_version,
@@ -1716,7 +1728,8 @@ class PostgresPointProcessingRepository:
                 continue
             cursor.execute(
                 """
-                SELECT id, entity_definition_id, data_type, unit
+                SELECT id, entity_definition_id, data_type, unit,
+                       freshness_seconds
                 FROM t_point_processing_outputs
                 WHERE revision_id = %s AND output_key = %s
                 """,
@@ -1737,6 +1750,24 @@ class PostgresPointProcessingRepository:
                 (entity_id,),
             )
             entity = cursor.fetchone()
+            if entity is None:
+                PostgresPointProcessingRepository._create_output_entity(
+                    cursor,
+                    plan,
+                    entity_id,
+                    definition_id=relation[1],
+                    data_type=relation[2],
+                    unit=relation[3],
+                    freshness_seconds=float(relation[4]),
+                )
+                cursor.execute(
+                    """
+                    SELECT definition_id, data_type, unit, source_kind
+                    FROM t_entity_instances WHERE id = %s
+                    """,
+                    (entity_id,),
+                )
+                entity = cursor.fetchone()
             if entity is None or entity != (
                 relation[1],
                 relation[2],
@@ -1757,6 +1788,104 @@ class PostgresPointProcessingRepository:
             )
             output_entity_ids.append(entity_id)
         return tuple(sorted(output_entity_ids, key=str))
+
+    @staticmethod
+    def _create_output_entity(
+        cursor: Any,
+        plan: PointProcessingPlan,
+        entity_id: UUID,
+        *,
+        definition_id: str,
+        data_type: str,
+        unit: str | None,
+        freshness_seconds: float,
+    ) -> None:
+        cursor.execute(
+            """
+            SELECT template.device_category, template.display_name,
+                   node.name
+            FROM t_point_processing_revisions AS revision
+            JOIN t_point_processing_templates AS template
+              ON template.id = revision.template_id
+            JOIN t_nodes AS node ON node.id = %s
+            WHERE revision.id = %s
+            """,
+            (plan.node_id, plan.template_revision_id),
+        )
+        contract = cursor.fetchone()
+        if contract is None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Point processing output target is unavailable",
+            )
+        device_category, template_name, node_name = contract
+        device_id = uuid5(
+            NAMESPACE_URL,
+            (
+                "zizu/point-processing-device/"
+                f"{plan.entity_identity_installation_id}/{plan.node_id}/"
+                f"{str(device_category).casefold()}"
+            ),
+        )
+        slot_id = f"dynamic.point-processing.{str(device_category).casefold()}"
+        instance_key = str(plan.node_id)
+        cursor.execute(
+            """
+            INSERT INTO t_device_instances
+              (id, identity_installation_id, slot_id, instance_key,
+               device_category, display_name, node_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (
+                device_id,
+                plan.entity_identity_installation_id,
+                slot_id,
+                instance_key,
+                str(device_category),
+                f"{node_name} 点位加工",
+                plan.node_id,
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT identity_installation_id, slot_id, instance_key,
+                   device_category, node_id
+            FROM t_device_instances
+            WHERE id = %s
+            """,
+            (device_id,),
+        )
+        device = cursor.fetchone()
+        if device != (
+            plan.entity_identity_installation_id,
+            slot_id,
+            instance_key,
+            str(device_category),
+            plan.node_id,
+        ):
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Point processing output device contract changed after planning",
+            )
+        cursor.execute(
+            """
+            INSERT INTO t_entity_instances
+              (id, device_instance_id, definition_id, display_name,
+               data_type, unit, direction, freshness_seconds, source_kind)
+            VALUES (%s, %s, %s, %s, %s, %s, 'R', %s, 'point_processing')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (
+                entity_id,
+                device_id,
+                definition_id,
+                f"{template_name} · {definition_id}",
+                data_type,
+                unit,
+                freshness_seconds,
+            ),
+        )
 
     @staticmethod
     def _create_derived_solution_lineage(

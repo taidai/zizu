@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from datetime import UTC, datetime, timedelta
 import unittest
-from dataclasses import replace
 from uuid import UUID
 
 import psycopg2
@@ -41,15 +40,15 @@ class PointProcessingPostgresTest(unittest.TestCase):
         from app.services.point_processing_postgres import (
             PostgresPointProcessingCatalog,
             PostgresPointProcessingRepository,
-            persist_point_processing_assets,
         )
-        from app.services.solution_point_processings import (
-            _asset_dict,
-            point_processing_revision_id,
-        )
-        from tests.test_point_processing import _site_formula_asset
 
         package, brand_a_revision, _ = self._import_reference_package()
+        formula_summary = next(
+            item
+            for item in PostgresPointProcessingCatalog().list_templates("SITE")
+            if item.asset.asset_id == "site.total-pcs-power"
+        )
+        formula_revision = formula_summary.revision_id
         pcs_1 = UUID("85000000-0000-0000-0000-000000000001")
         pcs_2 = UUID("85000000-0000-0000-0000-000000000002")
         site_id = UUID("85000000-0000-0000-0000-000000000010")
@@ -67,15 +66,6 @@ class PointProcessingPostgresTest(unittest.TestCase):
             pcs_1_node,
             entity_ids,
         )
-        formula_asset = _site_formula_asset()
-        formula_package = replace(
-            package,
-            manifest={
-                **package.manifest,
-                "_point_processing_assets": [_asset_dict(formula_asset)],
-            },
-        )
-        formula_revision = point_processing_revision_id(formula_asset)
         identity_id = UUID("85000000-0000-0000-0000-000000000203")
         installation_id = UUID("85000000-0000-0000-0000-000000000202")
         site_output = _stable_output_entity_id(
@@ -85,11 +75,6 @@ class PointProcessingPostgresTest(unittest.TestCase):
         )
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
-                persist_point_processing_assets(
-                    cursor,
-                    formula_package,
-                    "user:engineer-formula",
-                )
                 cursor.execute(
                     """
                     INSERT INTO t_nodes (id, name, node_type)
@@ -155,16 +140,6 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     """,
                     (second_installed, pcs_2, brand_a_revision),
                 )
-                site_device = UUID("85000000-0000-0000-0000-000000000310")
-                cursor.execute(
-                    """
-                    INSERT INTO t_device_instances
-                      (id, identity_installation_id, slot_id, instance_key,
-                       device_category, display_name, node_id)
-                    VALUES (%s, %s, 'slot.site', 'SITE-01', 'SITE', 'SITE-01', %s)
-                    """,
-                    (site_device, identity_id, site_id),
-                )
 
         service = PointProcessingDelivery(
             PostgresPointProcessingRepository(),
@@ -181,27 +156,14 @@ class PointProcessingPostgresTest(unittest.TestCase):
             )
         )
         self.assertEqual("ready", plan.status, plan.blockers)
-        with psycopg2.connect(**self.connection_kwargs) as transaction:
-            with transaction.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO t_entity_instances
-                      (id, device_instance_id, definition_id, display_name,
-                       data_type, unit, direction, freshness_seconds, source_kind)
-                    VALUES (%s, %s, 'site.total_pcs_power', 'PCS 总功率',
-                            'FLOAT', 'kW', 'R', 5, 'point_processing')
-                    """,
-                    (site_output, site_device),
-                )
-            application = service.apply(
-                ApplyPointProcessingPlan(
-                    plan.id,
-                    plan.digest,
-                    "install-site-formula",
-                    "user:engineer-formula",
-                ),
-                transaction=transaction,
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "install-site-formula",
+                "user:engineer-formula",
             )
+        )
 
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -219,6 +181,17 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     ),
                 )
                 self.assertEqual((2, 2), cursor.fetchone())
+                cursor.execute(
+                    """
+                    SELECT entity.definition_id, device.node_id
+                    FROM t_entity_instances AS entity
+                    JOIN t_device_instances AS device
+                      ON device.id = entity.device_instance_id
+                    WHERE entity.id = %s
+                    """,
+                    (site_output,),
+                )
+                self.assertEqual(("site.total_pcs_power", site_id), cursor.fetchone())
                 cursor.execute(
                     """
                     SELECT entity_instance_id
@@ -411,7 +384,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     cursor.fetchone(),
-                    (1, 3, 3, 96, 9, 15, 4, 88, 3),
+                    (1, 4, 4, 97, 10, 15, 4, 88, 4),
                 )
                 cursor.execute(
                     """
@@ -421,7 +394,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     """,
                     (package.id,),
                 )
-                self.assertEqual(cursor.fetchone(), (3,))
+                self.assertEqual(cursor.fetchone(), (4,))
 
     def test_independent_brand_replacement_preserves_l2_ids_and_advances_lineage(self) -> None:
         from app.services.point_processing import (
@@ -944,8 +917,8 @@ class PointProcessingPostgresTest(unittest.TestCase):
             package_path = retired_source / "package.yaml"
             package_path.write_text(
                 package_path.read_text(encoding="utf-8").replace(
-                    "version: 1.0.0",
-                    "version: 1.0.1",
+                    "version: 1.1.0",
+                    "version: 1.1.1",
                     1,
                 ),
                 encoding="utf-8",

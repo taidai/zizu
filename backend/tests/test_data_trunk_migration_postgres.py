@@ -113,7 +113,8 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                            to_regclass('t_point_processing_selectors'),
                            to_regclass('t_point_processing_selector_members'),
                            to_regclass('t_point_processing_dependencies'),
-                           to_regclass('t_point_processing_formula_runs')
+                           to_regclass('t_point_processing_formula_runs'),
+                           to_regclass('t_cross_node_processing_acceptance_reports')
                     """
                 )
                 self.assertEqual(
@@ -124,6 +125,7 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                         "t_point_processing_selector_members",
                         "t_point_processing_dependencies",
                         "t_point_processing_formula_runs",
+                        "t_cross_node_processing_acceptance_reports",
                     ),
                 )
                 cursor.execute(

@@ -1,6 +1,6 @@
 package:
   id: org.zizu.pv-storage-charging-ems
-  version: 1.0.0
+  version: 1.1.0
   displayName: 光储充 EMS 参考交付
   platformVersion: ">=0.4.77,<0.5.0"
 parameters:
@@ -54,6 +54,8 @@ assets:
   - {id: pv.active_power, kind: entity_definition, path: entities/pv-active-power.yaml}
   - {id: evse.active_power, kind: entity_definition, path: entities/evse-active-power.yaml}
   - {id: grid.active_power, kind: entity_definition, path: entities/grid-active-power.yaml}
+  - {id: site.total_pcs_power, kind: entity_definition, path: entities/site-total-pcs-power.yaml}
+  - {id: site.total-pcs-power, kind: point_processing_template, path: point-processings/site-total-pcs-power.yaml}
   - {id: slot.pcs, kind: entity_instance_slot, path: slots/pcs.yaml}
   - {id: slot.bms, kind: entity_instance_slot, path: slots/bms.yaml}
   - {id: slot.pv, kind: entity_instance_slot, path: slots/pv.yaml}

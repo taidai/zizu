@@ -12,7 +12,10 @@ import yaml
 
 from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
 from app.services.solution_delivery_contracts import DeliveryError
-from app.services.solution_point_processings import parse_point_processing_asset
+from app.services.solution_point_processings import (
+    PointProcessingAssetError,
+    parse_point_processing_asset,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +82,36 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
             "pcs_power",
         )
         self.assertEqual(len(asset.outputs[0].transform["astDigest"]), 64)
+
+    def test_cross_node_formula_rejects_mixed_l0_and_l2_inputs(self) -> None:
+        asset = yaml.safe_load(
+            (
+                REPO_ROOT
+                / "reference-deliveries"
+                / "pv-storage-charging-ems"
+                / "point-processings"
+                / "site-total-pcs-power.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        asset["inputs"].append(
+            {
+                "id": "site_meter_raw",
+                "sourceKind": "l0",
+                "sourceKey": "SiteMeterRaw",
+                "aliases": [],
+                "dataType": "FLOAT",
+                "unit": "kW",
+                "required": True,
+            }
+        )
+        asset["outputs"][0]["transform"]["expression"] = (
+            "sum(pcs_power) + site_meter_raw"
+        )
+
+        with self.assertRaises(PointProcessingAssetError) as raised:
+            parse_point_processing_asset(asset)
+        self.assertEqual("POINT_PROCESSING_FORMULA_INVALID", raised.exception.code)
+
     def test_imports_three_pcs_templates_with_same_three_outputs(self) -> None:
         from app.services.solution_point_processings import point_processing_assets
 
@@ -88,12 +121,16 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
         ).import_package(builder.build_archive(), "user:test-engineer")
 
         assets = point_processing_assets(package)
+        pcs_assets = tuple(
+            item for item in assets if item.device_category == "PCS"
+        )
 
         self.assertEqual(
-            {item.asset_id for item in assets},
+            {item.asset_id for item in pcs_assets},
             {"pcs.brand-a", "pcs.brand-b", "pcs.en9"},
         )
-        for asset in assets:
+        self.assertIn("site.total-pcs-power", {item.asset_id for item in assets})
+        for asset in pcs_assets:
             self.assertEqual(
                 tuple(output.entity_definition_id for output in asset.outputs),
                 (

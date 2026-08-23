@@ -33,7 +33,13 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
             InMemoryDeliveryRepository(), platform_version="0.4.77"
         ).import_package(first, "user:test-engineer")
         self.assertEqual(imported.package_id, "org.zizu.pv-storage-charging-ems")
-        self.assertEqual(imported.version, "1.0.0")
+        self.assertEqual(imported.version, "1.1.0")
+        formula_assets = imported.manifest["_point_processing_assets"]
+        site_formula = next(
+            item for item in formula_assets
+            if item["asset_id"] == "site.total-pcs-power"
+        )
+        self.assertEqual("sum(pcs_power)", site_formula["outputs"][0]["transform"]["expression"])
         self.assertEqual(len(imported.manifest["_entity_slots"]), 5)
         self.assertEqual(len(imported.manifest["_alarm_assets"]), 3)
         self.assertEqual(len(imported.manifest["_policy_assets"]), 1)

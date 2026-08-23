@@ -9,11 +9,13 @@ BEGIN
     ('t_point_processing_expressions'),
     ('t_point_processing_selectors'),
     ('t_point_processing_selector_members'),
-    ('t_point_processing_dependencies')
+    ('t_point_processing_dependencies'),
+    ('t_point_processing_formula_runs'),
+    ('t_cross_node_processing_acceptance_reports')
   ) AS expected(name)
   WHERE to_regclass('public.' || expected.name) IS NOT NULL;
 
-  IF existing_tables NOT IN (0, 4) THEN
+  IF existing_tables NOT IN (0, 6) THEN
     RAISE EXCEPTION 'schema 042 is partially present'
       USING ERRCODE = '55000';
   END IF;
@@ -99,6 +101,23 @@ CREATE INDEX IF NOT EXISTS ix_point_processing_dependencies_target
 CREATE INDEX IF NOT EXISTS ix_point_processing_selector_members_entity
   ON t_point_processing_selector_members(entity_instance_id);
 
+-- A digest identifies source content, not source identity. Two different L2
+-- entities can legitimately carry identical content and must both remain in
+-- a cross-node formula's evidence set.
+ALTER TABLE t_l2_observation_sources
+  DROP CONSTRAINT IF EXISTS t_l2_observation_sources_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_l2_observation_source_l0
+  ON t_l2_observation_sources(
+    l2_event_id, l2_observed_at, l0_observation_id
+  )
+  WHERE source_kind = 'l0';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_l2_observation_source_l2
+  ON t_l2_observation_sources(
+    l2_event_id, l2_observed_at,
+    source_l2_event_id, source_l2_observed_at
+  )
+  WHERE source_kind IN ('l2', 'freshness');
+
 CREATE TABLE IF NOT EXISTS t_point_processing_formula_runs (
   installed_processing_id UUID NOT NULL
     REFERENCES t_installed_point_processings(id),
@@ -106,6 +125,17 @@ CREATE TABLE IF NOT EXISTS t_point_processing_formula_runs (
   last_evaluated_at TIMESTAMPTZ NOT NULL,
   last_event_id UUID,
   PRIMARY KEY(installed_processing_id, output_id)
+);
+
+CREATE TABLE IF NOT EXISTS t_cross_node_processing_acceptance_reports (
+  id UUID PRIMARY KEY,
+  application_id UUID NOT NULL REFERENCES t_point_processing_applications(id),
+  status TEXT NOT NULL CHECK (status IN ('passed','failed')),
+  generated_at TIMESTAMPTZ NOT NULL,
+  evidence JSONB NOT NULL CHECK (jsonb_typeof(evidence) = 'object'),
+  digest CHAR(64) NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(application_id, digest)
 );
 
 DROP TRIGGER IF EXISTS trg_point_processing_expressions_immutable
@@ -154,4 +184,16 @@ DROP TRIGGER IF EXISTS trg_point_processing_dependencies_no_truncate
   ON t_point_processing_dependencies;
 CREATE TRIGGER trg_point_processing_dependencies_no_truncate
 BEFORE TRUNCATE ON t_point_processing_dependencies
+FOR EACH STATEMENT EXECUTE FUNCTION reject_data_trunk_append_only();
+
+DROP TRIGGER IF EXISTS trg_cross_node_processing_acceptance_reports_immutable
+  ON t_cross_node_processing_acceptance_reports;
+CREATE TRIGGER trg_cross_node_processing_acceptance_reports_immutable
+BEFORE UPDATE OR DELETE ON t_cross_node_processing_acceptance_reports
+FOR EACH ROW EXECUTE FUNCTION reject_data_trunk_append_only();
+
+DROP TRIGGER IF EXISTS trg_cross_node_processing_acceptance_reports_no_truncate
+  ON t_cross_node_processing_acceptance_reports;
+CREATE TRIGGER trg_cross_node_processing_acceptance_reports_no_truncate
+BEFORE TRUNCATE ON t_cross_node_processing_acceptance_reports
 FOR EACH STATEMENT EXECUTE FUNCTION reject_data_trunk_append_only();
