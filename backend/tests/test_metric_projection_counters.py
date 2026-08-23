@@ -104,6 +104,15 @@ class MetricProjectionCounterTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "finite"):
                     counter_delta((0, value), CounterContract(maximum=999999))
 
+    def test_counter_requires_two_samples_instead_of_fabricating_zero(self) -> None:
+        for values in ((), (100,)):
+            with self.subTest(values=values):
+                result = counter_delta(values, CounterContract(maximum=999999))
+
+                self.assertFalse(result.valid)
+                self.assertIsNone(result.value)
+                self.assertEqual(result.quality, TrunkQuality.BAD)
+
 
 if __name__ == "__main__":
     unittest.main()

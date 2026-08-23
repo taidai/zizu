@@ -6,9 +6,9 @@ recoverable state, committed L2 observations, and an explicit ``now``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import math
 from typing import Iterable, Sequence
 from uuid import UUID
@@ -25,7 +25,23 @@ from app.services.data_trunk_contracts import L2Observation, TrunkQuality
 
 
 Number = int | float | Decimal
-_BAD_QUALITIES = {TrunkQuality.BAD, TrunkQuality.STALE}
+_BAD_QUALITIES = frozenset({TrunkQuality.BAD, TrunkQuality.STALE})
+_POWER_UNIT_FACTORS = {
+    "W": Decimal(1),
+    "kW": Decimal(1000),
+    "MW": Decimal(1000000),
+}
+_ENERGY_UNIT_FACTORS = {
+    "Wh": Decimal(1),
+    "kWh": Decimal(1000),
+    "MWh": Decimal(1000000),
+}
+
+
+class MetricProjectionError(ValueError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -158,14 +174,29 @@ def counter_delta(
     samples: Sequence[Number] | Sequence[L2Observation],
     contract: CounterContract,
     window: MetricWindow | None = None,
+    *,
+    source_unit: str | None = None,
+    output_unit: str | None = None,
+    maximum_baseline_age_seconds: int | None = None,
 ) -> MetricCalculation:
     """Sum monotonic counter segments under one explicit frozen decrease policy."""
     if not isinstance(contract, CounterContract):
         raise TypeError("counter calculation requires a frozen counter contract")
-    prepared = _calculation_samples(samples, window)
+    prepared, selection_error = _counter_samples(
+        samples,
+        window,
+        maximum_baseline_age_seconds,
+    )
+    if selection_error is not None:
+        return _invalid_calculation(selection_error, prepared)
     if any(item.quality in _BAD_QUALITIES for item in prepared):
         return _invalid_calculation("SOURCE_BAD", prepared)
-    values = tuple(_decimal(item.value) for item in prepared)
+    values = tuple(
+        _sample_value(item, source_unit, "energy")
+        if source_unit is not None or output_unit is not None
+        else _decimal(item.value)
+        for item in prepared
+    )
     for value in values:
         if value < 0 or value > contract.maximum:
             return _invalid_calculation("COUNTER_VALUE_OUT_OF_RANGE", prepared)
@@ -184,7 +215,7 @@ def counter_delta(
     coverage = _span_coverage(prepared, window)
     quality = _source_quality(prepared)
     return MetricCalculation(
-        value=total,
+        value=_convert_same_family(total, source_unit, output_unit, "energy"),
         coverage=coverage,
         valid=True,
         quality=quality,
@@ -198,6 +229,8 @@ def integrate_power(
     *,
     maximum_sample_gap_seconds: int,
     direction: FlowDirection | str,
+    source_unit: str = "kW",
+    output_unit: str = "kWh",
 ) -> MetricCalculation:
     """Trapezoid-integrate selected power flow to energy in kWh."""
     prepared = _calculation_samples(events, window)
@@ -208,20 +241,45 @@ def integrate_power(
         raise ValueError("power flow direction is invalid") from exc
     total_kw_seconds = Decimal(0)
     covered_seconds = Decimal(0)
+    used_samples: list[_Sample] = []
     for previous, current in zip(prepared, prepared[1:]):
         interval = Decimal(str((current.observed_at - previous.observed_at).total_seconds()))
-        if interval <= 0 or interval > maximum_gap:
+        if (
+            interval <= 0
+            or interval > maximum_gap
+            or previous.quality in _BAD_QUALITIES
+            or current.quality in _BAD_QUALITIES
+        ):
             continue
-        previous_value = _flow_value(_decimal(previous.value), flow)
-        current_value = _flow_value(_decimal(current.value), flow)
-        total_kw_seconds += (previous_value + current_value) * interval / Decimal(2)
+        previous_value = _sample_value(previous, source_unit, "power")
+        current_value = _sample_value(current, source_unit, "power")
+        total_kw_seconds += _directional_linear_area(
+            previous_value,
+            current_value,
+            interval,
+            flow,
+        )
         covered_seconds += interval
+        used_samples.extend((previous, current))
     coverage = _duration_coverage(covered_seconds, window)
+    if not covered_seconds:
+        return MetricCalculation(
+            value=None,
+            coverage=0.0,
+            valid=False,
+            quality=TrunkQuality.BAD,
+            reason="COVERAGE_INSUFFICIENT",
+            source_event_ids=_event_ids(prepared),
+        )
     return MetricCalculation(
-        value=total_kw_seconds / Decimal(3600),
+        value=_power_seconds_to_energy(
+            total_kw_seconds,
+            source_unit,
+            output_unit,
+        ),
         coverage=coverage,
         valid=True,
-        quality=_source_quality(prepared),
+        quality=_source_quality(used_samples),
         source_event_ids=_event_ids(prepared),
     )
 
@@ -231,26 +289,45 @@ def time_weighted_average(
     window: MetricWindow,
     *,
     maximum_sample_gap_seconds: int,
+    source_unit: str | None = None,
+    output_unit: str | None = None,
 ) -> MetricCalculation:
     """Average by integrable elapsed time, never by number of samples."""
     prepared = _calculation_samples(events, window)
     maximum_gap = _maximum_gap(maximum_sample_gap_seconds)
     weighted = Decimal(0)
     covered_seconds = Decimal(0)
+    used_samples: list[_Sample] = []
     for previous, current in zip(prepared, prepared[1:]):
         interval = Decimal(str((current.observed_at - previous.observed_at).total_seconds()))
-        if interval <= 0 or interval > maximum_gap:
+        if (
+            interval <= 0
+            or interval > maximum_gap
+            or previous.quality in _BAD_QUALITIES
+            or current.quality in _BAD_QUALITIES
+        ):
             continue
-        previous_value = _decimal(previous.value)
-        current_value = _decimal(current.value)
+        previous_value = (
+            _sample_value(previous, source_unit, "power")
+            if source_unit is not None or output_unit is not None
+            else _decimal(previous.value)
+        )
+        current_value = (
+            _sample_value(current, source_unit, "power")
+            if source_unit is not None or output_unit is not None
+            else _decimal(current.value)
+        )
         weighted += (previous_value + current_value) * interval / Decimal(2)
         covered_seconds += interval
+        used_samples.extend((previous, current))
     value = weighted / covered_seconds if covered_seconds else None
+    if value is not None:
+        value = _convert_same_family(value, source_unit, output_unit, "power")
     return MetricCalculation(
         value=value,
         coverage=_duration_coverage(covered_seconds, window),
         valid=value is not None,
-        quality=_source_quality(prepared) if value is not None else TrunkQuality.BAD,
+        quality=_source_quality(used_samples) if value is not None else TrunkQuality.BAD,
         reason=None if value is not None else "COVERAGE_INSUFFICIENT",
         source_event_ids=_event_ids(prepared),
     )
@@ -259,18 +336,29 @@ def time_weighted_average(
 def window_maximum(
     events: Sequence[L2Observation],
     window: MetricWindow,
+    *,
+    source_unit: str | None = None,
+    output_unit: str | None = None,
 ) -> MetricCalculation:
     """Select the stable first maximum among quality-usable source samples."""
     prepared = tuple(
         item for item in _calculation_samples(events, window)
         if item.quality not in _BAD_QUALITIES
     )
-    valued = tuple((item, _decimal(item.value)) for item in prepared)
+    valued = tuple(
+        (
+            item,
+            _sample_value(item, source_unit, "power")
+            if source_unit is not None or output_unit is not None
+            else _decimal(item.value),
+        )
+        for item in prepared
+    )
     if not valued:
         return MetricCalculation(None, 0.0, False, TrunkQuality.BAD, "COVERAGE_INSUFFICIENT")
     winner, value = max(valued, key=lambda pair: pair[1])
     return MetricCalculation(
-        value=value,
+        value=_convert_same_family(value, source_unit, output_unit, "power"),
         coverage=_span_coverage(prepared, window),
         valid=True,
         quality=_source_quality(prepared),
@@ -301,12 +389,22 @@ def project_metric(
     selected = tuple(item for item in combined if window.contains(item.observed_at))
     if duplicate_conflict:
         return _invalid_decision(window, instant, selected, contract.estimated, "DUPLICATE_EVENT_CONFLICT")
-    if any(item.quality in _BAD_QUALITIES for item in selected):
-        return _invalid_decision(window, instant, selected, contract.estimated, "SOURCE_BAD")
-
     try:
-        calculation = _calculate(state, selected, window, contract)
-    except (InvalidOperation, ValueError) as exc:
+        calculation = _calculate(
+            state,
+            combined if contract.method is MetricAggregator.COUNTER_DELTA else selected,
+            window,
+            contract,
+        )
+    except MetricProjectionError as exc:
+        return _invalid_decision(
+            window,
+            instant,
+            selected,
+            contract.estimated,
+            exc.reason,
+        )
+    except ValueError as exc:
         if "timezone-aware" in str(exc):
             raise
         reason = "NONFINITE_VALUE" if "finite" in str(exc) else "CALCULATION_CONTRACT_INVALID"
@@ -361,21 +459,26 @@ class _RevisionContract:
     minimum_usable_coverage: float
     flow_direction: FlowDirection
     estimated: bool
+    source_unit: str | None
+    output_unit: str | None
 
 
 @dataclass(frozen=True)
 class _Sample:
-    value: Number
+    value: object
     observed_at: datetime
     quality: TrunkQuality
     event_id: UUID | None
     source_order_key: str
+    unit: str | None
 
 
 def _revision_contract(revision: CompiledMetricRevision) -> _RevisionContract:
     outputs = revision.point_processing_asset.outputs
     if len(outputs) != 1:
         raise ValueError("compiled metric revision must have one output")
+    if len(revision.sources) != 1:
+        raise ValueError("compiled metric revision must have one frozen source")
     transform = outputs[0].transform
     methods = transform.get("methods")
     if not isinstance(methods, tuple) or len(methods) != 1:
@@ -408,6 +511,8 @@ def _revision_contract(revision: CompiledMetricRevision) -> _RevisionContract:
         minimum_usable_coverage=minimum,
         flow_direction=direction,
         estimated=any(source.estimated for source in revision.sources),
+        source_unit=revision.sources[0].unit,
+        output_unit=outputs[0].unit,
     )
 
 
@@ -417,24 +522,42 @@ def _calculate(
     window: MetricWindow,
     contract: _RevisionContract,
 ) -> MetricCalculation:
+    source_unit = _required_unit(contract.source_unit)
+    output_unit = _required_unit(contract.output_unit)
     if contract.method is MetricAggregator.COUNTER_DELTA:
         if state.counter_contract is None:
             return _invalid_calculation("COUNTER_CONTRACT_INVALID", ())
-        return counter_delta(events, state.counter_contract, window)
+        return counter_delta(
+            events,
+            state.counter_contract,
+            window,
+            source_unit=source_unit,
+            output_unit=output_unit,
+            maximum_baseline_age_seconds=state.maximum_sample_gap_seconds,
+        )
     if contract.method is MetricAggregator.POWER_INTEGRAL:
         return integrate_power(
             events,
             window,
             maximum_sample_gap_seconds=_required_maximum_gap(state),
             direction=contract.flow_direction,
+            source_unit=source_unit,
+            output_unit=output_unit,
         )
     if contract.method is MetricAggregator.AVERAGE:
         return time_weighted_average(
             events,
             window,
             maximum_sample_gap_seconds=_required_maximum_gap(state),
+            source_unit=source_unit,
+            output_unit=output_unit,
         )
-    return window_maximum(events, window)
+    return window_maximum(
+        events,
+        window,
+        source_unit=source_unit,
+        output_unit=output_unit,
+    )
 
 
 def _required_maximum_gap(state: MetricProjectionState) -> int:
@@ -455,11 +578,12 @@ def _calculation_samples(
                 continue
             normalized.append(
                 _Sample(
-                    value=_typed_numeric(item),
+                    value=item.value.value,
                     observed_at=observed_at,
                     quality=TrunkQuality(item.quality),
                     event_id=item.event_id,
                     source_order_key=item.source_order_key,
+                    unit=item.unit,
                 )
             )
         else:
@@ -470,6 +594,7 @@ def _calculation_samples(
                     quality=TrunkQuality.GOOD,
                     event_id=None,
                     source_order_key=f"N:{index:020d}",
+                    unit=None,
                 )
             )
     normalized.sort(
@@ -480,6 +605,40 @@ def _calculation_samples(
         )
     )
     return tuple(normalized)
+
+
+def _counter_samples(
+    samples: Sequence[Number] | Sequence[L2Observation],
+    window: MetricWindow | None,
+    maximum_baseline_age_seconds: int | None,
+) -> tuple[tuple[_Sample, ...], str | None]:
+    prepared = _calculation_samples(samples, None)
+    if window is None:
+        if len(prepared) < 2:
+            return prepared, "COUNTER_ENDPOINT_MISSING"
+        return prepared, None
+
+    exact_start = tuple(item for item in prepared if item.observed_at == window.start)
+    if exact_start:
+        baseline = exact_start[-1]
+    else:
+        before_start = tuple(item for item in prepared if item.observed_at < window.start)
+        if not before_start or maximum_baseline_age_seconds is None:
+            return (), "COUNTER_BASELINE_MISSING"
+        baseline = before_start[-1]
+        age_seconds = (window.start - baseline.observed_at).total_seconds()
+        if age_seconds > maximum_baseline_age_seconds:
+            return (baseline,), "COUNTER_BASELINE_MISSING"
+
+    endpoints = tuple(
+        item
+        for item in prepared
+        if item.observed_at > window.start and window.contains(item.observed_at)
+    )
+    if not endpoints:
+        return (baseline,), "COUNTER_ENDPOINT_MISSING"
+    effective_baseline = replace(baseline, observed_at=window.start)
+    return (effective_baseline, *endpoints), None
 
 
 def _stable_unique_events(
@@ -556,33 +715,111 @@ def _invalid_decision(
     )
 
 
-def _typed_numeric(event: L2Observation) -> Number:
-    value = event.value.value
+def _decimal(value: object) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-        raise ValueError("metric value must be numeric and finite")
-    return value
-
-
-def _decimal(value: Number) -> Decimal:
-    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-        raise ValueError("metric value must be numeric and finite")
+        raise MetricProjectionError(
+            "VALUE_TYPE_INVALID",
+            "metric value must be numeric",
+        )
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("metric value must be finite")
+            raise MetricProjectionError("NONFINITE_VALUE", "metric value must be finite")
         result = Decimal(str(value))
     else:
         result = Decimal(value)
     if not result.is_finite():
-        raise ValueError("metric value must be finite")
+        raise MetricProjectionError("NONFINITE_VALUE", "metric value must be finite")
     return result
 
 
-def _flow_value(value: Decimal, direction: FlowDirection) -> Decimal:
+def _required_unit(unit: str | None) -> str:
+    if unit is None:
+        raise MetricProjectionError(
+            "UNIT_CONTRACT_INVALID",
+            "metric unit contract is missing",
+        )
+    return unit
+
+
+def _sample_value(sample: _Sample, source_unit: str | None, family: str) -> Decimal:
+    frozen_unit = _required_unit(source_unit)
+    frozen_factor = _unit_factor(frozen_unit, family, "UNIT_CONTRACT_INVALID")
+    event_unit = sample.unit or frozen_unit
+    event_factor = _unit_factor(event_unit, family, "UNIT_MISMATCH")
+    return _decimal(sample.value) * event_factor / frozen_factor
+
+
+def _convert_same_family(
+    value: Decimal,
+    source_unit: str | None,
+    output_unit: str | None,
+    family: str,
+) -> Decimal:
+    if source_unit is None and output_unit is None:
+        return value
+    source_factor = _unit_factor(
+        _required_unit(source_unit),
+        family,
+        "UNIT_CONTRACT_INVALID",
+    )
+    output_factor = _unit_factor(
+        _required_unit(output_unit),
+        family,
+        "UNIT_CONTRACT_INVALID",
+    )
+    return value * source_factor / output_factor
+
+
+def _power_seconds_to_energy(
+    value: Decimal,
+    source_unit: str,
+    output_unit: str,
+) -> Decimal:
+    power_factor = _unit_factor(source_unit, "power", "UNIT_CONTRACT_INVALID")
+    energy_factor = _unit_factor(output_unit, "energy", "UNIT_CONTRACT_INVALID")
+    return value * power_factor / Decimal(3600) / energy_factor
+
+
+def _unit_factor(unit: str, family: str, reason: str) -> Decimal:
+    factors = _POWER_UNIT_FACTORS if family == "power" else _ENERGY_UNIT_FACTORS
+    try:
+        return factors[unit]
+    except (KeyError, TypeError) as exc:
+        raise MetricProjectionError(
+            reason,
+            f"metric unit {unit!r} is not a supported {family} unit",
+        ) from exc
+
+
+def _directional_linear_area(
+    start: Decimal,
+    end: Decimal,
+    duration: Decimal,
+    direction: FlowDirection,
+) -> Decimal:
+    positive = _positive_linear_area(start, end, duration)
     if direction is FlowDirection.POSITIVE:
-        return value if value > 0 else Decimal(0)
+        return positive
+    negative = _positive_linear_area(-start, -end, duration)
     if direction is FlowDirection.NEGATIVE:
-        return -value if value < 0 else Decimal(0)
-    return abs(value)
+        return negative
+    return positive + negative
+
+
+def _positive_linear_area(
+    start: Decimal,
+    end: Decimal,
+    duration: Decimal,
+) -> Decimal:
+    if start <= 0 and end <= 0:
+        return Decimal(0)
+    if start >= 0 and end >= 0:
+        return (start + end) * duration / Decimal(2)
+    if start > 0:
+        positive_duration = duration * start / (start - end)
+        return start * positive_duration / Decimal(2)
+    positive_duration = duration * end / (end - start)
+    return end * positive_duration / Decimal(2)
 
 
 def _maximum_gap(value: int) -> Decimal:
@@ -637,6 +874,7 @@ __all__ = [
     "CounterContract",
     "MetricCalculation",
     "MetricProjectionState",
+    "MetricProjectionError",
     "MetricWindow",
     "ProjectionDecision",
     "aligned_daily_window",

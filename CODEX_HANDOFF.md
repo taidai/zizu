@@ -4,7 +4,9 @@
 
 - 新增纯计算 `MetricProjection` 内核：IANA aligned daily、通用 rolling、counter delta、梯形功率积分、时间加权平均、峰值和确定性 `project_metric`；无 I/O、无全局时钟。
 - 冻结 counter reset/rollover 规则覆盖 16/32/64 位，歧义、BAD、非有限值和覆盖不足稳定形成 `invalid/BAD`；当前有效窗口保持 `provisional`，所有 decision 的 `history_facts=()`。
-- Task 3 定向 28/28、Task 1 编译相关回归 18/18 通过；详细 RED/GREEN 与边界见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
+- 独立复审修复后，投影只按冻结 source/output unit 的 W/kW/MW 与 Wh/kWh/MWh 白名单换算；跨零功率按线性零交点分段积分；counter 保留窗口起点或最近可信 baseline；零有效时长不再伪造 0。
+- BAD/STALE 质量按聚合器处理：counter 链 fail closed，积分/平均只跳过相邻坏区间且不跨点连接，peak 忽略坏样本并保留稳定 winner 身份；`_BAD_QUALITIES` 已冻结为 `frozenset`。
+- Task 3 定向 51/51、Task 1 编译相关回归 18/18 通过；详细 RED/GREEN 与边界见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
 - 未做 PostgreSQL runtime、封窗/迟到修正、主循环、API/UI、重算或 1 号机操作；下一步按计划执行 Task 4。
 
 ## Session 2026-08-23 — v0.4.84 业务指标模板规格确认
