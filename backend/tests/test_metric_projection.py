@@ -353,7 +353,7 @@ class MetricProjectionTest(unittest.TestCase):
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "UNIT_MISMATCH")
 
-    def test_l2_unit_contract_cannot_be_bypassed_by_none_event_id(self) -> None:
+    def test_l2_event_identity_is_validated_before_its_unit(self) -> None:
         malformed = replace(
             self.event(15, 10, event_number=1),
             event_id=None,
@@ -367,7 +367,7 @@ class MetricProjectionTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
-        self.assertEqual(decision.reason, "UNIT_MISMATCH")
+        self.assertEqual(decision.reason, "EVENT_ID_INVALID")
 
     def test_l2_event_id_must_be_uuid_even_when_unit_matches(self) -> None:
         malformed = replace(self.event(15, 10, event_number=1), event_id=None)
@@ -401,6 +401,45 @@ class MetricProjectionTest(unittest.TestCase):
 
                 self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
                 self.assertEqual(decision.reason, "UNIT_MISMATCH")
+
+    def test_bad_counter_baseline_validates_identity_and_unit_before_quality(self) -> None:
+        endpoint = self.event(15, 1300, event_number=3, unit="Wh")
+        cases = (
+            (
+                self.event(
+                    -1,
+                    1000,
+                    event_number=1,
+                    quality=TrunkQuality.BAD,
+                    unit="kWh",
+                ),
+                "UNIT_MISMATCH",
+            ),
+            (
+                replace(
+                    self.event(
+                        -1,
+                        1000,
+                        event_number=2,
+                        quality=TrunkQuality.BAD,
+                        unit="kWh",
+                    ),
+                    event_id=None,
+                ),
+                "EVENT_ID_INVALID",
+            ),
+        )
+
+        for baseline, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                decision = project_metric(
+                    self.counter_state(),
+                    (baseline, endpoint),
+                    self.BASE + timedelta(minutes=15),
+                )
+
+                self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
+                self.assertEqual(decision.reason, expected_reason)
 
     def test_maximum_converts_frozen_watts_to_output_kw(self) -> None:
         decision = project_metric(
@@ -484,6 +523,8 @@ class MetricProjectionTest(unittest.TestCase):
             ),
             self.window(),
             maximum_sample_gap_seconds=10 * 60,
+            source_unit="kW",
+            output_unit="kW",
         )
 
         self.assertEqual(result.value, Decimal("9.5"))
@@ -498,6 +539,8 @@ class MetricProjectionTest(unittest.TestCase):
                 self.event(6, 99, event_number=3, quality=TrunkQuality.BAD),
             ),
             self.window(),
+            source_unit="kW",
+            output_unit="kW",
         )
 
         self.assertEqual(result.value, Decimal("18"))
@@ -545,7 +588,12 @@ class MetricProjectionTest(unittest.TestCase):
         later_key = self.event(5, 18, event_number=2, source_order_key="S:B")
         earlier_key = self.event(5, 18, event_number=3, source_order_key="S:A")
 
-        result = window_maximum((later_key, earlier_key), self.window())
+        result = window_maximum(
+            (later_key, earlier_key),
+            self.window(),
+            source_unit="kW",
+            output_unit="kW",
+        )
 
         self.assertEqual(result.peak_event_id, earlier_key.event_id)
 
@@ -553,7 +601,12 @@ class MetricProjectionTest(unittest.TestCase):
         winner = self.event(5, 18, event_number=1)
         bad_nan = self.event(10, float("nan"), event_number=2, quality=TrunkQuality.BAD)
 
-        result = window_maximum((bad_nan, winner), self.window())
+        result = window_maximum(
+            (bad_nan, winner),
+            self.window(),
+            source_unit="kW",
+            output_unit="kW",
+        )
 
         self.assertEqual(result.value, Decimal("18"))
         self.assertEqual(result.peak_event_id, winner.event_id)
@@ -582,6 +635,191 @@ class MetricProjectionTest(unittest.TestCase):
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "DUPLICATE_EVENT_CONFLICT")
+
+    def test_two_none_event_ids_fail_as_invalid_identity_before_deduplication(self) -> None:
+        first = replace(self.event(5, 10, event_number=1), event_id=None)
+        second = replace(self.event(10, 20, event_number=2), event_id=None)
+
+        decision = project_metric(
+            self.state(good_coverage=0, minimum_coverage=0),
+            (first, second),
+            self.BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
+        self.assertEqual(decision.reason, "EVENT_ID_INVALID")
+
+    def test_unhashable_event_ids_fail_as_invalid_identity_without_type_error(self) -> None:
+        for invalid_id in (["not-a-uuid"], {"not": "a-uuid"}):
+            with self.subTest(invalid_id=invalid_id):
+                malformed = replace(
+                    self.event(15, 10, event_number=1),
+                    event_id=invalid_id,
+                )
+
+                decision = project_metric(
+                    self.state(method="maximum", good_coverage=0, minimum_coverage=0),
+                    (malformed,),
+                    self.BASE + timedelta(minutes=15),
+                )
+
+                self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
+                self.assertEqual(decision.reason, "EVENT_ID_INVALID")
+
+    def test_l2_helpers_require_an_explicit_unit_contract(self) -> None:
+        power_events = (
+            self.event(0, 10, event_number=1),
+            self.event(10, 20, event_number=2),
+        )
+        counter_events = (
+            self.event(0, 1000, event_number=3, unit="Wh"),
+            self.event(10, 1300, event_number=4, unit="Wh"),
+        )
+
+        results = (
+            window_maximum(power_events, self.window()),
+            time_weighted_average(
+                power_events,
+                self.window(),
+                maximum_sample_gap_seconds=10 * 60,
+            ),
+            counter_delta(counter_events, CounterContract(maximum=999999)),
+        )
+
+        for result in results:
+            with self.subTest(result=result):
+                self.assertFalse(result.valid)
+                self.assertEqual(result.reason, "UNIT_CONTRACT_INVALID")
+
+    def test_l2_helper_validates_event_identity_before_missing_unit_contract(self) -> None:
+        malformed = replace(
+            self.event(5, 10, event_number=1, unit=None),
+            event_id=None,
+        )
+
+        result = window_maximum((malformed,), self.window())
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "EVENT_ID_INVALID")
+
+    def test_all_l2_helpers_validate_event_identity_before_event_unit(self) -> None:
+        malformed_power = replace(
+            self.event(0, 10, event_number=1, quality=TrunkQuality.BAD, unit=None),
+            event_id=None,
+        )
+        power_endpoint = self.event(10, 20, event_number=2)
+        malformed_counter = replace(
+            self.event(-1, 1000, event_number=3, quality=TrunkQuality.BAD, unit=None),
+            event_id=None,
+        )
+        counter_endpoint = self.event(10, 1300, event_number=4, unit="Wh")
+        cases = (
+            (
+                "counter",
+                lambda: counter_delta(
+                    (malformed_counter, counter_endpoint),
+                    CounterContract(maximum=999999),
+                    self.window(),
+                    source_unit="Wh",
+                    output_unit="kWh",
+                ),
+            ),
+            (
+                "integral",
+                lambda: integrate_power(
+                    (malformed_power, power_endpoint),
+                    self.window(),
+                    maximum_sample_gap_seconds=10 * 60,
+                    direction="positive",
+                ),
+            ),
+            (
+                "average",
+                lambda: time_weighted_average(
+                    (malformed_power, power_endpoint),
+                    self.window(),
+                    maximum_sample_gap_seconds=10 * 60,
+                    source_unit="kW",
+                    output_unit="kW",
+                ),
+            ),
+            (
+                "maximum",
+                lambda: window_maximum(
+                    (malformed_power, power_endpoint),
+                    self.window(),
+                    source_unit="kW",
+                    output_unit="kW",
+                ),
+            ),
+        )
+
+        for name, calculate in cases:
+            with self.subTest(helper=name):
+                result = calculate()
+                self.assertFalse(result.valid)
+                self.assertEqual(result.reason, "EVENT_ID_INVALID")
+
+    def test_integral_l2_unit_contract_cannot_be_disabled_with_none(self) -> None:
+        result = integrate_power(
+            (
+                self.event(0, 10, event_number=1),
+                self.event(10, 20, event_number=2),
+            ),
+            self.window(),
+            maximum_sample_gap_seconds=10 * 60,
+            direction="positive",
+            source_unit=None,
+            output_unit=None,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "UNIT_CONTRACT_INVALID")
+
+    def test_l2_helper_rejects_empty_frozen_units_before_quality_filtering(self) -> None:
+        bad_empty_unit = self.event(
+            5,
+            10,
+            event_number=1,
+            quality=TrunkQuality.BAD,
+            unit="",
+        )
+        good = self.event(5, 10, event_number=2)
+        cases = (
+            window_maximum(
+                (bad_empty_unit,),
+                self.window(),
+                source_unit="",
+                output_unit="kW",
+            ),
+            window_maximum(
+                (good,),
+                self.window(),
+                source_unit="kW",
+                output_unit="",
+            ),
+        )
+
+        for result in cases:
+            with self.subTest(result=result):
+                self.assertFalse(result.valid)
+                self.assertEqual(result.reason, "UNIT_CONTRACT_INVALID")
+
+    def test_unitless_helpers_remain_available_for_pure_numbers(self) -> None:
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        numeric_window = MetricWindow(epoch, epoch + timedelta(seconds=2), True, True)
+
+        average = time_weighted_average(
+            (0, 10, 10),
+            numeric_window,
+            maximum_sample_gap_seconds=1,
+        )
+        maximum = window_maximum((1, 3, 2), numeric_window)
+        delta = counter_delta((1, 3), CounterContract(maximum=999999))
+
+        self.assertEqual(average.value, Decimal("7.5"))
+        self.assertEqual(maximum.value, Decimal("3"))
+        self.assertEqual(delta.value, Decimal("2"))
 
     def test_rolling_start_event_is_excluded_and_end_event_is_included(self) -> None:
         start = self.event(0, 999, event_number=1)
@@ -785,56 +1023,124 @@ class MetricProjectionTest(unittest.TestCase):
         self.assertEqual(decision.source_event_ids, (good.event_id, endpoint.event_id))
 
     def test_counter_reports_source_bad_when_baseline_range_only_has_bad_samples(self) -> None:
+        baseline = self.event(
+            -1,
+            1000,
+            event_number=1,
+            unit="Wh",
+            quality=TrunkQuality.BAD,
+        )
+        endpoint = self.event(15, 1300, event_number=2, unit="Wh")
         decision = project_metric(
             self.counter_state(),
-            (
-                self.event(-1, 1000, event_number=1, unit="Wh", quality=TrunkQuality.BAD),
-                self.event(15, 1300, event_number=2, unit="Wh"),
-            ),
+            (baseline, endpoint),
             self.BASE + timedelta(minutes=15),
         )
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "SOURCE_BAD")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
 
-    def test_counter_bool_only_baseline_preserves_value_type_reason(self) -> None:
+    def test_bad_counter_baseline_may_have_an_empty_typed_value(self) -> None:
+        baseline = replace(
+            self.event(-1, 1000, event_number=1, unit="Wh", quality=TrunkQuality.BAD),
+            value=TypedValue.float(None),
+        )
+        endpoint = self.event(15, 1300, event_number=2, unit="Wh")
+
         decision = project_metric(
             self.counter_state(),
-            (
-                self.event(-1, True, event_number=1, unit="Wh"),
-                self.event(15, 1300, event_number=2, unit="Wh"),
-            ),
+            (endpoint, baseline),
+            self.BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(decision.reason, "SOURCE_BAD")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
+
+    def test_counter_bool_only_baseline_preserves_value_type_reason(self) -> None:
+        baseline = self.event(-1, True, event_number=1, unit="Wh")
+        endpoint = self.event(15, 1300, event_number=2, unit="Wh")
+        decision = project_metric(
+            self.counter_state(),
+            (baseline, endpoint),
             self.BASE + timedelta(minutes=15),
         )
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "VALUE_TYPE_INVALID")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
 
     def test_counter_nonfinite_only_baseline_preserves_reason(self) -> None:
+        baseline = self.event(-1, float("nan"), event_number=1, unit="Wh")
+        endpoint = self.event(15, 1300, event_number=2, unit="Wh")
         decision = project_metric(
             self.counter_state(),
-            (
-                self.event(-1, float("nan"), event_number=1, unit="Wh"),
-                self.event(15, 1300, event_number=2, unit="Wh"),
-            ),
+            (baseline, endpoint),
             self.BASE + timedelta(minutes=15),
         )
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "NONFINITE_VALUE")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
 
     def test_counter_wrong_unit_only_baseline_preserves_reason(self) -> None:
+        baseline = self.event(-1, 1000, event_number=1, unit="kWh")
+        endpoint = self.event(15, 1300, event_number=2, unit="Wh")
         decision = project_metric(
             self.counter_state(),
-            (
-                self.event(-1, 1000, event_number=1, unit="kWh"),
-                self.event(15, 1300, event_number=2, unit="Wh"),
-            ),
+            (baseline, endpoint),
             self.BASE + timedelta(minutes=15),
         )
 
         self.assertEqual(decision.lifecycle, MetricLifecycle.INVALID)
         self.assertEqual(decision.reason, "UNIT_MISMATCH")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
+
+    def test_counter_baseline_error_evidence_excludes_candidates_outside_lookback(self) -> None:
+        unrelated = self.event(-16, 900, event_number=1, unit="Wh")
+        baseline = self.event(-1, True, event_number=2, unit="Wh")
+        endpoint = self.event(15, 1300, event_number=3, unit="Wh")
+
+        decision = project_metric(
+            self.counter_state(),
+            (endpoint, unrelated, baseline),
+            self.BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(decision.reason, "VALUE_TYPE_INVALID")
+        self.assertEqual(decision.source_event_ids, (baseline.event_id, endpoint.event_id))
+
+    def test_counter_selection_error_evidence_is_stably_sorted_and_deduplicated(self) -> None:
+        earlier_bad = self.event(
+            -2,
+            900,
+            event_number=1,
+            unit="Wh",
+            quality=TrunkQuality.BAD,
+        )
+        later_wrong_unit = self.event(-1, 1000, event_number=2, unit="kWh")
+        endpoint = self.event(15, 1300, event_number=3, unit="Wh")
+
+        result = counter_delta(
+            (
+                endpoint,
+                later_wrong_unit,
+                earlier_bad,
+                endpoint,
+                later_wrong_unit,
+            ),
+            CounterContract(maximum=999999),
+            self.window(15),
+            source_unit="Wh",
+            output_unit="kWh",
+        )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "UNIT_MISMATCH")
+        self.assertEqual(
+            result.source_event_ids,
+            (earlier_bad.event_id, later_wrong_unit.event_id, endpoint.event_id),
+        )
 
     def test_counter_mixed_invalid_baselines_use_last_non_quality_reason(self) -> None:
         decision = project_metric(
@@ -918,6 +1224,25 @@ class MetricProjectionTest(unittest.TestCase):
 
                 self.assertTrue(result.valid)
                 self.assertEqual(result.value, Decimal("0.3"))
+                self.assertEqual(
+                    result.coverage,
+                    (hours * 60 * 60 - 1) / (hours * 60 * 60),
+                )
+
+    def test_counter_coverage_starts_at_window_boundary_not_before_window_baseline(self) -> None:
+        result = counter_delta(
+            (
+                self.event(-10, 1000, event_number=1, unit="Wh"),
+                self.event(5, 1300, event_number=2, unit="Wh"),
+            ),
+            CounterContract(maximum=999999),
+            self.window(15),
+            source_unit="Wh",
+            output_unit="kWh",
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.coverage, 5 * 60 / (15 * 60))
 
     def test_counter_rejects_missing_baseline_or_window_endpoint(self) -> None:
         missing_baseline = project_metric(
@@ -995,6 +1320,8 @@ class MetricProjectionTest(unittest.TestCase):
             ),
             self.window(),
             maximum_sample_gap_seconds=5 * 60,
+            source_unit="kW",
+            output_unit="kW",
         )
 
         self.assertFalse(result.valid)

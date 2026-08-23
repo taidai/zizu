@@ -6,9 +6,10 @@
 - 冻结 counter reset/rollover 规则覆盖 16/32/64 位，歧义、BAD、非有限值和覆盖不足稳定形成 `invalid/BAD`；当前有效窗口保持 `provisional`，所有 decision 的 `history_facts=()`。
 - 独立复审第二轮后，真实 L2 事件单位必须非空且精确等于冻结 source unit，只有冻结 source→output 才做 W/kW/MW 与 Wh/kWh/MWh 白名单换算；跨零功率按线性零交点分段积分，零有效时长不再伪造 0。
 - counter baseline 固定回看一个当前窗口时长，不再误用 maximum sample gap；候选先过滤 BAD/STALE、非有限值和错单位，再按稳定顺序选择最后可信读数，窗口内坏 endpoint 仍使整条链 fail closed。
-- 独立复审第三轮后，`_Sample` 用不可由 event ID 伪造的 L2 来源标记；所有真实 L2 在质量过滤前核对冻结单位，并拒绝非 UUID event ID。baseline 无可信候选时保留 bool/非有限/错单位精确原因，invalid counter decision 保留 baseline+endpoint evidence IDs。
+- 独立复审第四轮后，所有 L2 先验证 UUID event ID，再核对非空冻结单位和事件单位；非法/不可哈希 ID 在去重前稳定形成 `EVENT_ID_INVALID`。公开 helper 的真实 L2 不再允许缺失 unit contract，纯 Number sequence 仍可作无单位数学计算。
+- counter baseline 在质量前核对身份/单位，BAD 空 typed value 仍安全归类 `SOURCE_BAD`；分类失败 evidence 限定为一窗口内诊断候选加 endpoints，并稳定排序去重。before-window baseline 不计入 coverage，23/25 小时日窗按真实窗口时长计算。
 - BAD/STALE 质量按聚合器处理：counter 链 fail closed，积分/平均只跳过相邻坏区间且不跨点连接，peak 忽略坏样本并保留稳定 winner 身份；`_BAD_QUALITIES` 已冻结为 `frozenset`。
-- Task 3 定向 71/71、Task 1 编译相关回归 18/18 通过；四个 Task 3 文件 `py_compile` 与 `git diff --check` 通过。详细 RED/GREEN 与边界见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
+- Task 3 定向 84/84、Task 1 编译相关回归 18/18 通过；四个 Task 3 文件 `py_compile` 与 `git diff --check` 通过。完整后端 discovery 执行 569 tests / 133 skipped，仅有两个已知收集错误（F0 缺显式 `ZIZU_API`、F0 pure import 时 `SystemExit: 0`）。详细 RED/GREEN 与边界见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
 - 未做 PostgreSQL runtime、封窗/迟到修正、主循环、API/UI、重算或 1 号机操作；下一步按计划执行 Task 4。
 
 ## Session 2026-08-23 — v0.4.84 业务指标模板规格确认
