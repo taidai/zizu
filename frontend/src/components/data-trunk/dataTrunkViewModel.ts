@@ -103,3 +103,18 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
     layerCounts,
   }
 }
+
+export function buildFormulaPreviewViewModel(preview: {
+  result_type: string
+  result_unit: string | null
+  member_count: number
+  dag_summary: { edge_count: number; max_depth: number | null }
+  blockers: Array<{ code: string }>
+}) {
+  return {
+    resultContract: `${preview.result_type}${preview.result_unit ? ` · ${preview.result_unit}` : ''}`,
+    memberLabel: `已冻结 ${preview.member_count} 个输入实体`,
+    dagLabel: `${preview.dag_summary.edge_count} 条依赖 · 深度 ${preview.dag_summary.max_depth ?? '—'}/8`,
+    ready: preview.blockers.length === 0,
+  }
+}

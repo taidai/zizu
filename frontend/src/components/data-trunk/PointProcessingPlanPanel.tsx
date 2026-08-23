@@ -1,9 +1,12 @@
 import type {
   NodeDataTrunk,
+  PointProcessingFormulaPreview,
   PointProcessingPlan,
   PointProcessingTemplate,
 } from '../../api/client'
 import { buildDataTrunkViewModel, planActionLabel } from './dataTrunkViewModel'
+import PointProcessingDagPanel from './PointProcessingDagPanel'
+import PointProcessingFormulaEditor from './PointProcessingFormulaEditor'
 
 function inputName(inputId: string): string {
   return {
@@ -25,18 +28,22 @@ export default function PointProcessingPlanPanel({
   onSelectionChange,
   onPlan,
   onApply,
+  formulaPreview,
+  onFormulaPreview,
 }: {
   trunk: NodeDataTrunk
   templates: PointProcessingTemplate[]
   selectedTemplate: PointProcessingTemplate | null
   selections: Record<string, string>
   plan: PointProcessingPlan | null
-  busy: 'plan' | 'apply' | 'acceptance' | null
+  busy: 'plan' | 'apply' | 'acceptance' | 'formula' | null
   resultUnknown: boolean
   onTemplateChange: (revisionId: string) => void
   onSelectionChange: (inputId: string, sourceId: string) => void
   onPlan: () => void
   onApply: () => void
+  formulaPreview: PointProcessingFormulaPreview | null
+  onFormulaPreview: (expression: string) => void
 }) {
   const model = buildDataTrunkViewModel({ plan })
   const scanDriven = selectedTemplate?.asset_id === 'pcs.en9'
@@ -78,13 +85,19 @@ export default function PointProcessingPlanPanel({
 
       {selectedTemplate && (
         <div className="mt-4 space-y-3">
+          <PointProcessingFormulaEditor
+            template={selectedTemplate}
+            preview={formulaPreview}
+            busy={busy === 'formula'}
+            onPreview={onFormulaPreview}
+          />
           {scanDriven && (
             <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-[11px] leading-5 text-blue-900">
               <div className="font-semibold">Neuron 只读扫描</div>
               <div>系统将核对 {selectedTemplate.inputs.length} 个 L0 点位，生成 L1 加工和 {selectedTemplate.outputs.length} 个 L2 全局实体；不会改写驱动、点位或设备参数。</div>
             </div>
           )}
-          {!scanDriven && selectedTemplate.inputs.map((input) => (
+          {!scanDriven && selectedTemplate.inputs.filter((input) => !input.selector && input.source_kind === 'l0').map((input) => (
             <label key={input.input_id} className="block text-[11px] font-medium text-gray-700">
               {inputName(input.input_id)}{input.required ? '（必需）' : ''}
               <select
@@ -100,6 +113,14 @@ export default function PointProcessingPlanPanel({
                 ))}
               </select>
             </label>
+          ))}
+          {!scanDriven && selectedTemplate.inputs.filter((input) => input.selector).map((input) => (
+            <div key={input.input_id} className="rounded-lg border border-gray-200 bg-white p-3 text-[10px]">
+              <div className="font-semibold text-gray-800">{input.input_id} · 自动展开</div>
+              <div className="mt-1 text-gray-500">
+                当前节点全部后代 {input.selector?.nodeType} 的 {input.selector?.entityDefinition}；生成计划时冻结明确实体清单。
+              </div>
+            </div>
           ))}
           <button
             type="button"
@@ -161,6 +182,7 @@ export default function PointProcessingPlanPanel({
               })}
             </div>
           )}
+          <PointProcessingDagPanel plan={plan} />
           {resultUnknown && (
             <div role="alert" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-[10px] leading-4 text-amber-800">
               上次应用结果未知。系统已保留原请求标识，请点击同一按钮查询或完成同一笔应用，不要重新生成计划。

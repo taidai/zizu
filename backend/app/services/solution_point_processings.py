@@ -6,12 +6,13 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
-import math
 import re
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from app.services.data_trunk_contracts import FormulaSource, ValueKind
+from app.services.point_processing_formula import FormulaCompileError, compile_formula
 from app.services.solution_delivery_contracts import DeliveryError
 
 if TYPE_CHECKING:
@@ -20,11 +21,13 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
+_DEVICE_CATEGORIES = {"SITE", "ENERGY", "ESS", "PV", "GRID", "EVSE", "PCS"}
 _OUTPUT_TYPES = {
     "numeric": "FLOAT",
     "enum": "ENUM",
     "fault_codes": "CODE_SET",
     "boolean_set": "CODE_SET",
+    "formula": None,
 }
 
 
@@ -38,6 +41,9 @@ class PointProcessingInput:
     unit: str | None
     required: bool
     source_contract: Mapping[str, Any] | None = None
+    cardinality: str = "one"
+    selector: Mapping[str, Any] | None = None
+    default_value: float | int | bool | None = None
 
 
 @dataclass(frozen=True)
@@ -121,10 +127,10 @@ def parse_point_processing_asset(
                 "POINT_PROCESSING_ASSET_INVALID",
                 "Point processing asset identity is invalid",
             )
-    if raw["deviceCategory"] != "PCS":
+    if raw["deviceCategory"] not in _DEVICE_CATEGORIES:
         raise PointProcessingAssetError(
             "POINT_PROCESSING_DEVICE_CATEGORY_UNSUPPORTED",
-            "Only PCS point processing assets are supported",
+            "Point processing device category is unsupported",
         )
     if (
         not isinstance(raw.get("revision"), int)
@@ -138,7 +144,12 @@ def parse_point_processing_asset(
         )
 
     inputs = _parse_inputs(raw.get("inputs"))
-    outputs = _parse_outputs(raw.get("outputs"), inputs, entity_definitions or {})
+    outputs = _parse_outputs(
+        raw.get("outputs"),
+        inputs,
+        entity_definitions or {},
+        raw["deviceCategory"],
+    )
     canonical = json.dumps(
         _plain(raw),
         ensure_ascii=False,
@@ -221,7 +232,8 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
                 "Point processing input is invalid",
             )
         required_fields = {"id", "sourceKind", "sourceKey", "aliases", "dataType", "required"}
-        if set(raw) - (required_fields | {"unit", "sourceContract"}) or not required_fields.issubset(raw):
+        optional_fields = {"unit", "sourceContract", "cardinality", "selector", "defaultValue"}
+        if set(raw) - (required_fields | optional_fields) or not required_fields.issubset(raw):
             raise PointProcessingAssetError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input fields are invalid",
@@ -229,6 +241,9 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
         input_id = raw.get("id")
         aliases = raw.get("aliases")
         source_contract = raw.get("sourceContract")
+        cardinality = raw.get("cardinality", "one")
+        selector = raw.get("selector")
+        default_value = raw.get("defaultValue")
         if source_contract is not None and (
             not isinstance(source_contract, Mapping)
             or set(source_contract) != {
@@ -265,10 +280,60 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             or raw.get("dataType") not in _DATA_TYPES
             or not isinstance(raw.get("required"), bool)
             or not isinstance(raw.get("unit"), (str, type(None)))
+            or cardinality not in {"one", "many"}
         ):
             raise PointProcessingAssetError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input contract is invalid",
+            )
+        if selector is not None and (
+            raw["sourceKind"] != "l2"
+            or not isinstance(selector, Mapping)
+            or set(selector) != {"scope", "nodeType", "entityDefinition"}
+            or selector.get("scope") != "descendants"
+            or not isinstance(selector.get("nodeType"), str)
+            or not selector["nodeType"].strip()
+            or not isinstance(selector.get("entityDefinition"), str)
+            or selector.get("entityDefinition") != raw["sourceKey"]
+        ):
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_SELECTOR_INVALID",
+                "Point processing selector contract is invalid",
+            )
+        if (
+            (cardinality == "many" and selector is None)
+            or (source_contract is not None and raw["sourceKind"] != "l0")
+            or (selector is not None and source_contract is not None)
+            or (default_value is not None and (raw["required"] or cardinality != "one"))
+        ):
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing input source mode is invalid",
+            )
+        if default_value is not None:
+            if raw["dataType"] == "BOOL":
+                valid_default = isinstance(default_value, bool)
+            elif raw["dataType"] == "INT":
+                valid_default = isinstance(default_value, int) and not isinstance(
+                    default_value, bool
+                )
+            elif raw["dataType"] == "FLOAT":
+                valid_default = (
+                    isinstance(default_value, (int, float))
+                    and not isinstance(default_value, bool)
+                    and math.isfinite(float(default_value))
+                )
+            else:
+                valid_default = False
+            if not valid_default:
+                raise PointProcessingAssetError(
+                    "POINT_PROCESSING_INPUT_INVALID",
+                    "Point processing input default is invalid",
+                )
+        if cardinality == "many" and raw["dataType"] not in {"FLOAT", "INT", "BOOL"}:
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing collection input data type is invalid",
             )
         seen.add(input_id)
         parsed.append(
@@ -283,6 +348,9 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
                 source_contract=(
                     None if source_contract is None else _freeze(source_contract)
                 ),
+                cardinality=cardinality,
+                selector=None if selector is None else _freeze(selector),
+                default_value=default_value,
             )
         )
     return tuple(sorted(parsed, key=lambda item: item.input_id))
@@ -292,6 +360,7 @@ def _parse_outputs(
     raw_outputs: Any,
     inputs: tuple[PointProcessingInput, ...],
     entity_definitions: Mapping[str, Mapping[str, Any]],
+    device_category: str,
 ) -> tuple[PointProcessingOutput, ...]:
     if not isinstance(raw_outputs, list) or not raw_outputs:
         raise PointProcessingAssetError(
@@ -327,8 +396,14 @@ def _parse_outputs(
                 "Point processing output contract is invalid",
             )
         freshness = _duration_seconds(raw.get("freshness"))
-        transform = _parse_transform(raw.get("transform"), input_by_id)
-        if _OUTPUT_TYPES[transform["kind"]] != data_type:
+        transform = _parse_transform(
+            raw.get("transform"),
+            input_by_id,
+            output_data_type=data_type,
+            output_unit=unit,
+        )
+        expected_type = _OUTPUT_TYPES[transform["kind"]]
+        if expected_type is not None and expected_type != data_type:
             raise PointProcessingAssetError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
                 "Transform kind and output data type do not match",
@@ -337,7 +412,8 @@ def _parse_outputs(
         if definition is not None and (
             definition.get("dataType") != data_type
             or (definition.get("unit") or None) != (unit or None)
-            or str(definition.get("deviceCategory", "")).casefold() != "pcs"
+            or str(definition.get("deviceCategory", "")).casefold()
+            != device_category.casefold()
             or definition.get("direction") not in {"R", "RW"}
         ):
             raise PointProcessingAssetError(
@@ -366,6 +442,9 @@ def _parse_outputs(
 def _parse_transform(
     raw: Any,
     inputs: Mapping[str, PointProcessingInput],
+    *,
+    output_data_type: str,
+    output_unit: str | None,
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or raw.get("kind") not in _OUTPUT_TYPES:
         raise PointProcessingAssetError(
@@ -373,6 +452,46 @@ def _parse_transform(
             "Point processing transform kind is invalid",
         )
     kind = raw["kind"]
+    if kind == "formula":
+        if set(raw) != {
+            "kind", "expression", "scheduleSeconds", "controlEligible"
+        } or not isinstance(raw.get("expression"), str) or not isinstance(
+            raw.get("scheduleSeconds"), int
+        ) or isinstance(raw.get("scheduleSeconds"), bool) or not (
+            1 <= raw["scheduleSeconds"] <= 3600
+        ) or not isinstance(raw.get("controlEligible"), bool):
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_FORMULA_INVALID",
+                "Point processing formula fields are invalid",
+            )
+        try:
+            compiled = compile_formula(
+                raw["expression"],
+                sources=tuple(
+                    FormulaSource(
+                        item.input_id,
+                        ValueKind(item.data_type),
+                        item.unit,
+                        item.cardinality,
+                        item.required,
+                        item.default_value,
+                    )
+                    for item in inputs.values()
+                ),
+                result_type=ValueKind(output_data_type),
+                result_unit=output_unit,
+            )
+        except (FormulaCompileError, ValueError) as exc:
+            code = getattr(exc, "code", "POINT_PROCESSING_FORMULA_INVALID")
+            raise PointProcessingAssetError(code, str(exc)) from exc
+        return {
+            "kind": "formula",
+            "expression": compiled.text,
+            "canonicalAst": _plain(compiled.ast),
+            "astDigest": compiled.digest,
+            "scheduleSeconds": raw["scheduleSeconds"],
+            "controlEligible": raw["controlEligible"],
+        }
     if kind == "boolean_set":
         if set(raw) != {"kind", "entries"}:
             raise PointProcessingAssetError(
@@ -563,6 +682,9 @@ def _asset_dict(asset: PointProcessingAsset) -> dict[str, Any]:
                 "unit": item.unit,
                 "required": item.required,
                 "source_contract": _plain(item.source_contract),
+                "cardinality": item.cardinality,
+                "selector": _plain(item.selector),
+                "default_value": item.default_value,
             }
             for item in asset.inputs
         ],
@@ -600,6 +722,9 @@ def _asset_from_dict(raw: Mapping[str, Any]) -> PointProcessingAsset:
                 unit=item["unit"],
                 required=item["required"],
                 source_contract=_freeze(item.get("source_contract")),
+                cardinality=item.get("cardinality", "one"),
+                selector=_freeze(item.get("selector")),
+                default_value=item.get("default_value"),
             )
             for item in raw["inputs"]
         ),

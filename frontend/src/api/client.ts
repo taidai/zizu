@@ -1034,6 +1034,13 @@ export interface PointProcessingTemplateInput {
   data_type: string
   unit: string | null
   required: boolean
+  cardinality: 'one' | 'many'
+  selector: {
+    scope: 'descendants'
+    nodeType: string
+    entityDefinition: string
+  } | null
+  default_value: number | boolean | null
 }
 
 export interface PointProcessingTemplate {
@@ -1052,7 +1059,37 @@ export interface PointProcessingTemplate {
     entity_definition_id: string
     data_type: string
     unit: string | null
+    freshness_seconds: number
+    transform: {
+      kind: string
+      expression?: string
+      canonicalAst?: Record<string, unknown>
+      astDigest?: string
+      scheduleSeconds?: number
+      controlEligible?: boolean
+    }
   }>
+}
+
+export interface PointProcessingFormulaPreview {
+  expression: string
+  canonical_ast: Record<string, unknown>
+  ast_digest: string
+  result_type: string
+  result_unit: string | null
+  member_count: number
+  selector_members: Array<{
+    input_id: string
+    member_count: number
+    member_ids: string[]
+    digest: string
+  }>
+  dag_summary: {
+    edge_count: number
+    max_depth: number | null
+    digest: string | null
+  }
+  blockers: Array<{ code: string; input_id: string }>
 }
 
 export interface NodeDataTrunk {
@@ -1077,15 +1114,21 @@ export interface NodeDataTrunk {
 
 export interface PointProcessingPlanItem {
   item_key: string
-  kind: 'l0_point' | 'input_binding' | 'output_binding'
+  kind: 'l0_point' | 'input_binding' | 'selector_binding' | 'dag_validation' | 'output_binding'
   layer: 'L0' | 'L1' | 'L2'
   action: PointProcessingPlanAction
   input_id?: string
   candidate_source_ids?: string[]
   selected_source_id?: string | null
+  selected_source_ids?: string[]
+  selector_digest?: string | null
+  cardinality?: 'one' | 'many'
   blocker_code?: string | null
   output_id?: string
   entity_definition_id?: string
+  planned_edges?: Array<[string, string]>
+  max_depth?: number | null
+  dag_digest?: string | null
 }
 
 export interface PointProcessingPlan {
@@ -1211,6 +1254,19 @@ export async function createPointProcessingPlan(
   })
   if (!response.ok) throw await dataTrunkError(response, `生成点位加工计划失败：${response.status}`)
   return response.json()
+}
+
+export async function previewPointProcessingFormula(
+  nodeId: string,
+  body: { template_revision_id: string; expression: string },
+): Promise<PointProcessingFormulaPreview> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-formula-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `预检跨节点公式失败：${response.status}`)
+  return response.json() as Promise<PointProcessingFormulaPreview>
 }
 
 export async function fetchPointProcessingPlan(planId: string): Promise<PointProcessingPlan> {

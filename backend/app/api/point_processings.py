@@ -57,6 +57,12 @@ class ApplyPointProcessingRequest(BaseModel):
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
 
 
+class PointProcessingFormulaPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    template_revision_id: UUID
+    expression: str = Field(min_length=1, max_length=4096)
+
+
 class RunEN9AcceptanceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     observed_for_seconds: float = Field(ge=1800, le=86400)
@@ -126,6 +132,28 @@ async def create_point_processing_plan(
         return service.preview(
             body.to_command(node_id=node_id, actor=principal.actor)
         ).public_dict()
+    except PointProcessingError as exc:
+        _raise_point_processing_http(exc)
+
+
+@router.post(
+    "/nodes/{node_id}/point-processing-formula-preview",
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def preview_point_processing_formula(
+    node_id: UUID,
+    body: PointProcessingFormulaPreviewRequest,
+    _principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    service: PointProcessingDelivery = Depends(get_point_processings),
+) -> dict:
+    try:
+        return dict(
+            service.preview_formula(
+                node_id=node_id,
+                template_revision_id=body.template_revision_id,
+                expression=body.expression,
+            )
+        )
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
 

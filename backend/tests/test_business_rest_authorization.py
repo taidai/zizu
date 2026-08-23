@@ -301,6 +301,10 @@ POINT_PROCESSING_CAPABILITIES = {
         "/api/v1/nodes/{node_id}/point-processing-plans",
     ): "configuration.write",
     (
+        "POST",
+        "/api/v1/nodes/{node_id}/point-processing-formula-preview",
+    ): "configuration.write",
+    (
         "GET",
         "/api/v1/point-processing-plans/{plan_id}",
     ): "configuration.read",
@@ -1060,7 +1064,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
         self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
         self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 12)
-        self.assertEqual(len(POINT_PROCESSING_CAPABILITIES), 8)
+        self.assertEqual(len(POINT_PROCESSING_CAPABILITIES), 9)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1096,7 +1100,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 166)
+        self.assertEqual(len(registered), 167)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

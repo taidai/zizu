@@ -8,6 +8,7 @@ import unittest
 from uuid import UUID
 
 import psycopg2
+from psycopg2.extras import Json
 
 from app.services.data_trunk import DataTrunk, _FreshnessScheduler
 from app.services.data_trunk_contracts import (
@@ -36,6 +37,8 @@ BOOLEAN_FAULT_B_TAG_ID = UUID("00000000-0000-0000-0000-000000000015")
 STATE_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000303")
 FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000304")
 BOOLEAN_FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000305")
+FORMULA_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000306")
+FORMULA_INSTALLATION_ID = UUID("00000000-0000-0000-0000-000000000401")
 EXPECTED_EVENT_ID = UUID("c5320566-2b3d-50c5-b320-bf082d7533f3")
 
 
@@ -68,6 +71,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
                 migration_support.DataTrunkMigrationPostgresTest._apply_039(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_041(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_042(cursor)
                 self._seed_installed_numeric_conversion(cursor)
         self.repository = PostgresDataTrunkRepository(
             connection_factory=self._connection,
@@ -405,6 +409,158 @@ class DataTrunkPostgresTest(unittest.TestCase):
         )
 
     @staticmethod
+    def _seed_formula_processing(cursor) -> None:
+        from app.services.data_trunk_contracts import FormulaSource
+        from app.services.point_processing_formula import compile_formula
+
+        compiled = compile_formula(
+            "sum(pcs_power)",
+            sources=(
+                FormulaSource(
+                    "pcs_power",
+                    ValueKind.FLOAT,
+                    "kW",
+                    "many",
+                    True,
+                    None,
+                ),
+            ),
+            result_type=ValueKind.FLOAT,
+            result_unit="kW",
+        )
+        cursor.execute(
+            "SELECT identity_installation_id FROM t_device_instances WHERE node_id = %s",
+            (str(NODE_ID),),
+        )
+        identity_id = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT solution_installation_id FROM t_installed_point_processings WHERE id = %s",
+            (str(CONVERSION_ID),),
+        )
+        solution_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO t_nodes (id, name, node_type)
+            VALUES ('00000000-0000-0000-0000-000000000400', 'SITE-01', 'SITE');
+            UPDATE t_nodes
+            SET parent_id = '00000000-0000-0000-0000-000000000400',
+                node_type = 'PCS'
+            WHERE id = %s;
+            INSERT INTO t_device_instances
+              (id, identity_installation_id, slot_id, instance_key,
+               device_category, display_name, node_id)
+            VALUES (
+              '00000000-0000-0000-0000-000000000402', %s,
+              'site.primary', 'SITE-01', 'SITE', 'SITE 01',
+              '00000000-0000-0000-0000-000000000400'
+            );
+            INSERT INTO t_entity_instances
+              (id, device_instance_id, definition_id, display_name,
+               data_type, unit, direction, freshness_seconds, source_kind)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000402',
+              'site.total_pcs_power', 'PCS 总功率',
+              'FLOAT', 'kW', 'R', 5, 'point_processing'
+            );
+            INSERT INTO t_point_processing_templates
+              (id, asset_id, device_category, brand, model,
+               display_name, status)
+            VALUES (
+              '00000000-0000-0000-0000-000000000403',
+              'site.total-pcs-power', 'SITE', 'ZiZu', 'SITE-POWER',
+              '站级 PCS 总功率', 'active'
+            );
+            INSERT INTO t_point_processing_revisions
+              (id, template_id, revision, content_digest, published_at)
+            VALUES (
+              '00000000-0000-0000-0000-000000000404',
+              '00000000-0000-0000-0000-000000000403',
+              1, %s, '2026-08-17T00:00:00Z'
+            );
+            INSERT INTO t_point_processing_inputs
+              (id, revision_id, input_key, source_kind, data_type, unit,
+               required, stable_source_key, aliases)
+            VALUES (
+              '00000000-0000-0000-0000-000000000405',
+              '00000000-0000-0000-0000-000000000404',
+              'pcs_power', 'l2', 'FLOAT', 'kW', TRUE,
+              'pcs.active_power', '{}'
+            );
+            INSERT INTO t_point_processing_selectors
+              (input_id, scope, node_type, entity_definition_id, cardinality)
+            VALUES (
+              '00000000-0000-0000-0000-000000000405',
+              'descendants', 'PCS', 'pcs.active_power', 'many'
+            );
+            INSERT INTO t_point_processing_outputs
+              (id, revision_id, output_key, entity_definition_id,
+               data_type, unit, freshness_seconds)
+            VALUES (
+              '00000000-0000-0000-0000-000000000406',
+              '00000000-0000-0000-0000-000000000404',
+              'total_power', 'site.total_pcs_power', 'FLOAT', 'kW', 5
+            );
+            INSERT INTO t_point_processing_expressions
+              (output_id, dsl_text, canonical_ast, ast_digest,
+               result_data_type, result_unit, schedule_seconds, control_eligible)
+            VALUES (
+              '00000000-0000-0000-0000-000000000406',
+              'sum(pcs_power)', %s, %s, 'FLOAT', 'kW', 1, FALSE
+            );
+            INSERT INTO t_point_processing_plans
+              (id, node_id, template_revision_id,
+               entity_identity_installation_id, solution_installation_id,
+               base_site_configuration_version, source_catalog_digest,
+               status, items, blockers, digest, planned_by)
+            VALUES (
+              '00000000-0000-0000-0000-000000000407',
+              '00000000-0000-0000-0000-000000000400',
+              '00000000-0000-0000-0000-000000000404',
+              %s, %s, 1, %s, 'applied', '[]', '[]', %s, 'user:installer'
+            );
+            INSERT INTO t_installed_point_processings
+              (id, node_id, revision_id, source_plan_id,
+               solution_installation_id, site_configuration_version,
+               installed_by, current)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000400',
+              '00000000-0000-0000-0000-000000000404',
+              '00000000-0000-0000-0000-000000000407',
+              %s, 1, 'user:installer', TRUE
+            );
+            INSERT INTO t_point_processing_selector_members
+              (installed_processing_id, input_id, ordinal,
+               entity_instance_id, selector_digest)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000405',
+              0, %s, %s
+            );
+            INSERT INTO t_point_processing_output_bindings
+              (installed_processing_id, output_id, entity_instance_id)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000406', %s
+            );
+            INSERT INTO t_point_processing_dependencies
+              (installed_processing_id, input_id, output_id,
+               source_entity_instance_id, target_entity_instance_id)
+            VALUES (
+              %s, '00000000-0000-0000-0000-000000000405',
+              '00000000-0000-0000-0000-000000000406', %s, %s
+            )
+            """,
+            (
+                str(NODE_ID), identity_id, str(FORMULA_ENTITY_ID), "f" * 64,
+                Json(dict(compiled.ast)), compiled.digest,
+                identity_id, solution_id, "a" * 64, "b" * 64,
+                str(FORMULA_INSTALLATION_ID), solution_id,
+                str(FORMULA_INSTALLATION_ID), str(ENTITY_ID), "c" * 64,
+                str(FORMULA_INSTALLATION_ID), str(FORMULA_ENTITY_ID),
+                str(FORMULA_INSTALLATION_ID), str(ENTITY_ID),
+                str(FORMULA_ENTITY_ID),
+            ),
+        )
+
+    @staticmethod
     def _seed_enum_and_fault_conversions(cursor) -> None:
         cursor.execute(
             """
@@ -543,6 +699,36 @@ class DataTrunkPostgresTest(unittest.TestCase):
             sources=1,
             outbox=1,
         )
+
+    def test_due_formula_reads_frozen_l2_members_and_commits_history(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_formula_processing(cursor)
+        self.trunk.ingest((self.raw_power(12345.0, sequence=1),))
+
+        event_ids = self.trunk.evaluate_due_formulas()
+
+        self.assertEqual(1, len(event_ids))
+        self.assertEqual((), self.trunk.evaluate_due_formulas())
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT latest.value_float, latest.quality, source.source_kind,
+                           source.source_l2_event_id
+                    FROM t_l2_latest AS latest
+                    JOIN t_l2_observation_sources AS source
+                      ON source.l2_event_id = latest.event_id
+                     AND source.l2_observed_at = latest.observed_at
+                    WHERE latest.entity_instance_id = %s
+                    """,
+                    (str(FORMULA_ENTITY_ID),),
+                )
+                value, quality, source_kind, source_event_id = cursor.fetchone()
+                self.assertEqual(12.345, value)
+                self.assertEqual(int(TrunkQuality.GOOD), quality)
+                self.assertEqual("l2", source_kind)
+                self.assertEqual(EXPECTED_EVENT_ID, UUID(str(source_event_id)))
 
     def test_expired_numeric_input_is_stale_before_transform(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

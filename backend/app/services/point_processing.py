@@ -13,14 +13,28 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from app.services.data_trunk_contracts import (
     BooleanCodeInput,
     BooleanSetTransform,
+    CompiledFormula,
     EnumTransform,
     FaultCodeTransform,
+    FormulaSource,
+    FormulaTransform,
     InputReference,
     InstalledPointProcessing,
     NumericTransform,
     ValueKind,
 )
 from app.services.solution_point_processings import PointProcessingAsset
+from app.services.point_processing_dag import (
+    PointProcessingDagError,
+    validate_processing_dag,
+)
+from app.services.point_processing_selectors import (
+    FrozenSelection,
+    PointProcessingSelectorError,
+    Selector,
+    freeze_selector,
+)
+from app.services.point_processing_formula import FormulaCompileError, compile_formula
 from app.services.neuron_point_processing_catalog import (
     ScannedPoint,
     ScannedPointCatalog,
@@ -51,6 +65,7 @@ class CurrentPointProcessingContext:
     revision_id: UUID
     input_source_ids: Mapping[str, UUID]
     output_entity_ids: Mapping[str, UUID]
+    selector_source_ids: Mapping[str, tuple[UUID, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -62,6 +77,16 @@ class CurrentPointProcessingContext:
             self,
             "output_entity_ids",
             MappingProxyType(dict(self.output_entity_ids)),
+        )
+        object.__setattr__(
+            self,
+            "selector_source_ids",
+            MappingProxyType(
+                {
+                    key: tuple(sorted(values, key=str))
+                    for key, values in self.selector_source_ids.items()
+                }
+            ),
         )
 
 
@@ -179,6 +204,9 @@ class PointProcessingTemplateSummary:
                     "data_type": item.data_type,
                     "unit": item.unit,
                     "required": item.required,
+                    "cardinality": item.cardinality,
+                    "selector": _plain(item.selector),
+                    "default_value": item.default_value,
                 }
                 for item in self.asset.inputs
             ],
@@ -188,6 +216,8 @@ class PointProcessingTemplateSummary:
                     "entity_definition_id": item.entity_definition_id,
                     "data_type": item.data_type,
                     "unit": item.unit,
+                    "freshness_seconds": item.freshness_seconds,
+                    "transform": _plain(item.transform),
                 }
                 for item in self.asset.outputs
             ],
@@ -221,6 +251,19 @@ class PointProcessingCatalog(Protocol):
     ) -> tuple[PointProcessingTemplateSummary, ...]: ...
 
     def node_source_key(self, node_id: UUID) -> str | None: ...
+
+    def list_selector_members(
+        self,
+        target_node_id: UUID,
+        selector: Selector,
+    ) -> tuple[UUID, ...]: ...
+
+    def dependency_edges(self) -> tuple[tuple[UUID, UUID], ...]: ...
+
+    def record_dependencies(
+        self,
+        edges: tuple[tuple[UUID, UUID], ...],
+    ) -> None: ...
 
 
 class PointProcessingRepository(Protocol):
@@ -287,6 +330,158 @@ class PointProcessingDelivery:
             scan=scan,
         )
         return self._repository.save_plan(plan)
+
+    def preview_formula(
+        self,
+        *,
+        node_id: UUID,
+        template_revision_id: UUID,
+        expression: str,
+    ) -> Mapping[str, Any]:
+        template = self._catalog.get_template(template_revision_id)
+        if template is None or template.status != "active":
+            raise PointProcessingError(
+                "POINT_PROCESSING_TEMPLATE_NOT_FOUND",
+                "Point processing template revision was not found",
+            )
+        outputs = tuple(
+            item for item in template.outputs
+            if item.transform.get("kind") == "formula"
+        )
+        if len(outputs) != 1:
+            raise PointProcessingError(
+                "POINT_PROCESSING_FORMULA_INVALID",
+                "Formula preview requires exactly one formula output",
+            )
+        output = outputs[0]
+        try:
+            compiled = compile_formula(
+                expression,
+                sources=tuple(
+                    FormulaSource(
+                        item.input_id,
+                        ValueKind(item.data_type),
+                        item.unit,
+                        item.cardinality,
+                        item.required,
+                        item.default_value,
+                    )
+                    for item in template.inputs
+                ),
+                result_type=ValueKind(output.data_type),
+                result_unit=output.unit,
+            )
+        except (FormulaCompileError, ValueError) as exc:
+            raise PointProcessingError(
+                getattr(exc, "code", "POINT_PROCESSING_FORMULA_INVALID"),
+                str(exc),
+            ) from exc
+
+        input_contracts = {item.input_id: item for item in template.inputs}
+        referenced_inputs = _formula_input_names(compiled.ast)
+        if any(input_contracts[name].source_kind != "l2" for name in referenced_inputs):
+            raise PointProcessingError(
+                "POINT_PROCESSING_FORMULA_INVALID",
+                "Cross-node formulas may only reference L2 inputs",
+            )
+        current = self._repository.current_context(node_id)
+        target_id = (
+            current.output_entity_ids.get(output.output_id)
+            if current is not None
+            else None
+        ) or uuid5(
+            NAMESPACE_URL,
+            f"zizu/formula-preview/{node_id}/{output.entity_definition_id}",
+        )
+        site_version = self._repository.site_configuration_version()
+        sources = self._catalog.list_sources(node_id)
+        selected: dict[str, tuple[UUID, ...]] = {}
+        selector_previews: list[dict[str, Any]] = []
+        blockers: list[dict[str, str]] = []
+        for input_id in referenced_inputs:
+            contract = input_contracts[input_id]
+            if contract.selector is not None:
+                selector = Selector(
+                    scope=str(contract.selector["scope"]),
+                    node_type=str(contract.selector["nodeType"]),
+                    entity_definition_id=str(
+                        contract.selector["entityDefinition"]
+                    ),
+                    cardinality=contract.cardinality,
+                )
+                try:
+                    frozen = freeze_selector(
+                        selector=selector,
+                        target_node_id=node_id,
+                        site_configuration_version=site_version,
+                        entity_instance_ids=self._catalog.list_selector_members(
+                            node_id,
+                            selector,
+                        ),
+                    )
+                except PointProcessingSelectorError as exc:
+                    blockers.append({"code": exc.code, "input_id": input_id})
+                    continue
+                selected[input_id] = frozen.entity_instance_ids
+                selector_previews.append(
+                    {
+                        "input_id": input_id,
+                        "member_count": len(frozen.entity_instance_ids),
+                        "member_ids": [str(item) for item in frozen.entity_instance_ids],
+                        "digest": frozen.digest,
+                    }
+                )
+                continue
+            candidates = _input_candidates(contract, sources, node_id)
+            if len(candidates) == 1:
+                selected[input_id] = (candidates[0].source_id,)
+            elif not candidates and not contract.required and contract.default_value is not None:
+                selected[input_id] = ()
+            else:
+                blockers.append(
+                    {
+                        "code": (
+                            "POINT_PROCESSING_INPUT_MISSING"
+                            if not candidates
+                            else "POINT_PROCESSING_INPUT_AMBIGUOUS"
+                        ),
+                        "input_id": input_id,
+                    }
+                )
+
+        planned_edges = tuple(
+            (source_id, target_id)
+            for input_id in referenced_inputs
+            for source_id in selected.get(input_id, ())
+        )
+        try:
+            dag = validate_processing_dag(
+                existing_edges=self._catalog.dependency_edges(),
+                planned_edges=planned_edges,
+                max_depth=8,
+            )
+        except PointProcessingDagError as exc:
+            blockers.append({"code": exc.code, "input_id": "dag"})
+            dag = None
+        return MappingProxyType(
+            {
+                "expression": compiled.text,
+                "canonical_ast": _plain(compiled.ast),
+                "ast_digest": compiled.digest,
+                "result_type": compiled.result_kind.value,
+                "result_unit": compiled.result_unit,
+                "member_count": sum(
+                    item["member_count"] for item in selector_previews
+                ),
+                "selector_members": selector_previews,
+                "dag_summary": {
+                    "edge_count": len(planned_edges) if dag is None else dag.edge_count,
+                    "max_depth": None if dag is None else dag.max_depth,
+                    "digest": None if dag is None else dag.digest,
+                },
+                "blockers": blockers,
+            }
+        )
 
     def list_templates(
         self,
@@ -406,10 +601,14 @@ class InMemoryPointProcessingCatalog:
         templates: Mapping[UUID, PointProcessingAsset],
         sources: tuple[PointProcessingSource, ...] = (),
         node_source_keys: Mapping[UUID, str] | None = None,
+        selector_members: Mapping[tuple[UUID, str, str], tuple[UUID, ...]] | None = None,
+        dependency_edges: tuple[tuple[UUID, UUID], ...] = (),
     ) -> None:
         self._templates = dict(templates)
         self._sources = tuple(sources)
         self._node_source_keys = dict(node_source_keys or {})
+        self._selector_members = dict(selector_members or {})
+        self._dependency_edges = set(dependency_edges)
 
     def get_template(self, revision_id: UUID) -> PointProcessingAsset | None:
         return self._templates.get(revision_id)
@@ -436,6 +635,37 @@ class InMemoryPointProcessingCatalog:
 
     def node_source_key(self, node_id: UUID) -> str | None:
         return self._node_source_keys.get(node_id)
+
+    def list_selector_members(
+        self,
+        target_node_id: UUID,
+        selector: Selector,
+    ) -> tuple[UUID, ...]:
+        return tuple(
+            self._selector_members.get(
+                (
+                    target_node_id,
+                    selector.node_type,
+                    selector.entity_definition_id,
+                ),
+                (),
+            )
+        )
+
+    def dependency_edges(self) -> tuple[tuple[UUID, UUID], ...]:
+        return tuple(sorted(self._dependency_edges, key=lambda item: (str(item[0]), str(item[1]))))
+
+    def record_dependencies(
+        self,
+        edges: tuple[tuple[UUID, UUID], ...],
+    ) -> None:
+        self._dependency_edges.update(edges)
+
+    def replace_selector_members(
+        self,
+        members: Mapping[tuple[UUID, str, str], tuple[UUID, ...]],
+    ) -> None:
+        self._selector_members = dict(members)
 
     def replace_sources(self, sources: tuple[PointProcessingSource, ...]) -> None:
         self._sources = tuple(sources)
@@ -507,7 +737,7 @@ class InMemoryPointProcessingRepository:
                             for entry in output.transform["entries"]
                         )
                     )
-                else:
+                elif kind != "formula":
                     input_id = str(output.transform["input"])
                     input_contract = inputs[input_id]
                     input_source_id = current.input_source_ids[input_id]
@@ -537,6 +767,47 @@ class InMemoryPointProcessingRepository:
                             raw_code: str(entry["code"])
                             for raw_code, entry in output.transform["entries"].items()
                         },
+                    )
+                elif kind == "formula":
+                    referenced_inputs = _formula_input_names(
+                        output.transform["canonicalAst"]
+                    )
+                    formula_contracts = {
+                        input_id: FormulaSource(
+                            input_id,
+                            ValueKind(inputs[input_id].data_type),
+                            inputs[input_id].unit,
+                            inputs[input_id].cardinality,
+                            inputs[input_id].required,
+                            inputs[input_id].default_value,
+                        )
+                        for input_id in referenced_inputs
+                    }
+                    transform = FormulaTransform(
+                        sources={
+                            input_id: tuple(
+                                InputReference.l2(source_id)
+                                for source_id in (
+                                    current.selector_source_ids.get(input_id)
+                                    or (
+                                        (current.input_source_ids[input_id],)
+                                        if input_id in current.input_source_ids
+                                        else ()
+                                    )
+                                )
+                            )
+                            for input_id in referenced_inputs
+                        },
+                        source_contracts=formula_contracts,
+                        compiled=CompiledFormula(
+                            text=str(output.transform["expression"]),
+                            ast=output.transform["canonicalAst"],
+                            digest=str(output.transform["astDigest"]),
+                            result_kind=ValueKind(output.data_type),
+                            result_unit=output.unit,
+                        ),
+                        schedule_seconds=int(output.transform["scheduleSeconds"]),
+                        control_eligible=bool(output.transform["controlEligible"]),
                     )
                 installed.append(
                     InstalledPointProcessing(
@@ -608,15 +879,53 @@ class InMemoryPointProcessingRepository:
                     "POINT_PROCESSING_PLAN_STALE",
                     "Point processing template changed after planning",
                 )
-            actual_source_digest = (
-                verified_source_catalog_digest
-                if verified_source_catalog_digest is not None
-                else _template_source_catalog_digest(
-                    template,
-                    catalog.list_sources(plan.node_id),
-                    plan.node_id,
+            try:
+                for item in plan.items:
+                    if item.get("kind") != "selector_binding":
+                        continue
+                    selector = Selector(
+                        scope=str(item["selector"]["scope"]),
+                        node_type=str(item["selector"]["nodeType"]),
+                        entity_definition_id=str(
+                            item["selector"]["entityDefinition"]
+                        ),
+                        cardinality=str(item["cardinality"]),
+                    )
+                    current_selection = freeze_selector(
+                        selector=selector,
+                        target_node_id=plan.node_id,
+                        site_configuration_version=self._site_version,
+                        entity_instance_ids=catalog.list_selector_members(
+                            plan.node_id,
+                            selector,
+                        ),
+                    )
+                    if current_selection.digest != item.get("selector_digest"):
+                        raise PointProcessingSelectorError(
+                            "POINT_PROCESSING_SELECTOR_STALE",
+                            "Point processing selector members changed",
+                        )
+            except PointProcessingSelectorError as exc:
+                raise PointProcessingError(
+                    "POINT_PROCESSING_SELECTOR_STALE",
+                    "Point processing selector members changed after planning",
+                ) from exc
+            try:
+                actual_source_digest = (
+                    verified_source_catalog_digest
+                    if verified_source_catalog_digest is not None
+                    else _effective_source_catalog_digest(
+                        template,
+                        catalog,
+                        plan.node_id,
+                        self._site_version,
+                    )
                 )
-            )
+            except PointProcessingSelectorError as exc:
+                raise PointProcessingError(
+                    "POINT_PROCESSING_SELECTOR_STALE",
+                    "Point processing selector members changed after planning",
+                ) from exc
             if (
                 plan.base_site_configuration_version != self._site_version
                 or plan.source_catalog_digest
@@ -640,6 +949,20 @@ class InMemoryPointProcessingRepository:
                 and item.get("action") != "block"
                 and item.get("selected_source_id") is not None
             }
+            selector_ids = {
+                item["input_id"]: tuple(
+                    UUID(value) for value in item["selected_source_ids"]
+                )
+                for item in plan.items
+                if item.get("kind") == "selector_binding"
+                and item.get("action") != "block"
+            }
+            planned_edges = tuple(
+                (UUID(source), UUID(target))
+                for item in plan.items
+                if item.get("kind") == "dag_validation"
+                for source, target in item.get("planned_edges", ())
+            )
             current = self._current.get(plan.node_id)
             solution_id = (
                 plan.solution_installation_id
@@ -679,7 +1002,9 @@ class InMemoryPointProcessingRepository:
                 revision_id=plan.template_revision_id,
                 input_source_ids=input_ids,
                 output_entity_ids=output_ids,
+                selector_source_ids=selector_ids,
             )
+            catalog.record_dependencies(planned_edges)
             self._installed_ids[plan.node_id] = installed_id
             self._site_version = next_version
             self._plans[plan.id] = replace(plan, status="applied")
@@ -721,6 +1046,7 @@ def compile_point_processing_plan(
             "POINT_PROCESSING_INSTALLATION_CONTEXT_REQUIRED",
             "Entity identity and solution installation context are required",
         )
+    base_site_configuration_version = repository.site_configuration_version()
 
     items: list[Mapping[str, Any]] = []
     blockers: list[Mapping[str, str]] = []
@@ -745,7 +1071,75 @@ def compile_point_processing_plan(
             command.node_id,
         )
     selected_inputs: dict[str, UUID] = {}
+    frozen_selectors: dict[str, FrozenSelection] = {}
     for input_contract in template.inputs:
+        if input_contract.selector is not None:
+            selector = Selector(
+                scope=str(input_contract.selector["scope"]),
+                node_type=str(input_contract.selector["nodeType"]),
+                entity_definition_id=str(
+                    input_contract.selector["entityDefinition"]
+                ),
+                cardinality=input_contract.cardinality,
+            )
+            code: str | None = None
+            try:
+                frozen = freeze_selector(
+                    selector=selector,
+                    target_node_id=command.node_id,
+                    site_configuration_version=base_site_configuration_version,
+                    entity_instance_ids=catalog.list_selector_members(
+                        command.node_id,
+                        selector,
+                    ),
+                )
+                frozen_selectors[input_contract.input_id] = frozen
+            except PointProcessingSelectorError as exc:
+                code = exc.code
+                frozen = None
+                blockers.append(
+                    MappingProxyType(
+                        {"code": code, "input_id": input_contract.input_id}
+                    )
+                )
+            previous_members = (
+                current.selector_source_ids.get(input_contract.input_id, ())
+                if current is not None
+                else ()
+            )
+            selected_members = (
+                frozen.entity_instance_ids if frozen is not None else ()
+            )
+            action = (
+                "block"
+                if code is not None
+                else "preserve"
+                if previous_members == selected_members and previous_members
+                else "update"
+                if previous_members
+                else "add"
+            )
+            items.append(
+                MappingProxyType(
+                    {
+                        "item_key": f"selector:{input_contract.input_id}",
+                        "layer": "L1",
+                        "kind": "selector_binding",
+                        "action": action,
+                        "input_id": input_contract.input_id,
+                        "selector": _plain(input_contract.selector),
+                        "cardinality": input_contract.cardinality,
+                        "selected_source_ids": tuple(
+                            str(item) for item in selected_members
+                        ),
+                        "selector_digest": (
+                            frozen.digest if frozen is not None else None
+                        ),
+                        "blocker_code": code,
+                    }
+                )
+            )
+            continue
         candidates = _input_candidates(input_contract, sources, command.node_id)
         selected_id = command.input_selections.get(input_contract.input_id)
         selected = next(
@@ -806,6 +1200,17 @@ def compile_point_processing_plan(
                     "blocker_code": code,
                 }
             )
+        )
+
+    if frozen_selectors:
+        source_digest = _digest(
+            {
+                "catalog_digest": source_digest,
+                "selector_digests": {
+                    key: value.digest
+                    for key, value in sorted(frozen_selectors.items())
+                },
+            }
         )
 
     current_outputs = dict(current.output_entity_ids) if current is not None else {}
@@ -882,13 +1287,82 @@ def compile_point_processing_plan(
             )
         )
 
+    formula_outputs = tuple(
+        output for output in template.outputs
+        if output.transform["kind"] == "formula"
+    )
+    if formula_outputs:
+        planned_dependencies = tuple(
+            (
+                input_id,
+                output.output_id,
+                source_id,
+                output_ids[output.output_id],
+            )
+            for output in formula_outputs
+            for input_id in _formula_input_names(output.transform["canonicalAst"])
+            for source_id in (
+                frozen_selectors[input_id].entity_instance_ids
+                if input_id in frozen_selectors
+                else (
+                    (selected_inputs[input_id],)
+                    if input_id in selected_inputs
+                    else ()
+                )
+            )
+        ) if not blockers else ()
+        planned_edges = tuple(
+            (source_id, target_id)
+            for _input_id, _output_id, source_id, target_id in planned_dependencies
+        )
+        try:
+            dag = validate_processing_dag(
+                existing_edges=catalog.dependency_edges(),
+                planned_edges=planned_edges,
+                max_depth=8,
+            )
+            dag_code = None
+        except PointProcessingDagError as exc:
+            dag = None
+            dag_code = exc.code
+            blockers.append(
+                MappingProxyType({"code": exc.code, "input_id": "dag"})
+            )
+        items.append(
+            MappingProxyType(
+                {
+                    "item_key": "dag:site",
+                    "layer": "L1",
+                    "kind": "dag_validation",
+                    "action": "block" if dag_code else "add",
+                    "planned_edges": tuple(
+                        (str(source), str(target))
+                        for source, target in planned_edges
+                    ),
+                    "planned_dependencies": tuple(
+                        {
+                            "input_id": input_id,
+                            "output_id": output_id,
+                            "source_entity_instance_id": str(source_id),
+                            "target_entity_instance_id": str(target_id),
+                        }
+                        for input_id, output_id, source_id, target_id
+                        in planned_dependencies
+                    ),
+                    "max_depth": dag.max_depth if dag is not None else None,
+                    "dag_digest": dag.digest if dag is not None else None,
+                    "blocker_code": dag_code,
+                }
+            )
+        )
+
     content = {
         "node_id": str(command.node_id),
         "template_revision_id": str(command.template_revision_id),
         "template_digest": template.content_digest,
         "entity_identity_installation_id": str(identity_id),
         "solution_installation_id": str(solution_id),
-        "base_site_configuration_version": repository.site_configuration_version(),
+        "base_site_configuration_version": base_site_configuration_version,
         "source_catalog_digest": source_digest,
         "selected_inputs": {key: str(value) for key, value in sorted(selected_inputs.items())},
         "output_entity_ids": {key: str(value) for key, value in sorted(output_ids.items())},
@@ -903,7 +1377,7 @@ def compile_point_processing_plan(
         template_revision_id=command.template_revision_id,
         entity_identity_installation_id=identity_id,
         solution_installation_id=solution_id,
-        base_site_configuration_version=repository.site_configuration_version(),
+        base_site_configuration_version=base_site_configuration_version,
         source_catalog_digest=source_digest,
         status="blocked" if blockers else "ready",
         items=tuple(items),
@@ -1118,6 +1592,61 @@ def _template_source_catalog_digest(
     return _source_catalog_digest(
         tuple(relevant[key] for key in sorted(relevant, key=str))
     )
+
+
+def _effective_source_catalog_digest(
+    template: PointProcessingAsset,
+    catalog: PointProcessingCatalog,
+    node_id: UUID,
+    site_configuration_version: int,
+) -> str:
+    base_digest = _template_source_catalog_digest(
+        template,
+        catalog.list_sources(node_id),
+        node_id,
+    )
+    selector_digests: dict[str, str] = {}
+    for input_contract in template.inputs:
+        if input_contract.selector is None:
+            continue
+        selector = Selector(
+            scope=str(input_contract.selector["scope"]),
+            node_type=str(input_contract.selector["nodeType"]),
+            entity_definition_id=str(input_contract.selector["entityDefinition"]),
+            cardinality=input_contract.cardinality,
+        )
+        frozen = freeze_selector(
+            selector=selector,
+            target_node_id=node_id,
+            site_configuration_version=site_configuration_version,
+            entity_instance_ids=catalog.list_selector_members(node_id, selector),
+        )
+        selector_digests[input_contract.input_id] = frozen.digest
+    if not selector_digests:
+        return base_digest
+    return _digest(
+        {
+            "catalog_digest": base_digest,
+            "selector_digests": selector_digests,
+        }
+    )
+
+
+def _formula_input_names(value: Any) -> tuple[str, ...]:
+    names: set[str] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            if isinstance(item.get("input"), str):
+                names.add(item["input"])
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (tuple, list)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return tuple(sorted(names))
 
 
 def _plain(value: Any) -> Any:

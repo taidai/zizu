@@ -12,6 +12,7 @@ import yaml
 
 from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
 from app.services.solution_delivery_contracts import DeliveryError
+from app.services.solution_point_processings import parse_point_processing_asset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,61 @@ SPEC.loader.exec_module(builder)
 
 
 class SolutionPointProcessingAssetTest(unittest.TestCase):
+    def test_formula_asset_compiles_selector_and_expression(self) -> None:
+        asset = parse_point_processing_asset(
+            {
+                "schemaVersion": "zizu.point-processing/v1alpha1",
+                "id": "site.total-pcs-power",
+                "kind": "point_processing_template",
+                "displayName": "站级 PCS 总功率",
+                "deviceCategory": "SITE",
+                "brand": "ZiZu",
+                "model": "SITE-POWER",
+                "revision": 1,
+                "status": "active",
+                "inputs": [
+                    {
+                        "id": "pcs_power",
+                        "sourceKind": "l2",
+                        "sourceKey": "pcs.active_power",
+                        "aliases": [],
+                        "dataType": "FLOAT",
+                        "unit": "kW",
+                        "required": True,
+                        "cardinality": "many",
+                        "selector": {
+                            "scope": "descendants",
+                            "nodeType": "PCS",
+                            "entityDefinition": "pcs.active_power",
+                        },
+                    }
+                ],
+                "outputs": [
+                    {
+                        "id": "total_power",
+                        "entityDefinition": "site.total_pcs_power",
+                        "dataType": "FLOAT",
+                        "unit": "kW",
+                        "freshness": "5s",
+                        "transform": {
+                            "kind": "formula",
+                            "expression": "sum(pcs_power)",
+                            "scheduleSeconds": 1,
+                            "controlEligible": False,
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(asset.inputs[0].cardinality, "many")
+        self.assertEqual(asset.inputs[0].selector["nodeType"], "PCS")
+        self.assertEqual(asset.outputs[0].transform["canonicalAst"]["call"], "sum")
+        self.assertEqual(
+            asset.outputs[0].transform["canonicalAst"]["args"][0]["input"],
+            "pcs_power",
+        )
+        self.assertEqual(len(asset.outputs[0].transform["astDigest"]), 64)
     def test_imports_three_pcs_templates_with_same_three_outputs(self) -> None:
         from app.services.solution_point_processings import point_processing_assets
 

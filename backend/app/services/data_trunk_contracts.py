@@ -230,7 +230,17 @@ class FormulaTransform:
                 for references in source_map.values()
             )
             or any(
-                contracts[name].cardinality == "one" and len(references) != 1
+                contracts[name].cardinality == "one"
+                and (
+                    len(references) > 1
+                    or (
+                        not references
+                        and (
+                            contracts[name].required
+                            or contracts[name].default_value is None
+                        )
+                    )
+                )
                 for name, references in source_map.items()
             )
         ):

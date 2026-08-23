@@ -59,6 +59,11 @@ class DataTrunkRepository(Protocol):
         entity_definition_ids: tuple[str, ...],
     ) -> dict[str, Any]: ...
 
+    def evaluate_due_formulas(
+        self,
+        evaluator: ConversionEvaluator,
+    ) -> tuple[UUID, ...]: ...
+
 
 class DataTrunk:
     """隐藏转换查找、时序推进、来源图、outbox 与事务顺序。"""
@@ -106,6 +111,10 @@ class DataTrunk:
             solution_installation_id=solution_installation_id,
             entity_definition_ids=tuple(entity_definition_ids),
         )
+
+    def evaluate_due_formulas(self) -> tuple[UUID, ...]:
+        """Evaluate installed typed formulas that reached their configured cadence."""
+        return self._repository.evaluate_due_formulas(evaluate_processing)
 
 
 class InMemoryDataTrunkRepository:

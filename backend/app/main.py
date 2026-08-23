@@ -211,9 +211,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             PostgresOutboxRepository,
         )
         from app.services.data_trunk_postgres import PostgresDataTrunkRepository
+        from app.services.data_trunk import DataTrunk
         from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 
         freshness_repository = PostgresDataTrunkRepository()
+        formula_trunk = DataTrunk(freshness_repository)
         stream_evidence = get_en9_stream_evidence()
         await asyncio.to_thread(
             stream_evidence.register_runtime,
@@ -249,6 +251,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     logger.warning("[DataTrunk] outbox tick failed: {}", error)
                 await _wait_or_stop(0.25)
 
+        async def _typed_formula_loop() -> None:
+            while not _data_trunk_stop.is_set():
+                try:
+                    await asyncio.to_thread(formula_trunk.evaluate_due_formulas)
+                except Exception as error:
+                    logger.warning(
+                        "[DataTrunk] typed formula tick failed: {}",
+                        error,
+                    )
+                await _wait_or_stop(1.0)
+
         async def _runtime_health_loop() -> None:
             while not _data_trunk_stop.is_set():
                 try:
@@ -276,11 +289,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             asyncio.create_task(_freshness_loop(), name="data_trunk_freshness"),
             asyncio.create_task(_outbox_loop(), name="data_trunk_outbox"),
             asyncio.create_task(
+                _typed_formula_loop(),
+                name="data_trunk_typed_formulas",
+            ),
+            asyncio.create_task(
                 _runtime_health_loop(),
                 name="data_trunk_runtime_health",
             ),
         ]
-        logger.success("[Main] L2 freshness and outbox dispatch started ✅")
+        logger.success(
+            "[Main] L2 freshness, typed formulas and outbox dispatch started ✅"
+        )
     except Exception as error:
         from app.core.config import settings
 

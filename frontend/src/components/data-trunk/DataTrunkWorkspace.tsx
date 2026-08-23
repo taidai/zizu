@@ -11,6 +11,7 @@ import {
   fetchPointProcessingAcceptanceState,
   fetchPointProcessingPlan,
   fetchPointProcessingTemplates,
+  previewPointProcessingFormula,
   runEN9PointProcessingAcceptance,
   type EN9AcceptanceReport,
   type EntityInstance,
@@ -18,6 +19,7 @@ import {
   type Node,
   type NodeDataTrunk,
   type PointProcessingApplication,
+  type PointProcessingFormulaPreview,
   type PointProcessingPlan,
   type PointProcessingTemplate,
 } from '../../api/client'
@@ -51,9 +53,10 @@ export default function DataTrunkWorkspace({
   const [observations, setObservations] = useState<Map<string, EntityInstanceObservation>>(new Map())
   const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'plan' | 'apply' | 'acceptance' | null>(null)
+  const [busy, setBusy] = useState<'plan' | 'apply' | 'acceptance' | 'formula' | null>(null)
   const [error, setError] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
+  const [formulaPreview, setFormulaPreview] = useState<PointProcessingFormulaPreview | null>(null)
 
   const loadRuntime = useCallback(async () => {
     const [nextTrunk, catalog] = await Promise.all([
@@ -128,6 +131,7 @@ export default function DataTrunkWorkspace({
     setSelectedRevisionId('')
     setSelections({})
     setResultUnknown(false)
+    setFormulaPreview(null)
     void loadWorkspace()
   }, [loadWorkspace])
 
@@ -170,7 +174,25 @@ export default function DataTrunkWorkspace({
     setSelections(initial)
     setPlan(null)
     setResultUnknown(false)
+    setFormulaPreview(null)
   }, [selectedRevisionId, trunk?.node_id])
+
+  const handleFormulaPreview = async (expression: string) => {
+    if (!selectedTemplate) return
+    setBusy('formula')
+    setError('')
+    try {
+      setFormulaPreview(await previewPointProcessingFormula(node.id, {
+        template_revision_id: selectedTemplate.revision_id,
+        expression,
+      }))
+    } catch (reason) {
+      setFormulaPreview(null)
+      setError(reason instanceof Error ? reason.message : '公式预检失败')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const handlePlan = async () => {
     if (!selectedTemplate) return
@@ -328,10 +350,12 @@ export default function DataTrunkWorkspace({
             plan={plan}
             busy={busy}
             resultUnknown={resultUnknown}
+            formulaPreview={formulaPreview}
             onTemplateChange={setSelectedRevisionId}
             onSelectionChange={(inputId, sourceId) => setSelections((current) => ({ ...current, [inputId]: sourceId }))}
             onPlan={() => void handlePlan()}
             onApply={() => void handleApply()}
+            onFormulaPreview={(expression) => void handleFormulaPreview(expression)}
           />
         </div>
       )}

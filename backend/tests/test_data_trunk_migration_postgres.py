@@ -112,7 +112,8 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     SELECT to_regclass('t_point_processing_expressions'),
                            to_regclass('t_point_processing_selectors'),
                            to_regclass('t_point_processing_selector_members'),
-                           to_regclass('t_point_processing_dependencies')
+                           to_regclass('t_point_processing_dependencies'),
+                           to_regclass('t_point_processing_formula_runs')
                     """
                 )
                 self.assertEqual(
@@ -122,8 +123,19 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                         "t_point_processing_selectors",
                         "t_point_processing_selector_members",
                         "t_point_processing_dependencies",
+                        "t_point_processing_formula_runs",
                     ),
                 )
+                cursor.execute(
+                    """
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_nodes'
+                      AND column_name = 'parent_id'
+                    """
+                )
+                self.assertEqual(("uuid",), cursor.fetchone())
 
                 cursor.execute(
                     """

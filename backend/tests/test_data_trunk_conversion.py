@@ -436,7 +436,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             transform=FormulaTransform(
                 sources={
                     "primary": (primary_ref,),
-                    "reserve": (reserve_ref,),
+                    "reserve": (),
                 },
                 source_contracts=sources,
                 compiled=compiled,

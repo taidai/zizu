@@ -19,6 +19,9 @@ from app.services.data_trunk_contracts import (
     DataTrunkError,
     EnumTransform,
     FaultCodeTransform,
+    FormulaSource,
+    FormulaTransform,
+    CompiledFormula,
     InputReference,
     InstalledPointProcessing,
     L2Observation,
@@ -27,6 +30,8 @@ from app.services.data_trunk_contracts import (
     TypedValue,
     ValueKind,
 )
+from app.services.point_processing_dag import validate_processing_dag
+from app.services.point_processing import _formula_input_names
 from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 FaultHook = Callable[[str], None]
@@ -49,8 +54,19 @@ def verify_data_trunk_contract_gate(
                   IF to_regclass('public.t_point_processing_expressions') IS NULL
                      OR to_regclass('public.t_point_processing_selectors') IS NULL
                      OR to_regclass('public.t_point_processing_selector_members') IS NULL
-                     OR to_regclass('public.t_point_processing_dependencies') IS NULL THEN
+                     OR to_regclass('public.t_point_processing_dependencies') IS NULL
+                     OR to_regclass('public.t_point_processing_formula_runs') IS NULL THEN
                     RAISE EXCEPTION 'schema 042 point-processing contract is incomplete'
+                      USING ERRCODE = '55000';
+                  END IF;
+                  IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_nodes'
+                      AND column_name = 'parent_id'
+                  ) THEN
+                    RAISE EXCEPTION 'schema 042 node tree contract is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                 END;
@@ -172,6 +188,333 @@ class PostgresDataTrunkRepository:
                 item.observation_id for item in accepted
             ),
         )
+
+    def evaluate_due_formulas(
+        self,
+        evaluator: ConversionEvaluator,
+    ) -> tuple[UUID, ...]:
+        calculated_at = self._clock()
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT installed.id, installed.revision_id,
+                                   output.id, output_binding.entity_instance_id,
+                                   output.entity_definition_id, output.data_type,
+                                   output.unit, output.freshness_seconds,
+                                   expression.dsl_text, expression.canonical_ast,
+                                   expression.ast_digest,
+                                   expression.schedule_seconds,
+                                   expression.control_eligible
+                            FROM t_installed_point_processings AS installed
+                            JOIN t_point_processing_outputs AS output
+                              ON output.revision_id = installed.revision_id
+                            JOIN t_point_processing_output_bindings AS output_binding
+                              ON output_binding.installed_processing_id = installed.id
+                             AND output_binding.output_id = output.id
+                            JOIN t_point_processing_expressions AS expression
+                              ON expression.output_id = output.id
+                            LEFT JOIN t_point_processing_formula_runs AS run
+                              ON run.installed_processing_id = installed.id
+                             AND run.output_id = output.id
+                            WHERE installed.current = TRUE
+                              AND (
+                                run.last_evaluated_at IS NULL
+                                OR run.last_evaluated_at
+                                   + expression.schedule_seconds
+                                     * INTERVAL '1 second' <= %s
+                              )
+                            ORDER BY output_binding.entity_instance_id
+                            FOR UPDATE OF installed
+                            """,
+                            (calculated_at,),
+                        )
+                        formula_rows = cursor.fetchall()
+                        if not formula_rows:
+                            connection.commit()
+                            return ()
+
+                        cursor.execute(
+                            """
+                            SELECT current_version
+                            FROM t_site_configuration_state
+                            WHERE singleton = TRUE
+                            """
+                        )
+                        site_row = cursor.fetchone()
+                        if site_row is None:
+                            raise DataTrunkError(
+                                "POINT_PROCESSING_CONFIGURATION_INVALID",
+                                "site configuration state is unavailable",
+                            )
+                        site_configuration_version = int(site_row[0])
+
+                        installed_items: list[
+                            tuple[InstalledPointProcessing, UUID]
+                        ] = []
+                        all_source_ids: set[UUID] = set()
+                        for row in formula_rows:
+                            (
+                                installation_id,
+                                revision_id,
+                                output_id,
+                                target_entity_id,
+                                definition_id,
+                                output_type,
+                                output_unit,
+                                freshness_seconds,
+                                dsl_text,
+                                canonical_ast,
+                                ast_digest,
+                                schedule_seconds,
+                                control_eligible,
+                            ) = row
+                            cursor.execute(
+                                """
+                                SELECT input.id, input.input_key,
+                                       input.data_type, input.unit,
+                                       input.required,
+                                       COALESCE(selector.cardinality, 'one'),
+                                       selector.default_value
+                                FROM t_point_processing_inputs AS input
+                                LEFT JOIN t_point_processing_selectors AS selector
+                                  ON selector.input_id = input.id
+                                WHERE input.revision_id = %s
+                                ORDER BY input.input_key
+                                """,
+                                (revision_id,),
+                            )
+                            input_rows = cursor.fetchall()
+                            cursor.execute(
+                                """
+                                SELECT input_id, source_entity_instance_id
+                                FROM t_point_processing_dependencies
+                                WHERE installed_processing_id = %s
+                                  AND output_id = %s
+                                ORDER BY input_id, source_entity_instance_id
+                                """,
+                                (installation_id, output_id),
+                            )
+                            dependency_sources: dict[UUID, list[UUID]] = {}
+                            for input_id, source_id in cursor.fetchall():
+                                dependency_sources.setdefault(input_id, []).append(
+                                    UUID(str(source_id))
+                                )
+                            referenced_inputs = set(
+                                _formula_input_names(canonical_ast)
+                            )
+                            source_contracts: dict[str, FormulaSource] = {}
+                            sources: dict[str, tuple[InputReference, ...]] = {}
+                            for (
+                                input_id,
+                                input_key,
+                                data_type,
+                                unit,
+                                required,
+                                cardinality,
+                                default_value,
+                            ) in input_rows:
+                                if input_key not in referenced_inputs:
+                                    continue
+                                source_ids = tuple(
+                                    dependency_sources.get(input_id, ())
+                                )
+                                if not source_ids and required:
+                                    raise DataTrunkError(
+                                        "POINT_PROCESSING_CONFIGURATION_INVALID",
+                                        "required formula input has no frozen source",
+                                    )
+                                source_contracts[input_key] = FormulaSource(
+                                    input_key,
+                                    ValueKind(data_type),
+                                    unit,
+                                    cardinality,
+                                    required,
+                                    default_value,
+                                )
+                                sources[input_key] = tuple(
+                                    InputReference.l2(source_id)
+                                    for source_id in source_ids
+                                )
+                                all_source_ids.update(source_ids)
+                            item = InstalledPointProcessing(
+                                installation_id=UUID(str(installation_id)),
+                                revision_id=UUID(str(revision_id)),
+                                entity_instance_id=UUID(str(target_entity_id)),
+                                entity_definition_id=definition_id,
+                                output_kind=ValueKind(output_type),
+                                output_unit=output_unit,
+                                freshness_seconds=float(freshness_seconds),
+                                transform=FormulaTransform(
+                                    sources=sources,
+                                    source_contracts=source_contracts,
+                                    compiled=CompiledFormula(
+                                        text=dsl_text,
+                                        ast=canonical_ast,
+                                        digest=ast_digest.strip(),
+                                        result_kind=ValueKind(output_type),
+                                        result_unit=output_unit,
+                                    ),
+                                    schedule_seconds=int(schedule_seconds),
+                                    control_eligible=bool(control_eligible),
+                                ),
+                            )
+                            installed_items.append((item, UUID(str(output_id))))
+
+                        current_inputs = self._load_l2_formula_inputs(
+                            cursor,
+                            tuple(sorted(all_source_ids, key=str)),
+                        )
+                        cursor.execute(
+                            """
+                            SELECT DISTINCT dependency.source_entity_instance_id,
+                                            dependency.target_entity_instance_id
+                            FROM t_point_processing_dependencies AS dependency
+                            JOIN t_installed_point_processings AS installed
+                              ON installed.id = dependency.installed_processing_id
+                            WHERE installed.current = TRUE
+                            ORDER BY 1, 2
+                            """
+                        )
+                        dag = validate_processing_dag(
+                            existing_edges=tuple(cursor.fetchall()),
+                            planned_edges=(),
+                            max_depth=8,
+                        )
+                        rank = {entity_id: index for index, entity_id in enumerate(dag.order)}
+                        installed_items.sort(
+                            key=lambda value: (
+                                rank.get(value[0].entity_instance_id, len(rank)),
+                                str(value[0].entity_instance_id),
+                            )
+                        )
+
+                        produced: list[L2Observation] = []
+                        for installed, output_id in installed_items:
+                            evaluated = evaluator(
+                                installed=(installed,),
+                                current_inputs=current_inputs,
+                                site_configuration_version=site_configuration_version,
+                                calculated_at=calculated_at,
+                            )
+                            if len(evaluated) != 1:
+                                raise DataTrunkError(
+                                    "POINT_PROCESSING_CONFIGURATION_INVALID",
+                                    "formula evaluation produced an invalid result count",
+                                )
+                            observation = evaluated[0]
+                            produced.append(observation)
+                            current_inputs[
+                                InputReference.l2(installed.entity_instance_id)
+                            ] = observation
+
+                        committed = self._select_history_observations(
+                            cursor,
+                            tuple(produced),
+                        )
+                        self._ensure_runtime(cursor)
+                        self._insert_l2(cursor, committed)
+                        advanced = self._advance_l2_latest(cursor, committed)
+                        self._insert_sources(cursor, committed)
+                        self._insert_outbox(cursor, advanced)
+                        for installed, output_id in installed_items:
+                            observation = next(
+                                item for item in produced
+                                if item.entity_instance_id == installed.entity_instance_id
+                            )
+                            cursor.execute(
+                                """
+                                INSERT INTO t_point_processing_formula_runs
+                                  (installed_processing_id, output_id,
+                                   last_evaluated_at, last_event_id)
+                                VALUES (%s, %s, %s, %s)
+                                ON CONFLICT (installed_processing_id, output_id)
+                                DO UPDATE SET
+                                  last_evaluated_at = EXCLUDED.last_evaluated_at,
+                                  last_event_id = EXCLUDED.last_event_id
+                                """,
+                                (
+                                    str(installed.installation_id),
+                                    str(output_id),
+                                    calculated_at,
+                                    str(observation.event_id),
+                                ),
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_TRUNK_UNAVAILABLE",
+                "DATA_TRUNK_UNAVAILABLE",
+            ) from exc
+        return tuple(item.event_id for item in committed)
+
+    @staticmethod
+    def _load_l2_formula_inputs(
+        cursor: Any,
+        entity_ids: tuple[UUID, ...],
+    ) -> dict[InputReference, L2Observation]:
+        if not entity_ids:
+            return {}
+        cursor.execute(
+            """
+            SELECT latest.entity_instance_id, latest.event_id,
+                   entity.definition_id, entity.data_type, entity.unit,
+                   latest.value_float, latest.value_int, latest.value_bool,
+                   latest.value_text, latest.value_codes,
+                   latest.quality, latest.reason, latest.observed_at,
+                   latest.received_at, latest.calculated_at,
+                   latest.processing_revision_id,
+                   latest.site_configuration_version,
+                   latest.source_digest, latest.source_order_key
+            FROM t_l2_latest AS latest
+            JOIN t_entity_instances AS entity
+              ON entity.id = latest.entity_instance_id
+            WHERE latest.entity_instance_id = ANY(%s::uuid[])
+            ORDER BY latest.entity_instance_id
+            """,
+            ([str(item) for item in entity_ids],),
+        )
+        result: dict[InputReference, L2Observation] = {}
+        for row in cursor.fetchall():
+            kind = ValueKind(row[3])
+            quality = TrunkQuality(int(row[10]))
+            values = row[5:10]
+            value = None
+            if quality not in {TrunkQuality.BAD, TrunkQuality.STALE}:
+                value = {
+                    ValueKind.FLOAT: values[0],
+                    ValueKind.INT: values[1],
+                    ValueKind.BOOL: values[2],
+                    ValueKind.STRING: values[3],
+                    ValueKind.ENUM: values[3],
+                    ValueKind.CODE_SET: tuple(values[4]) if values[4] is not None else None,
+                }[kind]
+            entity_id = UUID(str(row[0]))
+            result[InputReference.l2(entity_id)] = L2Observation(
+                event_id=UUID(str(row[1])),
+                entity_instance_id=entity_id,
+                definition_id=row[2],
+                value=TypedValue(kind, value),
+                unit=row[4],
+                quality=quality,
+                reason=row[11],
+                observed_at=row[12],
+                received_at=row[13],
+                calculated_at=row[14],
+                processing_revision_id=UUID(str(row[15])),
+                site_configuration_version=int(row[16]),
+                source_observation_ids=(),
+                source_digest=row[17].strip(),
+                source_order_key=row[18],
+            )
+        return result
 
     def record_failure(
         self,
@@ -1209,13 +1552,38 @@ class PostgresDataTrunkRepository:
                 """,
                 ([str(item) for item in observation.source_observation_ids],),
             )
-            sources = cursor.fetchall()
-            if len(sources) != len(observation.source_observation_ids):
+            l0_sources = {
+                UUID(str(source_id)): (source_digest.strip(),)
+                for source_id, source_digest in cursor.fetchall()
+            }
+            unresolved = tuple(
+                source_id for source_id in observation.source_observation_ids
+                if source_id not in l0_sources
+            )
+            l2_sources: dict[UUID, tuple[datetime, str]] = {}
+            if unresolved:
+                cursor.execute(
+                    """
+                    SELECT event_id, observed_at, source_digest
+                    FROM t_l2_observations
+                    WHERE event_id = ANY(%s::uuid[])
+                    ORDER BY event_id, observed_at DESC
+                    """,
+                    ([str(item) for item in unresolved],),
+                )
+                for source_id, observed_at, source_digest in cursor.fetchall():
+                    l2_sources.setdefault(
+                        UUID(str(source_id)),
+                        (observed_at, source_digest.strip()),
+                    )
+            if len(l0_sources) + len(l2_sources) != len(
+                observation.source_observation_ids
+            ):
                 raise DataTrunkError(
                     "POINT_PROCESSING_SOURCE_MISSING",
                     "L2 source observation is unavailable",
                 )
-            for source_id, source_digest in sources:
+            for source_id, (source_digest,) in l0_sources.items():
                 cursor.execute(
                     """
                     INSERT INTO t_l2_observation_sources
@@ -1228,6 +1596,24 @@ class PostgresDataTrunkRepository:
                         str(observation.event_id),
                         observation.observed_at,
                         str(source_id),
+                        source_digest,
+                    ),
+                )
+            for source_id, (source_observed_at, source_digest) in l2_sources.items():
+                cursor.execute(
+                    """
+                    INSERT INTO t_l2_observation_sources
+                      (l2_event_id, l2_observed_at, source_kind,
+                       source_l2_event_id, source_l2_observed_at,
+                       source_digest)
+                    VALUES (%s, %s, 'l2', %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (
+                        str(observation.event_id),
+                        observation.observed_at,
+                        str(source_id),
+                        source_observed_at,
                         source_digest,
                     ),
                 )

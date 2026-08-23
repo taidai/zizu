@@ -29,6 +29,12 @@ BEGIN
 END;
 $$;
 
+ALTER TABLE t_nodes
+  ADD COLUMN IF NOT EXISTS parent_id UUID REFERENCES t_nodes(id);
+
+CREATE INDEX IF NOT EXISTS ix_nodes_parent_id
+  ON t_nodes(parent_id);
+
 CREATE TABLE IF NOT EXISTS t_point_processing_expressions (
   output_id UUID PRIMARY KEY REFERENCES t_point_processing_outputs(id),
   dsl_text TEXT NOT NULL CHECK (btrim(dsl_text) <> ''),
@@ -93,6 +99,15 @@ CREATE INDEX IF NOT EXISTS ix_point_processing_dependencies_target
 CREATE INDEX IF NOT EXISTS ix_point_processing_selector_members_entity
   ON t_point_processing_selector_members(entity_instance_id);
 
+CREATE TABLE IF NOT EXISTS t_point_processing_formula_runs (
+  installed_processing_id UUID NOT NULL
+    REFERENCES t_installed_point_processings(id),
+  output_id UUID NOT NULL REFERENCES t_point_processing_outputs(id),
+  last_evaluated_at TIMESTAMPTZ NOT NULL,
+  last_event_id UUID,
+  PRIMARY KEY(installed_processing_id, output_id)
+);
+
 DROP TRIGGER IF EXISTS trg_point_processing_expressions_immutable
   ON t_point_processing_expressions;
 CREATE TRIGGER trg_point_processing_expressions_immutable
@@ -140,4 +155,3 @@ DROP TRIGGER IF EXISTS trg_point_processing_dependencies_no_truncate
 CREATE TRIGGER trg_point_processing_dependencies_no_truncate
 BEFORE TRUNCATE ON t_point_processing_dependencies
 FOR EACH STATEMENT EXECUTE FUNCTION reject_data_trunk_append_only();
-

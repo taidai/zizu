@@ -25,6 +25,15 @@ from app.services.point_processing import (
     PointProcessingTemplateSummary,
     _template_source_catalog_digest,
 )
+from app.services.point_processing_dag import (
+    PointProcessingDagError,
+    validate_processing_dag,
+)
+from app.services.point_processing_selectors import (
+    PointProcessingSelectorError,
+    Selector,
+    freeze_selector,
+)
 from app.services.solution_delivery_contracts import DeliveryError, PackageImport
 from app.services.solution_point_processings import (
     PointProcessingAsset,
@@ -227,6 +236,26 @@ def persist_point_processing_assets(
                         item.source_contract.get("readOnly") if item.source_contract else None,
                     ),
                 )
+                if item.selector is not None:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_point_processing_selectors
+                          (input_id, scope, node_type, entity_definition_id,
+                           cardinality, default_value)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (input_id) DO NOTHING
+                        """,
+                        (
+                            input_id,
+                            item.selector["scope"],
+                            item.selector["nodeType"],
+                            item.selector["entityDefinition"],
+                            item.cardinality,
+                            Json(item.default_value)
+                            if item.default_value is not None
+                            else None,
+                        ),
+                    )
 
             for output in asset.outputs:
                 output_id = _output_id(revision_id, output.output_id)
@@ -313,7 +342,7 @@ def persist_point_processing_assets(
                                 entry["name"],
                             ),
                         )
-                else:
+                elif transform["kind"] == "boolean_set":
                     cursor.execute(
                         """
                         INSERT INTO t_boolean_set_transform_rules (output_id)
@@ -338,6 +367,27 @@ def persist_point_processing_assets(
                                 entry["category"],
                             ),
                         )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_point_processing_expressions
+                          (output_id, dsl_text, canonical_ast, ast_digest,
+                           result_data_type, result_unit, schedule_seconds,
+                           control_eligible)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (output_id) DO NOTHING
+                        """,
+                        (
+                            output_id,
+                            transform["expression"],
+                            Json(_plain(transform["canonicalAst"])),
+                            transform["astDigest"],
+                            output.data_type,
+                            output.unit,
+                            transform["scheduleSeconds"],
+                            transform["controlEligible"],
+                        ),
+                    )
     except DeliveryError:
         raise
     except psycopg2.Error as exc:
@@ -413,6 +463,83 @@ class PostgresPointProcessingCatalog:
             with connection.cursor() as cursor:
                 return self.list_sources_with_cursor(cursor, node_id)
 
+    def list_selector_members(
+        self,
+        target_node_id: UUID,
+        selector: Selector,
+    ) -> tuple[UUID, ...]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                return self.list_selector_members_with_cursor(
+                    cursor,
+                    target_node_id,
+                    selector,
+                )
+
+    @staticmethod
+    def list_selector_members_with_cursor(
+        cursor: Any,
+        target_node_id: UUID,
+        selector: Selector,
+    ) -> tuple[UUID, ...]:
+        cursor.execute(
+            """
+                    WITH RECURSIVE descendants(id) AS (
+                      SELECT id FROM t_nodes WHERE parent_id = %s
+                      UNION ALL
+                      SELECT child.id
+                      FROM t_nodes AS child
+                      JOIN descendants AS parent ON child.parent_id = parent.id
+                    )
+                    SELECT entity.id
+                    FROM descendants
+                    JOIN t_nodes AS node ON node.id = descendants.id
+                    JOIN t_device_instances AS device ON device.node_id = node.id
+                    JOIN t_entity_instances AS entity
+                      ON entity.device_instance_id = device.id
+                    WHERE node.node_type = %s
+                      AND entity.definition_id = %s
+                      AND entity.source_kind = 'point_processing'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM t_point_processing_output_bindings AS binding
+                        JOIN t_installed_point_processings AS installed
+                          ON installed.id = binding.installed_processing_id
+                         AND installed.current = TRUE
+                        WHERE binding.entity_instance_id = entity.id
+                      )
+                    ORDER BY entity.id
+            """,
+            (
+                target_node_id,
+                selector.node_type,
+                selector.entity_definition_id,
+            ),
+        )
+        return tuple(row[0] for row in cursor.fetchall())
+
+    def dependency_edges(self) -> tuple[tuple[UUID, UUID], ...]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT dependency.source_entity_instance_id,
+                                    dependency.target_entity_instance_id
+                    FROM t_point_processing_dependencies AS dependency
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id = dependency.installed_processing_id
+                    WHERE installed.current = TRUE
+                    ORDER BY 1, 2
+                    """
+                )
+                return tuple(cursor.fetchall())
+
+    def record_dependencies(
+        self,
+        edges: tuple[tuple[UUID, UUID], ...],
+    ) -> None:
+        del edges
+
     @staticmethod
     def list_sources_with_cursor(
         cursor: Any,
@@ -473,12 +600,19 @@ class PostgresPointProcessingCatalog:
             return None
         cursor.execute(
             """
-            SELECT input_key, source_kind, stable_source_key, aliases,
-                   data_type, unit, required, expected_group, expected_address,
-                   expected_wire_data_type, expected_decimal, expected_read_only
-            FROM t_point_processing_inputs
-            WHERE revision_id = %s
-            ORDER BY input_key
+            SELECT input.input_key, input.source_kind,
+                   input.stable_source_key, input.aliases,
+                   input.data_type, input.unit, input.required,
+                   input.expected_group, input.expected_address,
+                   input.expected_wire_data_type, input.expected_decimal,
+                   input.expected_read_only, selector.scope,
+                   selector.node_type, selector.entity_definition_id,
+                   selector.cardinality, selector.default_value
+            FROM t_point_processing_inputs AS input
+            LEFT JOIN t_point_processing_selectors AS selector
+              ON selector.input_id = input.id
+            WHERE input.revision_id = %s
+            ORDER BY input.input_key
             """,
             (revision_id,),
         )
@@ -502,6 +636,19 @@ class PostgresPointProcessingCatalog:
                         "readOnly": item[11],
                     })
                 ),
+                cardinality=item[15] or "one",
+                selector=(
+                    None
+                    if item[12] is None
+                    else MappingProxyType(
+                        {
+                            "scope": item[12],
+                            "nodeType": item[13],
+                            "entityDefinition": item[14],
+                        }
+                    )
+                ),
+                default_value=item[16],
             )
             for item in cursor.fetchall()
         )
@@ -546,6 +693,25 @@ class PostgresPointProcessingCatalog:
 
     @staticmethod
     def _load_transform(cursor: Any, output_id: UUID) -> dict[str, Any]:
+        cursor.execute(
+            """
+            SELECT dsl_text, canonical_ast, ast_digest,
+                   schedule_seconds, control_eligible
+            FROM t_point_processing_expressions
+            WHERE output_id = %s
+            """,
+            (output_id,),
+        )
+        expression = cursor.fetchone()
+        if expression is not None:
+            return {
+                "kind": "formula",
+                "expression": expression[0],
+                "canonicalAst": MappingProxyType(expression[1]),
+                "astDigest": expression[2].strip(),
+                "scheduleSeconds": expression[3],
+                "controlEligible": expression[4],
+            }
         cursor.execute(
             """
             SELECT input.input_key, rule.scale, rule."offset",
@@ -727,6 +893,20 @@ class PostgresPointProcessingRepository:
                 input_ids = dict(cursor.fetchall())
                 cursor.execute(
                     """
+                    SELECT input.input_key, member.entity_instance_id
+                    FROM t_point_processing_selector_members AS member
+                    JOIN t_point_processing_inputs AS input
+                      ON input.id = member.input_id
+                    WHERE member.installed_processing_id = %s
+                    ORDER BY input.input_key, member.ordinal
+                    """,
+                    (installed[0],),
+                )
+                selector_ids: dict[str, list[UUID]] = {}
+                for input_key, entity_id in cursor.fetchall():
+                    selector_ids.setdefault(input_key, []).append(entity_id)
+                cursor.execute(
+                    """
                     SELECT output.output_key, binding.entity_instance_id
                     FROM t_point_processing_output_bindings AS binding
                     JOIN t_point_processing_outputs AS output
@@ -743,6 +923,10 @@ class PostgresPointProcessingRepository:
                     revision_id=installed[2],
                     input_source_ids=input_ids,
                     output_entity_ids=output_ids,
+                    selector_source_ids={
+                        key: tuple(values)
+                        for key, values in selector_ids.items()
+                    },
                 )
 
     def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan:
@@ -837,6 +1021,23 @@ class PostgresPointProcessingRepository:
                             source_kind = None
                     else:
                         selected_entity_id = UUID(selected)
+            elif item["kind"] == "selector_binding":
+                cursor.execute(
+                    """
+                    SELECT id FROM t_point_processing_inputs
+                    WHERE revision_id = %s AND input_key = %s
+                    """,
+                    (plan.template_revision_id, item["input_id"]),
+                )
+                relation = cursor.fetchone()
+                if relation is None:
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Point processing selector input relation is missing",
+                    )
+                input_id = relation[0]
+            elif item["kind"] == "dag_validation":
+                layer = "L1"
             elif item["kind"] == "output_binding":
                 layer = "L2"
                 cursor.execute(
@@ -1010,6 +1211,8 @@ class PostgresPointProcessingRepository:
                                    t_entity_instance_bindings,
                                    t_entity_binding_confirmations,
                                    t_point_processing_output_bindings,
+                                   t_point_processing_selector_members,
+                                   t_point_processing_dependencies,
                                    t_installed_point_processings
                         IN SHARE ROW EXCLUSIVE MODE
                         """
@@ -1034,11 +1237,87 @@ class PostgresPointProcessingRepository:
                             sources,
                             plan.node_id,
                         )
+                    selector_digests: dict[str, str] = {}
+                    for item in plan.items:
+                        if item.get("kind") != "selector_binding":
+                            continue
+                        selector = Selector(
+                            scope=str(item["selector"]["scope"]),
+                            node_type=str(item["selector"]["nodeType"]),
+                            entity_definition_id=str(
+                                item["selector"]["entityDefinition"]
+                            ),
+                            cardinality=str(item["cardinality"]),
+                        )
+                        try:
+                            frozen = freeze_selector(
+                                selector=selector,
+                                target_node_id=plan.node_id,
+                                site_configuration_version=current_version,
+                                entity_instance_ids=(
+                                    PostgresPointProcessingCatalog
+                                    .list_selector_members_with_cursor(
+                                        cursor,
+                                        plan.node_id,
+                                        selector,
+                                    )
+                                ),
+                            )
+                        except PointProcessingSelectorError as exc:
+                            raise PointProcessingError(
+                                "POINT_PROCESSING_SELECTOR_STALE",
+                                "Point processing selector members changed after planning",
+                            ) from exc
+                        if frozen.digest != item.get("selector_digest"):
+                            raise PointProcessingError(
+                                "POINT_PROCESSING_SELECTOR_STALE",
+                                "Point processing selector members changed after planning",
+                            )
+                        selector_digests[item["input_id"]] = frozen.digest
+                    if selector_digests:
+                        actual_source_digest = _digest(
+                            {
+                                "catalog_digest": actual_source_digest,
+                                "selector_digests": {
+                                    key: selector_digests[key]
+                                    for key in sorted(selector_digests)
+                                },
+                            }
+                        )
                     if plan.source_catalog_digest != actual_source_digest:
                         raise PointProcessingError(
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing source catalog changed after planning",
                         )
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT dependency.source_entity_instance_id,
+                                        dependency.target_entity_instance_id
+                        FROM t_point_processing_dependencies AS dependency
+                        JOIN t_installed_point_processings AS installed
+                          ON installed.id = dependency.installed_processing_id
+                        WHERE installed.current = TRUE
+                        ORDER BY 1, 2
+                        """
+                    )
+                    existing_edges = tuple(cursor.fetchall())
+                    planned_edges = tuple(
+                        (UUID(source), UUID(target))
+                        for item in plan.items
+                        if item.get("kind") == "dag_validation"
+                        for source, target in item.get("planned_edges", ())
+                    )
+                    try:
+                        validate_processing_dag(
+                            existing_edges=existing_edges,
+                            planned_edges=planned_edges,
+                            max_depth=8,
+                        )
+                    except PointProcessingDagError as exc:
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_DAG_STALE",
+                            "Point processing dependency graph changed after planning",
+                        ) from exc
                     self._verify_package_ownership(cursor, plan, current_version)
                     self._apply_l0_plan_items(cursor, plan)
 
@@ -1323,17 +1602,24 @@ class PostgresPointProcessingRepository:
             if item["kind"] == "input_binding":
                 cursor.execute(
                     """
-                    SELECT id, source_kind
+                    SELECT id, source_kind, required
                     FROM t_point_processing_inputs
                     WHERE revision_id = %s AND input_key = %s
                     """,
                     (plan.template_revision_id, item["input_id"]),
                 )
                 relation = cursor.fetchone()
-                if relation is None or item.get("selected_source_id") is None:
+                if relation is None:
                     raise PointProcessingError(
                         "POINT_PROCESSING_PLAN_STALE",
                         "Point processing input relation is no longer available",
+                    )
+                if item.get("selected_source_id") is None:
+                    if relation[2] is False:
+                        continue
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Required point processing input has no selected source",
                     )
                 selected_id = UUID(item["selected_source_id"])
                 cursor.execute(
@@ -1353,7 +1639,80 @@ class PostgresPointProcessingRepository:
                     ),
                 )
                 continue
+            if item["kind"] == "selector_binding":
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM t_point_processing_inputs
+                    WHERE revision_id = %s AND input_key = %s
+                    """,
+                    (plan.template_revision_id, item["input_id"]),
+                )
+                relation = cursor.fetchone()
+                if relation is None:
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Point processing selector relation is no longer available",
+                    )
+                for ordinal, selected in enumerate(item["selected_source_ids"]):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_point_processing_selector_members
+                          (installed_processing_id, input_id, ordinal,
+                           entity_instance_id, selector_digest)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            installed_id,
+                            relation[0],
+                            ordinal,
+                            UUID(selected),
+                            item["selector_digest"],
+                        ),
+                    )
+                continue
             if item["kind"] == "l0_point":
+                continue
+            if item["kind"] == "dag_validation":
+                for dependency in item.get("planned_dependencies", ()):
+                    cursor.execute(
+                        """
+                        SELECT input.id, output.id
+                        FROM t_point_processing_inputs AS input
+                        CROSS JOIN t_point_processing_outputs AS output
+                        WHERE input.revision_id = %s
+                          AND input.input_key = %s
+                          AND output.revision_id = %s
+                          AND output.output_key = %s
+                        """,
+                        (
+                            plan.template_revision_id,
+                            dependency["input_id"],
+                            plan.template_revision_id,
+                            dependency["output_id"],
+                        ),
+                    )
+                    relation = cursor.fetchone()
+                    if relation is None:
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
+                            "Point processing dependency relation is unavailable",
+                        )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_point_processing_dependencies
+                          (installed_processing_id, input_id, output_id,
+                           source_entity_instance_id, target_entity_instance_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            installed_id,
+                            relation[0],
+                            relation[1],
+                            UUID(dependency["source_entity_instance_id"]),
+                            UUID(dependency["target_entity_instance_id"]),
+                        ),
+                    )
                 continue
             cursor.execute(
                 """

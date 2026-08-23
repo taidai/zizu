@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from datetime import UTC, datetime, timedelta
 import unittest
+from dataclasses import replace
 from uuid import UUID
 
 import psycopg2
@@ -30,6 +31,205 @@ SPEC.loader.exec_module(builder)
     "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL point-processing tests",
 )
 class PointProcessingPostgresTest(unittest.TestCase):
+    def test_site_formula_freezes_members_and_persists_dag_atomically(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingDelivery,
+            PreviewPointProcessing,
+            _stable_output_entity_id,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            persist_point_processing_assets,
+        )
+        from app.services.solution_point_processings import (
+            _asset_dict,
+            point_processing_revision_id,
+        )
+        from tests.test_point_processing import _site_formula_asset
+
+        package, brand_a_revision, _ = self._import_reference_package()
+        pcs_1 = UUID("85000000-0000-0000-0000-000000000001")
+        pcs_2 = UUID("85000000-0000-0000-0000-000000000002")
+        site_id = UUID("85000000-0000-0000-0000-000000000010")
+        pcs_1_node = UUID("85000000-0000-0000-0000-000000000011")
+        pcs_2_node = UUID("85000000-0000-0000-0000-000000000012")
+        entity_ids = {
+            "active_power": pcs_1,
+            "operating_state": UUID("85000000-0000-0000-0000-000000000101"),
+            "fault_codes": UUID("85000000-0000-0000-0000-000000000102"),
+        }
+        self._seed_brand_a_site(
+            package.id,
+            package.digest,
+            brand_a_revision,
+            pcs_1_node,
+            entity_ids,
+        )
+        formula_asset = _site_formula_asset()
+        formula_package = replace(
+            package,
+            manifest={
+                **package.manifest,
+                "_point_processing_assets": [_asset_dict(formula_asset)],
+            },
+        )
+        formula_revision = point_processing_revision_id(formula_asset)
+        identity_id = UUID("85000000-0000-0000-0000-000000000203")
+        installation_id = UUID("85000000-0000-0000-0000-000000000202")
+        site_output = _stable_output_entity_id(
+            identity_id,
+            site_id,
+            "site.total_pcs_power",
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                persist_point_processing_assets(
+                    cursor,
+                    formula_package,
+                    "user:engineer-formula",
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_nodes (id, name, node_type)
+                    VALUES (%s, 'SITE-01', 'SITE')
+                    """,
+                    (site_id,),
+                )
+                cursor.execute(
+                    """
+                    UPDATE t_nodes
+                    SET parent_id = %s, node_type = 'PCS'
+                    WHERE id = %s
+                    """,
+                    (site_id, pcs_1_node),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_nodes (id, name, parent_id, node_type)
+                    VALUES (%s, 'PCS-02', %s, 'PCS')
+                    """,
+                    (pcs_2_node, site_id),
+                )
+                pcs_2_device = UUID("85000000-0000-0000-0000-000000000302")
+                cursor.execute(
+                    """
+                    INSERT INTO t_device_instances
+                      (id, identity_installation_id, slot_id, instance_key,
+                       device_category, display_name, node_id)
+                    VALUES (%s, %s, 'slot.pcs-2', 'PCS-02', 'PCS', 'PCS-02', %s)
+                    """,
+                    (pcs_2_device, identity_id, pcs_2_node),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instances
+                      (id, device_instance_id, definition_id, display_name,
+                       data_type, unit, direction, freshness_seconds, source_kind)
+                    VALUES (%s, %s, 'pcs.active_power', 'PCS-02 有功功率',
+                            'FLOAT', 'kW', 'R', 30, 'point_processing')
+                    """,
+                    (pcs_2, pcs_2_device),
+                )
+                second_installed = UUID("85000000-0000-0000-0000-000000000306")
+                cursor.execute(
+                    """
+                    INSERT INTO t_installed_point_processings
+                      (id, node_id, revision_id, source_plan_id,
+                       solution_installation_id, site_configuration_version,
+                       installed_by, current)
+                    VALUES (%s, %s, %s,
+                            '85000000-0000-0000-0000-000000000205',
+                            %s, 1, 'user:engineer-install', TRUE)
+                    """,
+                    (second_installed, pcs_2_node, brand_a_revision, installation_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_output_bindings
+                      (installed_processing_id, output_id, entity_instance_id)
+                    SELECT %s, id, %s
+                    FROM t_point_processing_outputs
+                    WHERE revision_id = %s AND output_key = 'active_power'
+                    """,
+                    (second_installed, pcs_2, brand_a_revision),
+                )
+                site_device = UUID("85000000-0000-0000-0000-000000000310")
+                cursor.execute(
+                    """
+                    INSERT INTO t_device_instances
+                      (id, identity_installation_id, slot_id, instance_key,
+                       device_category, display_name, node_id)
+                    VALUES (%s, %s, 'slot.site', 'SITE-01', 'SITE', 'SITE-01', %s)
+                    """,
+                    (site_device, identity_id, site_id),
+                )
+
+        service = PointProcessingDelivery(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+        )
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=site_id,
+                template_revision_id=formula_revision,
+                input_selections={},
+                actor="user:engineer-formula",
+                entity_identity_installation_id=identity_id,
+                solution_installation_id=installation_id,
+            )
+        )
+        self.assertEqual("ready", plan.status, plan.blockers)
+        with psycopg2.connect(**self.connection_kwargs) as transaction:
+            with transaction.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instances
+                      (id, device_instance_id, definition_id, display_name,
+                       data_type, unit, direction, freshness_seconds, source_kind)
+                    VALUES (%s, %s, 'site.total_pcs_power', 'PCS 总功率',
+                            'FLOAT', 'kW', 'R', 5, 'point_processing')
+                    """,
+                    (site_output, site_device),
+                )
+            application = service.apply(
+                ApplyPointProcessingPlan(
+                    plan.id,
+                    plan.digest,
+                    "install-site-formula",
+                    "user:engineer-formula",
+                ),
+                transaction=transaction,
+            )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM t_point_processing_selector_members
+                       WHERE installed_processing_id = %s),
+                      (SELECT count(*) FROM t_point_processing_dependencies
+                       WHERE installed_processing_id = %s)
+                    """,
+                    (
+                        application.installed_processing_id,
+                        application.installed_processing_id,
+                    ),
+                )
+                self.assertEqual((2, 2), cursor.fetchone())
+                cursor.execute(
+                    """
+                    SELECT entity_instance_id
+                    FROM t_point_processing_selector_members
+                    WHERE installed_processing_id = %s
+                    ORDER BY ordinal
+                    """,
+                    (application.installed_processing_id,),
+                )
+                self.assertEqual((pcs_1, pcs_2), tuple(row[0] for row in cursor))
+
     def test_en9_unified_plan_applies_l0_l1_l2_atomically(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
         from app.services.point_processing import (
@@ -159,6 +359,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 DataTrunkMigrationPostgresTest._apply_039(cursor)
                 DataTrunkMigrationPostgresTest._apply_040(cursor)
                 DataTrunkMigrationPostgresTest._apply_041(cursor)
+                DataTrunkMigrationPostgresTest._apply_042(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     def test_package_import_persists_complete_versioned_catalog_atomically(self) -> None:

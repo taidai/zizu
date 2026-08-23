@@ -55,6 +55,7 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("t_point_processing_expressions", calls[0])
         self.assertIn("t_point_processing_selector_members", calls[0])
         self.assertIn("t_point_processing_dependencies", calls[0])
+        self.assertIn("t_point_processing_formula_runs", calls[0])
         self.assertIn("assert_entity_instance_single_source(id)", calls[1])
         self.assertIn("FROM t_entity_instances", calls[1])
 

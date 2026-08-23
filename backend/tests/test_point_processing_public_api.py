@@ -48,6 +48,9 @@ ENTITY_IDENTITY_INSTALLATION_ID = UUID("84000000-0000-0000-0000-000000000002")
 SOLUTION_INSTALLATION_ID = UUID("84000000-0000-0000-0000-000000000003")
 BRAND_A_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000a")
 BRAND_B_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000b")
+SITE_FORMULA_REVISION_ID = UUID("84000000-0000-0000-0000-00000000000c")
+PCS_POWER_1 = UUID("85000000-0000-0000-0000-000000000101")
+PCS_POWER_2 = UUID("85000000-0000-0000-0000-000000000102")
 
 
 class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
@@ -60,6 +63,8 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def build_app(self) -> tuple[FastAPI, InMemoryIdentityRepository, InMemoryPointProcessingRepository]:
+        from tests.test_point_processing import _site_formula_asset
+
         package = SolutionDelivery(
             InMemoryDeliveryRepository(),
             platform_version="0.4.77",
@@ -72,6 +77,7 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 templates={
                     BRAND_A_REVISION_ID: assets["pcs.brand-a"],
                     BRAND_B_REVISION_ID: assets["pcs.brand-b"],
+                    SITE_FORMULA_REVISION_ID: _site_formula_asset(),
                 },
                 sources=(
                     PointProcessingSource(UUID("85000000-0000-0000-0000-000000000001"), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
@@ -81,6 +87,12 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     PointProcessingSource(UUID("85000000-0000-0000-0000-000000000012"), "l0", NODE_ID, "ModeCode", "STRING", None, True),
                     PointProcessingSource(UUID("85000000-0000-0000-0000-000000000013"), "l0", NODE_ID, "AlarmList", "STRING", None, True),
                 ),
+                selector_members={
+                    (NODE_ID, "PCS", "pcs.active_power"): (
+                        PCS_POWER_2,
+                        PCS_POWER_1,
+                    ),
+                },
             ),
         )
         initial_plan = service.preview(
@@ -127,6 +139,47 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, response.status_code, response.text)
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    async def test_formula_preview_is_read_only_typed_and_engineer_only(self) -> None:
+        app, _, repository = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            operator_headers = await self.login(client, "operator")
+            engineer_headers = await self.login(client, "engineer")
+            body = {
+                "template_revision_id": str(SITE_FORMULA_REVISION_ID),
+                "expression": "sum(pcs_power)",
+            }
+            templates = await client.get(
+                "/api/v1/point-processing-templates?device_category=SITE",
+                headers=engineer_headers,
+            )
+            denied = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-formula-preview",
+                headers=operator_headers,
+                json=body,
+            )
+            response = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-formula-preview",
+                headers=engineer_headers,
+                json=body,
+            )
+
+        self.assertEqual(403, denied.status_code, denied.text)
+        self.assertEqual(200, templates.status_code, templates.text)
+        template = templates.json()["items"][0]
+        self.assertEqual("many", template["inputs"][0]["cardinality"])
+        self.assertEqual("PCS", template["inputs"][0]["selector"]["nodeType"])
+        self.assertEqual("formula", template["outputs"][0]["transform"]["kind"])
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("FLOAT", response.json()["result_type"])
+        self.assertEqual("kW", response.json()["result_unit"])
+        self.assertEqual(2, response.json()["member_count"])
+        self.assertEqual(2, response.json()["dag_summary"]["edge_count"])
+        self.assertEqual(1, repository.application_count())
 
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
         app, identity_repository, repository = self.build_app()
