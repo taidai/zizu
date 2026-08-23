@@ -8,7 +8,7 @@ import math
 import re
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.services.business_metric_contracts import (
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION = "zizu.business-metric/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
-_DURATION = re.compile(r"([1-9]\d*)([smhd])")
+_DURATION = re.compile(r"(\d+)([smhd])")
 _DURATION_SECONDS = {"s": 1, "m": 60, "h": 60 * 60, "d": 24 * 60 * 60}
 
 
@@ -59,6 +59,7 @@ def parse_business_metric_asset(raw: Mapping[str, Any]) -> BusinessMetricTemplat
         "window",
         "sources",
         "quality",
+        "allowedLateness",
         "correction",
         "capabilities",
     }
@@ -79,13 +80,28 @@ def parse_business_metric_asset(raw: Mapping[str, Any]) -> BusinessMetricTemplat
     window_kind, rolling_seconds = _parse_window(raw.get("window"))
     sources = _parse_sources(raw.get("sources"))
     quality = _parse_quality(raw.get("quality"))
-    correction_seconds = _parse_correction(raw.get("correction"))
+    allowed_lateness_seconds = _parse_allowed_lateness(raw.get("allowedLateness"))
+    correction_seconds = _parse_correction(raw.get("correction"), window_kind)
     flow_direction, normalize_flow_direction = _parse_flow(raw.get("flow"))
     capabilities = raw.get("capabilities")
     if not isinstance(capabilities, Mapping) or set(capabilities) != {"controlEligible"} or capabilities.get("controlEligible") is not False:
         raise _invalid("Business metric control capability must be false")
 
-    content_digest = _digest(_plain(raw))
+    content_digest = _template_content_digest(
+        template_id=raw["id"],
+        revision=revision,
+        display_name=raw["displayName"],
+        target_node_type=raw["targetNodeType"],
+        output=output,
+        window_kind=window_kind,
+        rolling_window_seconds=rolling_seconds,
+        sources=sources,
+        quality=quality,
+        allowed_lateness_seconds=allowed_lateness_seconds,
+        automatic_correction_horizon_seconds=correction_seconds,
+        flow_direction=flow_direction,
+        normalize_flow_direction=normalize_flow_direction,
+    )
     return BusinessMetricTemplate(
         template_id=raw["id"],
         revision=revision,
@@ -99,6 +115,7 @@ def parse_business_metric_asset(raw: Mapping[str, Any]) -> BusinessMetricTemplat
         rolling_window_seconds=rolling_seconds,
         sources=sources,
         quality=quality,
+        allowed_lateness_seconds=allowed_lateness_seconds,
         automatic_correction_horizon_seconds=correction_seconds,
         control_eligible=False,
         flow_direction=flow_direction,
@@ -163,7 +180,9 @@ def compile_business_metric(
             "sourceDigest": source_digest,
             "window": template.window_kind.value,
             "rollingWindowSeconds": template.rolling_window_seconds,
-            "qualityMinimumCoverage": template.quality.minimum_coverage,
+            "qualityGoodCoverage": template.quality.good_coverage,
+            "qualityMinimumUsableCoverage": template.quality.minimum_usable_coverage,
+            "allowedLatenessSeconds": template.allowed_lateness_seconds,
             "automaticCorrectionHorizonSeconds": template.automatic_correction_horizon_seconds,
             "methods": tuple(source.method.value for source in sources),
             "flowDirection": template.flow_direction.value,
@@ -287,16 +306,38 @@ def _parse_sources(raw: Any) -> tuple[MetricSourceOption, ...]:
 
 
 def _parse_quality(raw: Any) -> MetricQualityContract:
-    value = raw.get("minimumCoverage") if isinstance(raw, Mapping) and set(raw) == {"minimumCoverage"} else None
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 < float(value) <= 1:
+    if not isinstance(raw, Mapping) or set(raw) != {"goodCoverage", "minimumUsableCoverage"}:
         raise _invalid("Business metric quality contract is invalid")
-    return MetricQualityContract(float(value))
+    good = raw.get("goodCoverage")
+    minimum_usable = raw.get("minimumUsableCoverage")
+    if (
+        not isinstance(good, (int, float))
+        or isinstance(good, bool)
+        or not math.isfinite(float(good))
+        or not isinstance(minimum_usable, (int, float))
+        or isinstance(minimum_usable, bool)
+        or not math.isfinite(float(minimum_usable))
+        or not 0 <= float(minimum_usable) <= float(good) <= 1
+    ):
+        raise _invalid("Business metric quality contract is invalid")
+    return MetricQualityContract(float(good), float(minimum_usable))
 
 
-def _parse_correction(raw: Any) -> int:
+def _parse_allowed_lateness(raw: Any) -> int:
+    return _duration_seconds(raw, allow_zero=True)
+
+
+def _parse_correction(raw: Any, window_kind: WindowKind) -> int:
     if not isinstance(raw, Mapping) or set(raw) != {"automaticHorizon"}:
         raise _invalid("Business metric correction contract is invalid")
-    return _duration_seconds(raw.get("automaticHorizon"))
+    seconds = _duration_seconds(raw.get("automaticHorizon"))
+    expected = {
+        WindowKind.ALIGNED_DAILY: 7 * 24 * 60 * 60,
+        WindowKind.ROLLING: 6 * 60 * 60,
+    }[window_kind]
+    if seconds != expected:
+        raise _invalid("Business metric correction horizon does not match window kind")
+    return seconds
 
 
 def _parse_flow(raw: Any) -> tuple[FlowDirection, bool]:
@@ -336,7 +377,8 @@ def _validate_resolution(template: BusinessMetricTemplate, resolution: MetricSou
         except ValueError as exc:
             raise _invalid("Business metric resolved source method is invalid") from exc
         if (
-            source.entity_instance_id in identifiers
+            not isinstance(source.entity_instance_id, UUID)
+            or source.entity_instance_id in identifiers
             or (source.entity_definition_id, method) not in allowed
             or source.data_type not in _DATA_TYPES
             or not isinstance(source.unit, (str, type(None)))
@@ -362,7 +404,9 @@ def _template_dict(template: BusinessMetricTemplate) -> dict[str, Any]:
             {"method": item.method.value, "entity_definition_id": item.entity_definition_id, "priority": item.priority}
             for item in template.sources
         ],
-        "minimum_coverage": template.quality.minimum_coverage,
+        "good_coverage": template.quality.good_coverage,
+        "minimum_usable_coverage": template.quality.minimum_usable_coverage,
+        "allowed_lateness_seconds": template.allowed_lateness_seconds,
         "automatic_correction_horizon_seconds": template.automatic_correction_horizon_seconds,
         "control_eligible": template.control_eligible,
         "flow_direction": template.flow_direction.value,
@@ -391,7 +435,11 @@ def _template_from_dict(raw: Mapping[str, Any]) -> BusinessMetricTemplate:
             )
             for item in raw["sources"]
         ),
-        quality=MetricQualityContract(raw["minimum_coverage"]),
+        quality=MetricQualityContract(
+            raw["good_coverage"],
+            raw["minimum_usable_coverage"],
+        ),
+        allowed_lateness_seconds=raw["allowed_lateness_seconds"],
         automatic_correction_horizon_seconds=raw["automatic_correction_horizon_seconds"],
         control_eligible=raw["control_eligible"],
         flow_direction=FlowDirection(raw["flow_direction"]),
@@ -400,11 +448,62 @@ def _template_from_dict(raw: Mapping[str, Any]) -> BusinessMetricTemplate:
     )
 
 
-def _duration_seconds(value: Any) -> int:
+def _duration_seconds(value: Any, *, allow_zero: bool = False) -> int:
     match = _DURATION.fullmatch(value) if isinstance(value, str) else None
-    if match is None:
+    if match is None or (not allow_zero and int(match.group(1)) == 0):
         raise _invalid("Business metric duration is invalid")
     return int(match.group(1)) * _DURATION_SECONDS[match.group(2)]
+
+
+def _template_content_digest(
+    *,
+    template_id: str,
+    revision: int,
+    display_name: str,
+    target_node_type: str,
+    output: Mapping[str, Any],
+    window_kind: WindowKind,
+    rolling_window_seconds: int | None,
+    sources: tuple[MetricSourceOption, ...],
+    quality: MetricQualityContract,
+    allowed_lateness_seconds: int,
+    automatic_correction_horizon_seconds: int,
+    flow_direction: FlowDirection,
+    normalize_flow_direction: bool,
+) -> str:
+    return _digest(
+        {
+            "schemaVersion": _SCHEMA_VERSION,
+            "id": template_id,
+            "revision": revision,
+            "displayName": display_name,
+            "targetNodeType": target_node_type,
+            "output": dict(output),
+            "window": {
+                "kind": window_kind.value,
+                "rollingWindowSeconds": rolling_window_seconds,
+            },
+            "sources": [
+                {
+                    "method": source.method.value,
+                    "entityDefinition": source.entity_definition_id,
+                    "priority": source.priority,
+                }
+                for source in sources
+            ],
+            "quality": {
+                "goodCoverage": quality.good_coverage,
+                "minimumUsableCoverage": quality.minimum_usable_coverage,
+            },
+            "allowedLatenessSeconds": allowed_lateness_seconds,
+            "automaticCorrectionHorizonSeconds": automatic_correction_horizon_seconds,
+            "flow": {
+                "direction": flow_direction.value,
+                "normalize": normalize_flow_direction,
+            },
+            "controlEligible": False,
+        }
+    )
 
 
 def _invalid(message: str) -> BusinessMetricAssetError:

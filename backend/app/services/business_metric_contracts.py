@@ -42,7 +42,8 @@ class MetricSourceOption:
 
 @dataclass(frozen=True)
 class MetricQualityContract:
-    minimum_coverage: float
+    good_coverage: float
+    minimum_usable_coverage: float
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class BusinessMetricTemplate:
     rolling_window_seconds: int | None
     sources: tuple[MetricSourceOption, ...]
     quality: MetricQualityContract
+    allowed_lateness_seconds: int
     automatic_correction_horizon_seconds: int
     control_eligible: bool
     flow_direction: FlowDirection

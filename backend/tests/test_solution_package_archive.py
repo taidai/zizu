@@ -37,7 +37,8 @@ class SolutionPackageArchiveBusinessMetricTest(unittest.TestCase):
                     "priority": 1,
                 }
             ],
-            "quality": {"minimumCoverage": 0.98},
+            "quality": {"goodCoverage": 0.98, "minimumUsableCoverage": 0.8},
+            "allowedLateness": "5m",
             "correction": {"automaticHorizon": "7d"},
             "capabilities": {"controlEligible": False},
         }
@@ -91,6 +92,9 @@ class SolutionPackageArchiveBusinessMetricTest(unittest.TestCase):
 
         self.assertEqual(tuple(item.template_id for item in metrics), ("ems.pv-energy-today",))
         self.assertEqual(metrics[0].output_entity_definition_id, "site.pv_energy_today")
+        self.assertEqual(metrics[0].quality.good_coverage, 0.98)
+        self.assertEqual(metrics[0].quality.minimum_usable_coverage, 0.8)
+        self.assertEqual(metrics[0].allowed_lateness_seconds, 5 * 60)
         self.assertEqual(point_processing_assets(package), ())
 
     def test_import_rejects_metric_expression_before_retaining_the_asset(self) -> None:
