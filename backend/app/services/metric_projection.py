@@ -6,7 +6,7 @@ recoverable state, committed L2 observations, and an explicit ``now``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 import math
@@ -188,14 +188,24 @@ def counter_delta(
     )
     if selection_error is not None:
         return _invalid_calculation(selection_error, prepared)
+    if source_unit is not None or output_unit is not None:
+        try:
+            _validate_l2_sample_contracts(prepared, source_unit)
+        except MetricProjectionError as exc:
+            return _invalid_calculation(exc.reason, prepared)
     if any(item.quality in _BAD_QUALITIES for item in prepared):
         return _invalid_calculation("SOURCE_BAD", prepared)
-    values = tuple(
-        _sample_value(item, source_unit, "energy")
-        if source_unit is not None or output_unit is not None
-        else _decimal(item.value)
-        for item in prepared
-    )
+    try:
+        values = tuple(
+            _sample_value(item, source_unit, "energy")
+            if source_unit is not None or output_unit is not None
+            else _decimal(item.value)
+            for item in prepared
+        )
+    except MetricProjectionError as exc:
+        if any(item.is_l2_observation for item in prepared):
+            return _invalid_calculation(exc.reason, prepared)
+        raise
     for value in values:
         if value < 0 or value > contract.maximum:
             return _invalid_calculation("COUNTER_VALUE_OUT_OF_RANGE", prepared)
@@ -211,7 +221,7 @@ def counter_delta(
             total += current
         else:
             total += contract.maximum - previous + Decimal(1) + current
-    coverage = _span_coverage(prepared, window)
+    coverage = _counter_coverage(prepared, window)
     quality = _source_quality(prepared)
     return MetricCalculation(
         value=_convert_same_family(total, source_unit, output_unit, "energy"),
@@ -233,6 +243,7 @@ def integrate_power(
 ) -> MetricCalculation:
     """Trapezoid-integrate selected power flow to energy in kWh."""
     prepared = _calculation_samples(events, window)
+    _validate_l2_sample_contracts(prepared, source_unit)
     maximum_gap = _maximum_gap(maximum_sample_gap_seconds)
     try:
         flow = FlowDirection(direction)
@@ -293,6 +304,8 @@ def time_weighted_average(
 ) -> MetricCalculation:
     """Average by integrable elapsed time, never by number of samples."""
     prepared = _calculation_samples(events, window)
+    if source_unit is not None or output_unit is not None:
+        _validate_l2_sample_contracts(prepared, source_unit)
     maximum_gap = _maximum_gap(maximum_sample_gap_seconds)
     weighted = Decimal(0)
     covered_seconds = Decimal(0)
@@ -340,10 +353,10 @@ def window_maximum(
     output_unit: str | None = None,
 ) -> MetricCalculation:
     """Select the stable first maximum among quality-usable source samples."""
-    prepared = tuple(
-        item for item in _calculation_samples(events, window)
-        if item.quality not in _BAD_QUALITIES
-    )
+    all_samples = _calculation_samples(events, window)
+    if source_unit is not None or output_unit is not None:
+        _validate_l2_sample_contracts(all_samples, source_unit)
+    prepared = tuple(item for item in all_samples if item.quality not in _BAD_QUALITIES)
     valued = tuple(
         (
             item,
@@ -410,6 +423,7 @@ def project_metric(
         return _invalid_decision(window, instant, selected, contract.estimated, reason)
 
     if not calculation.valid:
+        evidence_ids = calculation.source_event_ids or _observation_ids(selected)
         return _invalid_decision(
             window,
             instant,
@@ -417,8 +431,10 @@ def project_metric(
             contract.estimated,
             calculation.reason or "CALCULATION_INVALID",
             coverage=calculation.coverage,
+            source_event_ids=evidence_ids,
         )
     if calculation.coverage < contract.minimum_usable_coverage:
+        evidence_ids = calculation.source_event_ids or _observation_ids(selected)
         return _invalid_decision(
             window,
             instant,
@@ -426,6 +442,7 @@ def project_metric(
             contract.estimated,
             "COVERAGE_INSUFFICIENT",
             coverage=calculation.coverage,
+            source_event_ids=evidence_ids,
         )
     quality = (
         TrunkQuality.GOOD
@@ -470,6 +487,7 @@ class _Sample:
     event_id: UUID | None
     source_order_key: str
     unit: str | None
+    is_l2_observation: bool
 
 
 def _revision_contract(revision: CompiledMetricRevision) -> _RevisionContract:
@@ -582,6 +600,7 @@ def _calculation_samples(
                     event_id=item.event_id,
                     source_order_key=item.source_order_key,
                     unit=item.unit,
+                    is_l2_observation=True,
                 )
             )
         else:
@@ -593,6 +612,7 @@ def _calculation_samples(
                     event_id=None,
                     source_order_key=f"N:{index:020d}",
                     unit=None,
+                    is_l2_observation=False,
                 )
             )
     normalized.sort(
@@ -622,17 +642,22 @@ def _counter_samples(
         for item in prepared
         if lookback_start <= item.observed_at <= window.start
     )
-    trusted_candidates = tuple(
-        item
+    classified_candidates = tuple(
+        (item, _counter_baseline_error(item, source_unit))
         for item in candidates
-        if _trustworthy_counter_baseline(item, source_unit)
+    )
+    trusted_candidates = tuple(
+        item for item, reason in classified_candidates if reason is None
     )
     if not trusted_candidates:
-        reason = (
-            "SOURCE_BAD"
-            if candidates and all(item.quality in _BAD_QUALITIES for item in candidates)
-            else "COUNTER_BASELINE_MISSING"
+        if not candidates:
+            return (), "COUNTER_BASELINE_MISSING"
+        non_quality_errors = tuple(
+            reason
+            for _, reason in classified_candidates
+            if reason != "SOURCE_BAD"
         )
+        reason = non_quality_errors[-1] if non_quality_errors else "SOURCE_BAD"
         return candidates, reason
     baseline = trusted_candidates[-1]
 
@@ -643,8 +668,7 @@ def _counter_samples(
     )
     if not endpoints:
         return (baseline,), "COUNTER_ENDPOINT_MISSING"
-    effective_baseline = replace(baseline, observed_at=window.start)
-    return (effective_baseline, *endpoints), None
+    return (baseline, *endpoints), None
 
 
 def _stable_unique_events(
@@ -706,6 +730,7 @@ def _invalid_decision(
     reason: str,
     *,
     coverage: float = 0.0,
+    source_event_ids: tuple[UUID, ...] | None = None,
 ) -> ProjectionDecision:
     return ProjectionDecision(
         window=window,
@@ -716,7 +741,11 @@ def _invalid_decision(
         estimated=estimated,
         updated_at=now,
         reason=reason,
-        source_event_ids=tuple(item.event_id for item in events),
+        source_event_ids=(
+            _observation_ids(events)
+            if source_event_ids is None
+            else source_event_ids
+        ),
         history_facts=(),
     )
 
@@ -750,27 +779,47 @@ def _required_unit(unit: str | None) -> str:
 def _sample_value(sample: _Sample, source_unit: str | None, family: str) -> Decimal:
     frozen_unit = _required_unit(source_unit)
     _unit_factor(frozen_unit, family, "UNIT_CONTRACT_INVALID")
-    if sample.event_id is not None and sample.unit != frozen_unit:
+    _validate_l2_sample_contract(sample, frozen_unit)
+    return _decimal(sample.value)
+
+
+def _counter_baseline_error(
+    sample: _Sample,
+    source_unit: str | None,
+) -> str | None:
+    if sample.quality in _BAD_QUALITIES:
+        return "SOURCE_BAD"
+    try:
+        if source_unit is not None:
+            _validate_l2_sample_contract(sample, source_unit)
+        _decimal(sample.value)
+    except MetricProjectionError as exc:
+        return exc.reason
+    return None
+
+
+def _validate_l2_sample_contracts(
+    samples: Sequence[_Sample],
+    source_unit: str | None,
+) -> None:
+    frozen_unit = _required_unit(source_unit)
+    for sample in samples:
+        _validate_l2_sample_contract(sample, frozen_unit)
+
+
+def _validate_l2_sample_contract(sample: _Sample, frozen_unit: str) -> None:
+    if not sample.is_l2_observation:
+        return
+    if sample.unit != frozen_unit:
         raise MetricProjectionError(
             "UNIT_MISMATCH",
             "metric event unit does not match the frozen source unit",
         )
-    return _decimal(sample.value)
-
-
-def _trustworthy_counter_baseline(
-    sample: _Sample,
-    source_unit: str | None,
-) -> bool:
-    if sample.quality in _BAD_QUALITIES:
-        return False
-    if source_unit is not None and sample.event_id is not None and sample.unit != source_unit:
-        return False
-    try:
-        _decimal(sample.value)
-    except MetricProjectionError:
-        return False
-    return True
+    if not isinstance(sample.event_id, UUID):
+        raise MetricProjectionError(
+            "EVENT_ID_INVALID",
+            "metric event ID must be a UUID",
+        )
 
 
 def _convert_same_family(
@@ -865,6 +914,15 @@ def _span_coverage(samples: Sequence[_Sample], window: MetricWindow | None) -> f
     return _duration_coverage(max(seconds, Decimal(0)), window)
 
 
+def _counter_coverage(samples: Sequence[_Sample], window: MetricWindow | None) -> float:
+    if window is None:
+        return 1.0 if len(samples) >= 2 else 0.0
+    if len(samples) < 2:
+        return 0.0
+    seconds = Decimal(str((samples[-1].observed_at - window.start).total_seconds()))
+    return _duration_coverage(max(seconds, Decimal(0)), window)
+
+
 def _source_quality(samples: Sequence[_Sample]) -> TrunkQuality:
     if not samples:
         return TrunkQuality.BAD
@@ -876,7 +934,11 @@ def _source_quality(samples: Sequence[_Sample]) -> TrunkQuality:
 
 
 def _event_ids(samples: Sequence[_Sample]) -> tuple[UUID, ...]:
-    return tuple(item.event_id for item in samples if item.event_id is not None)
+    return tuple(item.event_id for item in samples if isinstance(item.event_id, UUID))
+
+
+def _observation_ids(events: Sequence[L2Observation]) -> tuple[UUID, ...]:
+    return tuple(item.event_id for item in events if isinstance(item.event_id, UUID))
 
 
 def _finite_ratio(value: object, name: str) -> float:
