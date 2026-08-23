@@ -5,7 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, IntEnum
+import math
 from types import MappingProxyType
+from typing import Any
 from uuid import UUID
 
 
@@ -33,6 +35,14 @@ class TypedValue:
     @classmethod
     def float(cls, value: float | None) -> "TypedValue":
         return cls(ValueKind.FLOAT, value)
+
+    @classmethod
+    def integer(cls, value: int | None) -> "TypedValue":
+        return cls(ValueKind.INT, value)
+
+    @classmethod
+    def boolean(cls, value: bool | None) -> "TypedValue":
+        return cls(ValueKind.BOOL, value)
 
     @classmethod
     def enum(cls, value: str | None) -> "TypedValue":
@@ -145,7 +155,97 @@ class BooleanSetTransform:
         object.__setattr__(self, "inputs", canonical)
 
 
-Transform = NumericTransform | EnumTransform | FaultCodeTransform | BooleanSetTransform
+@dataclass(frozen=True)
+class FormulaSource:
+    name: str
+    data_type: ValueKind
+    unit: str | None
+    cardinality: str
+    required: bool
+    default_value: float | int | bool | None
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or self.cardinality not in {"one", "many"}:
+            raise ValueError("formula source contract is invalid")
+        if self.data_type not in {ValueKind.FLOAT, ValueKind.INT, ValueKind.BOOL}:
+            raise ValueError("formula source data type is unsupported")
+        if self.cardinality == "many" and self.default_value is not None:
+            raise ValueError("collection formula sources cannot have scalar defaults")
+        if self.required and self.default_value is not None:
+            raise ValueError("required formula sources cannot have defaults")
+        if self.default_value is not None:
+            if self.data_type is ValueKind.BOOL:
+                valid_default = isinstance(self.default_value, bool)
+            elif self.data_type is ValueKind.INT:
+                valid_default = isinstance(self.default_value, int) and not isinstance(
+                    self.default_value, bool
+                )
+            else:
+                valid_default = isinstance(self.default_value, (int, float)) and not isinstance(
+                    self.default_value, bool
+                ) and math.isfinite(float(self.default_value))
+            if not valid_default:
+                raise ValueError("formula source default does not match its data type")
+        object.__setattr__(self, "name", self.name.strip())
+
+
+@dataclass(frozen=True)
+class CompiledFormula:
+    text: str
+    ast: Mapping[str, Any]
+    digest: str
+    result_kind: ValueKind
+    result_unit: str | None
+
+    def __post_init__(self) -> None:
+        if len(self.digest) != 64:
+            raise ValueError("formula digest must be SHA-256")
+        object.__setattr__(self, "ast", MappingProxyType(dict(self.ast)))
+
+
+@dataclass(frozen=True)
+class FormulaTransform:
+    sources: Mapping[str, tuple[InputReference, ...]]
+    source_contracts: Mapping[str, FormulaSource]
+    compiled: CompiledFormula
+    schedule_seconds: int
+    control_eligible: bool
+
+    def __post_init__(self) -> None:
+        source_map = {
+            name: tuple(sorted(references, key=lambda item: str(item.source_id)))
+            for name, references in self.sources.items()
+        }
+        contracts = dict(self.source_contracts)
+        if (
+            set(source_map) != set(contracts)
+            or not 1 <= self.schedule_seconds <= 3600
+            or any(
+                reference.source_kind != "l2"
+                for references in source_map.values()
+                for reference in references
+            )
+            or any(
+                len(set(references)) != len(references)
+                for references in source_map.values()
+            )
+            or any(
+                contracts[name].cardinality == "one" and len(references) != 1
+                for name, references in source_map.items()
+            )
+        ):
+            raise ValueError("formula transform contract is invalid")
+        object.__setattr__(self, "sources", MappingProxyType(source_map))
+        object.__setattr__(self, "source_contracts", MappingProxyType(contracts))
+
+
+Transform = (
+    NumericTransform
+    | EnumTransform
+    | FaultCodeTransform
+    | BooleanSetTransform
+    | FormulaTransform
+)
 
 
 @dataclass(frozen=True)

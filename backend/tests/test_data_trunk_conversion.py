@@ -11,14 +11,18 @@ from app.services.data_trunk_contracts import (
     BooleanSetTransform,
     EnumTransform,
     FaultCodeTransform,
+    FormulaSource,
+    FormulaTransform,
     InputReference,
     InstalledPointProcessing,
+    L2Observation,
     RawObservation,
     TrunkQuality,
     TypedValue,
     ValueKind,
 )
 from app.services.data_trunk_conversion import evaluate_processing
+from app.services.point_processing_formula import compile_formula
 
 
 class PcsNumericConversionTest(unittest.TestCase):
@@ -401,6 +405,92 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(
             (TrunkQuality.BAD, "REQUIRED_INPUT_MISSING"),
             (output.quality, output.reason),
+        )
+
+    def test_formula_optional_default_marks_result_uncertain(self) -> None:
+        primary_ref = InputReference.l2(
+            UUID("00000000-0000-0000-0000-000000000401")
+        )
+        reserve_ref = InputReference.l2(
+            UUID("00000000-0000-0000-0000-000000000402")
+        )
+        sources = {
+            "primary": FormulaSource(
+                "primary", ValueKind.FLOAT, "kW", "one", True, None
+            ),
+            "reserve": FormulaSource(
+                "reserve", ValueKind.FLOAT, "kW", "one", False, 0.0
+            ),
+        }
+        compiled = compile_formula(
+            "primary + reserve",
+            sources=tuple(sources.values()),
+            result_type=ValueKind.FLOAT,
+            result_unit="kW",
+        )
+        base = self.fixture()["installed"][0]
+        installed = replace(
+            base,
+            output_kind=ValueKind.FLOAT,
+            output_unit="kW",
+            transform=FormulaTransform(
+                sources={
+                    "primary": (primary_ref,),
+                    "reserve": (reserve_ref,),
+                },
+                source_contracts=sources,
+                compiled=compiled,
+                schedule_seconds=1,
+                control_eligible=False,
+            ),
+        )
+        current = {
+            primary_ref: self._l2_input(
+                entity_id=primary_ref.source_id,
+                event_id=UUID("00000000-0000-0000-0000-000000000501"),
+                value=12.0,
+                digest="b" * 64,
+            )
+        }
+
+        output = evaluate_processing(
+            installed=(installed,),
+            current_inputs=current,
+            site_configuration_version=5,
+            calculated_at=datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
+        )[0]
+
+        self.assertEqual(output.value, TypedValue.float(12.0))
+        self.assertEqual(output.quality, TrunkQuality.UNCERTAIN)
+        self.assertEqual(output.reason, "OPTIONAL_DEFAULT_USED")
+        self.assertEqual(output.source_observation_ids, (current[primary_ref].event_id,))
+
+    @staticmethod
+    def _l2_input(
+        *,
+        entity_id: UUID,
+        event_id: UUID,
+        value: float,
+        digest: str,
+    ) -> L2Observation:
+        return L2Observation(
+            event_id=event_id,
+            entity_instance_id=entity_id,
+            definition_id="pcs.active_power",
+            value=TypedValue.float(value),
+            unit="kW",
+            quality=TrunkQuality.GOOD,
+            reason=None,
+            observed_at=datetime(2026, 8, 17, tzinfo=UTC),
+            received_at=datetime(2026, 8, 17, 0, 0, 1, tzinfo=UTC),
+            calculated_at=datetime(2026, 8, 17, 0, 0, 1, tzinfo=UTC),
+            processing_revision_id=UUID(
+                "00000000-0000-0000-0000-000000000601"
+            ),
+            site_configuration_version=4,
+            source_observation_ids=(),
+            source_digest=digest,
+            source_order_key=f"L:{event_id}",
         )
 
     def _boolean_set_fixture(self) -> dict[str, Any]:

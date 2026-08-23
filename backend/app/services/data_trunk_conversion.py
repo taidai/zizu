@@ -13,6 +13,7 @@ from app.services.data_trunk_contracts import (
     DataTrunkError,
     EnumTransform,
     FaultCodeTransform,
+    FormulaTransform,
     InputReference,
     InstalledPointProcessing,
     L2Observation,
@@ -21,6 +22,10 @@ from app.services.data_trunk_contracts import (
     TrunkQuality,
     TypedValue,
     ValueKind,
+)
+from app.services.point_processing_formula import (
+    FormulaEvaluationError,
+    evaluate_compiled_formula,
 )
 
 
@@ -50,6 +55,13 @@ def _evaluate_output(
     site_configuration_version: int,
     calculated_at: datetime,
 ) -> L2Observation:
+    if isinstance(installed.transform, FormulaTransform):
+        return _evaluate_formula_output(
+            installed,
+            current_inputs,
+            site_configuration_version,
+            calculated_at,
+        )
     if isinstance(installed.transform, BooleanSetTransform):
         return _evaluate_boolean_set_output(
             installed,
@@ -164,6 +176,162 @@ def _evaluate_output(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+    )
+
+
+def _evaluate_formula_output(
+    installed: InstalledPointProcessing,
+    current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+    site_configuration_version: int,
+    calculated_at: datetime,
+) -> L2Observation:
+    transform = installed.transform
+    if not isinstance(transform, FormulaTransform):
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "formula processing requires a formula transform",
+        )
+    values: dict[str, float | int | bool | list[float | int | bool]] = {}
+    sources: list[L2Observation] = []
+    default_used = False
+    failure_quality: TrunkQuality | None = None
+    failure_reason: str | None = None
+
+    for name, contract in transform.source_contracts.items():
+        references = transform.sources[name]
+        selected: list[L2Observation] = []
+        for reference in references:
+            source = current_inputs.get(reference)
+            if source is None:
+                continue
+            if not isinstance(source, L2Observation):
+                raise DataTrunkError(
+                    "POINT_PROCESSING_CONFIGURATION_INVALID",
+                    "formula processing requires frozen L2 inputs",
+                )
+            selected.append(source)
+        sources.extend(selected)
+
+        missing = len(selected) != len(references) or not selected
+        invalid_quality = min(
+            (source.quality for source in selected),
+            default=TrunkQuality.BAD,
+        )
+        can_default = (
+            contract.cardinality == "one"
+            and not contract.required
+            and contract.default_value is not None
+        )
+        if missing or invalid_quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+            if can_default:
+                values[name] = contract.default_value
+                default_used = True
+                continue
+            failure_quality = (
+                invalid_quality
+                if selected and invalid_quality in {TrunkQuality.BAD, TrunkQuality.STALE}
+                else TrunkQuality.BAD
+            )
+            failure_reason = (
+                _input_quality_reason(failure_quality)
+                if selected
+                else "REQUIRED_INPUT_MISSING"
+            )
+            break
+
+        normalized: list[float | int | bool] = []
+        for source in selected:
+            if source.value.kind is not contract.data_type or source.unit != contract.unit:
+                failure_quality = TrunkQuality.BAD
+                failure_reason = (
+                    "TYPE_MISMATCH"
+                    if source.value.kind is not contract.data_type
+                    else "UNIT_MISMATCH"
+                )
+                break
+            value = source.value.value
+            if contract.data_type is ValueKind.BOOL:
+                valid = isinstance(value, bool)
+            elif contract.data_type is ValueKind.INT:
+                valid = isinstance(value, int) and not isinstance(value, bool)
+            else:
+                valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if not valid:
+                failure_quality = TrunkQuality.BAD
+                failure_reason = "TYPE_MISMATCH"
+                break
+            normalized.append(value)
+        if failure_reason is not None:
+            break
+        values[name] = normalized if contract.cardinality == "many" else normalized[0]
+
+    source_digest = hashlib.sha256(
+        "|".join(sorted(source.source_digest for source in sources)).encode("ascii")
+    ).hexdigest()
+    source_ids = tuple(source.event_id for source in sources)
+    observed_at = max((source.observed_at for source in sources), default=calculated_at)
+    received_at = max((source.received_at for source in sources), default=calculated_at)
+    source_order_key = f"F:{len(sources):04d}:{source_digest}"
+
+    if failure_reason is not None:
+        return _observation(
+            installed=installed,
+            value=TypedValue(installed.output_kind, None),
+            quality=failure_quality or TrunkQuality.BAD,
+            reason=failure_reason,
+            observed_at=observed_at,
+            received_at=received_at,
+            calculated_at=calculated_at,
+            site_configuration_version=site_configuration_version,
+            source_observation_ids=source_ids,
+            source_digest=source_digest,
+            source_order_key=source_order_key,
+        )
+
+    try:
+        result = evaluate_compiled_formula(transform.compiled, values)
+    except FormulaEvaluationError as exc:
+        return _observation(
+            installed=installed,
+            value=TypedValue(installed.output_kind, None),
+            quality=TrunkQuality.BAD,
+            reason=exc.code,
+            observed_at=observed_at,
+            received_at=received_at,
+            calculated_at=calculated_at,
+            site_configuration_version=site_configuration_version,
+            source_observation_ids=source_ids,
+            source_digest=source_digest,
+            source_order_key=source_order_key,
+        )
+
+    quality = min(
+        [source.quality for source in sources]
+        + ([TrunkQuality.UNCERTAIN] if default_used else [TrunkQuality.GOOD])
+    )
+    if installed.output_kind is ValueKind.FLOAT:
+        typed = TypedValue.float(float(result))
+    elif installed.output_kind is ValueKind.INT:
+        typed = TypedValue.integer(int(result))
+    elif installed.output_kind is ValueKind.BOOL:
+        typed = TypedValue.boolean(bool(result))
+    else:
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "formula output kind is unsupported",
+        )
+    return _observation(
+        installed=installed,
+        value=typed,
+        quality=quality,
+        reason="OPTIONAL_DEFAULT_USED" if default_used else _input_quality_reason(quality),
+        observed_at=observed_at,
+        received_at=received_at,
+        calculated_at=calculated_at,
+        site_configuration_version=site_configuration_version,
+        source_observation_ids=source_ids,
+        source_digest=source_digest,
+        source_order_key=source_order_key,
     )
 
 
