@@ -4354,3 +4354,9 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 043 replay 在任何替换 DDL 前指纹校验 lineage/window/acceptance/projection/append-only 五个函数的规范定义与安全元数据；损坏稳定拒绝。pristine footprint 和 append-only trigger 计数绑定 public namespace，不受其他 schema 同名对象影响。
 - TDD RED 为 5 个业务行为失败、2 个函数 corruption subtest 失败与 1 个跨 schema 误拒；修复后非数据库 27/27、串行隔离 PostgreSQL 71/71（0 skip）通过，`py_compile` 与 `git diff --check` 作为提交门禁执行。
 - 完整证据已追加 Task 2 report。Task 3+ runtime/recompute/API/UI/assets 仍未实现；未新增依赖，未连接或操作 1 号机。
+
+### 2026-08-24 — v0.4.84 Task 2 第五轮（最终）trigger 指纹收口
+
+- 043 replay 的 append-only 与关键 evidence/projection trigger 指纹现在只接受普通会话启用态 `tgenabled='O'` 且无 `WHEN` 条件；`ENABLE REPLICA`、`ENABLE ALWAYS` 和同函数同事件的 `WHEN(false)` 均在修补 DDL 前稳定返回 SQLSTATE `55000` / `SCHEMA_043_PARTIAL_STRUCTURE`。
+- 新增真实 PostgreSQL mutation 回归，并在每个失败场景后回滚、核对 trigger 恢复为 `O`/无条件，再完整 replay；没有纳入 TimescaleDB 内部 trigger。
+- 最终门禁：内存 27/27；串行隔离 PostgreSQL 72/72、0 skip；相关生产模块与 migration 测试 `py_compile` 通过。未新增依赖，未触碰 001–042、Task 3+ 或 1 号机。

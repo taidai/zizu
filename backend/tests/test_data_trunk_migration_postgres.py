@@ -340,6 +340,77 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                             "SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception)
                         )
 
+    def test_043_replay_rejects_non_origin_or_qualified_triggers(self) -> None:
+        corruptions = (
+            (
+                "replica-only evidence trigger",
+                """
+                ALTER TABLE public.t_business_metric_window_results
+                  ENABLE REPLICA TRIGGER trg_business_metric_window_result_evidence
+                """,
+                "public.t_business_metric_window_results",
+                "trg_business_metric_window_result_evidence",
+            ),
+            (
+                "always evidence trigger",
+                """
+                ALTER TABLE public.t_business_metric_window_results
+                  ENABLE ALWAYS TRIGGER trg_business_metric_window_result_evidence
+                """,
+                "public.t_business_metric_window_results",
+                "trg_business_metric_window_result_evidence",
+            ),
+            (
+                "qualified append-only trigger",
+                """
+                DROP TRIGGER trg_t_business_metric_templates_immutable
+                  ON public.t_business_metric_templates;
+                CREATE TRIGGER trg_t_business_metric_templates_immutable
+                  BEFORE UPDATE OR DELETE ON public.t_business_metric_templates
+                  FOR EACH ROW WHEN (false)
+                  EXECUTE FUNCTION public.reject_data_trunk_append_only()
+                """,
+                "public.t_business_metric_templates",
+                "trg_t_business_metric_templates_immutable",
+            ),
+        )
+        with psycopg2.connect(**self.connection_kwargs) as setup_connection:
+            setup_connection.autocommit = True
+            with setup_connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
+        for label, corruption, table_name, trigger_name in corruptions:
+            with self.subTest(label):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    with connection.cursor() as cursor:
+                        try:
+                            cursor.execute(corruption)
+                            with self.assertRaises(
+                                psycopg2.errors.ObjectNotInPrerequisiteState
+                            ) as raised:
+                                self._apply_043(cursor)
+                            self.assertEqual(raised.exception.pgcode, "55000")
+                            self.assertIn(
+                                "SCHEMA_043_PARTIAL_STRUCTURE",
+                                str(raised.exception),
+                            )
+                        finally:
+                            connection.rollback()
+
+                        cursor.execute(
+                            """
+                            SELECT trigger.tgenabled, trigger.tgqual
+                            FROM pg_catalog.pg_trigger AS trigger
+                            WHERE trigger.tgrelid = %s::regclass
+                              AND trigger.tgname = %s
+                              AND NOT trigger.tgisinternal
+                            """,
+                            (table_name, trigger_name),
+                        )
+                        self.assertEqual(cursor.fetchone(), ("O", None))
+                        self._apply_043(cursor)
+
     def test_043_replay_rejects_damaged_function_body_or_search_path(self) -> None:
         corruptions = (
             (

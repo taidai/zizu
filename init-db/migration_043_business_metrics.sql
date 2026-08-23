@@ -516,7 +516,8 @@ BEGIN
         't_business_metric_audit',
         't_business_metric_acceptance_reports'
       )
-      AND trigger.tgenabled <> 'D'
+      AND trigger.tgenabled = 'O'
+      AND trigger.tgqual IS NULL
       AND trigger.tgfoid =
             'public.reject_data_trunk_append_only()'::regprocedure
       AND (
@@ -537,7 +538,8 @@ BEGIN
             )
         AND trigger.tgname = required.trigger_name
         AND NOT trigger.tgisinternal
-        AND trigger.tgenabled <> 'D'
+        AND trigger.tgenabled = 'O'
+        AND trigger.tgqual IS NULL
         AND trigger.tgfoid = to_regprocedure(
               'public.' || required.function_name
             )
