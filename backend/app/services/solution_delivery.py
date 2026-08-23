@@ -67,6 +67,7 @@ from app.services.solution_point_processings import (
     point_processing_revision_id,
     validate_point_processing_assets,
 )
+from app.services.solution_business_metrics import validate_business_metric_assets
 from app.services.point_processing import (
     ApplyPointProcessingPlan,
     PreviewPointProcessing,
@@ -267,6 +268,13 @@ class SolutionDelivery:
         )
         if normalized_point_processings:
             manifest["_point_processing_assets"] = list(normalized_point_processings)
+        normalized_business_metrics = validate_business_metric_assets(
+            manifest,
+            declared_assets,
+            _load_mapping,
+        )
+        if normalized_business_metrics:
+            manifest["_business_metric_assets"] = list(normalized_business_metrics)
         validate_data_trunk_acceptances(manifest, declared_assets)
         validate_policy_execution_acceptances(
             manifest,

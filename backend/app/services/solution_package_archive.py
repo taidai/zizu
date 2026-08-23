@@ -180,6 +180,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             "ems_workbench",
             "ems_policy",
             "point_processing_template",
+            "business_metric_template",
         } or any(
             not isinstance(asset.get(field), str) or not asset[field]
             for field in ("id", "path", "sha256")
