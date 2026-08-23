@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 
 import psycopg2
+from psycopg2 import sql
 
 from tests.test_alarm_configuration_postgres import (
     _PostgresAlarmConfigurationTestBase,
@@ -40,6 +41,7 @@ MIGRATION_039 = MIGRATIONS_ROOT / "migration_039_pcs_data_trunk_contract_gate.sq
 MIGRATION_040 = MIGRATIONS_ROOT / "migration_040_point_processing.sql"
 MIGRATION_041 = MIGRATIONS_ROOT / "migration_041_en9_runtime_evidence.sql"
 MIGRATION_042 = MIGRATIONS_ROOT / "migration_042_cross_node_formulas.sql"
+MIGRATION_043 = MIGRATIONS_ROOT / "migration_043_business_metrics.sql"
 
 
 @unittest.skipUnless(
@@ -92,6 +94,10 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     def _apply_042(cursor) -> None:
         cursor.execute(MIGRATION_042.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _apply_043(cursor) -> None:
+        cursor.execute(MIGRATION_043.read_text(encoding="utf-8"))
+
     @classmethod
     def _reset_through_041(cls, cursor) -> None:
         cls._reset_through_037(cursor)
@@ -99,6 +105,123 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
         cls._apply_039(cursor)
         cls._apply_040(cursor)
         cls._apply_041(cursor)
+
+    def test_043_adds_all_business_metric_tables_and_replays(self) -> None:
+        expected = (
+            "t_business_metric_templates",
+            "t_business_metric_revisions",
+            "t_business_metric_installation_plans",
+            "t_business_metric_plan_items",
+            "t_installed_business_metrics",
+            "t_business_metric_source_bindings",
+            "t_business_metric_projections",
+            "t_business_metric_window_results",
+            "t_business_metric_recomputations",
+            "t_entity_capability_contracts",
+            "t_business_metric_audit",
+            "t_business_metric_acceptance_reports",
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
+                self._apply_043(cursor)
+                cursor.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name = ANY(%s) "
+                    "ORDER BY table_name",
+                    (list(expected),),
+                )
+                self.assertEqual(tuple(row[0] for row in cursor.fetchall()), tuple(sorted(expected)))
+                cursor.execute(
+                    """
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_installed_point_processings'
+                      AND column_name = 'processing_scope'
+                    """
+                )
+                nullable, default = cursor.fetchone()
+                self.assertEqual(nullable, "NO")
+                self.assertIn("'node'", default)
+                cursor.execute(
+                    """
+                    SELECT indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = 'public'
+                      AND indexname = 'uq_installed_point_processing_current'
+                    """
+                )
+                self.assertIn("processing_scope = 'node'", cursor.fetchone()[0])
+
+    def test_043_rejects_partial_structure_without_recording_version(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                cursor.execute("CREATE TABLE t_business_metric_templates (id UUID PRIMARY KEY)")
+                with self.assertRaises(psycopg2.DatabaseError):
+                    self._apply_043(cursor)
+                cursor.execute("SELECT to_regclass('t_business_metric_revisions')")
+                self.assertEqual(cursor.fetchone(), (None,))
+
+    def test_043_append_only_tables_reject_update_delete_and_truncate(self) -> None:
+        immutable = (
+            "t_business_metric_templates",
+            "t_business_metric_revisions",
+            "t_business_metric_installation_plans",
+            "t_business_metric_plan_items",
+            "t_installed_business_metrics",
+            "t_business_metric_source_bindings",
+            "t_business_metric_window_results",
+            "t_business_metric_recomputations",
+            "t_entity_capability_contracts",
+            "t_business_metric_audit",
+            "t_business_metric_acceptance_reports",
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
+                template_id = "93000000-0000-0000-0000-000000000001"
+                cursor.execute(
+                    "INSERT INTO t_business_metric_templates (id, template_key) "
+                    "VALUES (%s, 'test.metric')",
+                    (template_id,),
+                )
+                with self.assertRaises(psycopg2.errors.ObjectNotInPrerequisiteState):
+                    cursor.execute(
+                        "UPDATE t_business_metric_templates "
+                        "SET template_key = 'changed.metric' WHERE id = %s",
+                        (template_id,),
+                    )
+                with self.assertRaises(psycopg2.errors.ObjectNotInPrerequisiteState):
+                    cursor.execute(
+                        "DELETE FROM t_business_metric_templates WHERE id = %s",
+                        (template_id,),
+                    )
+                for table_name in immutable:
+                    with self.assertRaises(
+                        psycopg2.errors.ObjectNotInPrerequisiteState,
+                        msg=table_name,
+                    ):
+                        cursor.execute(
+                            sql.SQL("TRUNCATE {} CASCADE").format(
+                                sql.Identifier(table_name)
+                            )
+                        )
+                cursor.execute(
+                    "SELECT count(*) FROM pg_trigger "
+                    "WHERE tgrelid = 't_business_metric_projections'::regclass "
+                    "AND NOT tgisinternal"
+                )
+                self.assertEqual(cursor.fetchone(), (0,))
 
     def test_042_adds_canonical_formula_and_frozen_selector_schema(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

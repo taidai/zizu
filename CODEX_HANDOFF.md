@@ -4338,3 +4338,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 领域与公开 HTTP 均证明阻断：preview 为 blocked、apply 为稳定 422、迁移写计数保持 0；原有布尔、字符串与负数合法值不回归。
 - 定向 `test_alarm_configuration + test_alarm_configuration_public_api` 为 50/50；超大整数补丁三项 focused tests 3/3；`compileall` 与 `git diff --check` 通过。
 - 独立 scoped review 对 `0007e8b..d402b21` 结论 Ready，无 Critical/Important。统一告警配置 Task 6 已解除阻断；下一步进入 observer-only 告警验收报告，验收迁移编号顺延为 036。
+
+### 2026-08-23 — v0.4.84 Task 2 业务指标 Schema 043 与原子安装
+
+- 完成 Schema 043：12 张业务指标表、完整 042 升级/replay/partial 拒绝、append-only 实际门禁、窗口结果 check/FK，以及普通节点处理与可并存私有业务指标处理的 `processing_scope`。
+- 完成 `BusinessMetricDelivery` 内存与 PostgreSQL 交付：累计量优先、积分回退、来源 blocker、冻结时区/保留期/质量/估算、不可变计划证据、持久计划复核、稳定 L2、能力契约、审计及幂等。
+- 原子 apply 复用现有 point-processing 外部事务 seam；注入故障证明 solution/site/point-processing/entity/metric 全部回滚。同站点双指标均保留独立 current processing source。
+- 最终指定门禁：内存 6/6、真实 PostgreSQL 33/33（0 skip），其中既有 point-processing 12/12；`py_compile` 与 `git diff --check` 通过。完整 discovery 442 项仅有两个既有脚本收集错误（F0 缺显式 `ZIZU_API`、F0 pure import 时 `sys.exit(0)`），93 skip。
+- 完整续作证据见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-2-report.md`；Task 3+ runtime/recompute/API/UI/assets 未实现，保持后续范围。

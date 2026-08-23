@@ -59,6 +59,22 @@ def _output_id(revision_id: UUID, output_key: str) -> UUID:
     )
 
 
+def _supports_processing_scope(cursor: Any) -> bool:
+    """Keep the shared adapter usable during Schema 042 upgrade rehearsals."""
+    cursor.execute(
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 't_installed_point_processings'
+            AND column_name = 'processing_scope'
+        )
+        """
+    )
+    return bool(cursor.fetchone()[0])
+
+
 def persist_point_processing_assets(
     cursor: Any,
     package: PackageImport,
@@ -704,6 +720,11 @@ class PostgresPointProcessingCatalog:
         )
         expression = cursor.fetchone()
         if expression is not None:
+            if expression[1].get("kind") == "business_metric":
+                # Private compiled transform.  It is deliberately stored in the
+                # existing immutable expression record only to reuse the L1
+                # catalog/revision seam; it is never a user-editable formula.
+                return dict(expression[1])
             return {
                 "kind": "formula",
                 "expression": expression[0],
@@ -863,15 +884,22 @@ class PostgresPointProcessingRepository:
     ) -> CurrentPointProcessingContext | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                scope_filter = (
+                    "AND installed.processing_scope = 'node'"
+                    if _supports_processing_scope(cursor)
+                    else ""
+                )
                 cursor.execute(
-                    """
+                    f"""
                     SELECT installed.id, installed.solution_installation_id,
                            installed.revision_id,
                            site.entity_identity_installation_id
                     FROM t_installed_point_processings AS installed
                     JOIN t_site_configuration_versions AS site
                       ON site.version = installed.site_configuration_version
-                    WHERE installed.node_id = %s AND installed.current = TRUE
+                    WHERE installed.node_id = %s
+                      AND installed.current = TRUE
+                      {scope_filter}
                     """,
                     (node_id,),
                 )
@@ -929,9 +957,14 @@ class PostgresPointProcessingRepository:
                     },
                 )
 
-    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan:
+    def save_plan(
+        self,
+        plan: PointProcessingPlan,
+        *,
+        transaction: Any | None = None,
+    ) -> PointProcessingPlan:
         try:
-            with self._connection() as connection:
+            with self._connection(transaction) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """
@@ -1226,6 +1259,24 @@ class PostgresPointProcessingRepository:
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing template changed after planning",
                         )
+                    processing_scope = (
+                        "business_metric"
+                        if template.outputs
+                        and all(
+                            output.transform.get("kind") == "business_metric"
+                            for output in template.outputs
+                        )
+                        else "node"
+                    )
+                    supports_processing_scope = _supports_processing_scope(cursor)
+                    if (
+                        processing_scope == "business_metric"
+                        and not supports_processing_scope
+                    ):
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_SCHEMA_OUTDATED",
+                            "Business metric processing requires Schema 043",
+                        )
                     actual_source_digest = verified_source_catalog_digest
                     if actual_source_digest is None:
                         sources = PostgresPointProcessingCatalog.list_sources_with_cursor(
@@ -1321,25 +1372,32 @@ class PostgresPointProcessingRepository:
                     self._verify_package_ownership(cursor, plan, current_version)
                     self._apply_l0_plan_items(cursor, plan)
 
-                    cursor.execute(
-                        """
-                        SELECT id
-                        FROM t_installed_point_processings
-                        WHERE node_id = %s AND current = TRUE
-                        FOR UPDATE
-                        """,
-                        (plan.node_id,),
-                    )
-                    current_installed = cursor.fetchone()
-                    if current_installed is not None:
-                        cursor.execute(
-                            """
-                            UPDATE t_installed_point_processings
-                            SET current = FALSE
-                            WHERE id = %s
-                            """,
-                            (current_installed[0],),
+                    if processing_scope == "node":
+                        scope_filter = (
+                            "AND processing_scope = 'node'"
+                            if supports_processing_scope
+                            else ""
                         )
+                        cursor.execute(
+                            f"""
+                            SELECT id
+                            FROM t_installed_point_processings
+                            WHERE node_id = %s AND current = TRUE
+                              {scope_filter}
+                            FOR UPDATE
+                            """,
+                            (plan.node_id,),
+                        )
+                        current_installed = cursor.fetchone()
+                        if current_installed is not None:
+                            cursor.execute(
+                                """
+                                UPDATE t_installed_point_processings
+                                SET current = FALSE
+                                WHERE id = %s
+                                """,
+                                (current_installed[0],),
+                            )
 
                     if external_transaction:
                         solution_installation_id = plan.solution_installation_id
@@ -1365,24 +1423,37 @@ class PostgresPointProcessingRepository:
                             f"{command.actor}/{command.idempotency_key}"
                         ),
                     )
-                    cursor.execute(
-                        """
-                        INSERT INTO t_installed_point_processings
-                          (id, node_id, revision_id, source_plan_id,
-                           solution_installation_id, site_configuration_version,
-                           installed_by, current)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
-                        """,
-                        (
-                            installed_id,
-                            plan.node_id,
-                            plan.template_revision_id,
-                            plan.id,
-                            solution_installation_id,
-                            next_version,
-                            command.actor,
-                        ),
+                    installed_values = (
+                        installed_id,
+                        plan.node_id,
+                        plan.template_revision_id,
+                        plan.id,
+                        solution_installation_id,
+                        next_version,
+                        command.actor,
                     )
+                    if supports_processing_scope:
+                        cursor.execute(
+                            """
+                            INSERT INTO t_installed_point_processings
+                              (id, node_id, revision_id, source_plan_id,
+                               solution_installation_id, site_configuration_version,
+                               installed_by, current, processing_scope)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                            """,
+                            (*installed_values, processing_scope),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO t_installed_point_processings
+                              (id, node_id, revision_id, source_plan_id,
+                               solution_installation_id, site_configuration_version,
+                               installed_by, current)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                            """,
+                            installed_values,
+                        )
                     output_ids = self._install_bindings(
                         cursor,
                         plan,

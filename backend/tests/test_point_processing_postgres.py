@@ -14,7 +14,7 @@ from uuid import UUID
 
 import psycopg2
 
-from tests.test_data_trunk_migration_postgres import DataTrunkMigrationPostgresTest
+from tests import test_data_trunk_migration_postgres as migration_test
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -327,12 +327,12 @@ class PointProcessingPostgresTest(unittest.TestCase):
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                DataTrunkMigrationPostgresTest._reset_through_037(cursor)
-                DataTrunkMigrationPostgresTest._apply_038(cursor)
-                DataTrunkMigrationPostgresTest._apply_039(cursor)
-                DataTrunkMigrationPostgresTest._apply_040(cursor)
-                DataTrunkMigrationPostgresTest._apply_041(cursor)
-                DataTrunkMigrationPostgresTest._apply_042(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._reset_through_037(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._apply_038(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._apply_039(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._apply_040(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._apply_041(cursor)
+                migration_test.DataTrunkMigrationPostgresTest._apply_042(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     def test_package_import_persists_complete_versioned_catalog_atomically(self) -> None:

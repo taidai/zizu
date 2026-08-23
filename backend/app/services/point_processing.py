@@ -274,7 +274,12 @@ class PointProcessingRepository(Protocol):
         node_id: UUID,
     ) -> CurrentPointProcessingContext | None: ...
 
-    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan: ...
+    def save_plan(
+        self,
+        plan: PointProcessingPlan,
+        *,
+        transaction: Any | None = None,
+    ) -> PointProcessingPlan: ...
 
     def get_plan(self, plan_id: UUID) -> PointProcessingPlan | None: ...
 
@@ -695,7 +700,13 @@ class InMemoryPointProcessingRepository:
     ) -> CurrentPointProcessingContext | None:
         return self._current.get(node_id)
 
-    def save_plan(self, plan: PointProcessingPlan) -> PointProcessingPlan:
+    def save_plan(
+        self,
+        plan: PointProcessingPlan,
+        *,
+        transaction: Any | None = None,
+    ) -> PointProcessingPlan:
+        del transaction
         existing = self._plans.get(plan.id)
         if existing is not None and existing != plan:
             raise PointProcessingError(
