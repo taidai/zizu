@@ -177,7 +177,6 @@ def counter_delta(
     *,
     source_unit: str | None = None,
     output_unit: str | None = None,
-    maximum_baseline_age_seconds: int | None = None,
 ) -> MetricCalculation:
     """Sum monotonic counter segments under one explicit frozen decrease policy."""
     if not isinstance(contract, CounterContract):
@@ -185,7 +184,7 @@ def counter_delta(
     prepared, selection_error = _counter_samples(
         samples,
         window,
-        maximum_baseline_age_seconds,
+        source_unit,
     )
     if selection_error is not None:
         return _invalid_calculation(selection_error, prepared)
@@ -533,7 +532,6 @@ def _calculate(
             window,
             source_unit=source_unit,
             output_unit=output_unit,
-            maximum_baseline_age_seconds=state.maximum_sample_gap_seconds,
         )
     if contract.method is MetricAggregator.POWER_INTEGRAL:
         return integrate_power(
@@ -610,7 +608,7 @@ def _calculation_samples(
 def _counter_samples(
     samples: Sequence[Number] | Sequence[L2Observation],
     window: MetricWindow | None,
-    maximum_baseline_age_seconds: int | None,
+    source_unit: str | None,
 ) -> tuple[tuple[_Sample, ...], str | None]:
     prepared = _calculation_samples(samples, None)
     if window is None:
@@ -618,17 +616,25 @@ def _counter_samples(
             return prepared, "COUNTER_ENDPOINT_MISSING"
         return prepared, None
 
-    exact_start = tuple(item for item in prepared if item.observed_at == window.start)
-    if exact_start:
-        baseline = exact_start[-1]
-    else:
-        before_start = tuple(item for item in prepared if item.observed_at < window.start)
-        if not before_start or maximum_baseline_age_seconds is None:
-            return (), "COUNTER_BASELINE_MISSING"
-        baseline = before_start[-1]
-        age_seconds = (window.start - baseline.observed_at).total_seconds()
-        if age_seconds > maximum_baseline_age_seconds:
-            return (baseline,), "COUNTER_BASELINE_MISSING"
+    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
+    candidates = tuple(
+        item
+        for item in prepared
+        if lookback_start <= item.observed_at <= window.start
+    )
+    trusted_candidates = tuple(
+        item
+        for item in candidates
+        if _trustworthy_counter_baseline(item, source_unit)
+    )
+    if not trusted_candidates:
+        reason = (
+            "SOURCE_BAD"
+            if candidates and all(item.quality in _BAD_QUALITIES for item in candidates)
+            else "COUNTER_BASELINE_MISSING"
+        )
+        return candidates, reason
+    baseline = trusted_candidates[-1]
 
     endpoints = tuple(
         item
@@ -743,10 +749,28 @@ def _required_unit(unit: str | None) -> str:
 
 def _sample_value(sample: _Sample, source_unit: str | None, family: str) -> Decimal:
     frozen_unit = _required_unit(source_unit)
-    frozen_factor = _unit_factor(frozen_unit, family, "UNIT_CONTRACT_INVALID")
-    event_unit = sample.unit or frozen_unit
-    event_factor = _unit_factor(event_unit, family, "UNIT_MISMATCH")
-    return _decimal(sample.value) * event_factor / frozen_factor
+    _unit_factor(frozen_unit, family, "UNIT_CONTRACT_INVALID")
+    if sample.event_id is not None and sample.unit != frozen_unit:
+        raise MetricProjectionError(
+            "UNIT_MISMATCH",
+            "metric event unit does not match the frozen source unit",
+        )
+    return _decimal(sample.value)
+
+
+def _trustworthy_counter_baseline(
+    sample: _Sample,
+    source_unit: str | None,
+) -> bool:
+    if sample.quality in _BAD_QUALITIES:
+        return False
+    if source_unit is not None and sample.event_id is not None and sample.unit != source_unit:
+        return False
+    try:
+        _decimal(sample.value)
+    except MetricProjectionError:
+        return False
+    return True
 
 
 def _convert_same_family(

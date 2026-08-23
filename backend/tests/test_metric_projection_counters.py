@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from uuid import UUID
 
-from app.services.data_trunk_contracts import TrunkQuality
+from app.services.data_trunk_contracts import L2Observation, TrunkQuality, TypedValue
 from app.services.metric_projection import CounterContract, counter_delta
 
 
@@ -112,6 +114,55 @@ class MetricProjectionCounterTest(unittest.TestCase):
                 self.assertFalse(result.valid)
                 self.assertIsNone(result.value)
                 self.assertEqual(result.quality, TrunkQuality.BAD)
+
+    def test_counter_converts_frozen_mwh_to_kwh(self) -> None:
+        observed_at = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        samples = (
+            L2Observation(
+                event_id=UUID(int=1),
+                entity_instance_id=UUID(int=101),
+                definition_id="site.energy",
+                value=TypedValue.float(1.0),
+                unit="MWh",
+                quality=TrunkQuality.GOOD,
+                reason=None,
+                observed_at=observed_at,
+                received_at=observed_at,
+                calculated_at=observed_at,
+                processing_revision_id=UUID(int=201),
+                site_configuration_version=1,
+                source_observation_ids=(),
+                source_digest="1" * 64,
+                source_order_key="1",
+            ),
+            L2Observation(
+                event_id=UUID(int=2),
+                entity_instance_id=UUID(int=101),
+                definition_id="site.energy",
+                value=TypedValue.float(1.5),
+                unit="MWh",
+                quality=TrunkQuality.GOOD,
+                reason=None,
+                observed_at=observed_at + timedelta(minutes=1),
+                received_at=observed_at + timedelta(minutes=1),
+                calculated_at=observed_at + timedelta(minutes=1),
+                processing_revision_id=UUID(int=201),
+                site_configuration_version=1,
+                source_observation_ids=(),
+                source_digest="2" * 64,
+                source_order_key="2",
+            ),
+        )
+
+        result = counter_delta(
+            samples,
+            CounterContract(maximum=Decimal("999")),
+            source_unit="MWh",
+            output_unit="kWh",
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.value, Decimal("500.0"))
 
 
 if __name__ == "__main__":
