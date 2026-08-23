@@ -40,6 +40,9 @@ class CrossNodeAcceptanceReport:
     frozen_member_count: int
     source_entity_count: int
     output_value: float | None
+    restart_continuity: bool
+    authenticated_ws_delivery: bool
+    late_input_protected: bool
     passed: bool
     checks: tuple[CrossNodeAcceptanceCheck, ...]
     generated_at: datetime
@@ -53,6 +56,9 @@ class CrossNodeAcceptanceReport:
             "frozen_member_count": self.frozen_member_count,
             "source_entity_count": self.source_entity_count,
             "output_value": self.output_value,
+            "restart_continuity": self.restart_continuity,
+            "authenticated_ws_delivery": self.authenticated_ws_delivery,
+            "late_input_protected": self.late_input_protected,
             "passed": self.passed,
             "generated_at": self.generated_at.isoformat(),
             "digest": self.digest,
@@ -189,7 +195,8 @@ def run_cross_node_processing_acceptance(
 
                 cursor.execute(
                     """
-                    SELECT count(*)
+                    SELECT count(*),
+                           count(DISTINCT producing_runtime_instance_id)
                     FROM t_l2_observations
                     WHERE entity_instance_id = %s
                       AND processing_revision_id = %s
@@ -197,11 +204,15 @@ def run_cross_node_processing_acceptance(
                     """,
                     (output_entity_id, revision_id, site_version),
                 )
-                history_count = int(cursor.fetchone()[0])
+                history_count, runtime_instance_count = (
+                    int(value) for value in cursor.fetchone()
+                )
 
                 source_entity_ids: tuple[UUID, ...] = ()
+                source_latest_match_count = 0
                 outbox_count = 0
                 checkpoint_matches = False
+                authenticated_ws_receipt_count = 0
                 if latest_event_id is not None:
                     cursor.execute(
                         """
@@ -221,6 +232,25 @@ def run_cross_node_processing_acceptance(
                         UUID(str(row[0])) for row in cursor.fetchall()
                     )
                     cursor.execute(
+                        """
+                        SELECT count(DISTINCT source_observation.entity_instance_id)
+                        FROM t_l2_observation_sources AS source
+                        JOIN t_l2_observations AS source_observation
+                          ON source_observation.event_id = source.source_l2_event_id
+                         AND source_observation.observed_at = source.source_l2_observed_at
+                        JOIN t_l2_latest AS source_latest
+                          ON source_latest.entity_instance_id =
+                               source_observation.entity_instance_id
+                         AND source_latest.event_id = source.source_l2_event_id
+                         AND source_latest.observed_at = source.source_l2_observed_at
+                        WHERE source.l2_event_id = %s
+                          AND source.l2_observed_at = %s
+                          AND source.source_kind = 'l2'
+                        """,
+                        (latest_event_id, latest_observed_at),
+                    )
+                    source_latest_match_count = int(cursor.fetchone()[0])
+                    cursor.execute(
                         "SELECT count(*) FROM t_l2_stream_outbox WHERE event_id = %s",
                         (latest_event_id,),
                     )
@@ -236,6 +266,31 @@ def run_cross_node_processing_acceptance(
                         (installed_id, output_id, latest_event_id),
                     )
                     checkpoint_matches = int(cursor.fetchone()[0]) == 1
+                    cursor.execute(
+                        """
+                        SELECT count(*)
+                        FROM t_en9_acceptance_ws_receipts
+                        WHERE application_id = %s
+                          AND event_id = %s
+                          AND entity_instance_id = %s
+                        """,
+                        (application_id, latest_event_id, output_entity_id),
+                    )
+                    authenticated_ws_receipt_count = int(cursor.fetchone()[0])
+
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM t_l2_observations AS history
+                    JOIN t_l2_latest AS latest
+                      ON latest.entity_instance_id = history.entity_instance_id
+                    WHERE history.entity_instance_id = ANY(%s::uuid[])
+                      AND history.observed_at < latest.observed_at
+                      AND history.calculated_at > latest.calculated_at
+                    """,
+                    ([str(item) for item in member_ids],),
+                )
+                late_source_history_count = int(cursor.fetchone()[0])
 
                 checks = (
                     CrossNodeAcceptanceCheck(
@@ -292,6 +347,31 @@ def run_cross_node_processing_acceptance(
                         },
                     ),
                     CrossNodeAcceptanceCheck(
+                        "RESTART_CONTINUITY",
+                        runtime_instance_count >= 2,
+                        {"runtime_instance_count": runtime_instance_count},
+                    ),
+                    CrossNodeAcceptanceCheck(
+                        "AUTHENTICATED_WS_DELIVERY",
+                        authenticated_ws_receipt_count >= 1,
+                        {
+                            "authenticated_receipt_count": (
+                                authenticated_ws_receipt_count
+                            )
+                        },
+                    ),
+                    CrossNodeAcceptanceCheck(
+                        "LATE_L2_DID_NOT_REWIND_LATEST",
+                        bool(
+                            late_source_history_count >= 1
+                            and source_latest_match_count == len(member_ids)
+                        ),
+                        {
+                            "late_source_history_count": late_source_history_count,
+                            "current_source_count": source_latest_match_count,
+                        },
+                    ),
+                    CrossNodeAcceptanceCheck(
                         "OUTBOX_AND_CHECKPOINT",
                         outbox_count == 1 and checkpoint_matches,
                         {
@@ -302,6 +382,10 @@ def run_cross_node_processing_acceptance(
                 )
                 passed = all(check.passed for check in checks)
                 evidence = {
+                    "application_id": str(application_id),
+                    "installed_processing_id": str(installed_id),
+                    "processing_revision_id": str(revision_id),
+                    "site_configuration_version": int(site_version),
                     "output_definition_id": output_definition_id,
                     "output_value": output_value,
                     "frozen_member_ids": [str(item) for item in member_ids],
@@ -371,6 +455,18 @@ def run_cross_node_processing_acceptance(
         frozen_member_count=len(stored_evidence["frozen_member_ids"]),
         source_entity_count=len(stored_evidence["source_entity_ids"]),
         output_value=stored_evidence["output_value"],
+        restart_continuity=next(
+            item.passed for item in stored_checks
+            if item.code == "RESTART_CONTINUITY"
+        ),
+        authenticated_ws_delivery=next(
+            item.passed for item in stored_checks
+            if item.code == "AUTHENTICATED_WS_DELIVERY"
+        ),
+        late_input_protected=next(
+            item.passed for item in stored_checks
+            if item.code == "LATE_L2_DID_NOT_REWIND_LATEST"
+        ),
         passed=stored_status == "passed",
         checks=stored_checks,
         generated_at=stored_at,

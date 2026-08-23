@@ -4,7 +4,20 @@ import type {
   PointProcessingFormulaPreview,
   PointProcessingTemplate,
 } from '../../api/client'
-import { buildFormulaPreviewViewModel } from './dataTrunkViewModel'
+import {
+  buildFormulaPreviewViewModel,
+  buildVisualFormula,
+  parseVisualFormula,
+  type VisualFormulaFunction,
+} from './dataTrunkViewModel'
+
+const visualFunctions: Array<{ key: VisualFormulaFunction; label: string }> = [
+  { key: 'sum', label: '求和' },
+  { key: 'avg', label: '平均' },
+  { key: 'min_of', label: '最小值' },
+  { key: 'max_of', label: '最大值' },
+  { key: 'count', label: '计数' },
+]
 
 export default function PointProcessingFormulaEditor({
   template,
@@ -24,7 +37,13 @@ export default function PointProcessingFormulaEditor({
 
   useEffect(() => setExpression(templateExpression), [template.revision_id, templateExpression])
   if (!output) return null
-  const model = preview ? buildFormulaPreviewViewModel(preview) : null
+  const collectionInputs = template.inputs.filter((item) => item.cardinality === 'many')
+  const visual = parseVisualFormula(
+    expression,
+    collectionInputs.map((item) => item.input_id),
+  )
+  const currentPreview = preview?.expression === expression.trim() ? preview : null
+  const model = currentPreview ? buildFormulaPreviewViewModel(currentPreview) : null
 
   return (
     <section className="rounded-lg border border-blue-200 bg-blue-50/60 p-3">
@@ -51,19 +70,44 @@ export default function PointProcessingFormulaEditor({
 
       {mode === 'visual' ? (
         <div className="mt-3 rounded-md border border-blue-100 bg-white p-3">
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <span className="rounded bg-blue-100 px-2 py-1 font-semibold text-blue-900">集合求和</span>
-            <span className="text-gray-400">←</span>
-            {template.inputs.filter((item) => expression.includes(item.input_id)).map((input) => (
-              <span key={input.input_id} className="rounded border border-gray-200 px-2 py-1 text-gray-700">
-                {input.input_id} · {input.data_type}{input.unit ? `/${input.unit}` : ''}
-              </span>
+          <div className="text-[10px] font-semibold text-gray-600">1. 选择集合函数</div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {visualFunctions.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                disabled={!collectionInputs.length}
+                onClick={() => setExpression(buildVisualFormula(
+                  item.key,
+                  visual?.inputId || collectionInputs[0].input_id,
+                ))}
+                className={`rounded border px-2 py-1 text-[10px] ${visual?.functionName === item.key ? 'border-blue-600 bg-blue-100 text-blue-900' : 'border-gray-200 text-gray-600'}`}
+              >
+                {item.label}
+              </button>
             ))}
-            <span className="text-gray-400">→</span>
-            <span className="rounded bg-emerald-50 px-2 py-1 font-semibold text-emerald-800">
-              {output.data_type}{output.unit ? `/${output.unit}` : ''}
-            </span>
           </div>
+          <div className="mt-3 text-[10px] font-semibold text-gray-600">2. 选择冻结输入</div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {collectionInputs.map((input) => (
+              <button
+                key={input.input_id}
+                type="button"
+                onClick={() => setExpression(buildVisualFormula(
+                  visual?.functionName || 'sum',
+                  input.input_id,
+                ))}
+                className={`rounded border px-2 py-1 text-[10px] ${visual?.inputId === input.input_id ? 'border-blue-600 bg-blue-100 text-blue-900' : 'border-gray-200 text-gray-700'}`}
+              >
+                {input.input_id} · {input.data_type}{input.unit ? `/${input.unit}` : ''}
+              </button>
+            ))}
+          </div>
+          {!visual && (
+            <div className="mt-3 rounded bg-amber-50 px-2 py-1.5 text-[10px] text-amber-800">
+              当前是复杂文本公式；选择上方函数和输入可重建为可视公式。
+            </div>
+          )}
           <code className="mt-3 block break-all font-mono text-[11px] text-gray-600">{expression}</code>
         </div>
       ) : (
@@ -88,12 +132,12 @@ export default function PointProcessingFormulaEditor({
         {busy ? '正在编译并展开实体...' : '预检公式、成员与 DAG'}
       </button>
 
-      {model && preview && (
+      {model && currentPreview && (
         <div className={`mt-3 grid gap-2 text-[10px] sm:grid-cols-3 ${model.ready ? 'text-emerald-800' : 'text-red-700'}`}>
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">结果契约</div><div className="mt-1 font-semibold">{model.resultContract}</div></div>
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">选择器</div><div className="mt-1 font-semibold">{model.memberLabel}</div></div>
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">全站 DAG</div><div className="mt-1 font-semibold">{model.dagLabel}</div></div>
-          <div className="sm:col-span-3 break-all text-gray-500">AST {preview.ast_digest.slice(0, 16)} · DAG {preview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
+          <div className="sm:col-span-3 break-all text-gray-500">AST {currentPreview.ast_digest.slice(0, 16)} · DAG {currentPreview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
         </div>
       )}
     </section>

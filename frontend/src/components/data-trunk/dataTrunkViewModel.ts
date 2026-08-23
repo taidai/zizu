@@ -118,3 +118,37 @@ export function buildFormulaPreviewViewModel(preview: {
     ready: preview.blockers.length === 0,
   }
 }
+
+export type VisualFormulaFunction = 'sum' | 'avg' | 'min_of' | 'max_of' | 'count'
+
+const visualFormulaFunctions = new Set<VisualFormulaFunction>([
+  'sum',
+  'avg',
+  'min_of',
+  'max_of',
+  'count',
+])
+
+export function buildVisualFormula(
+  functionName: VisualFormulaFunction,
+  inputId: string,
+): string {
+  if (!visualFormulaFunctions.has(functionName) || !/^[A-Za-z_]\w*$/.test(inputId)) {
+    throw new Error('可视化公式参数无效')
+  }
+  return `${functionName}(${inputId})`
+}
+
+export function parseVisualFormula(
+  expression: string,
+  inputIds: string[],
+): { functionName: VisualFormulaFunction; inputId: string } | null {
+  const matched = expression.match(
+    /^\s*(sum|avg|min_of|max_of|count)\(\s*([A-Za-z_]\w*)\s*\)\s*$/,
+  )
+  if (!matched || !inputIds.includes(matched[2])) return null
+  return {
+    functionName: matched[1] as VisualFormulaFunction,
+    inputId: matched[2],
+  }
+}

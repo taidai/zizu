@@ -86,3 +86,20 @@ test('formula preview exposes one typed selector and DAG summary', async () => {
   assert.equal(model.dagLabel, '2 条依赖 · 深度 2/8')
   assert.equal(model.ready, true)
 })
+
+test('visual formula builder and text parser share one canonical expression', async () => {
+  const viewModel = await import('./dataTrunkViewModel.ts')
+
+  assert.equal(
+    viewModel.buildVisualFormula('avg', 'pcs_power'),
+    'avg(pcs_power)',
+  )
+  assert.deepEqual(
+    viewModel.parseVisualFormula('avg(pcs_power)', ['pcs_power', 'reserve_power']),
+    { functionName: 'avg', inputId: 'pcs_power' },
+  )
+  assert.equal(
+    viewModel.parseVisualFormula('pcs_power + reserve_power', ['pcs_power', 'reserve_power']),
+    null,
+  )
+})
