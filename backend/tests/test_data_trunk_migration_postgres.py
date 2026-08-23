@@ -340,6 +340,92 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                             "SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception)
                         )
 
+    def test_043_replay_rejects_damaged_function_body_or_search_path(self) -> None:
+        corruptions = (
+            (
+                "projection guard body",
+                """
+                CREATE OR REPLACE FUNCTION public.guard_business_metric_projection()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                SET search_path = pg_catalog, public
+                AS $$ BEGIN RETURN NEW; END $$
+                """,
+            ),
+            (
+                "window evidence search path",
+                """
+                ALTER FUNCTION public.validate_business_metric_window_result_evidence()
+                RESET search_path
+                """,
+            ),
+        )
+        for label, corruption in corruptions:
+            with self.subTest(label):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        self._reset_through_041(cursor)
+                        self._apply_042(cursor)
+                        self._apply_043(cursor)
+                        cursor.execute(corruption)
+                        with self.assertRaises(
+                            psycopg2.errors.ObjectNotInPrerequisiteState
+                        ) as raised:
+                            self._apply_043(cursor)
+                        self.assertIn(
+                            "SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception)
+                        )
+
+    def test_043_ignores_same_named_contracts_outside_public(self) -> None:
+        shadow_schema = "metric_043_shadow"
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(shadow_schema)
+                    )
+                )
+                try:
+                    self._reset_through_041(cursor)
+                    self._apply_042(cursor)
+                    cursor.execute(
+                        sql.SQL(
+                            """
+                            CREATE SCHEMA {};
+                            CREATE TABLE {}.t_point_processing_revisions (
+                              internal_kind TEXT,
+                              CONSTRAINT chk_point_processing_revision_internal_kind
+                                CHECK (internal_kind IS NULL)
+                            );
+                            CREATE TABLE {}.t_business_metric_templates (id UUID);
+                            CREATE TRIGGER trg_t_business_metric_templates_immutable
+                              BEFORE UPDATE OR DELETE
+                              ON {}.t_business_metric_templates
+                              FOR EACH ROW EXECUTE FUNCTION
+                                public.reject_data_trunk_append_only()
+                            """
+                        ).format(
+                            sql.Identifier(shadow_schema),
+                            sql.Identifier(shadow_schema),
+                            sql.Identifier(shadow_schema),
+                            sql.Identifier(shadow_schema),
+                        )
+                    )
+                    self._apply_043(cursor)
+                    self._apply_043(cursor)
+                    cursor.execute(
+                        "SELECT to_regclass('public.t_business_metric_templates')"
+                    )
+                    self.assertIsNotNone(cursor.fetchone()[0])
+                finally:
+                    cursor.execute(
+                        sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                            sql.Identifier(shadow_schema)
+                        )
+                    )
+
     def test_043_template_mutation_and_all_append_only_truncations_are_rejected(self) -> None:
         immutable = (
             "t_business_metric_templates",

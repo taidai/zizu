@@ -1079,9 +1079,12 @@ class PostgresBusinessMetricRepository:
               SELECT audit.resulting_state
               FROM t_business_metric_audit AS audit
               WHERE audit.installed_metric_id = installed.id
-                AND audit.resulting_state IS NOT NULL
-                AND audit.action IN (
-                  'installed', 'upgraded', 'reused', 'enabled', 'disabled'
+                AND (
+                  (audit.action = 'disabled'
+                   AND audit.resulting_state = 'disabled')
+                  OR
+                  (audit.action IN ('installed', 'upgraded', 'enabled')
+                   AND audit.resulting_state = 'active')
                 )
               ORDER BY audit.created_at DESC, audit.id DESC
               LIMIT 1

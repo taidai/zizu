@@ -21,6 +21,8 @@ DECLARE
   schema_043_expected_contract_triggers INTEGER;
   schema_043_constraint_definitions INTEGER;
   schema_043_expected_constraint_definitions INTEGER;
+  schema_043_function_contracts INTEGER;
+  schema_043_expected_function_contracts INTEGER;
 BEGIN
   SELECT count(*) INTO existing_tables
   FROM (VALUES
@@ -53,10 +55,22 @@ BEGIN
       AND columns.column_name = expected.column_name
   );
   SELECT count(*) INTO schema_043_extension_constraints
-  FROM pg_constraint
-  WHERE conname IN (
-    'chk_point_processing_revision_internal_kind',
-    'chk_installed_point_processing_scope'
+  FROM (VALUES
+    ('t_point_processing_revisions',
+     'chk_point_processing_revision_internal_kind'),
+    ('t_installed_point_processings',
+     'chk_installed_point_processing_scope')
+  ) AS expected(table_name, constraint_name)
+  WHERE EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_record
+    JOIN pg_catalog.pg_class AS relation
+      ON relation.oid = constraint_record.conrelid
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relname = expected.table_name
+      AND constraint_record.conname = expected.constraint_name
   );
   SELECT count(*) INTO schema_043_extension_indexes
   FROM (VALUES ('uq_installed_business_metric_processing_current')) AS expected(name)
@@ -102,7 +116,7 @@ BEGIN
   END IF;
 
   IF to_regclass('public.schema_migrations') IS NOT NULL THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)'
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = $1)'
       INTO schema_042_recorded USING '042';
     IF NOT schema_042_recorded THEN
       RAISE EXCEPTION 'schema 043 requires recorded schema 042 migration evidence'
@@ -149,15 +163,15 @@ BEGIN
 
   IF schema_042_contract_columns <> 22
      OR NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conrelid = 't_point_processing_expressions'::regclass
+       SELECT 1 FROM pg_catalog.pg_constraint
+       WHERE conrelid = 'public.t_point_processing_expressions'::regclass
          AND contype = 'p'
      )
      OR to_regclass('public.uq_l2_event_observed_at') IS NULL
      OR to_regclass('public.ix_nodes_parent_id') IS NULL
      OR NOT EXISTS (
-       SELECT 1 FROM pg_trigger
-       WHERE tgrelid = 't_point_processing_expressions'::regclass
+       SELECT 1 FROM pg_catalog.pg_trigger
+       WHERE tgrelid = 'public.t_point_processing_expressions'::regclass
          AND tgname = 'trg_point_processing_expressions_immutable'
          AND NOT tgisinternal
      ) THEN
@@ -210,8 +224,10 @@ BEGIN
     ) AS required(table_name, constraint_name, check_expression)
     WHERE EXISTS (
       SELECT 1
-      FROM pg_constraint AS constraint_record
-      WHERE constraint_record.conrelid = required.table_name::regclass
+      FROM pg_catalog.pg_constraint AS constraint_record
+      WHERE constraint_record.conrelid = to_regclass(
+              'public.' || required.table_name
+            )
         AND constraint_record.conname = required.constraint_name
         AND constraint_record.contype = 'c'
         AND pg_get_expr(
@@ -346,27 +362,29 @@ BEGIN
     ) AS required(table_name, column_name, type_name, required_not_null);
 
     SELECT count(*) INTO schema_043_primary_keys
-    FROM pg_constraint
+    FROM pg_catalog.pg_constraint
     WHERE contype = 'p'
       AND conrelid IN (
-        't_business_metric_templates'::regclass,
-        't_business_metric_revisions'::regclass,
-        't_business_metric_installation_plans'::regclass,
-        't_business_metric_plan_items'::regclass,
-        't_installed_business_metrics'::regclass,
-        't_business_metric_source_bindings'::regclass,
-        't_business_metric_projections'::regclass,
-        't_business_metric_window_results'::regclass,
-        't_business_metric_recomputations'::regclass,
-        't_entity_capability_contracts'::regclass,
-        't_business_metric_audit'::regclass,
-        't_business_metric_acceptance_reports'::regclass
+        'public.t_business_metric_templates'::regclass,
+        'public.t_business_metric_revisions'::regclass,
+        'public.t_business_metric_installation_plans'::regclass,
+        'public.t_business_metric_plan_items'::regclass,
+        'public.t_installed_business_metrics'::regclass,
+        'public.t_business_metric_source_bindings'::regclass,
+        'public.t_business_metric_projections'::regclass,
+        'public.t_business_metric_window_results'::regclass,
+        'public.t_business_metric_recomputations'::regclass,
+        'public.t_entity_capability_contracts'::regclass,
+        'public.t_business_metric_audit'::regclass,
+        'public.t_business_metric_acceptance_reports'::regclass
       );
 
     SELECT count(*), count(*) FILTER (WHERE EXISTS (
       SELECT 1
-      FROM pg_constraint AS constraint_record
-      WHERE constraint_record.conrelid = required.table_name::regclass
+      FROM pg_catalog.pg_constraint AS constraint_record
+      WHERE constraint_record.conrelid = to_regclass(
+              'public.' || required.table_name
+            )
         AND constraint_record.conname = required.constraint_name
         AND constraint_record.contype = required.constraint_type::"char"
     )) INTO schema_043_expected_constraints, schema_043_constraints
@@ -400,8 +418,10 @@ BEGIN
 
     SELECT count(*), count(*) FILTER (WHERE EXISTS (
       SELECT 1
-      FROM pg_constraint AS constraint_record
-      WHERE constraint_record.conrelid = required.table_name::regclass
+      FROM pg_catalog.pg_constraint AS constraint_record
+      WHERE constraint_record.conrelid = to_regclass(
+              'public.' || required.table_name
+            )
         AND constraint_record.conname = required.constraint_name
         AND constraint_record.contype = required.constraint_type::"char"
         AND CASE
@@ -477,9 +497,12 @@ BEGIN
     ) AS required(table_name, constraint_name, constraint_type, definition);
 
     SELECT count(*) INTO schema_043_immutable_triggers
-    FROM pg_trigger AS trigger
-    JOIN pg_class AS relation ON relation.oid = trigger.tgrelid
+    FROM pg_catalog.pg_trigger AS trigger
+    JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
     WHERE NOT trigger.tgisinternal
+      AND namespace.nspname = 'public'
       AND relation.relname IN (
         't_business_metric_templates',
         't_business_metric_revisions',
@@ -494,7 +517,8 @@ BEGIN
         't_business_metric_acceptance_reports'
       )
       AND trigger.tgenabled <> 'D'
-      AND trigger.tgfoid = 'reject_data_trunk_append_only()'::regprocedure
+      AND trigger.tgfoid =
+            'public.reject_data_trunk_append_only()'::regprocedure
       AND (
         (
           trigger.tgname = 'trg_' || relation.relname || '_immutable'
@@ -507,12 +531,16 @@ BEGIN
       );
     SELECT count(*), count(*) FILTER (WHERE EXISTS (
       SELECT 1
-      FROM pg_trigger AS trigger
-      WHERE trigger.tgrelid = required.table_name::regclass
+      FROM pg_catalog.pg_trigger AS trigger
+      WHERE trigger.tgrelid = to_regclass(
+              'public.' || required.table_name
+            )
         AND trigger.tgname = required.trigger_name
         AND NOT trigger.tgisinternal
         AND trigger.tgenabled <> 'D'
-        AND trigger.tgfoid = required.function_name::regprocedure
+        AND trigger.tgfoid = to_regprocedure(
+              'public.' || required.function_name
+            )
         AND trigger.tgtype = required.trigger_type
     )) INTO schema_043_expected_contract_triggers, schema_043_contract_triggers
     FROM (VALUES
@@ -532,6 +560,46 @@ BEGIN
        'trg_business_metric_acceptance_runtime',
        'validate_business_metric_acceptance_runtime()', 7)
     ) AS required(table_name, trigger_name, function_name, trigger_type);
+
+    SELECT count(*), count(*) FILTER (WHERE EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_proc AS procedure
+      JOIN pg_catalog.pg_namespace AS namespace
+        ON namespace.oid = procedure.pronamespace
+      JOIN pg_catalog.pg_language AS language
+        ON language.oid = procedure.prolang
+      WHERE namespace.nspname = 'public'
+        AND procedure.proname = required.function_name
+        AND procedure.pronargs = 0
+        AND procedure.prokind = 'f'
+        AND procedure.prorettype = 'pg_catalog.trigger'::regtype
+        AND language.lanname = 'plpgsql'
+        AND procedure.provolatile = 'v'
+        AND procedure.proparallel = 'u'
+        AND NOT procedure.proisstrict
+        AND NOT procedure.prosecdef
+        AND NOT procedure.proleakproof
+        AND procedure.proconfig =
+              ARRAY['search_path=pg_catalog, public']::TEXT[]
+        AND md5(regexp_replace(
+              pg_get_functiondef(procedure.oid), '[[:space:]]+', ' ', 'g'
+            )) = required.definition_digest
+    )) INTO
+      schema_043_expected_function_contracts,
+      schema_043_function_contracts
+    FROM (VALUES
+      ('guard_business_metric_projection',
+       'e7f2e3707497c2a80ef285a1eabe3038'),
+      ('reject_data_trunk_append_only',
+       '055c32ce480d817fe7a82c47d42214bf'),
+      ('validate_business_metric_acceptance_runtime',
+       '03c067975cb3851f4ddc676b1af4887b'),
+      ('validate_business_metric_installation_lineage',
+       '200dd4022c853d06e98348abbaea0739'),
+      ('validate_business_metric_window_result_evidence',
+       '3d2ab258069d03b397ac434c37165737')
+    ) AS required(function_name, definition_digest);
+
     IF existing_contract_columns <> schema_043_expected_columns
        OR schema_043_primary_keys <> 12
        OR schema_043_constraints <> schema_043_expected_constraints
@@ -539,6 +607,8 @@ BEGIN
           <> schema_043_expected_constraint_definitions
        OR schema_043_immutable_triggers <> 22
        OR schema_043_contract_triggers <> schema_043_expected_contract_triggers
+       OR schema_043_function_contracts
+          <> schema_043_expected_function_contracts
        OR NOT EXISTS (
          SELECT 1 FROM pg_index
          WHERE indexrelid = to_regclass('public.uq_business_metric_installation_successor')
@@ -701,12 +771,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_business_metric_installation_successor
   ON t_installed_business_metrics(previous_installation_id)
   WHERE previous_installation_id IS NOT NULL;
 
-CREATE OR REPLACE FUNCTION validate_business_metric_installation_lineage()
+CREATE OR REPLACE FUNCTION public.validate_business_metric_installation_lineage()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
-  previous_row t_installed_business_metrics%ROWTYPE;
+  previous_row public.t_installed_business_metrics%ROWTYPE;
 BEGIN
   IF NEW.previous_installation_id IS NULL THEN
     IF NEW.installation_revision <> 1 THEN
@@ -717,7 +788,7 @@ BEGIN
   END IF;
 
   SELECT * INTO previous_row
-  FROM t_installed_business_metrics
+  FROM public.t_installed_business_metrics
   WHERE id = NEW.previous_installation_id;
   IF NOT FOUND
      OR previous_row.node_id <> NEW.node_id
@@ -731,10 +802,10 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_business_metric_installation_lineage
-  ON t_installed_business_metrics;
+  ON public.t_installed_business_metrics;
 CREATE TRIGGER trg_business_metric_installation_lineage
-BEFORE INSERT ON t_installed_business_metrics
-FOR EACH ROW EXECUTE FUNCTION validate_business_metric_installation_lineage();
+BEFORE INSERT ON public.t_installed_business_metrics
+FOR EACH ROW EXECUTE FUNCTION public.validate_business_metric_installation_lineage();
 
 ALTER TABLE t_business_metric_installation_plans
   DROP CONSTRAINT IF EXISTS fk_business_metric_plan_previous_installation;
@@ -868,20 +939,21 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
   )
 );
 
-CREATE OR REPLACE FUNCTION validate_business_metric_window_result_evidence()
+CREATE OR REPLACE FUNCTION public.validate_business_metric_window_result_evidence()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NOT EXISTS (
        SELECT 1
-       FROM t_business_metric_source_bindings AS binding
+       FROM public.t_business_metric_source_bindings AS binding
        WHERE binding.installed_metric_id = NEW.installed_metric_id
          AND binding.method = NEW.calculation_method
      )
      OR EXISTS (
        SELECT 1
-       FROM t_business_metric_source_bindings AS binding
+       FROM public.t_business_metric_source_bindings AS binding
        WHERE binding.installed_metric_id = NEW.installed_metric_id
          AND binding.method <> NEW.calculation_method
      ) THEN
@@ -903,8 +975,8 @@ BEGIN
     END IF;
     IF NOT EXISTS (
          SELECT 1
-         FROM t_l2_observations AS observation
-         JOIN t_business_metric_source_bindings AS binding
+         FROM public.t_l2_observations AS observation
+         JOIN public.t_business_metric_source_bindings AS binding
            ON binding.installed_metric_id = NEW.installed_metric_id
           AND binding.entity_instance_id = observation.entity_instance_id
          WHERE observation.event_id = NEW.first_source_event_id
@@ -912,8 +984,8 @@ BEGIN
        )
        OR NOT EXISTS (
          SELECT 1
-         FROM t_l2_observations AS observation
-         JOIN t_business_metric_source_bindings AS binding
+         FROM public.t_l2_observations AS observation
+         JOIN public.t_business_metric_source_bindings AS binding
            ON binding.installed_metric_id = NEW.installed_metric_id
           AND binding.entity_instance_id = observation.entity_instance_id
          WHERE observation.event_id = NEW.last_source_event_id
@@ -928,10 +1000,10 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_business_metric_window_result_evidence
-  ON t_business_metric_window_results;
+  ON public.t_business_metric_window_results;
 CREATE TRIGGER trg_business_metric_window_result_evidence
-BEFORE INSERT ON t_business_metric_window_results
-FOR EACH ROW EXECUTE FUNCTION validate_business_metric_window_result_evidence();
+BEFORE INSERT ON public.t_business_metric_window_results
+FOR EACH ROW EXECUTE FUNCTION public.validate_business_metric_window_result_evidence();
 
 CREATE TABLE IF NOT EXISTS t_business_metric_recomputations (
   id UUID PRIMARY KEY,
@@ -1023,11 +1095,13 @@ CREATE TABLE IF NOT EXISTS t_business_metric_acceptance_reports (
     UNIQUE(installed_metric_id, digest)
 );
 
-CREATE OR REPLACE FUNCTION validate_business_metric_acceptance_runtime()
+CREATE OR REPLACE FUNCTION public.validate_business_metric_acceptance_runtime()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
+  window_result public.t_business_metric_window_results%ROWTYPE;
   producing_runtime_id UUID;
 BEGIN
   IF NEW.window_result_installed_metric_id IS NULL
@@ -1037,17 +1111,106 @@ BEGIN
      OR NEW.runtime_instance_id IS NULL THEN
     RETURN NEW;
   END IF;
-  SELECT observation.producing_runtime_instance_id
-  INTO producing_runtime_id
-  FROM t_business_metric_window_results AS result
-  JOIN t_l2_observations AS observation
-    ON observation.event_id = result.result_event_id
-   AND observation.observed_at = result.result_observed_at
-   AND observation.entity_instance_id = result.result_entity_instance_id
+  SELECT result.* INTO window_result
+  FROM public.t_business_metric_window_results AS result
   WHERE result.installed_metric_id = NEW.window_result_installed_metric_id
     AND result.window_started_at = NEW.window_result_started_at
     AND result.window_ended_at = NEW.window_result_ended_at
     AND result.revision = NEW.window_result_revision;
+
+  IF NOT FOUND
+     OR window_result.lifecycle NOT IN ('completed', 'corrected')
+     OR window_result.source_count <= 0
+     OR window_result.first_source_event_id IS NULL
+     OR window_result.first_source_observed_at IS NULL
+     OR window_result.last_source_event_id IS NULL
+     OR window_result.last_source_observed_at IS NULL
+     OR window_result.result_event_id IS NULL
+     OR window_result.result_observed_at IS NULL
+     OR window_result.result_entity_instance_id IS NULL
+     OR (
+       window_result.source_count = 1
+       AND (
+         window_result.first_source_event_id
+           IS DISTINCT FROM window_result.last_source_event_id
+         OR window_result.first_source_observed_at
+           IS DISTINCT FROM window_result.last_source_observed_at
+       )
+     )
+     OR (
+       window_result.source_count > 1
+       AND NOT (
+         ROW(window_result.first_source_observed_at,
+             window_result.first_source_event_id)
+         < ROW(window_result.last_source_observed_at,
+               window_result.last_source_event_id)
+       )
+     )
+     OR window_result.last_source_observed_at
+          < window_result.window_started_at
+     OR window_result.last_source_observed_at
+          > window_result.window_ended_at
+     OR window_result.first_source_observed_at
+          > window_result.window_ended_at
+     OR (
+       window_result.calculation_method = 'counter_delta'
+       AND window_result.first_source_observed_at
+             < window_result.window_started_at
+               - (window_result.window_ended_at
+                  - window_result.window_started_at)
+     )
+     OR (
+       window_result.calculation_method <> 'counter_delta'
+       AND window_result.first_source_observed_at
+             < window_result.window_started_at
+     ) THEN
+    RAISE EXCEPTION 'acceptance result source evidence is invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT EXISTS (
+       SELECT 1
+       FROM public.t_business_metric_source_bindings AS binding
+       WHERE binding.installed_metric_id = window_result.installed_metric_id
+         AND binding.method = window_result.calculation_method
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM public.t_business_metric_source_bindings AS binding
+       WHERE binding.installed_metric_id = window_result.installed_metric_id
+         AND binding.method <> window_result.calculation_method
+     )
+     OR NOT EXISTS (
+       SELECT 1
+       FROM public.t_l2_observations AS observation
+       JOIN public.t_business_metric_source_bindings AS binding
+         ON binding.installed_metric_id = window_result.installed_metric_id
+        AND binding.entity_instance_id = observation.entity_instance_id
+       WHERE observation.event_id = window_result.first_source_event_id
+         AND observation.observed_at = window_result.first_source_observed_at
+     )
+     OR NOT EXISTS (
+       SELECT 1
+       FROM public.t_l2_observations AS observation
+       JOIN public.t_business_metric_source_bindings AS binding
+         ON binding.installed_metric_id = window_result.installed_metric_id
+        AND binding.entity_instance_id = observation.entity_instance_id
+       WHERE observation.event_id = window_result.last_source_event_id
+         AND observation.observed_at = window_result.last_source_observed_at
+     ) THEN
+    RAISE EXCEPTION 'acceptance result does not match frozen sources'
+      USING ERRCODE = '23514';
+  END IF;
+
+  SELECT observation.producing_runtime_instance_id
+  INTO producing_runtime_id
+  FROM public.t_l2_observations AS observation
+  JOIN public.t_installed_business_metrics AS installation
+    ON installation.id = window_result.installed_metric_id
+   AND installation.entity_instance_id = observation.entity_instance_id
+  WHERE observation.event_id = window_result.result_event_id
+    AND observation.observed_at = window_result.result_observed_at
+    AND observation.entity_instance_id = window_result.result_entity_instance_id;
   IF producing_runtime_id IS NULL
      OR producing_runtime_id <> NEW.runtime_instance_id THEN
     RAISE EXCEPTION 'acceptance runtime does not match result producer'
@@ -1058,18 +1221,19 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_business_metric_acceptance_runtime
-  ON t_business_metric_acceptance_reports;
+  ON public.t_business_metric_acceptance_reports;
 CREATE TRIGGER trg_business_metric_acceptance_runtime
-BEFORE INSERT ON t_business_metric_acceptance_reports
-FOR EACH ROW EXECUTE FUNCTION validate_business_metric_acceptance_runtime();
+BEFORE INSERT ON public.t_business_metric_acceptance_reports
+FOR EACH ROW EXECUTE FUNCTION public.validate_business_metric_acceptance_runtime();
 
 CREATE INDEX IF NOT EXISTS ix_business_metric_installed_node ON t_installed_business_metrics(node_id, state);
 CREATE INDEX IF NOT EXISTS ix_business_metric_source_bindings_entity ON t_business_metric_source_bindings(entity_instance_id);
 CREATE INDEX IF NOT EXISTS ix_business_metric_window_results_lookup ON t_business_metric_window_results(installed_metric_id, window_ended_at DESC, revision DESC);
 
-CREATE OR REPLACE FUNCTION guard_business_metric_projection()
+CREATE OR REPLACE FUNCTION public.guard_business_metric_projection()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
@@ -1087,16 +1251,16 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_business_metric_projection_guard
-  ON t_business_metric_projections;
+  ON public.t_business_metric_projections;
 CREATE TRIGGER trg_business_metric_projection_guard
-BEFORE UPDATE OR DELETE ON t_business_metric_projections
-FOR EACH ROW EXECUTE FUNCTION guard_business_metric_projection();
+BEFORE UPDATE OR DELETE ON public.t_business_metric_projections
+FOR EACH ROW EXECUTE FUNCTION public.guard_business_metric_projection();
 
 DROP TRIGGER IF EXISTS trg_business_metric_projection_no_truncate
-  ON t_business_metric_projections;
+  ON public.t_business_metric_projections;
 CREATE TRIGGER trg_business_metric_projection_no_truncate
-BEFORE TRUNCATE ON t_business_metric_projections
-FOR EACH STATEMENT EXECUTE FUNCTION guard_business_metric_projection();
+BEFORE TRUNCATE ON public.t_business_metric_projections
+FOR EACH STATEMENT EXECUTE FUNCTION public.guard_business_metric_projection();
 
 DO $$
 DECLARE
@@ -1115,11 +1279,13 @@ DECLARE
     't_business_metric_acceptance_reports'
   ];
 BEGIN
+  EXECUTE 'ALTER FUNCTION public.reject_data_trunk_append_only() '
+          'SET search_path = pg_catalog, public';
   FOREACH table_name IN ARRAY immutable_tables LOOP
-    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', 'trg_' || table_name || '_immutable', table_name);
-    EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION reject_data_trunk_append_only()', 'trg_' || table_name || '_immutable', table_name);
-    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', 'trg_' || table_name || '_no_truncate', table_name);
-    EXECUTE format('CREATE TRIGGER %I BEFORE TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION reject_data_trunk_append_only()', 'trg_' || table_name || '_no_truncate', table_name);
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', 'trg_' || table_name || '_immutable', table_name);
+    EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.reject_data_trunk_append_only()', 'trg_' || table_name || '_immutable', table_name);
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', 'trg_' || table_name || '_no_truncate', table_name);
+    EXECUTE format('CREATE TRIGGER %I BEFORE TRUNCATE ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION public.reject_data_trunk_append_only()', 'trg_' || table_name || '_no_truncate', table_name);
   END LOOP;
 END;
 $$;

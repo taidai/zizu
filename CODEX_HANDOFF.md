@@ -4346,3 +4346,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 原子 apply 复用现有 point-processing 外部事务 seam；注入故障证明 solution/site/point-processing/entity/metric 全部回滚。同站点双指标均保留独立 current processing source。
 - 最终指定门禁：内存 6/6、真实 PostgreSQL 33/33（0 skip），其中既有 point-processing 12/12；`py_compile` 与 `git diff --check` 通过。完整 discovery 442 项仅有两个既有脚本收集错误（F0 缺显式 `ZIZU_API`、F0 pure import 时 `sys.exit(0)`），93 skip。
 - 完整续作证据见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-2-report.md`；Task 3+ runtime/recompute/API/UI/assets 未实现，保持后续范围。
+
+### 2026-08-24 — v0.4.84 Task 2 第四轮安全收口
+
+- 有效状态读取现在对 audit action/resulting_state 成对 fail-closed；绕过历史 CHECK 的非法组合不能改变 `inspect`。
+- Schema 043 关键 trigger 函数显式使用 `pg_catalog, public` 安全 search path 和 `public.` 对象；window/acceptance 不再可被临时同名表遮蔽，acceptance 会独立复核历史窗口来源、时间、顺序、结果实体与 producer。
+- 043 replay 在任何替换 DDL 前指纹校验 lineage/window/acceptance/projection/append-only 五个函数的规范定义与安全元数据；损坏稳定拒绝。pristine footprint 和 append-only trigger 计数绑定 public namespace，不受其他 schema 同名对象影响。
+- TDD RED 为 5 个业务行为失败、2 个函数 corruption subtest 失败与 1 个跨 schema 误拒；修复后非数据库 27/27、串行隔离 PostgreSQL 71/71（0 skip）通过，`py_compile` 与 `git diff --check` 作为提交门禁执行。
+- 完整证据已追加 Task 2 report。Task 3+ runtime/recompute/API/UI/assets 仍未实现；未新增依赖，未连接或操作 1 号机。
