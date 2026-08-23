@@ -181,20 +181,26 @@ def counter_delta(
     """Sum monotonic counter segments under one explicit frozen decrease policy."""
     if not isinstance(contract, CounterContract):
         raise TypeError("counter calculation requires a frozen counter contract")
-    prepared, selection_error = _counter_samples(
-        samples,
+    input_kind = _input_kind(samples)
+    if input_kind == "mixed":
+        return _invalid_calculation("INPUT_KIND_MIXED", ())
+    relevant = _counter_relevant_samples(
+        _calculation_samples(samples, None),
         window,
-        source_unit,
     )
-    if selection_error is not None:
-        return _invalid_calculation(selection_error, prepared)
-    contract_error = _l2_helper_contract_error(
-        prepared,
+    contract_error = _metric_contract_error(
+        relevant,
         source_unit,
         output_unit,
+        source_family="energy",
+        output_family="energy",
+        require_units=input_kind == "l2",
     )
     if contract_error is not None:
-        return _invalid_calculation(contract_error, prepared)
+        return _invalid_calculation(contract_error, relevant)
+    prepared, selection_error = _counter_samples(relevant, window, source_unit)
+    if selection_error is not None:
+        return _invalid_calculation(selection_error, prepared)
     if any(item.quality in _BAD_QUALITIES for item in prepared):
         return _invalid_calculation("SOURCE_BAD", prepared)
     try:
@@ -235,21 +241,26 @@ def counter_delta(
 
 
 def integrate_power(
-    events: Sequence[L2Observation],
+    events: Sequence[Number] | Sequence[L2Observation],
     window: MetricWindow,
     *,
     maximum_sample_gap_seconds: int,
     direction: FlowDirection | str,
-    source_unit: str = "kW",
-    output_unit: str = "kWh",
+    source_unit: str | None = "kW",
+    output_unit: str | None = "kWh",
 ) -> MetricCalculation:
     """Trapezoid-integrate selected power flow to energy in kWh."""
+    input_kind = _input_kind(events)
+    if input_kind == "mixed":
+        return _invalid_calculation("INPUT_KIND_MIXED", ())
     prepared = _calculation_samples(events, window)
-    contract_error = _l2_helper_contract_error(
+    contract_error = _metric_contract_error(
         prepared,
         source_unit,
         output_unit,
-        require_units=True,
+        source_family="power",
+        output_family="energy",
+        require_units=input_kind == "l2",
     )
     if contract_error is not None:
         return _invalid_calculation(contract_error, prepared)
@@ -270,8 +281,16 @@ def integrate_power(
             or current.quality in _BAD_QUALITIES
         ):
             continue
-        previous_value = _sample_value(previous, source_unit, "power")
-        current_value = _sample_value(current, source_unit, "power")
+        previous_value = (
+            _sample_value(previous, source_unit, "power")
+            if source_unit is not None or output_unit is not None
+            else _decimal(previous.value)
+        )
+        current_value = (
+            _sample_value(current, source_unit, "power")
+            if source_unit is not None or output_unit is not None
+            else _decimal(current.value)
+        )
         total_kw_seconds += _directional_linear_area(
             previous_value,
             current_value,
@@ -290,12 +309,17 @@ def integrate_power(
             reason="COVERAGE_INSUFFICIENT",
             source_event_ids=_event_ids(prepared),
         )
-    return MetricCalculation(
-        value=_power_seconds_to_energy(
+    value = (
+        total_kw_seconds / Decimal(3600)
+        if source_unit is None and output_unit is None
+        else _power_seconds_to_energy(
             total_kw_seconds,
-            source_unit,
-            output_unit,
-        ),
+            _required_unit(source_unit),
+            _required_unit(output_unit),
+        )
+    )
+    return MetricCalculation(
+        value=value,
         coverage=coverage,
         valid=True,
         quality=_source_quality(used_samples),
@@ -304,7 +328,7 @@ def integrate_power(
 
 
 def time_weighted_average(
-    events: Sequence[L2Observation],
+    events: Sequence[Number] | Sequence[L2Observation],
     window: MetricWindow,
     *,
     maximum_sample_gap_seconds: int,
@@ -312,11 +336,17 @@ def time_weighted_average(
     output_unit: str | None = None,
 ) -> MetricCalculation:
     """Average by integrable elapsed time, never by number of samples."""
+    input_kind = _input_kind(events)
+    if input_kind == "mixed":
+        return _invalid_calculation("INPUT_KIND_MIXED", ())
     prepared = _calculation_samples(events, window)
-    contract_error = _l2_helper_contract_error(
+    contract_error = _metric_contract_error(
         prepared,
         source_unit,
         output_unit,
+        source_family="power",
+        output_family="power",
+        require_units=input_kind == "l2",
     )
     if contract_error is not None:
         return _invalid_calculation(contract_error, prepared)
@@ -360,18 +390,24 @@ def time_weighted_average(
 
 
 def window_maximum(
-    events: Sequence[L2Observation],
+    events: Sequence[Number] | Sequence[L2Observation],
     window: MetricWindow,
     *,
     source_unit: str | None = None,
     output_unit: str | None = None,
 ) -> MetricCalculation:
     """Select the stable first maximum among quality-usable source samples."""
+    input_kind = _input_kind(events)
+    if input_kind == "mixed":
+        return _invalid_calculation("INPUT_KIND_MIXED", ())
     all_samples = _calculation_samples(events, window)
-    contract_error = _l2_helper_contract_error(
+    contract_error = _metric_contract_error(
         all_samples,
         source_unit,
         output_unit,
+        source_family="power",
+        output_family="power",
+        require_units=input_kind == "l2",
     )
     if contract_error is not None:
         return _invalid_calculation(contract_error, all_samples)
@@ -386,7 +422,7 @@ def window_maximum(
         for item in prepared
     )
     if not valued:
-        return MetricCalculation(None, 0.0, False, TrunkQuality.BAD, "COVERAGE_INSUFFICIENT")
+        return _invalid_calculation("COVERAGE_INSUFFICIENT", all_samples)
     winner, value = max(valued, key=lambda pair: pair[1])
     return MetricCalculation(
         value=_convert_same_family(value, source_unit, output_unit, "power"),
@@ -417,23 +453,29 @@ def project_metric(
         window = rolling_window(instant, contract.rolling_window_seconds)
 
     all_events = (*state.events, *events)
+    relevant = _project_relevant_events(all_events, window, contract.method)
     try:
-        combined, duplicate_conflict = _ordered_unique_events(all_events)
+        combined, duplicate_conflict = _ordered_unique_events(relevant)
     except MetricProjectionError as exc:
         return _invalid_decision(
             window,
             instant,
-            all_events,
+            relevant,
             contract.estimated,
             exc.reason,
         )
-    selected = tuple(item for item in combined if window.contains(item.observed_at))
     if duplicate_conflict:
-        return _invalid_decision(window, instant, selected, contract.estimated, "DUPLICATE_EVENT_CONFLICT")
+        return _invalid_decision(
+            window,
+            instant,
+            combined,
+            contract.estimated,
+            "DUPLICATE_EVENT_CONFLICT",
+        )
     try:
         calculation = _calculate(
             state,
-            combined if contract.method is MetricAggregator.COUNTER_DELTA else selected,
+            combined,
             window,
             contract,
         )
@@ -441,7 +483,7 @@ def project_metric(
         return _invalid_decision(
             window,
             instant,
-            selected,
+            combined,
             contract.estimated,
             exc.reason,
         )
@@ -449,25 +491,25 @@ def project_metric(
         if "timezone-aware" in str(exc):
             raise
         reason = "NONFINITE_VALUE" if "finite" in str(exc) else "CALCULATION_CONTRACT_INVALID"
-        return _invalid_decision(window, instant, selected, contract.estimated, reason)
+        return _invalid_decision(window, instant, combined, contract.estimated, reason)
 
     if not calculation.valid:
-        evidence_ids = calculation.source_event_ids or _observation_ids(selected)
+        evidence_ids = calculation.source_event_ids or _observation_ids(combined)
         return _invalid_decision(
             window,
             instant,
-            selected,
+            combined,
             contract.estimated,
             calculation.reason or "CALCULATION_INVALID",
             coverage=calculation.coverage,
             source_event_ids=evidence_ids,
         )
     if calculation.coverage < contract.minimum_usable_coverage:
-        evidence_ids = calculation.source_event_ids or _observation_ids(selected)
+        evidence_ids = calculation.source_event_ids or _observation_ids(combined)
         return _invalid_decision(
             window,
             instant,
-            selected,
+            combined,
             contract.estimated,
             "COVERAGE_INSUFFICIENT",
             coverage=calculation.coverage,
@@ -568,8 +610,30 @@ def _calculate(
     window: MetricWindow,
     contract: _RevisionContract,
 ) -> MetricCalculation:
-    source_unit = _required_unit(contract.source_unit)
-    output_unit = _required_unit(contract.output_unit)
+    source_unit = contract.source_unit
+    output_unit = contract.output_unit
+    source_family = (
+        "energy"
+        if contract.method is MetricAggregator.COUNTER_DELTA
+        else "power"
+    )
+    output_family = (
+        "energy"
+        if contract.method
+        in {MetricAggregator.COUNTER_DELTA, MetricAggregator.POWER_INTEGRAL}
+        else "power"
+    )
+    prepared = _calculation_samples(events, None)
+    contract_error = _metric_contract_error(
+        prepared,
+        source_unit,
+        output_unit,
+        source_family=source_family,
+        output_family=output_family,
+        require_units=True,
+    )
+    if contract_error is not None:
+        return _invalid_calculation(contract_error, prepared)
     if contract.method is MetricAggregator.COUNTER_DELTA:
         if state.counter_contract is None:
             return _invalid_calculation("COUNTER_CONTRACT_INVALID", ())
@@ -609,6 +673,37 @@ def _required_maximum_gap(state: MetricProjectionState) -> int:
     if state.maximum_sample_gap_seconds is None:
         raise ValueError("maximum sample gap is not frozen")
     return state.maximum_sample_gap_seconds
+
+
+def _input_kind(
+    samples: Sequence[Number] | Sequence[L2Observation],
+) -> str:
+    has_l2 = any(isinstance(item, L2Observation) for item in samples)
+    has_non_l2 = any(not isinstance(item, L2Observation) for item in samples)
+    if has_l2 and has_non_l2:
+        return "mixed"
+    return "l2" if has_l2 else "number"
+
+
+def _project_relevant_events(
+    events: Sequence[L2Observation],
+    window: MetricWindow,
+    method: MetricAggregator,
+) -> tuple[L2Observation, ...]:
+    for event in events:
+        if not isinstance(event, L2Observation):
+            raise TypeError("metric events must be committed L2 observations")
+
+    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
+    relevant: list[L2Observation] = []
+    for event in events:
+        observed_at = _utc(event.observed_at, "event timestamp")
+        if method is MetricAggregator.COUNTER_DELTA:
+            if lookback_start <= observed_at <= window.end:
+                relevant.append(event)
+        elif window.contains(observed_at):
+            relevant.append(event)
+    return tuple(relevant)
 
 
 def _calculation_samples(
@@ -654,16 +749,25 @@ def _calculation_samples(
     return tuple(normalized)
 
 
+def _counter_relevant_samples(
+    samples: tuple[_Sample, ...],
+    window: MetricWindow | None,
+) -> tuple[_Sample, ...]:
+    if window is None:
+        return samples
+    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
+    return tuple(
+        sample
+        for sample in samples
+        if lookback_start <= sample.observed_at <= window.end
+    )
+
+
 def _counter_samples(
-    samples: Sequence[Number] | Sequence[L2Observation],
+    prepared: tuple[_Sample, ...],
     window: MetricWindow | None,
     source_unit: str | None,
 ) -> tuple[tuple[_Sample, ...], str | None]:
-    prepared = _calculation_samples(samples, None)
-    try:
-        _validate_l2_sample_identities(prepared)
-    except MetricProjectionError as exc:
-        return prepared, exc.reason
     if window is None:
         if len(prepared) < 2:
             return prepared, "COUNTER_ENDPOINT_MISSING"
@@ -689,18 +793,18 @@ def _counter_samples(
     )
     if not trusted_candidates:
         if not candidates:
-            return endpoints, "COUNTER_BASELINE_MISSING"
+            return prepared, "COUNTER_BASELINE_MISSING"
         non_quality_errors = tuple(
             reason
             for _, reason in classified_candidates
             if reason != "SOURCE_BAD"
         )
         reason = non_quality_errors[-1] if non_quality_errors else "SOURCE_BAD"
-        return (*candidates, *endpoints), reason
+        return prepared, reason
     baseline = trusted_candidates[-1]
 
     if not endpoints:
-        return candidates, "COUNTER_ENDPOINT_MISSING"
+        return prepared, "COUNTER_ENDPOINT_MISSING"
     return (baseline, *endpoints), None
 
 
@@ -719,14 +823,7 @@ def _ordered_unique_events(
             )
     for event in materialized:
         _utc(event.observed_at, "event timestamp")
-    ordered = sorted(
-        materialized,
-        key=lambda item: (
-            item.observed_at.astimezone(UTC),
-            item.source_order_key,
-            str(item.event_id),
-        ),
-    )
+    ordered = sorted(materialized, key=_observation_order_key)
     unique: dict[UUID, L2Observation] = {}
     conflict = False
     for event in ordered:
@@ -738,14 +835,18 @@ def _ordered_unique_events(
     canonical = tuple(
         sorted(
             unique.values(),
-            key=lambda item: (
-                item.observed_at.astimezone(UTC),
-                item.source_order_key,
-                str(item.event_id),
-            ),
+            key=_observation_order_key,
         )
     )
     return canonical, conflict
+
+
+def _observation_order_key(event: L2Observation) -> tuple[datetime, str, str]:
+    return (
+        _utc(event.observed_at, "event timestamp"),
+        event.source_order_key,
+        str(event.event_id),
+    )
 
 
 def _invalid_calculation(
@@ -840,33 +941,30 @@ def _counter_baseline_error(
     return None
 
 
-def _l2_helper_contract_error(
+def _metric_contract_error(
     samples: Sequence[_Sample],
     source_unit: str | None,
     output_unit: str | None,
     *,
+    source_family: str,
+    output_family: str,
     require_units: bool = False,
 ) -> str | None:
     has_l2_samples = any(sample.is_l2_observation for sample in samples)
     try:
-        _validate_l2_sample_contracts(samples, source_unit)
-        if has_l2_samples or require_units:
-            _required_unit(output_unit)
+        _validate_l2_sample_identities(samples)
+        has_declared_units = source_unit is not None or output_unit is not None
+        if not (has_l2_samples or require_units or has_declared_units):
+            return None
+        frozen_source_unit = _required_unit(source_unit)
+        frozen_output_unit = _required_unit(output_unit)
+        for sample in samples:
+            _validate_l2_sample_unit(sample, frozen_source_unit)
+        _unit_factor(frozen_source_unit, source_family, "UNIT_CONTRACT_INVALID")
+        _unit_factor(frozen_output_unit, output_family, "UNIT_CONTRACT_INVALID")
     except MetricProjectionError as exc:
         return exc.reason
     return None
-
-
-def _validate_l2_sample_contracts(
-    samples: Sequence[_Sample],
-    source_unit: str | None,
-) -> None:
-    _validate_l2_sample_identities(samples)
-    if not any(sample.is_l2_observation for sample in samples):
-        return
-    frozen_unit = _required_unit(source_unit)
-    for sample in samples:
-        _validate_l2_sample_unit(sample, frozen_unit)
 
 
 def _validate_l2_sample_identities(samples: Sequence[_Sample]) -> None:
@@ -1016,11 +1114,27 @@ def _source_quality(samples: Sequence[_Sample]) -> TrunkQuality:
 
 
 def _event_ids(samples: Sequence[_Sample]) -> tuple[UUID, ...]:
-    return _unique_uuid_ids(item.event_id for item in samples)
+    ordered = sorted(
+        samples,
+        key=lambda item: (
+            item.observed_at,
+            item.source_order_key,
+            str(item.event_id),
+        ),
+    )
+    return _unique_uuid_ids(item.event_id for item in ordered)
 
 
 def _observation_ids(events: Sequence[L2Observation]) -> tuple[UUID, ...]:
-    return _unique_uuid_ids(item.event_id for item in events)
+    ordered = sorted(
+        (
+            event
+            for event in events
+            if isinstance(event, L2Observation) and isinstance(event.event_id, UUID)
+        ),
+        key=_observation_order_key,
+    )
+    return _unique_uuid_ids(item.event_id for item in ordered)
 
 
 def _unique_uuid_ids(values: Iterable[object]) -> tuple[UUID, ...]:

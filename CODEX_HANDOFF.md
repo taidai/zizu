@@ -1,5 +1,14 @@
 ---
 
+## Session 2026-08-24 — v0.4.84 业务指标 Task 3 最终输入边界收口
+
+- Task 3 最后一轮修复把 projection 输入隔离提前到 UUID/duplicate 之前：非 counter 只处理当前窗口，counter 只处理一个窗口时长的 baseline 回看至窗口末端；窗口外合法 timestamp 的非法 ID、冲突副本和其他字段不再污染当前 decision。
+- counter 与四个公开 helper 统一在 selection/quality/reduction 前验证 L2 身份、冻结 source/output 单位、事件精确单位和方法单位族；错误稳定形成 `UNIT_CONTRACT_INVALID` / `UNIT_MISMATCH`，BAD 空 typed value 不被错误强制 numeric。
+- helper 输入必须全 Number 或全 L2；mixed 稳定返回 `INPUT_KIND_MIXED` 且无 value/peak/evidence。纯 Number 保留 1970 合成时间及无单位数学路径。
+- invalid evidence 现在只保留合法 UUID，并按 `(observed_at, source_order_key, event_id)` 稳定排序去重；counter 单位契约错误保留相关 baseline + endpoint，输入换序不改变 evidence。
+- TDD 新增 10 项行为测试并保留原 84 项；最终 Task 3 94/94、Task 1 compiler 18/18、四文件 `py_compile` 与 `git diff --check` 通过。完整 RED/GREEN 见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
+- 范围仍严格停在 Task 3；未实现 Task 4+，未新增依赖，未连接 PostgreSQL、未启动服务、未连接或操作 1 号机。
+
 ## Session 2026-08-24 — v0.4.84 业务指标 Task 3
 
 - 新增纯计算 `MetricProjection` 内核：IANA aligned daily、通用 rolling、counter delta、梯形功率积分、时间加权平均、峰值和确定性 `project_metric`；无 I/O、无全局时钟。
