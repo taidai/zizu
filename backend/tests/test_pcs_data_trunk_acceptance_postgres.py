@@ -348,8 +348,8 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 streamed = publish(
                     {
                         "ActivePowerRaw": 13000,
-                        "RunningState": "2",
-                        "FaultCodeText": "E30;E11",
+                        "RunningState": "0",
+                        "FaultCodeText": "",
                     }
                 )
                 self.assertEqual(200, streamed.status_code, streamed.text)
