@@ -284,7 +284,7 @@ admin 管理模板生命周期；engineer 生成和应用计划并运行验收�
 
 ### 11.3 一号机部署
 
-部署沿用旧容器必要运行设置，包括 `network_mode: host` 和 `/dev/mqueue` tmpfs；不启动 Caddy、不申请 TLS、不改变既有公网入口。生产流程为：停止配置写入、停止旧容器、启动固定 rc.1 摘要、应用 040、重新扫描现场目录、零 blocker 时应用计划、运行机器验收。生产复核出现 blocker 或关键验收失败时立即回退。
+部署沿用旧容器必要运行设置，包括 `network_mode: host` 和 `/dev/mqueue` tmpfs；不启动 Caddy、不申请 TLS、不改变既有公网入口。生产流程为：停止配置写入、停止旧容器、使用 owner migration job 依次应用 040、041、确认 `schema_migrations` 最新为 041、启动固定 rc.1 摘要、重新扫描现场目录、零 blocker 时应用计划、运行机器验收。生产复核出现 blocker 或关键验收失败时立即回退。
 
 ### 11.4 机器验收
 

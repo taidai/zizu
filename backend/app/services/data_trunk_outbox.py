@@ -157,7 +157,7 @@ class EntityObservationBroadcaster:
                         pending[event.event_id] = _PendingAcceptanceEvent(
                             event,
                             nonce,
-                            False,
+                            True,
                         )
                         while len(pending) > 1000:
                             pending.pop(next(iter(pending)))
@@ -166,16 +166,6 @@ class EntityObservationBroadcaster:
             except Exception:
                 failed.append(websocket)
                 continue
-            if nonce is not None:
-                async with self._lock:
-                    pending = self._pending_acceptance_events.get(websocket)
-                    current = pending.get(event.event_id) if pending else None
-                    if current is not None and current.nonce == nonce:
-                        pending[event.event_id] = _PendingAcceptanceEvent(
-                            event,
-                            nonce,
-                            True,
-                        )
         if failed:
             async with self._lock:
                 for websocket in failed:

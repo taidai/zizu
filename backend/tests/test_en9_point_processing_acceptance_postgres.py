@@ -472,15 +472,23 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                     (str(application.installed_processing_id),) * 2,
                 )
                 corrupted_sources = cursor.fetchall()
-                wrong_tag_id = corrupted_sources[0][2]
+                repeated_fault_tag_id = corrupted_sources[0][1]
                 cursor.execute(
                     "ALTER TABLE t_l0_observation_dedup DISABLE TRIGGER USER"
+                )
+                cursor.execute(
+                    "ALTER TABLE t_telemetry DISABLE TRIGGER USER"
                 )
                 for source_id, _original_tag_id, _wrong_tag_id in corrupted_sources:
                     cursor.execute(
                         "UPDATE t_l0_observation_dedup SET tag_id = %s "
                         "WHERE observation_id = %s",
-                        (str(wrong_tag_id), str(source_id)),
+                        (str(repeated_fault_tag_id), str(source_id)),
+                    )
+                    cursor.execute(
+                        "UPDATE t_telemetry SET tag_id = %s "
+                        "WHERE observation_id = %s",
+                        (str(repeated_fault_tag_id), str(source_id)),
                     )
             connection.commit()
         self.assertFalse(check_passed("EN9_FAULT_SOURCE_EVIDENCE"))
@@ -493,6 +501,14 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                         "WHERE observation_id = %s",
                         (str(original_tag_id), str(source_id)),
                     )
+                    cursor.execute(
+                        "UPDATE t_telemetry SET tag_id = %s "
+                        "WHERE observation_id = %s",
+                        (str(original_tag_id), str(source_id)),
+                    )
+                cursor.execute(
+                    "ALTER TABLE t_telemetry ENABLE TRIGGER USER"
+                )
                 cursor.execute(
                     "ALTER TABLE t_l0_observation_dedup ENABLE TRIGGER USER"
                 )

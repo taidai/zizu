@@ -386,7 +386,7 @@ def run_en9_acceptance(
                  ) = CASE output.entity_definition_id
                        WHEN 'pcs.fault_codes' THEN 88 ELSE 1 END
                  AND (
-                   SELECT count(DISTINCT linked_source.source_digest)
+                   SELECT count(DISTINCT l0_meta.tag_id)
                    FROM t_l2_observation_sources AS linked_source
                    JOIN t_l0_observation_dedup AS l0_meta
                      ON l0_meta.observation_id = linked_source.l0_observation_id
@@ -424,7 +424,7 @@ def run_en9_acceptance(
             l2_history_count = len(continuity_rows)
             cursor.execute(
                 """
-                SELECT count(DISTINCT source.l0_observation_id),
+                SELECT count(DISTINCT l0_meta.tag_id),
                        (
                          SELECT count(*)
                          FROM t_l2_observation_sources AS all_source

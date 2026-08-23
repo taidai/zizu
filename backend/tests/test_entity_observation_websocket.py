@@ -196,7 +196,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
             await broadcaster.acknowledge(socket, EVENT_ID, "not-a-real-nonce")
 
-    async def test_acceptance_ack_nonce_blocks_preack_cross_socket_and_replay(self) -> None:
+    async def test_acceptance_ack_nonce_allows_immediate_ack_and_blocks_forgery(self) -> None:
         runtime_id = UUID("91000000-0000-0000-0000-000000000003")
         application_id = UUID("91000000-0000-0000-0000-000000000020")
         binding = SimpleNamespace(application_id=application_id)
@@ -239,14 +239,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         nonce = socket.messages[-1]["acceptance_ack_nonce"]
 
         with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
-            await broadcaster.acknowledge(socket, EVENT_ID, nonce)
-        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
             await broadcaster.acknowledge(other, EVENT_ID, nonce)
-
-        socket.release.set()
-        await publishing
-        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
-            await broadcaster.acknowledge(other, EVENT_ID, nonce, application_id)
         with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
             await broadcaster.acknowledge(
                 socket,
@@ -260,6 +253,12 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
             nonce,
             application_id,
         )
+        self.assertEqual(1, len(recorder.deliveries))
+
+        socket.release.set()
+        await publishing
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(other, EVENT_ID, nonce, application_id)
         with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
             await broadcaster.acknowledge(
                 socket,
