@@ -1,5 +1,15 @@
 ---
 
+## Session 2026-08-23 — v0.4.84 业务指标模板规格确认
+
+- 维护者已对 Q1—Q71 的业务指标设计回复“整体确认”，决策前沿清空；最终架构为“业务指标模板 → 内部运行投影 → L2 统计实体”，不增加 L3、不按节点或指标新建超级表。
+- 已从 PR #48 基线 `ea8b01e` 创建叠加分支 `ticket/v0.4.84-business-metric-templates`；PR #48 保持冻结，本轮未推送、未改产品代码、未连接或部署 1 号机。
+- 新增 Accepted ADR-0012，固定当前窗口投影与不可变完成/修正历史分离，以及自动控制检查完整时间能力依赖闭包。
+- `CONTEXT.md` 已新增业务指标模板、统计实体、运行投影、统计结果修订和时间能力契约，并明确生命周期与 L2 质量不是同一枚举。
+- 已完成确认规格 `docs/superpowers/specs/2026-08-23-v0.4.84-business-metric-templates-design.md`：Schema 043、八项光储充 EMS 指标、累计量优先/积分回退、IANA 时区、水位线、迟到修正、停用/升级、统一实时历史、界面、API、权限、性能和机器验收均已冻结。
+- 已完成实施计划 `docs/superpowers/plans/2026-08-23-v0.4.84-business-metric-templates.md`，拆为 9 个纵向 TDD 任务；计划已核对真实代码路径、规格覆盖、接口命名和占位符。
+- 下一步推荐使用 `superpowers:subagent-driven-development` 从 Task 1 开始，逐任务做 RED/GREEN、提交和双阶段复审；若维护者选择当前会话顺序执行，则使用 `superpowers:executing-plans`。发布标签、固定摘要、叠加 PR 和 1 号机维护窗口均在 Task 9 完成后另行确认。
+
 ## Session 2026-08-22 — v0.4.81-rc.1 已部署到 1号机
 
 - 已在固定 SSH 主机密钥校验下完成 1号机 backend-only 维护切换；目标为
