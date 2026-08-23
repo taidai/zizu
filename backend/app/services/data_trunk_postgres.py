@@ -44,6 +44,21 @@ def verify_data_trunk_contract_gate(
         with connection.cursor() as cursor:
             cursor.execute(
                 """
+                DO $$
+                BEGIN
+                  IF to_regclass('public.t_point_processing_expressions') IS NULL
+                     OR to_regclass('public.t_point_processing_selectors') IS NULL
+                     OR to_regclass('public.t_point_processing_selector_members') IS NULL
+                     OR to_regclass('public.t_point_processing_dependencies') IS NULL THEN
+                    RAISE EXCEPTION 'schema 042 point-processing contract is incomplete'
+                      USING ERRCODE = '55000';
+                  END IF;
+                END;
+                $$
+                """
+            )
+            cursor.execute(
+                """
                 SELECT assert_entity_instance_single_source(id)
                 FROM t_entity_instances
                 ORDER BY id

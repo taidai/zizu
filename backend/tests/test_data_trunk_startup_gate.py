@@ -51,9 +51,12 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         connection, calls = self._connection(row_count=3)
 
         self.assertEqual(verify_data_trunk_contract_gate(connection), 3)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("assert_entity_instance_single_source(id)", calls[0])
-        self.assertIn("FROM t_entity_instances", calls[0])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("t_point_processing_expressions", calls[0])
+        self.assertIn("t_point_processing_selector_members", calls[0])
+        self.assertIn("t_point_processing_dependencies", calls[0])
+        self.assertIn("assert_entity_instance_single_source(id)", calls[1])
+        self.assertIn("FROM t_entity_instances", calls[1])
 
     def test_production_startup_invokes_gate_after_migrations(self) -> None:
         from app import main

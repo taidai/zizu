@@ -39,6 +39,7 @@ MIGRATION_038 = MIGRATIONS_ROOT / "migration_038_pcs_data_trunk.sql"
 MIGRATION_039 = MIGRATIONS_ROOT / "migration_039_pcs_data_trunk_contract_gate.sql"
 MIGRATION_040 = MIGRATIONS_ROOT / "migration_040_point_processing.sql"
 MIGRATION_041 = MIGRATIONS_ROOT / "migration_041_en9_runtime_evidence.sql"
+MIGRATION_042 = MIGRATIONS_ROOT / "migration_042_cross_node_formulas.sql"
 
 
 @unittest.skipUnless(
@@ -86,6 +87,92 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     @staticmethod
     def _apply_041(cursor) -> None:
         cursor.execute(MIGRATION_041.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_042(cursor) -> None:
+        cursor.execute(MIGRATION_042.read_text(encoding="utf-8"))
+
+    @classmethod
+    def _reset_through_041(cls, cursor) -> None:
+        cls._reset_through_037(cursor)
+        cls._apply_038(cursor)
+        cls._apply_039(cursor)
+        cls._apply_040(cursor)
+        cls._apply_041(cursor)
+
+    def test_042_adds_canonical_formula_and_frozen_selector_schema(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+
+                cursor.execute(
+                    """
+                    SELECT to_regclass('t_point_processing_expressions'),
+                           to_regclass('t_point_processing_selectors'),
+                           to_regclass('t_point_processing_selector_members'),
+                           to_regclass('t_point_processing_dependencies')
+                    """
+                )
+                self.assertEqual(
+                    cursor.fetchone(),
+                    (
+                        "t_point_processing_expressions",
+                        "t_point_processing_selectors",
+                        "t_point_processing_selector_members",
+                        "t_point_processing_dependencies",
+                    ),
+                )
+
+                cursor.execute(
+                    """
+                    SELECT constraint_name
+                    FROM information_schema.table_constraints
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_point_processing_dependencies'
+                      AND constraint_type = 'CHECK'
+                    ORDER BY constraint_name
+                    """
+                )
+                self.assertIn(
+                    "chk_point_processing_dependency_not_self",
+                    {row[0] for row in cursor.fetchall()},
+                )
+
+    def test_042_replays_after_complete_application(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_042(cursor)
+                cursor.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name LIKE 't_point_processing_%'"
+                )
+                self.assertGreaterEqual(cursor.fetchone()[0], 10)
+
+    def test_042_rejects_mixed_schema_without_recording_version(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                cursor.execute(
+                    "CREATE TABLE t_point_processing_expressions "
+                    "(output_id UUID PRIMARY KEY)"
+                )
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())"
+                )
+                with self.assertRaises(psycopg2.DatabaseError):
+                    self._apply_042(cursor)
+                cursor.execute(
+                    "SELECT count(*) FROM schema_migrations WHERE version='042'"
+                )
+                self.assertEqual(cursor.fetchone(), (0,))
 
     def test_040_hard_cuts_point_conversion_to_point_processing(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
