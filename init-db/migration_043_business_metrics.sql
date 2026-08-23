@@ -14,6 +14,13 @@ DECLARE
   schema_043_immutable_triggers INTEGER;
   schema_043_constraints INTEGER;
   schema_043_expected_constraints INTEGER;
+  schema_043_extension_columns INTEGER;
+  schema_043_extension_footprint INTEGER;
+  schema_043_extension_constraints INTEGER;
+  schema_043_extension_indexes INTEGER;
+  schema_043_expected_contract_triggers INTEGER;
+  schema_043_constraint_definitions INTEGER;
+  schema_043_expected_constraint_definitions INTEGER;
 BEGIN
   SELECT count(*) INTO existing_tables
   FROM (VALUES
@@ -32,8 +39,40 @@ BEGIN
   ) AS expected(name)
   WHERE to_regclass('public.' || expected.name) IS NOT NULL;
 
+  SELECT count(*) INTO schema_043_extension_columns
+  FROM (VALUES
+    ('t_point_processing_revisions', 'internal_kind'),
+    ('t_installed_point_processings', 'processing_scope'),
+    ('t_installed_point_processings', 'processing_owner_key')
+  ) AS expected(table_name, column_name)
+  WHERE EXISTS (
+    SELECT 1
+    FROM information_schema.columns AS columns
+    WHERE columns.table_schema = 'public'
+      AND columns.table_name = expected.table_name
+      AND columns.column_name = expected.column_name
+  );
+  SELECT count(*) INTO schema_043_extension_constraints
+  FROM pg_constraint
+  WHERE conname IN (
+    'chk_point_processing_revision_internal_kind',
+    'chk_installed_point_processing_scope'
+  );
+  SELECT count(*) INTO schema_043_extension_indexes
+  FROM (VALUES ('uq_installed_business_metric_processing_current')) AS expected(name)
+  WHERE to_regclass('public.' || expected.name) IS NOT NULL;
+  schema_043_extension_footprint :=
+    schema_043_extension_columns
+    + schema_043_extension_constraints
+    + schema_043_extension_indexes;
+
   IF existing_tables NOT IN (0, 12) THEN
-    RAISE EXCEPTION 'schema 043 is partially present' USING ERRCODE = '55000';
+    RAISE EXCEPTION 'SCHEMA_043_PARTIAL_STRUCTURE: metric tables are incomplete'
+      USING ERRCODE = '55000';
+  END IF;
+  IF existing_tables = 0 AND schema_043_extension_footprint <> 0 THEN
+    RAISE EXCEPTION 'SCHEMA_043_PARTIAL_STRUCTURE: point-processing extension is partial'
+      USING ERRCODE = '55000';
   END IF;
 
   SELECT count(*) INTO schema_042_tables
@@ -127,6 +166,87 @@ BEGIN
   END IF;
 
   IF existing_tables = 12 THEN
+    SELECT count(*) INTO schema_043_extension_columns
+    FROM (VALUES
+      ('t_point_processing_revisions', 'internal_kind', 'text', FALSE, NULL::TEXT),
+      ('t_installed_point_processings', 'processing_scope', 'text', TRUE, '''node''::text'),
+      ('t_installed_point_processings', 'processing_owner_key', 'uuid', FALSE, NULL::TEXT)
+    ) AS required(
+      table_name, column_name, type_name, required_not_null, default_expression
+    )
+    WHERE EXISTS (
+      SELECT 1
+      FROM pg_namespace AS namespace
+      JOIN pg_class AS relation
+        ON relation.relnamespace = namespace.oid
+      JOIN pg_attribute AS attribute
+        ON attribute.attrelid = relation.oid
+       AND attribute.attname = required.column_name
+       AND attribute.attnum > 0
+       AND NOT attribute.attisdropped
+      LEFT JOIN pg_attrdef AS column_default
+        ON column_default.adrelid = relation.oid
+       AND column_default.adnum = attribute.attnum
+      WHERE namespace.nspname = 'public'
+        AND relation.relname = required.table_name
+        AND attribute.atttypid = required.type_name::regtype
+        AND attribute.attnotnull = required.required_not_null
+        AND pg_get_expr(column_default.adbin, column_default.adrelid)
+            IS NOT DISTINCT FROM required.default_expression
+    );
+
+    SELECT count(*) INTO schema_043_extension_constraints
+    FROM (VALUES
+      (
+        't_point_processing_revisions',
+        'chk_point_processing_revision_internal_kind',
+        '((internal_kind IS NULL) OR (internal_kind = ''business_metric''::text))'
+      ),
+      (
+        't_installed_point_processings',
+        'chk_installed_point_processing_scope',
+        '(((processing_scope = ''node''::text) AND (processing_owner_key IS NULL)) OR ((processing_scope = ''business_metric''::text) AND (processing_owner_key IS NOT NULL)))'
+      )
+    ) AS required(table_name, constraint_name, check_expression)
+    WHERE EXISTS (
+      SELECT 1
+      FROM pg_constraint AS constraint_record
+      WHERE constraint_record.conrelid = required.table_name::regclass
+        AND constraint_record.conname = required.constraint_name
+        AND constraint_record.contype = 'c'
+        AND pg_get_expr(
+              constraint_record.conbin, constraint_record.conrelid
+            ) = required.check_expression
+    );
+
+    SELECT count(*) INTO schema_043_extension_indexes
+    FROM (VALUES
+      (
+        'uq_installed_point_processing_current',
+        'CREATE UNIQUE INDEX uq_installed_point_processing_current ON public.t_installed_point_processings USING btree (node_id) WHERE ((current = true) AND (processing_scope = ''node''::text))'
+      ),
+      (
+        'uq_installed_business_metric_processing_current',
+        'CREATE UNIQUE INDEX uq_installed_business_metric_processing_current ON public.t_installed_point_processings USING btree (node_id, processing_owner_key) WHERE ((current = true) AND (processing_scope = ''business_metric''::text))'
+      )
+    ) AS required(index_name, index_definition)
+    WHERE EXISTS (
+      SELECT 1
+      FROM pg_index AS index_record
+      WHERE index_record.indexrelid = to_regclass(
+              'public.' || required.index_name
+            )
+        AND index_record.indisunique
+        AND pg_get_indexdef(index_record.indexrelid) = required.index_definition
+    );
+
+    IF schema_043_extension_columns <> 3
+       OR schema_043_extension_constraints <> 2
+       OR schema_043_extension_indexes <> 2 THEN
+      RAISE EXCEPTION 'SCHEMA_043_PARTIAL_STRUCTURE: point-processing extension is malformed'
+        USING ERRCODE = '55000';
+    END IF;
+
     SELECT count(*), count(*) FILTER (WHERE EXISTS (
       SELECT 1
       FROM pg_namespace AS namespace
@@ -257,20 +377,104 @@ BEGIN
       ('t_installed_business_metrics', 'fk_business_metric_installation_previous', 'f'),
       ('t_installed_business_metrics', 'uq_business_metric_installation_revision', 'u'),
       ('t_installed_business_metrics', 'uq_business_metric_installation_entity', 'u'),
+      ('t_installed_business_metrics', 'uq_business_metric_installation_plan', 'u'),
       ('t_installed_business_metrics', 'uq_business_metric_installation_idempotency', 'u'),
       ('t_business_metric_source_bindings', 'uq_business_metric_source_binding_entity', 'u'),
       ('t_business_metric_window_results', 'chk_business_metric_window_method', 'c'),
       ('t_business_metric_window_results', 'chk_business_metric_window_source_count', 'c'),
+      ('t_business_metric_window_results', 'chk_business_metric_window_formal_sources', 'c'),
+      ('t_business_metric_window_results', 'chk_business_metric_window_source_order', 'c'),
+      ('t_business_metric_window_results', 'chk_business_metric_window_source_range', 'c'),
       ('t_business_metric_window_results', 'fk_business_metric_window_first_source', 'f'),
       ('t_business_metric_window_results', 'fk_business_metric_window_last_source', 'f'),
       ('t_business_metric_window_results', 'fk_business_metric_window_result', 'f'),
       ('t_business_metric_window_results', 'fk_business_metric_window_result_installation', 'f'),
       ('t_business_metric_recomputations', 'uq_business_metric_recomputation_revision', 'u'),
       ('t_entity_capability_contracts', 'uq_business_metric_capability_installation_digest', 'u'),
+      ('t_business_metric_audit', 'fk_business_metric_audit_installation_plan', 'f'),
+      ('t_business_metric_audit', 'chk_business_metric_audit_lifecycle', 'c'),
       ('t_business_metric_acceptance_reports', 'fk_business_metric_acceptance_window_result', 'f'),
       ('t_business_metric_acceptance_reports', 'chk_business_metric_acceptance_installation', 'c'),
       ('t_business_metric_acceptance_reports', 'uq_business_metric_acceptance_installation_digest', 'u')
     ) AS required(table_name, constraint_name, constraint_type);
+
+    SELECT count(*), count(*) FILTER (WHERE EXISTS (
+      SELECT 1
+      FROM pg_constraint AS constraint_record
+      WHERE constraint_record.conrelid = required.table_name::regclass
+        AND constraint_record.conname = required.constraint_name
+        AND constraint_record.contype = required.constraint_type::"char"
+        AND CASE
+          WHEN required.constraint_type = 'c' THEN
+            pg_get_expr(constraint_record.conbin, constraint_record.conrelid)
+              = required.definition
+          ELSE pg_get_constraintdef(constraint_record.oid) = required.definition
+        END
+    )) INTO
+      schema_043_expected_constraint_definitions,
+      schema_043_constraint_definitions
+    FROM (VALUES
+      (
+        't_business_metric_installation_plans',
+        'fk_business_metric_plan_previous_installation', 'f',
+        'FOREIGN KEY (previous_installation_id) REFERENCES t_installed_business_metrics(id)'
+      ),
+      (
+        't_installed_business_metrics',
+        'chk_business_metric_installation_lineage_shape', 'c',
+        '(((installation_revision = 1) AND (previous_installation_id IS NULL)) OR ((installation_revision > 1) AND (previous_installation_id IS NOT NULL)))'
+      ),
+      (
+        't_business_metric_window_results',
+        'chk_business_metric_window_method', 'c',
+        '(calculation_method = ANY (ARRAY[''counter_delta''::text, ''power_integral''::text, ''average''::text, ''maximum''::text]))'
+      ),
+      (
+        't_business_metric_window_results',
+        'chk_business_metric_window_source_count', 'c',
+        '(((source_count = 0) AND (first_source_event_id IS NULL) AND (first_source_observed_at IS NULL) AND (last_source_event_id IS NULL) AND (last_source_observed_at IS NULL)) OR ((source_count > 0) AND (first_source_event_id IS NOT NULL) AND (first_source_observed_at IS NOT NULL) AND (last_source_event_id IS NOT NULL) AND (last_source_observed_at IS NOT NULL)))'
+      ),
+      (
+        't_business_metric_window_results',
+        'chk_business_metric_window_formal_sources', 'c',
+        '((lifecycle = ''invalid''::text) OR (source_count > 0))'
+      ),
+      (
+        't_business_metric_window_results',
+        'chk_business_metric_window_source_order', 'c',
+        '((source_count = 0) OR ((source_count = 1) AND (NOT (first_source_event_id IS DISTINCT FROM last_source_event_id)) AND (NOT (first_source_observed_at IS DISTINCT FROM last_source_observed_at))) OR ((source_count > 1) AND (ROW(first_source_observed_at, first_source_event_id) < ROW(last_source_observed_at, last_source_event_id))))'
+      ),
+      (
+        't_business_metric_window_results',
+        'chk_business_metric_window_source_range', 'c',
+        '((source_count = 0) OR ((last_source_observed_at >= window_started_at) AND (last_source_observed_at <= window_ended_at) AND (first_source_observed_at <= window_ended_at) AND (((calculation_method = ''counter_delta''::text) AND (first_source_observed_at >= (window_started_at - (window_ended_at - window_started_at)))) OR ((calculation_method <> ''counter_delta''::text) AND (first_source_observed_at >= window_started_at)))))'
+      ),
+      (
+        't_business_metric_window_results',
+        'fk_business_metric_window_result_installation', 'f',
+        'FOREIGN KEY (installed_metric_id, result_entity_instance_id) REFERENCES t_installed_business_metrics(id, entity_instance_id)'
+      ),
+      (
+        't_business_metric_audit',
+        'fk_business_metric_audit_installation_plan', 'f',
+        'FOREIGN KEY (installed_metric_id, plan_id) REFERENCES t_installed_business_metrics(id, source_plan_id)'
+      ),
+      (
+        't_business_metric_audit',
+        'chk_business_metric_audit_lifecycle', 'c',
+        '(((action = ''disabled''::text) AND (installed_metric_id IS NOT NULL) AND (plan_id IS NOT NULL) AND (resulting_state IS NOT NULL) AND (resulting_state = ''disabled''::text)) OR ((action = ANY (ARRAY[''installed''::text, ''upgraded''::text, ''reused''::text, ''enabled''::text])) AND (installed_metric_id IS NOT NULL) AND (plan_id IS NOT NULL) AND (resulting_state IS NOT NULL) AND (resulting_state = ''active''::text)) OR ((action = ''recomputed''::text) AND (installed_metric_id IS NOT NULL) AND (resulting_state IS NULL)) OR ((action = ''rejected''::text) AND (resulting_state IS NULL)))'
+      ),
+      (
+        't_business_metric_acceptance_reports',
+        'fk_business_metric_acceptance_window_result', 'f',
+        'FOREIGN KEY (window_result_installed_metric_id, window_result_started_at, window_result_ended_at, window_result_revision) REFERENCES t_business_metric_window_results(installed_metric_id, window_started_at, window_ended_at, revision)'
+      ),
+      (
+        't_business_metric_acceptance_reports',
+        'chk_business_metric_acceptance_installation', 'c',
+        '(window_result_installed_metric_id = installed_metric_id)'
+      )
+    ) AS required(table_name, constraint_name, constraint_type, definition);
 
     SELECT count(*) INTO schema_043_immutable_triggers
     FROM pg_trigger AS trigger
@@ -289,30 +493,52 @@ BEGIN
         't_business_metric_audit',
         't_business_metric_acceptance_reports'
       )
-      AND trigger.tgname IN (
-        'trg_' || relation.relname || '_immutable',
-        'trg_' || relation.relname || '_no_truncate'
+      AND trigger.tgenabled <> 'D'
+      AND trigger.tgfoid = 'reject_data_trunk_append_only()'::regprocedure
+      AND (
+        (
+          trigger.tgname = 'trg_' || relation.relname || '_immutable'
+          AND trigger.tgtype = 27
+        )
+        OR (
+          trigger.tgname = 'trg_' || relation.relname || '_no_truncate'
+          AND trigger.tgtype = 34
+        )
       );
-    SELECT count(*) INTO schema_043_contract_triggers
-    FROM pg_trigger
-    WHERE NOT tgisinternal
-      AND (tgrelid, tgname) IN (
-        ('t_installed_business_metrics'::regclass,
-         'trg_business_metric_installation_lineage'),
-        ('t_business_metric_projections'::regclass,
-         'trg_business_metric_projection_guard'),
-        ('t_business_metric_projections'::regclass,
-         'trg_business_metric_projection_no_truncate'),
-        ('t_business_metric_window_results'::regclass,
-         'trg_business_metric_window_result_evidence'),
-        ('t_business_metric_acceptance_reports'::regclass,
-         'trg_business_metric_acceptance_runtime')
-      );
+    SELECT count(*), count(*) FILTER (WHERE EXISTS (
+      SELECT 1
+      FROM pg_trigger AS trigger
+      WHERE trigger.tgrelid = required.table_name::regclass
+        AND trigger.tgname = required.trigger_name
+        AND NOT trigger.tgisinternal
+        AND trigger.tgenabled <> 'D'
+        AND trigger.tgfoid = required.function_name::regprocedure
+        AND trigger.tgtype = required.trigger_type
+    )) INTO schema_043_expected_contract_triggers, schema_043_contract_triggers
+    FROM (VALUES
+      ('t_installed_business_metrics',
+       'trg_business_metric_installation_lineage',
+       'validate_business_metric_installation_lineage()', 7),
+      ('t_business_metric_projections',
+       'trg_business_metric_projection_guard',
+       'guard_business_metric_projection()', 27),
+      ('t_business_metric_projections',
+       'trg_business_metric_projection_no_truncate',
+       'guard_business_metric_projection()', 34),
+      ('t_business_metric_window_results',
+       'trg_business_metric_window_result_evidence',
+       'validate_business_metric_window_result_evidence()', 7),
+      ('t_business_metric_acceptance_reports',
+       'trg_business_metric_acceptance_runtime',
+       'validate_business_metric_acceptance_runtime()', 7)
+    ) AS required(table_name, trigger_name, function_name, trigger_type);
     IF existing_contract_columns <> schema_043_expected_columns
        OR schema_043_primary_keys <> 12
        OR schema_043_constraints <> schema_043_expected_constraints
+       OR schema_043_constraint_definitions
+          <> schema_043_expected_constraint_definitions
        OR schema_043_immutable_triggers <> 22
-       OR schema_043_contract_triggers <> 5
+       OR schema_043_contract_triggers <> schema_043_expected_contract_triggers
        OR NOT EXISTS (
          SELECT 1 FROM pg_index
          WHERE indexrelid = to_regclass('public.uq_business_metric_installation_successor')
@@ -328,7 +554,7 @@ BEGIN
          WHERE indexrelid = to_regclass('public.uq_l2_event_observed_entity')
            AND indisunique
        ) THEN
-      RAISE EXCEPTION 'schema 043 structure is malformed'
+      RAISE EXCEPTION 'SCHEMA_043_PARTIAL_STRUCTURE: schema 043 is malformed'
         USING ERRCODE = '55000';
     END IF;
   END IF;
@@ -339,34 +565,42 @@ $$;
 -- while each installed business metric owns an independent private program.
 -- Keeping that distinction on the shared installation record lets Task 2
 -- reuse the existing atomic apply path without one metric superseding another.
-ALTER TABLE t_installed_point_processings
-  ADD COLUMN IF NOT EXISTS processing_scope TEXT NOT NULL DEFAULT 'node';
-ALTER TABLE t_installed_point_processings
-  ADD COLUMN IF NOT EXISTS processing_owner_key UUID;
-ALTER TABLE t_point_processing_revisions
-  ADD COLUMN IF NOT EXISTS internal_kind TEXT;
-ALTER TABLE t_point_processing_revisions
-  DROP CONSTRAINT IF EXISTS chk_point_processing_revision_internal_kind;
-ALTER TABLE t_point_processing_revisions
-  ADD CONSTRAINT chk_point_processing_revision_internal_kind
-  CHECK (internal_kind IS NULL OR internal_kind = 'business_metric');
-ALTER TABLE t_installed_point_processings
-  DROP CONSTRAINT IF EXISTS chk_installed_point_processing_scope;
-ALTER TABLE t_installed_point_processings
-  ADD CONSTRAINT chk_installed_point_processing_scope
-  CHECK (
-    (processing_scope = 'node' AND processing_owner_key IS NULL)
-    OR (processing_scope = 'business_metric' AND processing_owner_key IS NOT NULL)
-  );
+DO $$
+BEGIN
+  -- A replay has already been verified above and must not repair or rewrite
+  -- this shared point-processing contract.  Only a pristine 042 upgrade may
+  -- create the Schema 043 extension.
+  IF to_regclass('public.t_business_metric_templates') IS NULL THEN
+    ALTER TABLE t_installed_point_processings
+      ADD COLUMN processing_scope TEXT NOT NULL DEFAULT 'node';
+    ALTER TABLE t_installed_point_processings
+      ADD COLUMN processing_owner_key UUID;
+    ALTER TABLE t_point_processing_revisions
+      ADD COLUMN internal_kind TEXT;
+    ALTER TABLE t_point_processing_revisions
+      ADD CONSTRAINT chk_point_processing_revision_internal_kind
+      CHECK (internal_kind IS NULL OR internal_kind = 'business_metric');
+    ALTER TABLE t_installed_point_processings
+      ADD CONSTRAINT chk_installed_point_processing_scope
+      CHECK (
+        (processing_scope = 'node' AND processing_owner_key IS NULL)
+        OR (
+          processing_scope = 'business_metric'
+          AND processing_owner_key IS NOT NULL
+        )
+      );
 
-DROP INDEX IF EXISTS uq_installed_point_conversion_current;
-DROP INDEX IF EXISTS uq_installed_point_processing_current;
-CREATE UNIQUE INDEX uq_installed_point_processing_current
-ON t_installed_point_processings(node_id)
-WHERE current = TRUE AND processing_scope = 'node';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_installed_business_metric_processing_current
-ON t_installed_point_processings(node_id, processing_owner_key)
-WHERE current = TRUE AND processing_scope = 'business_metric';
+    DROP INDEX IF EXISTS uq_installed_point_conversion_current;
+    DROP INDEX IF EXISTS uq_installed_point_processing_current;
+    CREATE UNIQUE INDEX uq_installed_point_processing_current
+      ON t_installed_point_processings(node_id)
+      WHERE current = TRUE AND processing_scope = 'node';
+    CREATE UNIQUE INDEX uq_installed_business_metric_processing_current
+      ON t_installed_point_processings(node_id, processing_owner_key)
+      WHERE current = TRUE AND processing_scope = 'business_metric';
+  END IF;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS t_business_metric_templates (
   id UUID PRIMARY KEY,
@@ -458,6 +692,8 @@ CREATE TABLE IF NOT EXISTS t_installed_business_metrics (
     UNIQUE(node_id, entity_instance_id, installation_revision),
   CONSTRAINT uq_business_metric_installation_entity
     UNIQUE(id, entity_instance_id),
+  CONSTRAINT uq_business_metric_installation_plan
+    UNIQUE(id, source_plan_id),
   CONSTRAINT uq_business_metric_installation_idempotency
     UNIQUE(installed_by, idempotency_key)
 );
@@ -585,6 +821,44 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
       AND first_source_event_id IS NOT NULL AND first_source_observed_at IS NOT NULL
       AND last_source_event_id IS NOT NULL AND last_source_observed_at IS NOT NULL)
   ),
+  CONSTRAINT chk_business_metric_window_formal_sources CHECK (
+    lifecycle = 'invalid' OR source_count > 0
+  ),
+  CONSTRAINT chk_business_metric_window_source_order CHECK (
+    source_count = 0
+    OR (
+      source_count = 1
+      AND first_source_event_id IS NOT DISTINCT FROM last_source_event_id
+      AND first_source_observed_at IS NOT DISTINCT FROM last_source_observed_at
+    )
+    OR (
+      source_count > 1
+      AND ROW(first_source_observed_at, first_source_event_id)
+          < ROW(last_source_observed_at, last_source_event_id)
+    )
+  ),
+  -- Counter delta may use one baseline event before the aligned window.  Bound
+  -- that look-back to one window duration; all other aggregators must draw
+  -- their first and last evidence from the closed [window_start, window_end].
+  CONSTRAINT chk_business_metric_window_source_range CHECK (
+    source_count = 0
+    OR (
+      last_source_observed_at >= window_started_at
+      AND last_source_observed_at <= window_ended_at
+      AND first_source_observed_at <= window_ended_at
+      AND (
+        (
+          calculation_method = 'counter_delta'
+          AND first_source_observed_at
+              >= window_started_at - (window_ended_at - window_started_at)
+        )
+        OR (
+          calculation_method <> 'counter_delta'
+          AND first_source_observed_at >= window_started_at
+        )
+      )
+    )
+  ),
   CHECK (
     (lifecycle IN ('completed','corrected')
       AND result_event_id IS NOT NULL AND result_observed_at IS NOT NULL
@@ -701,10 +975,26 @@ CREATE TABLE IF NOT EXISTS t_business_metric_audit (
   evidence JSONB NOT NULL CHECK (jsonb_typeof(evidence) = 'object'),
   digest CHAR(64) NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (
-    (action = 'disabled' AND resulting_state = 'disabled')
-    OR (action IN ('installed','upgraded','reused','enabled') AND resulting_state = 'active')
-    OR (action IN ('recomputed','rejected') AND resulting_state IS NULL)
+  CONSTRAINT fk_business_metric_audit_installation_plan
+    FOREIGN KEY(installed_metric_id, plan_id)
+    REFERENCES t_installed_business_metrics(id, source_plan_id),
+  CONSTRAINT chk_business_metric_audit_lifecycle CHECK (
+    (
+      action = 'disabled'
+      AND installed_metric_id IS NOT NULL AND plan_id IS NOT NULL
+      AND resulting_state IS NOT NULL AND resulting_state = 'disabled'
+    )
+    OR (
+      action IN ('installed','upgraded','reused','enabled')
+      AND installed_metric_id IS NOT NULL AND plan_id IS NOT NULL
+      AND resulting_state IS NOT NULL AND resulting_state = 'active'
+    )
+    OR (
+      action = 'recomputed'
+      AND installed_metric_id IS NOT NULL
+      AND resulting_state IS NULL
+    )
+    OR (action = 'rejected' AND resulting_state IS NULL)
   )
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_business_metric_audit_idempotency

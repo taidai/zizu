@@ -1080,6 +1080,9 @@ class PostgresBusinessMetricRepository:
               FROM t_business_metric_audit AS audit
               WHERE audit.installed_metric_id = installed.id
                 AND audit.resulting_state IS NOT NULL
+                AND audit.action IN (
+                  'installed', 'upgraded', 'reused', 'enabled', 'disabled'
+                )
               ORDER BY audit.created_at DESC, audit.id DESC
               LIMIT 1
             ) AS lifecycle ON TRUE

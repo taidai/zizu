@@ -247,7 +247,7 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     psycopg2.errors.ObjectNotInPrerequisiteState
                 ) as raised:
                     self._apply_043(cursor)
-                self.assertIn("schema 043 structure is malformed", str(raised.exception))
+                self.assertIn("SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception))
 
     def test_043_replay_rejects_missing_evidence_constraint_as_malformed(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
@@ -264,7 +264,81 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     psycopg2.errors.ObjectNotInPrerequisiteState
                 ) as raised:
                     self._apply_043(cursor)
-                self.assertIn("schema 043 structure is malformed", str(raised.exception))
+                self.assertIn("SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception))
+
+    def test_043_replay_rejects_damaged_point_processing_extension(self) -> None:
+        corruptions = (
+            (
+                "missing internal kind",
+                "ALTER TABLE t_point_processing_revisions "
+                "DROP COLUMN internal_kind CASCADE",
+            ),
+            (
+                "missing scope",
+                "ALTER TABLE t_installed_point_processings "
+                "DROP COLUMN processing_scope CASCADE",
+            ),
+            (
+                "missing business current index",
+                "DROP INDEX uq_installed_business_metric_processing_current",
+            ),
+        )
+        for label, corruption in corruptions:
+            with self.subTest(label):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        self._reset_through_041(cursor)
+                        self._apply_042(cursor)
+                        self._apply_043(cursor)
+                        cursor.execute(corruption)
+                        with self.assertRaises(
+                            psycopg2.errors.ObjectNotInPrerequisiteState
+                        ) as raised:
+                            self._apply_043(cursor)
+                        self.assertIn(
+                            "SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception)
+                        )
+
+    def test_043_replay_rejects_same_name_fake_contracts(self) -> None:
+        corruptions = (
+            (
+                "fake scope check",
+                """
+                ALTER TABLE t_installed_point_processings
+                  DROP CONSTRAINT chk_installed_point_processing_scope;
+                ALTER TABLE t_installed_point_processings
+                  ADD CONSTRAINT chk_installed_point_processing_scope
+                  CHECK (processing_scope IS NOT NULL)
+                """,
+            ),
+            (
+                "fake projection guard",
+                """
+                DROP TRIGGER trg_business_metric_projection_guard
+                  ON t_business_metric_projections;
+                CREATE TRIGGER trg_business_metric_projection_guard
+                  BEFORE UPDATE ON t_business_metric_projections
+                  FOR EACH ROW EXECUTE FUNCTION reject_data_trunk_append_only()
+                """,
+            ),
+        )
+        for label, corruption in corruptions:
+            with self.subTest(label):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        self._reset_through_041(cursor)
+                        self._apply_042(cursor)
+                        self._apply_043(cursor)
+                        cursor.execute(corruption)
+                        with self.assertRaises(
+                            psycopg2.errors.ObjectNotInPrerequisiteState
+                        ) as raised:
+                            self._apply_043(cursor)
+                        self.assertIn(
+                            "SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception)
+                        )
 
     def test_043_template_mutation_and_all_append_only_truncations_are_rejected(self) -> None:
         immutable = (

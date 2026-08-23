@@ -1044,6 +1044,7 @@ class BusinessMetricPostgresTest(unittest.TestCase):
     def test_window_result_lifecycle_and_l2_reference_checks_are_enforced(self) -> None:
         plan = self._preview()
         installed = self._delivery().apply(self._apply_command(plan))
+        evidence = self._seed_window_evidence(installed)
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -1070,25 +1071,63 @@ class BusinessMetricPostgresTest(unittest.TestCase):
             INSERT INTO t_business_metric_window_results
               (installed_metric_id, window_started_at, window_ended_at,
                revision, lifecycle, calculation_method, quality, coverage,
-               estimated, source_count, result_event_id, result_observed_at,
+               estimated, source_count, first_source_event_id,
+               first_source_observed_at, last_source_event_id,
+               last_source_observed_at, result_event_id, result_observed_at,
                result_entity_instance_id, content_digest, source_summary)
-            VALUES (%s, now() - interval '1 day', now(), 1, %s,
-                    'counter_delta', 192, 1, FALSE, 0, %s, %s, %s, %s, '{}')
+            VALUES (%s, %s, %s, 1, %s,
+                    'counter_delta', 192, 1, FALSE, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, '{}')
         """
         cases = (
             (
                 psycopg2.errors.CheckViolation,
-                (installed.id, "completed", None, None, None, "f" * 64),
+                (
+                    installed.id,
+                    evidence["window_started_at"],
+                    evidence["result_observed_at"],
+                    "completed",
+                    1,
+                    evidence["source_event_id"],
+                    evidence["source_observed_at"],
+                    evidence["source_event_id"],
+                    evidence["source_observed_at"],
+                    None,
+                    None,
+                    None,
+                    "f" * 64,
+                ),
             ),
             (
                 psycopg2.errors.CheckViolation,
-                (installed.id, "invalid", uuid4(), None, None, "f" * 64),
+                (
+                    installed.id,
+                    evidence["window_started_at"],
+                    evidence["result_observed_at"],
+                    "invalid",
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    uuid4(),
+                    None,
+                    None,
+                    "f" * 64,
+                ),
             ),
             (
                 psycopg2.errors.ForeignKeyViolation,
                 (
                     installed.id,
+                    evidence["window_started_at"],
+                    evidence["result_observed_at"],
                     "completed",
+                    1,
+                    evidence["source_event_id"],
+                    evidence["source_observed_at"],
+                    evidence["source_event_id"],
+                    evidence["source_observed_at"],
                     uuid4(),
                     "2026-01-01T00:00:00Z",
                     installed.entity_instance_id,
@@ -1156,7 +1195,8 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                 connection.rollback()
 
     def test_metric_lifecycle_and_recomputation_progress_by_appending_events(self) -> None:
-        installed = self._delivery().apply(self._apply_command(self._preview()))
+        plan = self._preview()
+        installed = self._delivery().apply(self._apply_command(plan))
         request_id = uuid4()
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
@@ -1173,12 +1213,12 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                 cursor.execute(
                     """
                     INSERT INTO t_business_metric_audit
-                      (id, installed_metric_id, action, actor, resulting_state,
-                       evidence, digest)
-                    VALUES (%s, %s, 'disabled', 'user:operator', 'disabled',
-                            '{}', %s)
+                      (id, installed_metric_id, plan_id, action, actor,
+                       resulting_state, evidence, digest)
+                    VALUES (%s, %s, %s, 'disabled', 'user:operator',
+                            'disabled', '{}', %s)
                     """,
-                    (uuid4(), installed.id, "e" * 64),
+                    (uuid4(), installed.id, plan.id, "e" * 64),
                 )
                 for revision, status in ((1, "requested"), (2, "approved")):
                     cursor.execute(
@@ -1230,6 +1270,78 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                         (request_id,),
                     )
                 connection.rollback()
+
+    def test_lifecycle_audit_rejects_a_plan_from_another_metric(self) -> None:
+        first_plan = self._preview()
+        first = self._delivery().apply(
+            self._apply_command(first_plan, key="audit-first-metric")
+        )
+        self._seed_second_metric_template()
+        unrelated_plan = self._preview_template("ems.pv-energy-yesterday")
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_audit
+                          (id, installed_metric_id, plan_id, action, actor,
+                           resulting_state, evidence, digest)
+                        VALUES (%s, %s, %s, 'disabled', 'user:operator',
+                                'disabled', '{}', %s)
+                        """,
+                        (uuid4(), first.id, unrelated_plan.id, "1" * 64),
+                    )
+
+    def test_lifecycle_audit_requires_an_explicit_resulting_state(self) -> None:
+        plan = self._preview()
+        installed = self._delivery().apply(
+            self._apply_command(plan, key="audit-null-state")
+        )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_audit
+                          (id, installed_metric_id, plan_id, action, actor,
+                           resulting_state, evidence, digest)
+                        VALUES (%s, %s, %s, 'disabled', 'user:operator',
+                                NULL, '{}', %s)
+                        """,
+                        (uuid4(), installed.id, plan.id, "2" * 64),
+                    )
+
+    def test_non_lifecycle_audit_cannot_change_effective_state(self) -> None:
+        plan = self._preview()
+        installed = self._delivery().apply(
+            self._apply_command(plan, key="audit-non-lifecycle")
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                # Simulate a restored legacy row that predates the lifecycle
+                # CHECK.  The read model must still fail closed by action.
+                cursor.execute(
+                    """
+                    ALTER TABLE t_business_metric_audit
+                    DROP CONSTRAINT chk_business_metric_audit_lifecycle
+                    """
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_business_metric_audit
+                      (id, installed_metric_id, plan_id, action, actor,
+                       resulting_state, evidence, digest)
+                    VALUES (%s, %s, %s, 'rejected', 'user:operator',
+                            'disabled', '{}', %s)
+                    """,
+                    (uuid4(), installed.id, plan.id, "3" * 64),
+                )
+
+        inspected = self._delivery().inspect(node_id=self.SITE_ID)
+        self.assertEqual(inspected[0].state, "active")
 
     def test_window_results_reject_provisional_and_incomplete_source_evidence(self) -> None:
         installed = self._delivery().apply(self._apply_command(self._preview()))
@@ -1332,6 +1444,128 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                             "d" * 64,
                         ),
                     )
+
+    def test_completed_windows_require_distinct_ordered_and_bounded_sources(self) -> None:
+        installed = self._delivery().apply(self._apply_command(self._preview()))
+        evidence = self._seed_window_evidence(installed)
+        earlier_event_id = uuid4()
+        earlier_observed_at = "2026-08-22T15:58:00Z"
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_l2_observations
+                      (observed_at, event_id, entity_instance_id, received_at,
+                       calculated_at, value_float, quality,
+                       processing_revision_id, site_configuration_version,
+                       source_digest, source_order_key,
+                       producing_runtime_instance_id)
+                    VALUES (%s, %s, %s, %s, %s, 99, 192, %s, %s, %s,
+                            'frozen-upstream-earlier', %s)
+                    """,
+                    (
+                        earlier_observed_at,
+                        earlier_event_id,
+                        self.COUNTER_ID,
+                        earlier_observed_at,
+                        earlier_observed_at,
+                        installed.processing_revision_id,
+                        installed.site_configuration_version,
+                        "9" * 64,
+                        evidence["result_runtime_id"],
+                    ),
+                )
+
+        statement = """
+            INSERT INTO t_business_metric_window_results
+              (installed_metric_id, window_started_at, window_ended_at,
+               revision, lifecycle, calculation_method, quality, coverage,
+               estimated, source_count, first_source_event_id,
+               first_source_observed_at, last_source_event_id,
+               last_source_observed_at, result_event_id, result_observed_at,
+               result_entity_instance_id, content_digest, source_summary)
+            VALUES (%s, %s, %s, %s, 'completed', 'counter_delta', 192, 1,
+                    FALSE, %s, %s, %s, %s, %s, %s, %s, %s, %s, '{}')
+        """
+        cases = (
+            (
+                "zero sources",
+                evidence["window_started_at"],
+                evidence["result_observed_at"],
+                1,
+                0,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "two sources with one identity",
+                evidence["window_started_at"],
+                evidence["result_observed_at"],
+                2,
+                2,
+                evidence["source_event_id"],
+                evidence["source_observed_at"],
+                evidence["source_event_id"],
+                evidence["source_observed_at"],
+            ),
+            (
+                "reverse source order",
+                evidence["window_started_at"],
+                evidence["result_observed_at"],
+                3,
+                2,
+                evidence["source_event_id"],
+                evidence["source_observed_at"],
+                earlier_event_id,
+                earlier_observed_at,
+            ),
+            (
+                "source outside window evidence range",
+                "2026-08-22T14:00:00Z",
+                "2026-08-22T15:00:00Z",
+                4,
+                1,
+                evidence["source_event_id"],
+                evidence["source_observed_at"],
+                evidence["source_event_id"],
+                evidence["source_observed_at"],
+            ),
+        )
+        for (
+            label,
+            window_started_at,
+            window_ended_at,
+            revision,
+            source_count,
+            first_event_id,
+            first_observed_at,
+            last_event_id,
+            last_observed_at,
+        ) in cases:
+            with self.subTest(label):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    with connection.cursor() as cursor:
+                        with self.assertRaises(psycopg2.errors.CheckViolation):
+                            cursor.execute(
+                                statement,
+                                (
+                                    installed.id,
+                                    window_started_at,
+                                    window_ended_at,
+                                    revision,
+                                    source_count,
+                                    first_event_id,
+                                    first_observed_at,
+                                    last_event_id,
+                                    last_observed_at,
+                                    evidence["result_event_id"],
+                                    evidence["result_observed_at"],
+                                    installed.entity_instance_id,
+                                    f"{revision}" * 64,
+                                ),
+                            )
 
     def test_acceptance_runtime_must_match_the_result_producer(self) -> None:
         installed = self._delivery().apply(self._apply_command(self._preview()))
