@@ -290,6 +290,39 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
             ({"code": "BUSINESS_METRIC_TIMEZONE_INVALID"},),
         )
 
+    def test_preview_turns_path_like_timezone_keys_into_stable_blockers(self) -> None:
+        from app.services.business_metrics import (
+            BusinessMetricDelivery,
+            InMemoryBusinessMetricCatalog,
+            MetricNode,
+        )
+
+        for timezone in ("../UTC", "/usr/share/zoneinfo/UTC"):
+            with self.subTest(timezone=timezone):
+                catalog = InMemoryBusinessMetricCatalog(
+                    templates=(self.template,),
+                    nodes=(
+                        MetricNode(self.site_id, "SITE", None, timezone, 30),
+                        MetricNode(
+                            self.child_id,
+                            "INVERTER",
+                            self.site_id,
+                            None,
+                        ),
+                    ),
+                    sources=self.catalog.sources,
+                )
+
+                plan = BusinessMetricDelivery(catalog, self.repository).preview(
+                    self._preview_request()
+                )
+
+                self.assertEqual(plan.status, "blocked")
+                self.assertEqual(
+                    plan.blockers,
+                    ({"code": "BUSINESS_METRIC_TIMEZONE_INVALID"},),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

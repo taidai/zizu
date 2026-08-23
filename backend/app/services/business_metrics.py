@@ -115,6 +115,8 @@ class MetricInstallation:
     state: str
     plan_digest: str
     installed_processing_id: UUID | None = None
+    installation_revision: int = 1
+    previous_installation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -352,7 +354,10 @@ def _compile_plan_from_state(
             for item in existing_installations
             if item.template_id == template.template_id
         ),
-        key=lambda item: item.site_configuration_version,
+        key=lambda item: (
+            item.installation_revision,
+            item.site_configuration_version,
+        ),
         default=None,
     )
     timezone: str | None = None
@@ -367,7 +372,7 @@ def _compile_plan_from_state(
         else:
             try:
                 ZoneInfo(timezone)
-            except ZoneInfoNotFoundError:
+            except (ZoneInfoNotFoundError, ValueError):
                 blocker = "BUSINESS_METRIC_TIMEZONE_INVALID"
         if blocker is None and (raw_retention is None or raw_retention < 0):
             blocker = "BUSINESS_METRIC_RETENTION_INVALID"

@@ -484,6 +484,70 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(cursor.fetchone(), (2,))
 
+    def test_schema_043_preserves_ordinary_node_processing_replacement(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PreviewPointProcessing,
+        )
+        from app.services.point_processing_postgres import (
+            build_postgres_point_processing,
+        )
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                migration_test.DataTrunkMigrationPostgresTest._apply_043(cursor)
+
+        package, brand_a_revision, brand_b_revision = self._import_reference_package()
+        node_id = UUID("85000000-0000-0000-0000-000000000001")
+        entity_ids = {
+            "active_power": UUID("85000000-0000-0000-0000-000000000101"),
+            "operating_state": UUID("85000000-0000-0000-0000-000000000102"),
+            "fault_codes": UUID("85000000-0000-0000-0000-000000000103"),
+        }
+        self._seed_brand_a_site(
+            package.id,
+            package.digest,
+            brand_a_revision,
+            node_id,
+            entity_ids,
+        )
+        service = build_postgres_point_processing()
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=node_id,
+                template_revision_id=brand_b_revision,
+                input_selections={},
+                actor="user:schema-043-replace",
+            )
+        )
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "schema-043-node-replacement",
+                "user:schema-043-replace",
+            )
+        )
+
+        self.assertEqual(application.revision_id, brand_b_revision)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*), count(*) FILTER (WHERE current),
+                           bool_and(processing_scope = 'node'),
+                           count(processing_owner_key),
+                           count(*) FILTER (WHERE revision.internal_kind IS NULL)
+                    FROM t_installed_point_processings AS installed
+                    JOIN t_point_processing_revisions AS revision
+                      ON revision.id = installed.revision_id
+                    WHERE installed.node_id = %s
+                    """,
+                    (node_id,),
+                )
+                self.assertEqual(cursor.fetchone(), (2, 1, True, 0, 2))
+
     def test_concurrent_same_plan_allows_one_apply_and_one_stale(self) -> None:
         from app.services.point_processing import (
             ApplyPointProcessingPlan,

@@ -101,6 +101,22 @@ def _internal_revision_kind(cursor: Any, revision_id: UUID) -> str | None:
     return row[0] if row is not None else None
 
 
+def lock_point_processing_authoritative_catalog(cursor: Any) -> None:
+    """Freeze every table that can change source membership or contracts."""
+    cursor.execute(
+        """
+        LOCK TABLE t_nodes, t_device_instances, t_tags, t_entity_instances,
+                   t_entity_instance_bindings,
+                   t_entity_binding_confirmations,
+                   t_point_processing_output_bindings,
+                   t_point_processing_selector_members,
+                   t_point_processing_dependencies,
+                   t_installed_point_processings
+        IN SHARE ROW EXCLUSIVE MODE
+        """
+    )
+
+
 def persist_point_processing_assets(
     cursor: Any,
     package: PackageImport,
@@ -1283,18 +1299,7 @@ class PostgresPointProcessingRepository:
                             "Site configuration changed after planning",
                         )
 
-                    cursor.execute(
-                        """
-                        LOCK TABLE t_tags, t_entity_instances,
-                                   t_entity_instance_bindings,
-                                   t_entity_binding_confirmations,
-                                   t_point_processing_output_bindings,
-                                   t_point_processing_selector_members,
-                                   t_point_processing_dependencies,
-                                   t_installed_point_processings
-                        IN SHARE ROW EXCLUSIVE MODE
-                        """
-                    )
+                    lock_point_processing_authoritative_catalog(cursor)
                     internal_kind = _internal_revision_kind(
                         cursor, plan.template_revision_id
                     )

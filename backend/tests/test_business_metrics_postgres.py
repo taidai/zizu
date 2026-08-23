@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from threading import Event, Thread
 import unittest
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -379,6 +381,69 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                 )
                 return tuple(int(item) for item in cursor.fetchone())
 
+    def _seed_window_evidence(self, installed):
+        source_event_id = uuid4()
+        result_event_id = uuid4()
+        result_runtime_id = uuid4()
+        other_runtime_id = uuid4()
+        source_observed_at = "2026-08-22T15:59:00Z"
+        result_observed_at = "2026-08-22T16:00:00Z"
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_runtime_instances
+                      (id, started_at, platform_version)
+                    VALUES (%s, now(), 'metric-runtime'),
+                           (%s, now(), 'other-runtime')
+                    """,
+                    (result_runtime_id, other_runtime_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_l2_observations
+                      (observed_at, event_id, entity_instance_id, received_at,
+                       calculated_at, value_float, quality,
+                       processing_revision_id, site_configuration_version,
+                       source_digest, source_order_key,
+                       producing_runtime_instance_id)
+                    VALUES
+                      (%s, %s, %s, %s, %s, 100, 192, %s, %s, %s,
+                       'frozen-upstream', %s),
+                      (%s, %s, %s, %s, %s, 12.5, 192, %s, %s, %s,
+                       'metric-result', %s)
+                    """,
+                    (
+                        source_observed_at,
+                        source_event_id,
+                        self.COUNTER_ID,
+                        source_observed_at,
+                        source_observed_at,
+                        installed.processing_revision_id,
+                        installed.site_configuration_version,
+                        "a" * 64,
+                        result_runtime_id,
+                        result_observed_at,
+                        result_event_id,
+                        installed.entity_instance_id,
+                        result_observed_at,
+                        result_observed_at,
+                        installed.processing_revision_id,
+                        installed.site_configuration_version,
+                        "b" * 64,
+                        result_runtime_id,
+                    ),
+                )
+        return {
+            "source_event_id": source_event_id,
+            "source_observed_at": source_observed_at,
+            "result_event_id": result_event_id,
+            "result_observed_at": result_observed_at,
+            "result_runtime_id": result_runtime_id,
+            "other_runtime_id": other_runtime_id,
+            "window_started_at": "2026-08-21T16:00:00Z",
+        }
+
     def test_preview_persists_counter_plan_and_frozen_contract_evidence(self) -> None:
         plan = self._preview()
 
@@ -571,6 +636,120 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(cursor.fetchone(), (2, 1, 1))
 
+    def test_deactivated_metric_previews_and_applies_a_new_installation_revision(self) -> None:
+        first_plan = self._preview()
+        first = self._delivery().apply(
+            self._apply_command(first_plan, key="activation-revision-1")
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_business_metric_audit
+                      (id, installed_metric_id, plan_id, action, actor,
+                       resulting_state, evidence, digest)
+                    VALUES (%s, %s, %s, 'disabled', 'user:operator',
+                            'disabled', '{}', %s)
+                    """,
+                    (uuid4(), first.id, first_plan.id, "d" * 64),
+                )
+
+        self.assertEqual(self._delivery().inspect(node_id=self.SITE_ID)[0].state, "disabled")
+        reactivation_plan = self._preview()
+        self.assertEqual(reactivation_plan.previous_installation_id, first.id)
+        reactivated = self._delivery().apply(
+            self._apply_command(
+                reactivation_plan,
+                key="activation-revision-2",
+            )
+        )
+
+        self.assertNotEqual(reactivated.id, first.id)
+        self.assertEqual(reactivated.entity_instance_id, first.entity_instance_id)
+        self.assertEqual(reactivated.template_revision, first.template_revision)
+        self.assertEqual(reactivated.installation_revision, 2)
+        self.assertEqual(reactivated.previous_installation_id, first.id)
+        self.assertEqual(reactivated.state, "active")
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT installation_revision, previous_installation_id
+                    FROM t_installed_business_metrics
+                    WHERE entity_instance_id = %s
+                    ORDER BY installation_revision
+                    """,
+                    (first.entity_instance_id,),
+                )
+                self.assertEqual(
+                    cursor.fetchall(),
+                    [(1, None), (2, first.id)],
+                )
+
+    def test_preview_keeps_lineage_when_previous_metric_processing_is_not_current(self) -> None:
+        first_plan = self._preview()
+        first = self._delivery().apply(
+            self._apply_command(first_plan, key="lineage-revision-1")
+        )
+        replacement_processing_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE t_installed_point_processings
+                    SET current = FALSE
+                    WHERE id = %s
+                    """,
+                    (first.installed_processing_id,),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_installed_point_processings
+                      (id, node_id, revision_id, source_plan_id,
+                       solution_installation_id, site_configuration_version,
+                       installed_by, installed_at, current,
+                       processing_scope, processing_owner_key)
+                    SELECT %s, node_id, revision_id, source_plan_id,
+                           solution_installation_id, site_configuration_version,
+                           installed_by, now(), TRUE,
+                           processing_scope, processing_owner_key
+                    FROM t_installed_point_processings
+                    WHERE id = %s
+                    """,
+                    (replacement_processing_id, first.installed_processing_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_input_bindings
+                      (installed_processing_id, input_id, source_kind,
+                       l0_tag_id, l2_entity_instance_id, confirmed_by,
+                       confirmed_at)
+                    SELECT %s, input_id, source_kind, l0_tag_id,
+                           l2_entity_instance_id, confirmed_by, now()
+                    FROM t_point_processing_input_bindings
+                    WHERE installed_processing_id = %s
+                    """,
+                    (replacement_processing_id, first.installed_processing_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_output_bindings
+                      (installed_processing_id, output_id, entity_instance_id)
+                    SELECT %s, output_id, entity_instance_id
+                    FROM t_point_processing_output_bindings
+                    WHERE installed_processing_id = %s
+                    """,
+                    (replacement_processing_id, first.installed_processing_id),
+                )
+
+        next_plan = self._preview()
+        self.assertEqual(next_plan.previous_installation_id, first.id)
+        second = self._delivery().apply(
+            self._apply_command(next_plan, key="lineage-revision-2")
+        )
+        self.assertEqual(second.previous_installation_id, first.id)
+        self.assertEqual(second.installation_revision, 2)
+
     def test_same_plan_with_new_key_reuses_installation_and_records_idempotency(self) -> None:
         plan = self._preview()
         first = self._delivery().apply(
@@ -741,6 +920,72 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     cursor.fetchone(),
                     ("blocked", "blocker", "BUSINESS_METRIC_SOURCE_AMBIGUOUS"),
                 )
+
+    def test_apply_locks_authoritative_sources_before_its_final_compile(self) -> None:
+        from app.services import business_metrics_postgres
+
+        plan = self._preview()
+        compile_entered = Event()
+        release_compile = Event()
+        outcomes: list[object] = []
+        real_compile = business_metrics_postgres.compile_business_metric
+
+        def paused_compile(*args, **kwargs):
+            compile_entered.set()
+            if not release_compile.wait(timeout=8):
+                raise AssertionError("timed out waiting for concurrent source write")
+            return real_compile(*args, **kwargs)
+
+        def apply_plan() -> None:
+            try:
+                outcomes.append(
+                    self._delivery().apply(
+                        self._apply_command(plan, key="locked-source-apply")
+                    )
+                )
+            except BaseException as exc:  # surfaced in the assertion below
+                outcomes.append(exc)
+
+        with patch.object(
+            business_metrics_postgres,
+            "compile_business_metric",
+            side_effect=paused_compile,
+        ):
+            worker = Thread(target=apply_plan, daemon=True)
+            worker.start()
+            self.assertTrue(
+                compile_entered.wait(timeout=8),
+                "apply never reached its final locked compile",
+            )
+            source_write_was_blocked = False
+            try:
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET lock_timeout = '750ms'")
+                        try:
+                            cursor.execute(
+                                """
+                                UPDATE t_entity_instances
+                                SET data_type = 'INT'
+                                WHERE id = %s
+                                """,
+                                (self.COUNTER_ID,),
+                            )
+                        except psycopg2.errors.LockNotAvailable:
+                            source_write_was_blocked = True
+            finally:
+                release_compile.set()
+                worker.join(timeout=8)
+
+        self.assertFalse(worker.is_alive(), "apply thread did not terminate")
+        self.assertTrue(
+            source_write_was_blocked,
+            "source definition changed between final read and point apply",
+        )
+        self.assertEqual(len(outcomes), 1)
+        self.assertNotIsInstance(outcomes[0], BaseException)
+        self.assertEqual(self._counts(), (1, 1, 1, 1, 1, 1))
 
     def test_preview_and_apply_reject_incompatible_authoritative_source_contract(self) -> None:
         from app.services.business_metrics import BusinessMetricError
@@ -1016,6 +1261,135 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                             ),
                         )
 
+    def test_window_result_method_must_match_the_frozen_source_method(self) -> None:
+        installed = self._delivery().apply(self._apply_command(self._preview()))
+        evidence = self._seed_window_evidence(installed)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_window_results
+                          (installed_metric_id, window_started_at,
+                           window_ended_at, revision, lifecycle,
+                           calculation_method, quality, coverage, estimated,
+                           source_count, first_source_event_id,
+                           first_source_observed_at, last_source_event_id,
+                           last_source_observed_at, result_event_id,
+                           result_observed_at, result_entity_instance_id,
+                           content_digest, source_summary)
+                        VALUES (%s, %s, %s, 1, 'completed',
+                                'power_integral', 192, 1, FALSE, 1,
+                                %s, %s, %s, %s, %s, %s, %s, %s, '{}')
+                        """,
+                        (
+                            installed.id,
+                            evidence["window_started_at"],
+                            evidence["result_observed_at"],
+                            evidence["source_event_id"],
+                            evidence["source_observed_at"],
+                            evidence["source_event_id"],
+                            evidence["source_observed_at"],
+                            evidence["result_event_id"],
+                            evidence["result_observed_at"],
+                            installed.entity_instance_id,
+                            "c" * 64,
+                        ),
+                    )
+
+    def test_window_result_source_events_must_belong_to_frozen_sources(self) -> None:
+        installed = self._delivery().apply(self._apply_command(self._preview()))
+        evidence = self._seed_window_evidence(installed)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_window_results
+                          (installed_metric_id, window_started_at,
+                           window_ended_at, revision, lifecycle,
+                           calculation_method, quality, coverage, estimated,
+                           source_count, first_source_event_id,
+                           first_source_observed_at, last_source_event_id,
+                           last_source_observed_at, result_event_id,
+                           result_observed_at, result_entity_instance_id,
+                           content_digest, source_summary)
+                        VALUES (%s, %s, %s, 1, 'completed',
+                                'counter_delta', 192, 1, FALSE, 1,
+                                %s, %s, %s, %s, %s, %s, %s, %s, '{}')
+                        """,
+                        (
+                            installed.id,
+                            evidence["window_started_at"],
+                            evidence["result_observed_at"],
+                            evidence["result_event_id"],
+                            evidence["result_observed_at"],
+                            evidence["result_event_id"],
+                            evidence["result_observed_at"],
+                            evidence["result_event_id"],
+                            evidence["result_observed_at"],
+                            installed.entity_instance_id,
+                            "d" * 64,
+                        ),
+                    )
+
+    def test_acceptance_runtime_must_match_the_result_producer(self) -> None:
+        installed = self._delivery().apply(self._apply_command(self._preview()))
+        evidence = self._seed_window_evidence(installed)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_business_metric_window_results
+                      (installed_metric_id, window_started_at, window_ended_at,
+                       revision, lifecycle, calculation_method, quality,
+                       coverage, estimated, source_count,
+                       first_source_event_id, first_source_observed_at,
+                       last_source_event_id, last_source_observed_at,
+                       result_event_id, result_observed_at,
+                       result_entity_instance_id, content_digest,
+                       source_summary)
+                    VALUES (%s, %s, %s, 1, 'completed', 'counter_delta',
+                            192, 1, FALSE, 1, %s, %s, %s, %s, %s, %s, %s,
+                            %s, '{}')
+                    """,
+                    (
+                        installed.id,
+                        evidence["window_started_at"],
+                        evidence["result_observed_at"],
+                        evidence["source_event_id"],
+                        evidence["source_observed_at"],
+                        evidence["source_event_id"],
+                        evidence["source_observed_at"],
+                        evidence["result_event_id"],
+                        evidence["result_observed_at"],
+                        installed.entity_instance_id,
+                        "e" * 64,
+                    ),
+                )
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_acceptance_reports
+                          (id, installed_metric_id,
+                           window_result_installed_metric_id,
+                           window_result_started_at, window_result_ended_at,
+                           window_result_revision, runtime_instance_id,
+                           schema_version, status, report, digest)
+                        VALUES (%s, %s, %s, %s, %s, 1, %s, '043', 'failed',
+                                '{}', %s)
+                        """,
+                        (
+                            uuid4(),
+                            installed.id,
+                            installed.id,
+                            evidence["window_started_at"],
+                            evidence["result_observed_at"],
+                            evidence["other_runtime_id"],
+                            "f" * 64,
+                        ),
+                    )
+
     def test_acceptance_requires_runtime_and_exact_window_result_binding(self) -> None:
         installed = self._delivery().apply(self._apply_command(self._preview()))
         with psycopg2.connect(**self.connection_kwargs) as connection:
@@ -1036,42 +1410,13 @@ class BusinessMetricPostgresTest(unittest.TestCase):
         second = self._delivery().apply(
             self._apply_command(second_plan, key="acceptance-second-metric")
         )
-        runtime_id = uuid4()
-        result_event_id = uuid4()
-        observed_at = "2026-08-22T16:00:00Z"
-        window_started_at = "2026-08-21T16:00:00Z"
+        evidence = self._seed_window_evidence(installed)
+        runtime_id = evidence["result_runtime_id"]
+        result_event_id = evidence["result_event_id"]
+        observed_at = evidence["result_observed_at"]
+        window_started_at = evidence["window_started_at"]
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO t_runtime_instances
-                      (id, started_at, platform_version)
-                    VALUES (%s, now(), 'test-runtime')
-                    """,
-                    (runtime_id,),
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO t_l2_observations
-                      (observed_at, event_id, entity_instance_id, received_at,
-                       calculated_at, value_float, quality,
-                       processing_revision_id, site_configuration_version,
-                       source_digest, source_order_key,
-                       producing_runtime_instance_id)
-                    VALUES (%s, %s, %s, %s, %s, 12.5, 192, %s, 1, %s,
-                            'metric-result', %s)
-                    """,
-                    (
-                        observed_at,
-                        result_event_id,
-                        installed.entity_instance_id,
-                        observed_at,
-                        observed_at,
-                        installed.processing_revision_id,
-                        "a" * 64,
-                        runtime_id,
-                    ),
-                )
                 cursor.execute(
                     """
                     INSERT INTO t_business_metric_window_results
@@ -1091,10 +1436,10 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                         installed.id,
                         window_started_at,
                         observed_at,
-                        result_event_id,
-                        observed_at,
-                        result_event_id,
-                        observed_at,
+                        evidence["source_event_id"],
+                        evidence["source_observed_at"],
+                        evidence["source_event_id"],
+                        evidence["source_observed_at"],
                         result_event_id,
                         observed_at,
                         installed.entity_instance_id,

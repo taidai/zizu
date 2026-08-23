@@ -43,6 +43,7 @@ from app.services.point_processing import (
 from app.services.point_processing_postgres import (
     PostgresPointProcessingCatalog,
     PostgresPointProcessingRepository,
+    lock_point_processing_authoritative_catalog,
 )
 from app.services.solution_business_metrics import (
     compile_business_metric,
@@ -623,7 +624,13 @@ class PostgresBusinessMetricRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     self._installation_select()
-                    + " WHERE installed.node_id = %s AND processing.current = TRUE "
+                    + " WHERE installed.node_id = %s "
+                    "AND installed.installation_revision = ("
+                    "  SELECT max(newer.installation_revision) "
+                    "  FROM t_installed_business_metrics AS newer "
+                    "  WHERE newer.node_id = installed.node_id "
+                    "    AND newer.entity_instance_id = installed.entity_instance_id"
+                    ") "
                     "ORDER BY installed.installed_at",
                     (node_id,),
                 )
@@ -746,6 +753,7 @@ class PostgresBusinessMetricRepository:
                     """
                 )
                 current_version = int(cursor.fetchone()[0])
+                lock_point_processing_authoritative_catalog(cursor)
                 node = PostgresBusinessMetricCatalog.get_node_with_cursor(
                     cursor, plan.node_id
                 )
@@ -881,6 +889,29 @@ class PostgresBusinessMetricRepository:
                 installation_id = uuid5(
                     NAMESPACE_URL, f"zizu/business-metric/installation/{plan.digest}"
                 )
+                installation_revision = 1
+                if plan.previous_installation_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT installation_revision, node_id,
+                               entity_instance_id
+                        FROM t_installed_business_metrics
+                        WHERE id = %s
+                        FOR SHARE
+                        """,
+                        (plan.previous_installation_id,),
+                    )
+                    previous = cursor.fetchone()
+                    if (
+                        previous is None
+                        or previous[1] != plan.node_id
+                        or previous[2] != plan.output_entity_instance_id
+                    ):
+                        raise BusinessMetricError(
+                            "BUSINESS_METRIC_PLAN_STALE",
+                            "Previous installation lineage changed",
+                        )
+                    installation_revision = int(previous[0]) + 1
                 cursor.execute(
                     """
                     INSERT INTO t_installed_business_metrics
@@ -888,9 +919,10 @@ class PostgresBusinessMetricRepository:
                        installed_processing_id, source_plan_id,
                        site_configuration_version, frozen_timezone,
                        raw_detail_retention_days, state, installed_by,
-                       idempotency_key)
+                       idempotency_key, installation_revision,
+                       previous_installation_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            'active', %s, %s)
+                            'active', %s, %s, %s, %s)
                     """,
                     (
                         installation_id,
@@ -904,6 +936,8 @@ class PostgresBusinessMetricRepository:
                         plan.raw_detail_retention_days,
                         command.actor,
                         command.idempotency_key,
+                        installation_revision,
+                        plan.previous_installation_id,
                     ),
                 )
                 for ordinal, source in enumerate(plan.sources):
@@ -1027,8 +1061,11 @@ class PostgresBusinessMetricRepository:
             SELECT installed.id, installed.node_id, template.template_key,
                    revision.revision, installed.entity_instance_id,
                    processing.revision_id, installed.frozen_timezone,
-                   installed.site_configuration_version, installed.state,
-                   plan.digest, processing.id
+                   installed.site_configuration_version,
+                   COALESCE(lifecycle.resulting_state, installed.state),
+                   plan.digest, processing.id,
+                   installed.installation_revision,
+                   installed.previous_installation_id
             FROM t_installed_business_metrics AS installed
             JOIN t_business_metric_revisions AS revision
               ON revision.id = installed.template_revision_id
@@ -1038,6 +1075,14 @@ class PostgresBusinessMetricRepository:
               ON processing.id = installed.installed_processing_id
             JOIN t_business_metric_installation_plans AS plan
               ON plan.id = installed.source_plan_id
+            LEFT JOIN LATERAL (
+              SELECT audit.resulting_state
+              FROM t_business_metric_audit AS audit
+              WHERE audit.installed_metric_id = installed.id
+                AND audit.resulting_state IS NOT NULL
+              ORDER BY audit.created_at DESC, audit.id DESC
+              LIMIT 1
+            ) AS lifecycle ON TRUE
         """
 
     @classmethod
@@ -1057,7 +1102,13 @@ class PostgresBusinessMetricRepository:
     ) -> tuple[MetricInstallation, ...]:
         cursor.execute(
             cls._installation_select()
-            + " WHERE installed.node_id = %s AND processing.current = TRUE "
+            + " WHERE installed.node_id = %s "
+            "AND installed.installation_revision = ("
+            "  SELECT max(newer.installation_revision) "
+            "  FROM t_installed_business_metrics AS newer "
+            "  WHERE newer.node_id = installed.node_id "
+            "    AND newer.entity_instance_id = installed.entity_instance_id"
+            ") "
             "ORDER BY installed.installed_at",
             (node_id,),
         )

@@ -182,6 +182,24 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 cursor.execute("SELECT to_regclass('t_business_metric_templates')")
                 self.assertEqual(cursor.fetchone(), (None,))
 
+    def test_043_rejects_schema_042_with_sentinels_but_missing_key_structure(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                cursor.execute(
+                    "ALTER TABLE t_point_processing_expressions "
+                    "DROP CONSTRAINT t_point_processing_expressions_pkey"
+                )
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_043(cursor)
+                self.assertIn("schema 042 structure is malformed", str(raised.exception))
+                cursor.execute("SELECT to_regclass('t_business_metric_templates')")
+                self.assertEqual(cursor.fetchone(), (None,))
+
     def test_043_rejects_all_twelve_malformed_existing_tables(self) -> None:
         table_names = (
             "t_business_metric_templates",
@@ -213,6 +231,40 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 ) as raised:
                     self._apply_043(cursor)
                 self.assertIn("malformed", str(raised.exception))
+
+    def test_043_replay_rejects_missing_key_trigger_as_malformed(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
+                cursor.execute(
+                    "DROP TRIGGER trg_business_metric_projection_guard "
+                    "ON t_business_metric_projections"
+                )
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_043(cursor)
+                self.assertIn("schema 043 structure is malformed", str(raised.exception))
+
+    def test_043_replay_rejects_missing_evidence_constraint_as_malformed(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
+                cursor.execute(
+                    "ALTER TABLE t_business_metric_window_results "
+                    "DROP CONSTRAINT chk_business_metric_window_method"
+                )
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_043(cursor)
+                self.assertIn("schema 043 structure is malformed", str(raised.exception))
 
     def test_043_template_mutation_and_all_append_only_truncations_are_rejected(self) -> None:
         immutable = (
