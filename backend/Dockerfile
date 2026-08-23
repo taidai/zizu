@@ -15,7 +15,9 @@
 # ============================================================
 
 # ---- Stage 1: Frontend Build ----
-FROM node:22-alpine AS frontend-builder
+# Frontend output is architecture-neutral. Build it natively so arm64 releases
+# do not run npm under QEMU; the final Python stage still targets --platform.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 

@@ -14,7 +14,10 @@ class ReleaseImageBuildTest(unittest.TestCase):
     def test_uses_the_primary_official_image_registry(self) -> None:
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         self.assertNotIn("docker.m.daocloud.io", dockerfile)
-        self.assertIn("FROM node:22-alpine AS frontend-builder", dockerfile)
+        self.assertIn(
+            "FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder",
+            dockerfile,
+        )
         self.assertIn("FROM python:3.12-slim", dockerfile)
         self.assertIn("ARG ZIZU_VERSION", dockerfile)
         self.assertIn('org.opencontainers.image.version="${ZIZU_VERSION}"', dockerfile)

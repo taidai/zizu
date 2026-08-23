@@ -12,6 +12,17 @@ SOURCE_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 class BuildReleaseImagesTest(unittest.TestCase):
+    def test_frontend_build_runs_on_native_builder_platform(self) -> None:
+        dockerfile = (REPO_ROOT / "backend" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder",
+            dockerfile,
+        )
+        self.assertIn("FROM python:3.12-slim", dockerfile)
+
     def test_builds_each_required_architecture_and_writes_a_verified_manifest(self) -> None:
         from scripts.build_release_images import build_release_images
 
