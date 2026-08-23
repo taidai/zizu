@@ -8,6 +8,7 @@ import {
   fetchEntityInstanceHistory,
   fetchEntityInstances,
   fetchNodeDataTrunk,
+  fetchPointProcessingAcceptanceState,
   fetchPointProcessingPlan,
   fetchPointProcessingTemplates,
   runEN9PointProcessingAcceptance,
@@ -86,8 +87,13 @@ export default function DataTrunkWorkspace({
     try {
       const nextTrunk = await loadRuntime()
       if (!readOnly) {
-        const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
+        const [nextTemplates, acceptanceState] = await Promise.all([
+          fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase()),
+          fetchPointProcessingAcceptanceState(node.id),
+        ])
         setTemplates(nextTemplates)
+        setApplication(acceptanceState.application)
+        setAcceptance(acceptanceState.latest_report)
         setSelectedRevisionId((current) => current || nextTrunk.l1_summary.revision_id || nextTemplates[0]?.revision_id || '')
         const retry = findDataTrunkApplyRetry(sessionStorage, actorId, node.id)
         if (retry) {
@@ -138,7 +144,8 @@ export default function DataTrunkWorkspace({
       })
     },
     async () => { await loadRuntime() },
-  ), [l2Ids.join('|'), loadRuntime])
+    application?.id,
+  ), [l2Ids.join('|'), loadRuntime, application?.id])
 
   const selectedTemplate = templates.find((item) => item.revision_id === selectedRevisionId) || null
   const installedTemplate = templates.find((item) => item.revision_id === trunk?.l1_summary.revision_id) || null
@@ -215,7 +222,7 @@ export default function DataTrunkWorkspace({
     setBusy('acceptance')
     setError('')
     try {
-      setAcceptance(await runEN9PointProcessingAcceptance(application.id, 0))
+      setAcceptance(await runEN9PointProcessingAcceptance(application.id, 1800))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '机器验收失败')
     } finally {
@@ -289,10 +296,20 @@ export default function DataTrunkWorkspace({
               <div className="border-l-2 border-blue-500 pl-3">
                 <div className="text-[10px] text-gray-500">运行验收</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">{acceptance ? (acceptance.passed ? '机器验收通过' : '机器验收未通过') : application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div>
-                {application && !acceptance && (
+                {application && !acceptance?.passed && (
                   <button type="button" disabled={busy !== null} onClick={() => void handleAcceptance()} className="neu-btn mt-2 px-2 py-1 text-[10px] text-blue-700 disabled:opacity-50">
-                    {busy === 'acceptance' ? '验收中...' : '运行机器验收'}
+                    {busy === 'acceptance' ? '验收中...' : acceptance ? '重新运行机器验收' : '运行机器验收'}
                   </button>
+                )}
+                {acceptance && (
+                  <div className="mt-2 space-y-1 text-[10px] text-gray-500">
+                    <div>报告 {acceptance.id.slice(0, 8)} · 摘要 {acceptance.digest.slice(0, 12)}</div>
+                    {acceptance.checks.map((check) => (
+                      <div key={check.code} className={check.passed ? 'text-emerald-700' : 'text-red-700'}>
+                        {check.passed ? '通过' : '未通过'} · {check.code}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>

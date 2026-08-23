@@ -931,6 +931,7 @@ def _scan_plan_inputs(
         if item.source_kind == "l0" and item.node_id == node_id
     )
     for input_contract in template.inputs:
+        source_contract = input_contract.source_contract
         accepted_names = {
             _normalized_source_key(input_contract.source_key),
             *(_normalized_source_key(alias) for alias in input_contract.aliases),
@@ -939,7 +940,41 @@ def _scan_plan_inputs(
             point for point in scan.points
             if _normalized_source_key(point.name) in accepted_names
             or _normalized_source_key(point.address) in accepted_names
+            or (
+                source_contract is not None
+                and point.address == source_contract["address"]
+            )
         )
+        if not matches:
+            blockers.append(
+                MappingProxyType({
+                    "code": "NEURON_REQUIRED_POINT_MISSING",
+                    "input_id": input_contract.input_id,
+                })
+            )
+            continue
+        if source_contract is not None:
+            compatible = tuple(
+                point for point in matches
+                if point.address == source_contract["address"]
+                and point.wire_data_type == source_contract["wireDataType"]
+                and point.value_data_type == input_contract.data_type
+                and point.decimal == source_contract["decimal"]
+                and point.read_only is source_contract["readOnly"]
+            )
+            preferred = tuple(
+                point for point in compatible
+                if point.group == source_contract["group"]
+            )
+            matches = preferred or compatible
+            if not matches:
+                blockers.append(
+                    MappingProxyType({
+                        "code": "NEURON_POINT_CONTRACT_MISMATCH",
+                        "input_id": input_contract.input_id,
+                    })
+                )
+                continue
         if len(matches) != 1:
             code = (
                 "NEURON_REQUIRED_POINT_MISSING"
@@ -953,22 +988,6 @@ def _scan_plan_inputs(
             )
             continue
         point = matches[0]
-        source_contract = input_contract.source_contract
-        if source_contract is not None and (
-            point.group != source_contract["group"]
-            or point.address != source_contract["address"]
-            or point.wire_data_type != source_contract["wireDataType"]
-            or point.value_data_type != input_contract.data_type
-            or point.decimal != source_contract["decimal"]
-            or point.read_only is not source_contract["readOnly"]
-        ):
-            blockers.append(
-                MappingProxyType({
-                    "code": "NEURON_POINT_CONTRACT_MISMATCH",
-                    "input_id": input_contract.input_id,
-                })
-            )
-            continue
         if point.group_interval_ms <= 0:
             blockers.append(
                 MappingProxyType({

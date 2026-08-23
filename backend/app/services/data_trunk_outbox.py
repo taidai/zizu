@@ -31,12 +31,37 @@ class OutboxEvent:
         }
 
 
+RUNTIME_INSTANCE_ID = uuid4()
+
+
+class AcceptanceReceiptRecorder(Protocol):
+    def record_delivery(
+        self,
+        binding: Any,
+        event: OutboxEvent,
+        runtime_instance_id: UUID,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class _Subscription:
+    entity_instance_ids: frozenset[UUID]
+    acceptance_binding: Any | None = None
+
+
 class EntityObservationBroadcaster:
     """Keep per-socket L2 entity subscriptions and publish commit evidence."""
 
-    def __init__(self) -> None:
-        self._subscriptions: dict[Any, set[UUID] | None] = {}
+    def __init__(
+        self,
+        *,
+        receipt_recorder: AcceptanceReceiptRecorder | None = None,
+        runtime_instance_id: UUID = RUNTIME_INSTANCE_ID,
+    ) -> None:
+        self._subscriptions: dict[Any, _Subscription | None] = {}
         self._lock = asyncio.Lock()
+        self._receipt_recorder = receipt_recorder
+        self._runtime_instance_id = runtime_instance_id
 
     async def connect(self, websocket: Any) -> None:
         async with self._lock:
@@ -50,29 +75,52 @@ class EntityObservationBroadcaster:
         self,
         websocket: Any,
         entity_instance_ids: tuple[UUID, ...],
+        *,
+        acceptance_binding: Any | None = None,
     ) -> None:
         async with self._lock:
             if websocket in self._subscriptions:
-                self._subscriptions[websocket] = set(entity_instance_ids)
+                self._subscriptions[websocket] = _Subscription(
+                    frozenset(entity_instance_ids),
+                    acceptance_binding,
+                )
 
     async def publish(self, event: OutboxEvent) -> None:
         async with self._lock:
             subscribers = tuple(
-                websocket
-                for websocket, wanted in self._subscriptions.items()
-                if wanted is not None and event.entity_instance_id in wanted
+                (websocket, subscription)
+                for websocket, subscription in self._subscriptions.items()
+                if subscription is not None
+                and event.entity_instance_id in subscription.entity_instance_ids
             )
         payload = event.public_dict()
         failed = []
-        for websocket in subscribers:
+        evidence_error: Exception | None = None
+        for websocket, subscription in subscribers:
             try:
                 await websocket.send_json(payload)
             except Exception:
                 failed.append(websocket)
+                continue
+            if (
+                subscription.acceptance_binding is not None
+                and self._receipt_recorder is not None
+            ):
+                try:
+                    await asyncio.to_thread(
+                        self._receipt_recorder.record_delivery,
+                        subscription.acceptance_binding,
+                        event,
+                        self._runtime_instance_id,
+                    )
+                except Exception as exc:
+                    evidence_error = exc
         if failed:
             async with self._lock:
                 for websocket in failed:
                     self._subscriptions.pop(websocket, None)
+        if evidence_error is not None:
+            raise evidence_error
 
 
 class OutboxRepository(Protocol):

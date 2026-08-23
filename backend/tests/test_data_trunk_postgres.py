@@ -543,6 +543,30 @@ class DataTrunkPostgresTest(unittest.TestCase):
             outbox=1,
         )
 
+    def test_expired_numeric_input_is_stale_before_transform(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id = %s",
+                    (str(TAG_ID),),
+                )
+
+        self.trunk.ingest((self.raw_power(12345.0, sequence=1),))
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_float, quality, reason
+                    FROM t_l2_latest WHERE entity_instance_id = %s
+                    """,
+                    (str(ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (None, int(TrunkQuality.STALE), "INPUT_STALE"),
+                    cursor.fetchone(),
+                )
+
     def test_injected_source_or_outbox_failure_rolls_back_every_write(self) -> None:
         for failed_stage in ("source", "outbox"):
             with self.subTest(failed_stage=failed_stage):
@@ -839,6 +863,36 @@ class DataTrunkPostgresTest(unittest.TestCase):
                             "UNMAPPED_FAULT_CODE",
                         ),
                     ],
+                )
+
+    def test_expired_enum_input_is_stale_before_transform(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_enum_and_fault_conversions(cursor)
+                cursor.execute(
+                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id = %s",
+                    (str(STATE_TAG_ID),),
+                )
+
+        self.trunk.ingest((self.raw_text(
+            tag_id=STATE_TAG_ID,
+            source_key="OperatingStateRaw",
+            value="2",
+            sequence=2,
+        ),))
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_text, quality, reason
+                    FROM t_l2_latest WHERE entity_instance_id = %s
+                    """,
+                    (str(STATE_ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (None, int(TrunkQuality.STALE), "INPUT_STALE"),
+                    cursor.fetchone(),
                 )
 
     def test_boolean_set_uses_all_current_inputs_and_persists_source_evidence(self) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import math
 import re
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
@@ -241,6 +242,10 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             or not source_contract["wireDataType"].strip()
             or not isinstance(source_contract.get("decimal"), (int, float, type(None)))
             or isinstance(source_contract.get("decimal"), bool)
+            or (
+                source_contract.get("decimal") is not None
+                and not math.isfinite(float(source_contract["decimal"]))
+            )
             or source_contract.get("readOnly") is not True
         ):
             raise PointProcessingAssetError(

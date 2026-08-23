@@ -58,7 +58,7 @@ class ApplyPointProcessingRequest(BaseModel):
 
 class RunEN9AcceptanceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    observed_for_seconds: float = Field(ge=0, le=86400)
+    observed_for_seconds: float = Field(ge=1800, le=86400)
 
 
 def _raise_point_processing_http(exc: PointProcessingError) -> NoReturn:
@@ -200,6 +200,18 @@ async def run_en9_point_processing_acceptance(
             ),
             detail={"code": code},
         ) from exc
+
+
+@router.get(
+    "/nodes/{node_id}/point-processing-acceptance-state",
+    **protected(CONFIGURATION_READ),
+)
+async def read_latest_en9_point_processing_acceptance_state(node_id: UUID) -> dict:
+    from app.services.en9_point_processing_acceptance import (
+        get_latest_en9_acceptance_state,
+    )
+
+    return get_latest_en9_acceptance_state(node_id)
 
 
 @router.get(

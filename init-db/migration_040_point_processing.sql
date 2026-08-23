@@ -97,16 +97,53 @@ ALTER TABLE t_point_processing_inputs
   ADD COLUMN IF NOT EXISTS expected_decimal DOUBLE PRECISION,
   ADD COLUMN IF NOT EXISTS expected_read_only BOOLEAN;
 
+ALTER TABLE t_point_processing_inputs
+  DROP CONSTRAINT IF EXISTS chk_point_processing_expected_decimal_finite,
+  ADD CONSTRAINT chk_point_processing_expected_decimal_finite CHECK (
+    expected_decimal IS NULL
+    OR (expected_decimal = expected_decimal AND abs(expected_decimal) < 1e308)
+  );
+
 CREATE TABLE IF NOT EXISTS t_en9_acceptance_reports (
   id UUID PRIMARY KEY,
   application_id UUID NOT NULL REFERENCES t_point_processing_applications(id),
   status TEXT NOT NULL CHECK (status IN ('passed','failed')),
-  observed_for_seconds DOUBLE PRECISION NOT NULL CHECK (observed_for_seconds >= 0),
+  observed_for_seconds DOUBLE PRECISION NOT NULL,
   generated_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   evidence JSONB NOT NULL,
   digest CHAR(64) NOT NULL,
   UNIQUE(application_id, digest)
 );
+
+ALTER TABLE t_en9_acceptance_reports
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  DROP CONSTRAINT IF EXISTS t_en9_acceptance_reports_observed_for_seconds_check,
+  DROP CONSTRAINT IF EXISTS chk_en9_acceptance_observation_window,
+  ADD CONSTRAINT chk_en9_acceptance_observation_window CHECK (
+    observed_for_seconds >= 1800
+  );
+
+CREATE TABLE IF NOT EXISTS t_runtime_instances (
+  id UUID PRIMARY KEY,
+  started_at TIMESTAMPTZ NOT NULL,
+  platform_version TEXT NOT NULL CHECK (btrim(platform_version) <> '')
+);
+
+CREATE TABLE IF NOT EXISTS t_en9_acceptance_ws_receipts (
+  id UUID PRIMARY KEY,
+  application_id UUID NOT NULL REFERENCES t_point_processing_applications(id),
+  event_id UUID NOT NULL,
+  entity_instance_id UUID NOT NULL REFERENCES t_entity_instances(id),
+  user_id UUID NOT NULL,
+  session_id UUID NOT NULL,
+  runtime_instance_id UUID NOT NULL REFERENCES t_runtime_instances(id),
+  delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(application_id, event_id, session_id, runtime_instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_en9_acceptance_ws_receipts_window
+  ON t_en9_acceptance_ws_receipts(application_id, delivered_at);
 
 ALTER TABLE t_entity_instances
   DROP CONSTRAINT IF EXISTS chk_entity_instance_source_kind;
@@ -304,7 +341,9 @@ BEGIN
     't_point_processing_plan_items',
     't_boolean_set_transform_rules',
     't_boolean_set_mapping_entries',
-    't_en9_acceptance_reports'
+    't_en9_acceptance_reports',
+    't_runtime_instances',
+    't_en9_acceptance_ws_receipts'
   ] LOOP
     trigger_name := 'trg_' || table_name || '_append_only';
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);

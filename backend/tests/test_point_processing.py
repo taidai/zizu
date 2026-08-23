@@ -205,6 +205,52 @@ class PointProcessingTest(unittest.TestCase):
             {item["code"] for item in plan.blockers},
         )
 
+    def test_en9_source_contract_disambiguates_same_name_in_command_group(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingDelivery,
+            PreviewPointProcessing,
+        )
+        from tests.test_neuron_point_processing_catalog import FakeNeuron
+
+        class MultiGroupNeuron(FakeNeuron):
+            def get_groups(self, node_name: str) -> list[dict]:
+                self.node_name = node_name
+                return [
+                    {"name": "data", "interval": self.interval},
+                    {"name": "command", "interval": self.interval},
+                ]
+
+            def get_tags(self, node_name: str, group_name: str) -> list[dict]:
+                if group_name == "data":
+                    return list(self.tags)
+                command = dict(self.tags[0])
+                command["attribute"] = 2
+                return [command]
+
+        service = PointProcessingDelivery(
+            InMemoryPointProcessingRepository(),
+            InMemoryPointProcessingCatalog(
+                templates={EN9_REVISION_ID: _assets()["pcs.en9"]},
+                node_source_keys={NODE_ID: "EN9-PCS"},
+            ),
+            point_scanner=NeuronPointCatalog(MultiGroupNeuron()),
+        )
+
+        plan = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=EN9_REVISION_ID,
+            input_selections={},
+            actor="user:engineer",
+            entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
+            solution_installation_id=SOLUTION_INSTALLATION_ID,
+        ))
+
+        self.assertEqual("ready", plan.status)
+        self.assertEqual((), plan.blockers)
+
     def test_applied_template_exposes_installed_runtime_snapshot(self) -> None:
         from app.services.data_trunk_contracts import (
             EnumTransform,

@@ -1125,6 +1125,11 @@ export interface EN9AcceptanceReport {
   }>
 }
 
+export interface PointProcessingAcceptanceState {
+  application: PointProcessingApplication | null
+  latest_report: EN9AcceptanceReport | null
+}
+
 export interface EntityInstanceObservation {
   type?: 'entity_observation'
   event_id: string | null
@@ -1231,7 +1236,7 @@ export async function applyPointProcessingPlan(
 
 export async function runEN9PointProcessingAcceptance(
   applicationId: string,
-  observedForSeconds = 0,
+  observedForSeconds = 1800,
 ): Promise<EN9AcceptanceReport> {
   const response = await apiFetch(`${API_BASE}/point-processing-applications/${encodeURIComponent(applicationId)}/acceptance`, {
     method: 'POST',
@@ -1240,6 +1245,14 @@ export async function runEN9PointProcessingAcceptance(
   })
   if (!response.ok) throw await dataTrunkError(response, `运行 EN9 机器验收失败：${response.status}`)
   return response.json() as Promise<EN9AcceptanceReport>
+}
+
+export async function fetchPointProcessingAcceptanceState(
+  nodeId: string,
+): Promise<PointProcessingAcceptanceState> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-acceptance-state`)
+  if (!response.ok) throw await dataTrunkError(response, `读取点位加工验收状态失败：${response.status}`)
+  return response.json() as Promise<PointProcessingAcceptanceState>
 }
 
 export async function fetchEntityInstanceHistory(
@@ -1255,6 +1268,7 @@ export function connectEntityObservationWS(
   entityInstanceIds: string[],
   onObservation: (observation: EntityInstanceObservation) => void,
   onReconnectRefresh: () => Promise<void>,
+  acceptanceApplicationId?: string,
 ): () => void {
   let socket: WebSocket | null = null
   let cancelled = false
@@ -1291,7 +1305,12 @@ export function connectEntityObservationWS(
           entity_instance_id?: string
         }
         if (payload.type === 'authenticated') {
-          socket?.send(JSON.stringify({ subscribe: entityInstanceIds }))
+          socket?.send(JSON.stringify({
+            subscribe: entityInstanceIds,
+            ...(acceptanceApplicationId
+              ? { acceptance_application_id: acceptanceApplicationId }
+              : {}),
+          }))
         } else if (
           payload.type === 'entity_observation'
           && payload.event_id

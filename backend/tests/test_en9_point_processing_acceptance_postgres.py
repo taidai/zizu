@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import os
+from types import SimpleNamespace
 import unittest
 from uuid import UUID, uuid5, NAMESPACE_URL
 
@@ -66,6 +68,16 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
             yield connection
         finally:
             connection.close()
+
+    def test_en9_acceptance_rejects_a_client_declared_short_window(self) -> None:
+        from app.services.en9_point_processing_acceptance import run_en9_acceptance
+
+        with self.assertRaisesRegex(ValueError, "EN9_ACCEPTANCE_WINDOW_TOO_SHORT"):
+            run_en9_acceptance(
+                UUID("85000000-0000-0000-0000-000000000999"),
+                0,
+                connection_factory=self._connection,
+            )
 
     def test_en9_report_requires_all_ninety_sources_and_three_l2_entities(self) -> None:
         from app.services.en9_point_processing_acceptance import run_en9_acceptance
@@ -161,11 +173,203 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
         ).ingest(tuple(observations))
         self.assertEqual((90, 3), (receipt.accepted_l0_count, len(receipt.l2_event_ids)))
 
+        runtime_ids = (
+            UUID("85000000-0000-0000-0000-000000000201"),
+            UUID("85000000-0000-0000-0000-000000000202"),
+        )
+        user_id = UUID("85000000-0000-0000-0000-000000000203")
+        session_id = UUID("85000000-0000-0000-0000-000000000204")
+        from app.services.data_trunk_outbox import OutboxEvent
+        from app.services.en9_point_processing_acceptance import (
+            PostgresEN9StreamEvidence,
+        )
+        stream_evidence = PostgresEN9StreamEvidence(self._connection)
+        binding = stream_evidence.bind(
+            application.id,
+            application.output_entity_instance_ids,
+            SimpleNamespace(user_id=user_id, session_id=session_id),
+        )
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT event_id, entity_instance_id, payload
+                    FROM t_l2_stream_outbox
+                    WHERE event_id = ANY(%s::uuid[])
+                    ORDER BY entity_instance_id
+                    """,
+                    ([str(item) for item in receipt.l2_event_ids],),
+                )
+                committed_events = cursor.fetchall()
+        for event_id, entity_id, payload in committed_events:
+            stream_evidence.record_delivery(
+                binding,
+                OutboxEvent(UUID(str(event_id)), UUID(str(entity_id)), payload),
+                runtime_ids[0],
+            )
+
+        generated_at = observed_at + timedelta(seconds=1800)
+        premature = run_en9_acceptance(
+            application.id,
+            1800,
+            connection_factory=self._connection,
+            clock=lambda: generated_at,
+        )
+        self.assertFalse(premature.passed)
+        premature_checks = {item.code: item.passed for item in premature.checks}
+        self.assertFalse(premature_checks["EN9_L2_CONTINUOUS_HISTORY"])
+        self.assertFalse(premature_checks["EN9_AUTHENTICATED_WS_RECEIPTS"])
+        self.assertFalse(premature_checks["EN9_RESTART_CONTINUITY"])
+
+        final_observations = tuple(
+            replace(
+                observation,
+                observation_id=uuid5(
+                    NAMESPACE_URL,
+                    f"en9:final:{observation.tag_id}",
+                ),
+                source_timestamp=generated_at - timedelta(seconds=1),
+                received_at=generated_at - timedelta(milliseconds=500),
+                source_message_id="en9-acceptance-final",
+                source_sequence=1000 + index,
+                source_digest=hashlib.sha256(
+                    f"final:{observation.tag_id}".encode()
+                ).hexdigest(),
+            )
+            for index, observation in enumerate(observations, 1)
+        )
+        final_receipt = DataTrunk(
+            PostgresDataTrunkRepository(
+                clock=lambda: generated_at,
+            )
+        ).ingest(final_observations)
+        self.assertEqual(
+            (90, 3),
+            (final_receipt.accepted_l0_count, len(final_receipt.l2_event_ids)),
+        )
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                for runtime_id in runtime_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_runtime_instances
+                          (id, started_at, platform_version)
+                        VALUES (%s, %s, '0.4.82')
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        (str(runtime_id), observed_at),
+                    )
+                for minute in range(1, 30):
+                    point_at = observed_at + timedelta(minutes=minute)
+                    for entity_id in (
+                        UUID("85000000-0000-0000-0000-000000000101"),
+                        UUID("85000000-0000-0000-0000-000000000102"),
+                        UUID("85000000-0000-0000-0000-000000000103"),
+                    ):
+                        event_id = uuid5(
+                            NAMESPACE_URL,
+                            f"en9:history:{minute}:{entity_id}",
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO t_l2_observations
+                              (observed_at, event_id, entity_instance_id,
+                               received_at, calculated_at, value_float,
+                               value_int, value_bool, value_text, value_codes,
+                               quality, reason, processing_revision_id,
+                               site_configuration_version, source_digest,
+                               source_order_key)
+                            SELECT %s, %s, entity_instance_id, %s, %s,
+                                   value_float, value_int, value_bool,
+                                   value_text, value_codes, quality, reason,
+                                   processing_revision_id,
+                                   site_configuration_version,
+                                   source_digest, %s
+                            FROM t_l2_latest WHERE entity_instance_id = %s
+                            """,
+                            (
+                                point_at, str(event_id), point_at, point_at,
+                                f"acceptance:{minute:02d}:{entity_id}",
+                                str(entity_id),
+                            ),
+                        )
+                for minute in range(31):
+                    delivered_at = observed_at + timedelta(minutes=minute)
+                    runtime_id = runtime_ids[0]
+                    for entity_id in (
+                        UUID("85000000-0000-0000-0000-000000000101"),
+                        UUID("85000000-0000-0000-0000-000000000102"),
+                        UUID("85000000-0000-0000-0000-000000000103"),
+                    ):
+                        event_id = uuid5(
+                            NAMESPACE_URL,
+                            f"en9:receipt-event:{minute}:{entity_id}",
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO t_en9_acceptance_ws_receipts
+                              (id, application_id, event_id,
+                               entity_instance_id, user_id, session_id,
+                               runtime_instance_id, delivered_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                str(uuid5(NAMESPACE_URL, f"receipt:{event_id}")),
+                                str(application.id), str(event_id), str(entity_id),
+                                str(user_id), str(session_id), str(runtime_id),
+                                delivered_at,
+                            ),
+                        )
+            connection.commit()
+
+        single_runtime = run_en9_acceptance(
+            application.id,
+            1800,
+            connection_factory=self._connection,
+            clock=lambda: generated_at,
+        )
+        single_runtime_checks = {
+            item.code: item.passed for item in single_runtime.checks
+        }
+        self.assertFalse(single_runtime.passed)
+        self.assertTrue(single_runtime_checks["EN9_L2_CONTINUOUS_HISTORY"])
+        self.assertTrue(single_runtime_checks["EN9_AUTHENTICATED_WS_RECEIPTS"])
+        self.assertFalse(single_runtime_checks["EN9_RESTART_CONTINUITY"])
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                for entity_id in (
+                    UUID("85000000-0000-0000-0000-000000000101"),
+                    UUID("85000000-0000-0000-0000-000000000102"),
+                    UUID("85000000-0000-0000-0000-000000000103"),
+                ):
+                    event_id = uuid5(
+                        NAMESPACE_URL,
+                        f"en9:restart-proof:{entity_id}",
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_en9_acceptance_ws_receipts
+                          (id, application_id, event_id, entity_instance_id,
+                           user_id, session_id, runtime_instance_id,
+                           delivered_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            str(uuid5(NAMESPACE_URL, f"receipt:{event_id}")),
+                            str(application.id), str(event_id), str(entity_id),
+                            str(user_id), str(session_id), str(runtime_ids[1]),
+                            generated_at,
+                        ),
+                    )
+            connection.commit()
+
         report = run_en9_acceptance(
             application.id,
-            0,
+            1800,
             connection_factory=self._connection,
-            clock=lambda: observed_at + timedelta(seconds=1),
+            clock=lambda: generated_at,
         )
 
         self.assertEqual(90, report.required_input_count)
@@ -180,6 +384,45 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
         )
         self.assertEqual(report.digest, persisted["digest"])
         self.assertTrue(persisted["passed"])
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE t_l2_latest
+                    SET value_float = value_float * 10
+                    WHERE entity_instance_id = %s
+                    """,
+                    ("85000000-0000-0000-0000-000000000101",),
+                )
+                cursor.execute(
+                    """
+                    UPDATE t_l2_latest
+                    SET value_text = 'STOPPED'
+                    WHERE entity_instance_id = %s
+                    """,
+                    ("85000000-0000-0000-0000-000000000102",),
+                )
+            connection.commit()
+        mismatched = run_en9_acceptance(
+            application.id,
+            1800,
+            connection_factory=self._connection,
+            clock=lambda: generated_at,
+        )
+        mismatch_checks = {item.code: item.passed for item in mismatched.checks}
+        self.assertFalse(mismatched.passed)
+        self.assertFalse(mismatch_checks["EN9_POWER_VALUE"])
+        self.assertFalse(mismatch_checks["EN9_STATE_ENUM"])
+        from app.services.en9_point_processing_acceptance import (
+            get_latest_en9_acceptance_state,
+        )
+        restored = get_latest_en9_acceptance_state(
+            node_id,
+            connection_factory=self._connection,
+        )
+        self.assertEqual(str(application.id), restored["application"]["id"])
+        self.assertEqual(mismatched.digest, restored["latest_report"]["digest"])
 
 
 if __name__ == "__main__":

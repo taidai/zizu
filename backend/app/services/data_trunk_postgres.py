@@ -100,12 +100,17 @@ class PostgresDataTrunkRepository:
                 try:
                     with connection.cursor() as cursor:
                         accepted = self._insert_l0(cursor, raw_observations)
+                        calculated_at = self._clock()
+                        accepted = self._derive_l0_freshness(
+                            cursor,
+                            accepted,
+                            calculated_at=calculated_at,
+                        )
                         advanced_l0, late_l0 = self._advance_l0_latest(
                             cursor,
                             accepted,
                         )
                         if accepted:
-                            calculated_at = self._clock()
                             snapshot = self._load_conversion_snapshot(
                                 cursor,
                                 accepted,
@@ -584,6 +589,44 @@ class PostgresDataTrunkRepository:
             else:
                 advanced.append(observation)
         return tuple(advanced), late
+
+    @staticmethod
+    def _derive_l0_freshness(
+        cursor,
+        observations: tuple[RawObservation, ...],
+        *,
+        calculated_at: datetime,
+    ) -> tuple[RawObservation, ...]:
+        if not observations:
+            return ()
+        cursor.execute(
+            """
+            SELECT id, freshness_seconds
+            FROM t_tags
+            WHERE id = ANY(%s::uuid[])
+            """,
+            ([str(item.tag_id) for item in observations],),
+        )
+        freshness_by_tag = {
+            UUID(str(tag_id)): freshness_seconds
+            for tag_id, freshness_seconds in cursor.fetchall()
+        }
+        return tuple(
+            replace(
+                observation,
+                quality=min(observation.quality, TrunkQuality.STALE),
+            )
+            if (
+                freshness_by_tag.get(observation.tag_id) is not None
+                and observation.source_timestamp
+                + timedelta(
+                    seconds=float(freshness_by_tag[observation.tag_id])
+                )
+                <= calculated_at
+            )
+            else observation
+            for observation in observations
+        )
 
     @staticmethod
     def _load_conversion_snapshot(

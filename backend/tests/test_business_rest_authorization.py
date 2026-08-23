@@ -316,6 +316,10 @@ POINT_PROCESSING_CAPABILITIES = {
         "GET",
         "/api/v1/point-processing-acceptance-reports/{report_id}",
     ): "configuration.read",
+    (
+        "GET",
+        "/api/v1/nodes/{node_id}/point-processing-acceptance-state",
+    ): "configuration.read",
 }
 
 ANONYMOUS_LIVENESS = {("GET", "/api/v1/health/live")}
@@ -1056,7 +1060,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
         self.assertEqual(len(TICKET_15_CAPABILITIES), 2)
         self.assertEqual(len(TICKET_16_CAPABILITIES), 4)
         self.assertEqual(len(ALARM_CONFIGURATION_CAPABILITIES), 12)
-        self.assertEqual(len(POINT_PROCESSING_CAPABILITIES), 7)
+        self.assertEqual(len(POINT_PROCESSING_CAPABILITIES), 8)
 
         partitions = (
             set(TICKET_03_CAPABILITIES),
@@ -1092,7 +1096,7 @@ class BusinessRestOpenApiCoverageTest(unittest.TestCase):
                 "missing": sorted(expected_registered - registered),
             },
         )
-        self.assertEqual(len(registered), 165)
+        self.assertEqual(len(registered), 166)
 
         for (method, path), capability in sorted(TICKET_07_CAPABILITIES.items()):
             operation = schema["paths"][path][method.lower()]

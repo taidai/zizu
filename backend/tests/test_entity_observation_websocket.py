@@ -17,6 +17,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.api.auth import router as auth_router
 from app.api.security import get_identity
 from app.api.websocket import (
+    get_en9_stream_evidence,
     get_entity_observation_broadcaster,
     get_entity_observation_catalog,
     router as websocket_router,
@@ -51,6 +52,19 @@ class _Socket:
 
     async def send_json(self, message) -> None:
         self.messages.append(message)
+
+
+class _AcceptanceEvidence:
+    def __init__(self) -> None:
+        self.bindings = []
+
+    def bind(self, application_id, entity_ids, principal):
+        binding = object()
+        self.bindings.append((application_id, tuple(entity_ids), principal, binding))
+        return binding
+
+    def record_delivery(self, binding, event, runtime_instance_id):
+        return None
 
 
 class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
@@ -123,6 +137,43 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await dispatcher.run_once(limit=20), 1)
         self.assertEqual(repository.published, [EVENT_ID])
 
+    async def test_authenticated_acceptance_subscription_records_actual_delivery(self) -> None:
+        runtime_id = UUID("91000000-0000-0000-0000-000000000003")
+        binding = object()
+
+        class Recorder:
+            def __init__(self) -> None:
+                self.deliveries = []
+
+            def record_delivery(self, actual_binding, event, actual_runtime_id):
+                self.deliveries.append(
+                    (actual_binding, event.event_id, actual_runtime_id)
+                )
+
+        recorder = Recorder()
+        try:
+            broadcaster = EntityObservationBroadcaster(
+                receipt_recorder=recorder,
+                runtime_instance_id=runtime_id,
+            )
+        except TypeError as exc:
+            self.fail(f"acceptance receipt recorder is unavailable: {exc}")
+        socket = _Socket()
+        await broadcaster.connect(socket)
+        await broadcaster.subscribe(
+            socket,
+            (ENTITY_ID,),
+            acceptance_binding=binding,
+        )
+        event = OutboxEvent(EVENT_ID, ENTITY_ID, {"value": 12.345})
+
+        await broadcaster.publish(event)
+
+        self.assertEqual(
+            [(binding, EVENT_ID, runtime_id)],
+            recorder.deliveries,
+        )
+
 
 class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
     @classmethod
@@ -146,7 +197,10 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
             ]
         )
         identity = Identity(repository)
-        broadcaster = EntityObservationBroadcaster()
+        acceptance_evidence = _AcceptanceEvidence()
+        broadcaster = EntityObservationBroadcaster(
+            receipt_recorder=acceptance_evidence,
+        )
         app = FastAPI()
         app.include_router(auth_router, prefix="/api/v1")
         app.include_router(websocket_router, prefix="/api/v1")
@@ -155,6 +209,10 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
         app.dependency_overrides[
             get_entity_observation_broadcaster
         ] = lambda: broadcaster
+        app.dependency_overrides[
+            get_en9_stream_evidence
+        ] = lambda: acceptance_evidence
+        app.state.acceptance_evidence = acceptance_evidence
         return app
 
     def test_ticket_authenticates_entity_subscription_and_logout_revokes_it(self) -> None:
@@ -194,6 +252,39 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
                 with self.assertRaises(WebSocketDisconnect) as closed:
                     websocket.receive_json()
                 self.assertEqual(closed.exception.code, 4401)
+
+    def test_acceptance_subscription_is_bound_to_authenticated_principal(self) -> None:
+        app = self.build_app()
+        application_id = UUID("91000000-0000-0000-0000-000000000020")
+        with TestClient(app, base_url="https://testserver") as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": "operator", "password": self.password},
+            )
+            ticket = client.post(
+                "/api/v1/auth/ws-ticket",
+                headers={
+                    "Authorization": f"Bearer {login.json()['access_token']}"
+                },
+            ).json()["ticket"]
+            with client.websocket_connect(
+                "wss://testserver/api/v1/ws/entity-observations"
+            ) as websocket:
+                websocket.send_json({"authenticate": {"ticket": ticket}})
+                self.assertEqual({"type": "authenticated"}, websocket.receive_json())
+                websocket.send_json({
+                    "subscribe": [str(ENTITY_ID)],
+                    "acceptance_application_id": str(application_id),
+                })
+                self.assertEqual("subscribed", websocket.receive_json()["type"])
+
+        [(bound_application, bound_entities, principal, _)] = (
+            app.state.acceptance_evidence.bindings
+        )
+        self.assertEqual(application_id, bound_application)
+        self.assertEqual((ENTITY_ID,), bound_entities)
+        self.assertEqual("operator", principal.username)
+        self.assertEqual("operator", principal.role)
 
 
 @unittest.skipUnless(

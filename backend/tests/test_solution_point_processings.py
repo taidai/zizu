@@ -111,6 +111,27 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
                 SolutionDelivery(
                     InMemoryDeliveryRepository(),
                     platform_version="0.4.77",
+                    ).import_package(builder.build_archive(source), "user:test-engineer")
+
+    def test_rejects_non_finite_source_contract_decimal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "package"
+            shutil.copytree(builder.DEFAULT_SOURCE, source)
+            asset_path = source / "point-processings" / "pcs-en9.yaml"
+            asset = yaml.safe_load(asset_path.read_text(encoding="utf-8"))
+            asset["inputs"][0]["sourceContract"]["decimal"] = float("nan")
+            asset_path.write_text(
+                yaml.safe_dump(asset, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                DeliveryError,
+                "POINT_PROCESSING_INPUT_INVALID",
+            ):
+                SolutionDelivery(
+                    InMemoryDeliveryRepository(),
+                    platform_version="0.4.82",
                 ).import_package(builder.build_archive(source), "user:test-engineer")
 
     def test_rejects_reversed_numeric_limits(self) -> None:

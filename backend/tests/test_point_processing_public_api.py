@@ -236,6 +236,13 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 "app.services.en9_point_processing_acceptance.get_en9_acceptance_report",
                 return_value=report_body,
             ) as get_report,
+            patch(
+                "app.services.en9_point_processing_acceptance.get_latest_en9_acceptance_state",
+                return_value={
+                    "application": {"id": str(application_id)},
+                    "latest_report": report_body,
+                },
+            ) as get_state,
         ):
             async with httpx.AsyncClient(
                 transport=transport,
@@ -261,6 +268,10 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                     f"/api/v1/point-processing-acceptance-reports/{report_id}",
                     headers=engineer_headers,
                 )
+                restored = await client.get(
+                    f"/api/v1/nodes/{NODE_ID}/point-processing-acceptance-state",
+                    headers=engineer_headers,
+                )
 
         self.assertEqual(401, anonymous.status_code, anonymous.text)
         self.assertEqual(403, operator.status_code, operator.text)
@@ -268,8 +279,11 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report_body, created.json())
         self.assertEqual(200, fetched.status_code, fetched.text)
         self.assertEqual(report_body, fetched.json())
+        self.assertEqual(200, restored.status_code, restored.text)
+        self.assertEqual(str(application_id), restored.json()["application"]["id"])
         run_acceptance.assert_called_once_with(application_id, 1800.0)
         get_report.assert_called_once_with(report_id)
+        get_state.assert_called_once_with(NODE_ID)
 
 
 if __name__ == "__main__":
