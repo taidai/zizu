@@ -1,5 +1,12 @@
 ---
 
+## Session 2026-08-24 — v0.4.84 业务指标 Task 3
+
+- 新增纯计算 `MetricProjection` 内核：IANA aligned daily、通用 rolling、counter delta、梯形功率积分、时间加权平均、峰值和确定性 `project_metric`；无 I/O、无全局时钟。
+- 冻结 counter reset/rollover 规则覆盖 16/32/64 位，歧义、BAD、非有限值和覆盖不足稳定形成 `invalid/BAD`；当前有效窗口保持 `provisional`，所有 decision 的 `history_facts=()`。
+- Task 3 定向 28/28、Task 1 编译相关回归 18/18 通过；详细 RED/GREEN 与边界见 `.superpowers/sdd/2026-08-23-v0.4.84-business-metric-templates/task-3-report.md`。
+- 未做 PostgreSQL runtime、封窗/迟到修正、主循环、API/UI、重算或 1 号机操作；下一步按计划执行 Task 4。
+
 ## Session 2026-08-23 — v0.4.84 业务指标模板规格确认
 
 - 维护者已对 Q1—Q71 的业务指标设计回复“整体确认”，决策前沿清空；最终架构为“业务指标模板 → 内部运行投影 → L2 统计实体”，不增加 L3、不按节点或指标新建超级表。
