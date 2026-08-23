@@ -158,6 +158,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 DataTrunkMigrationPostgresTest._apply_038(cursor)
                 DataTrunkMigrationPostgresTest._apply_039(cursor)
                 DataTrunkMigrationPostgresTest._apply_040(cursor)
+                DataTrunkMigrationPostgresTest._apply_041(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     def test_package_import_persists_complete_versioned_catalog_atomically(self) -> None:

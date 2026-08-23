@@ -386,6 +386,40 @@ async def entity_observations_ws(
         while True:
             try:
                 message = json.loads(await ws.receive_text())
+                acknowledgement = message.get("acknowledge_acceptance_event")
+                if acknowledgement is not None:
+                    acknowledgement_nonce = message.get(
+                        "acceptance_ack_nonce"
+                    )
+                    if not isinstance(acknowledgement_nonce, str):
+                        raise ValueError("acceptance ACK nonce required")
+                    if principal != _INSECURE_DEVELOPMENT_PRINCIPAL:
+                        principal = await asyncio.to_thread(
+                            identity.revalidate_session,
+                            principal,
+                            client_ip=_client_ip(ws),
+                        )
+                    await asyncio.to_thread(
+                        identity.authorize,
+                        principal,
+                        "runtime.read",
+                    )
+                    acceptance_application_id = message.get(
+                        "acceptance_application_id"
+                    )
+                    if acceptance_application_id is None:
+                        raise ValueError("acceptance application required")
+                    await broadcaster.acknowledge(
+                        ws,
+                        UUID(str(acknowledgement)),
+                        acknowledgement_nonce,
+                        UUID(str(acceptance_application_id)),
+                    )
+                    await ws.send_json({
+                        "type": "acknowledged",
+                        "event_id": str(acknowledgement),
+                    })
+                    continue
                 values = message.get("subscribe")
                 if (
                     not isinstance(values, list)

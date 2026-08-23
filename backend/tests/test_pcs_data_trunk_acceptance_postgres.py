@@ -54,6 +54,7 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
                 data_migration_test.DataTrunkMigrationPostgresTest._apply_038(cursor)
                 data_migration_test.DataTrunkMigrationPostgresTest._apply_039(cursor)
                 data_migration_test.DataTrunkMigrationPostgresTest._apply_040(cursor)
+                data_migration_test.DataTrunkMigrationPostgresTest._apply_041(cursor)
                 cls._seed_sources(cursor)
 
         cls.port = cls._free_port()
@@ -177,14 +178,17 @@ class PcsDataTrunkAcceptancePostgresTest(unittest.TestCase):
             ],
             cwd=BACKEND_ROOT,
             env=cls.server_env,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if cls.process.poll() is not None:
-                raise RuntimeError("PCS data-trunk test server exited early")
+                output = cls.process.stdout.read() if cls.process.stdout else ""
+                raise RuntimeError(
+                    f"PCS data-trunk test server exited early: {output[-4000:]}"
+                )
             try:
                 response = httpx.get(
                     f"{cls.base_url}/api/v1/health/live",

@@ -101,7 +101,11 @@ ALTER TABLE t_point_processing_inputs
   DROP CONSTRAINT IF EXISTS chk_point_processing_expected_decimal_finite,
   ADD CONSTRAINT chk_point_processing_expected_decimal_finite CHECK (
     expected_decimal IS NULL
-    OR (expected_decimal = expected_decimal AND abs(expected_decimal) < 1e308)
+    OR expected_decimal NOT IN (
+      'NaN'::double precision,
+      'Infinity'::double precision,
+      '-Infinity'::double precision
+    )
   );
 
 CREATE TABLE IF NOT EXISTS t_en9_acceptance_reports (

@@ -1303,6 +1303,7 @@ export function connectEntityObservationWS(
           type?: string
           event_id?: string | null
           entity_instance_id?: string
+          acceptance_ack_nonce?: string
         }
         if (payload.type === 'authenticated') {
           socket?.send(JSON.stringify({
@@ -1318,6 +1319,13 @@ export function connectEntityObservationWS(
           && remember(payload.event_id)
         ) {
           onObservation(payload as unknown as EntityInstanceObservation)
+          if (acceptanceApplicationId && payload.acceptance_ack_nonce) {
+            socket?.send(JSON.stringify({
+              acknowledge_acceptance_event: payload.event_id,
+              acceptance_ack_nonce: payload.acceptance_ack_nonce,
+              acceptance_application_id: acceptanceApplicationId,
+            }))
+          }
         }
       } catch { /* Malformed stream frames do not alter the current projection. */ }
     }

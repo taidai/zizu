@@ -192,6 +192,7 @@ export default function DataTrunkWorkspace({
 
   const handleApply = async () => {
     if (!plan) return
+    setAcceptance(null)
     setBusy('apply')
     setError('')
     const identity = { actorId, nodeId: node.id, planId: plan.id, planDigest: plan.digest }
@@ -230,7 +231,10 @@ export default function DataTrunkWorkspace({
     }
   }
 
-  const completedStage = acceptance?.passed
+  const currentAcceptance = acceptance?.application_id === application?.id
+    ? acceptance
+    : null
+  const completedStage = currentAcceptance?.passed
     ? 4
     : application || plan?.status === 'applied'
       ? 3
@@ -295,18 +299,20 @@ export default function DataTrunkWorkspace({
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">站点配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.site_configuration_version ?? observations.values().next().value?.site_configuration_version ?? '等待安装'}</div></div>
               <div className="border-l-2 border-blue-500 pl-3">
                 <div className="text-[10px] text-gray-500">运行验收</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">{acceptance ? (acceptance.passed ? '机器验收通过' : '机器验收未通过') : application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div>
-                {application && !acceptance?.passed && (
+                <div className="mt-1 text-sm font-semibold text-gray-900">{currentAcceptance ? (currentAcceptance.passed ? '机器验收通过' : '机器验收未通过') : application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div>
+                {application && !currentAcceptance?.passed && (
                   <button type="button" disabled={busy !== null} onClick={() => void handleAcceptance()} className="neu-btn mt-2 px-2 py-1 text-[10px] text-blue-700 disabled:opacity-50">
-                    {busy === 'acceptance' ? '验收中...' : acceptance ? '重新运行机器验收' : '运行机器验收'}
+                    {busy === 'acceptance' ? '验收中...' : currentAcceptance ? '重新运行机器验收' : '运行机器验收'}
                   </button>
                 )}
-                {acceptance && (
+                {currentAcceptance && (
                   <div className="mt-2 space-y-1 text-[10px] text-gray-500">
-                    <div>报告 {acceptance.id.slice(0, 8)} · 摘要 {acceptance.digest.slice(0, 12)}</div>
-                    {acceptance.checks.map((check) => (
-                      <div key={check.code} className={check.passed ? 'text-emerald-700' : 'text-red-700'}>
-                        {check.passed ? '通过' : '未通过'} · {check.code}
+                    <div>报告 {currentAcceptance.id.slice(0, 8)} · 摘要 {currentAcceptance.digest.slice(0, 12)}</div>
+                    {currentAcceptance.checks.map((check) => (
+                      <div key={check.code} className={`rounded border px-2 py-1 ${check.passed ? 'border-emerald-100 text-emerald-700' : 'border-red-100 bg-red-50 text-red-700'}`}>
+                        <div>{check.passed ? '通过' : '未通过'} · {check.code}</div>
+                        <div className="mt-0.5 break-all text-gray-500">{Object.entries(check.evidence).map(([key, value]) => `${key}=${String(value)}`).join(' · ')}</div>
+                        {!check.passed && <div className="mt-0.5">建议：检查该项证据后修复，再重新运行验收。</div>}
                       </div>
                     ))}
                   </div>

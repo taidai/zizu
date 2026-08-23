@@ -67,6 +67,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
                 migration_support.DataTrunkMigrationPostgresTest._apply_038(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_039(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_041(cursor)
                 self._seed_installed_numeric_conversion(cursor)
         self.repository = PostgresDataTrunkRepository(
             connection_factory=self._connection,

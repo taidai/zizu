@@ -1,6 +1,7 @@
 """Authenticated REST adapter for L1 point-processing planning and apply."""
 from __future__ import annotations
 
+import asyncio
 from typing import NoReturn
 from uuid import UUID
 
@@ -186,10 +187,12 @@ async def run_en9_point_processing_acceptance(
     from app.services.en9_point_processing_acceptance import run_en9_acceptance
 
     try:
-        return run_en9_acceptance(
+        report = await asyncio.to_thread(
+            run_en9_acceptance,
             application_id,
             body.observed_for_seconds,
-        ).public_dict()
+        )
+        return report.public_dict()
     except ValueError as exc:
         code = str(exc)
         raise HTTPException(
@@ -211,7 +214,7 @@ async def read_latest_en9_point_processing_acceptance_state(node_id: UUID) -> di
         get_latest_en9_acceptance_state,
     )
 
-    return get_latest_en9_acceptance_state(node_id)
+    return await asyncio.to_thread(get_latest_en9_acceptance_state, node_id)
 
 
 @router.get(
@@ -224,7 +227,7 @@ async def read_en9_point_processing_acceptance(report_id: UUID) -> dict:
     )
 
     try:
-        return get_en9_acceptance_report(report_id)
+        return await asyncio.to_thread(get_en9_acceptance_report, report_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

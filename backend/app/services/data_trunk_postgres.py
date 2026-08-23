@@ -27,6 +27,7 @@ from app.services.data_trunk_contracts import (
     TypedValue,
     ValueKind,
 )
+from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 FaultHook = Callable[[str], None]
 
@@ -127,6 +128,7 @@ class PostgresDataTrunkRepository:
                                 cursor,
                                 produced,
                             )
+                            self._ensure_runtime(cursor)
                             self._insert_l2(cursor, produced)
                             advanced = self._advance_l2_latest(cursor, produced)
                             self._insert_sources(cursor, produced)
@@ -316,6 +318,7 @@ class PostgresDataTrunkRepository:
                         observations = tuple(
                             item.observation for item in candidates
                         )
+                        self._ensure_runtime(cursor)
                         self._insert_l2(cursor, observations)
                         advanced = self._advance_l2_latest(cursor, observations)
                         advanced_ids = {item.event_id for item in advanced}
@@ -1056,6 +1059,19 @@ class PostgresDataTrunkRepository:
         return tuple(selected)
 
     @staticmethod
+    def _ensure_runtime(cursor) -> None:
+        from app.api.health import _VERSION as platform_version
+
+        cursor.execute(
+            """
+            INSERT INTO t_runtime_instances (id, started_at, platform_version)
+            VALUES (%s, now(), %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (str(RUNTIME_INSTANCE_ID), platform_version),
+        )
+
+    @staticmethod
     def _insert_l2(cursor, observations: tuple[L2Observation, ...]) -> None:
         for observation in observations:
             values = _l2_columns(observation.value)
@@ -1066,13 +1082,14 @@ class PostgresDataTrunkRepository:
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
-                   source_digest, source_order_key)
+                   source_digest, source_order_key,
+                   producing_runtime_instance_id)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s
+                  %s, %s, %s
                 )
                 ON CONFLICT (event_id, observed_at) DO NOTHING
                 """,
@@ -1089,6 +1106,7 @@ class PostgresDataTrunkRepository:
                     observation.site_configuration_version,
                     observation.source_digest,
                     observation.source_order_key,
+                    str(RUNTIME_INSTANCE_ID),
                 ),
             )
 
@@ -1107,13 +1125,14 @@ class PostgresDataTrunkRepository:
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
-                   source_digest, source_order_key)
+                   source_digest, source_order_key,
+                   producing_runtime_instance_id)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s
+                  %s, %s, %s
                 )
                 ON CONFLICT (entity_instance_id) DO UPDATE SET
                   event_id = EXCLUDED.event_id,
@@ -1130,7 +1149,9 @@ class PostgresDataTrunkRepository:
                   processing_revision_id = EXCLUDED.processing_revision_id,
                   site_configuration_version = EXCLUDED.site_configuration_version,
                   source_digest = EXCLUDED.source_digest,
-                  source_order_key = EXCLUDED.source_order_key
+                  source_order_key = EXCLUDED.source_order_key,
+                  producing_runtime_instance_id =
+                    EXCLUDED.producing_runtime_instance_id
                 WHERE
                   EXCLUDED.observed_at > t_l2_latest.observed_at
                   OR (
@@ -1152,6 +1173,7 @@ class PostgresDataTrunkRepository:
                     observation.site_configuration_version,
                     observation.source_digest,
                     observation.source_order_key,
+                    str(RUNTIME_INSTANCE_ID),
                 ),
             )
             if cursor.fetchone() is not None:
@@ -1220,6 +1242,7 @@ class PostgresDataTrunkRepository:
                     observation.site_configuration_version
                 ),
                 "source_digest": observation.source_digest,
+                "producing_runtime_instance_id": str(RUNTIME_INSTANCE_ID),
             }
             cursor.execute(
                 """

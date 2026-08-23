@@ -53,6 +53,7 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                 migration_support.DataTrunkMigrationPostgresTest._apply_038(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_039(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_041(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     @classmethod
@@ -184,6 +185,7 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
             PostgresEN9StreamEvidence,
         )
         stream_evidence = PostgresEN9StreamEvidence(self._connection)
+        stream_evidence.register_runtime(runtime_ids[0])
         binding = stream_evidence.bind(
             application.id,
             application.output_entity_instance_ids,
@@ -202,7 +204,7 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                 )
                 committed_events = cursor.fetchall()
         for event_id, entity_id, payload in committed_events:
-            stream_evidence.record_delivery(
+            stream_evidence.record_acknowledgement(
                 binding,
                 OutboxEvent(UUID(str(event_id)), UUID(str(entity_id)), payload),
                 runtime_ids[0],
@@ -221,6 +223,30 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
         self.assertFalse(premature_checks["EN9_AUTHENTICATED_WS_RECEIPTS"])
         self.assertFalse(premature_checks["EN9_RESTART_CONTINUITY"])
 
+        for minute in range(1, 30):
+            point_at = observed_at + timedelta(minutes=minute)
+            minute_observations = tuple(
+                replace(
+                    observation,
+                    observation_id=uuid5(
+                        NAMESPACE_URL,
+                        f"en9:minute:{minute}:{observation.tag_id}",
+                    ),
+                    source_timestamp=point_at,
+                    received_at=point_at,
+                    source_message_id=f"en9-acceptance-minute-{minute}",
+                    source_sequence=minute * 1000 + index,
+                    source_digest=hashlib.sha256(
+                        f"minute:{minute}:{observation.tag_id}".encode()
+                    ).hexdigest(),
+                )
+                for index, observation in enumerate(observations, 1)
+            )
+            minute_receipt = DataTrunk(
+                PostgresDataTrunkRepository(clock=lambda now=point_at: now)
+            ).ingest(minute_observations)
+            self.assertEqual(3, len(minute_receipt.l2_event_ids))
+
         final_observations = tuple(
             replace(
                 observation,
@@ -228,8 +254,8 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                     NAMESPACE_URL,
                     f"en9:final:{observation.tag_id}",
                 ),
-                source_timestamp=generated_at - timedelta(seconds=1),
-                received_at=generated_at - timedelta(milliseconds=500),
+                source_timestamp=generated_at,
+                received_at=generated_at,
                 source_message_id="en9-acceptance-final",
                 source_sequence=1000 + index,
                 source_digest=hashlib.sha256(
@@ -243,14 +269,15 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                 clock=lambda: generated_at,
             )
         ).ingest(final_observations)
-        self.assertEqual(
-            (90, 3),
-            (final_receipt.accepted_l0_count, len(final_receipt.l2_event_ids)),
-        )
+        self.assertEqual(90, final_receipt.accepted_l0_count)
+        self.assertEqual(3, len(final_receipt.l2_event_ids))
 
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                for runtime_id in runtime_ids:
+                for runtime_id, started_at in (
+                    (runtime_ids[0], observed_at),
+                    (runtime_ids[1], observed_at + timedelta(minutes=15)),
+                ):
                     cursor.execute(
                         """
                         INSERT INTO t_runtime_instances
@@ -258,69 +285,73 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                         VALUES (%s, %s, '0.4.82')
                         ON CONFLICT (id) DO NOTHING
                         """,
-                        (str(runtime_id), observed_at),
+                        (str(runtime_id), started_at),
                     )
-                for minute in range(1, 30):
-                    point_at = observed_at + timedelta(minutes=minute)
-                    for entity_id in (
-                        UUID("85000000-0000-0000-0000-000000000101"),
-                        UUID("85000000-0000-0000-0000-000000000102"),
-                        UUID("85000000-0000-0000-0000-000000000103"),
-                    ):
-                        event_id = uuid5(
-                            NAMESPACE_URL,
-                            f"en9:history:{minute}:{entity_id}",
-                        )
-                        cursor.execute(
-                            """
-                            INSERT INTO t_l2_observations
-                              (observed_at, event_id, entity_instance_id,
-                               received_at, calculated_at, value_float,
-                               value_int, value_bool, value_text, value_codes,
-                               quality, reason, processing_revision_id,
-                               site_configuration_version, source_digest,
-                               source_order_key)
-                            SELECT %s, %s, entity_instance_id, %s, %s,
-                                   value_float, value_int, value_bool,
-                                   value_text, value_codes, quality, reason,
-                                   processing_revision_id,
-                                   site_configuration_version,
-                                   source_digest, %s
-                            FROM t_l2_latest WHERE entity_instance_id = %s
-                            """,
-                            (
-                                point_at, str(event_id), point_at, point_at,
-                                f"acceptance:{minute:02d}:{entity_id}",
-                                str(entity_id),
-                            ),
-                        )
-                for minute in range(31):
+                cursor.execute("ALTER TABLE t_l2_observations DISABLE TRIGGER USER")
+                cursor.execute("ALTER TABLE t_l2_latest DISABLE TRIGGER USER")
+                cursor.execute(
+                    """
+                    UPDATE t_l2_observations
+                    SET producing_runtime_instance_id = CASE
+                      WHEN calculated_at < %s THEN %s::uuid ELSE %s::uuid END
+                    WHERE calculated_at BETWEEN %s AND %s
+                    """,
+                    (
+                        observed_at + timedelta(minutes=15),
+                        str(runtime_ids[0]), str(runtime_ids[1]),
+                        observed_at, generated_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE t_l2_latest
+                    SET producing_runtime_instance_id = %s
+                    WHERE processing_revision_id IS NOT NULL
+                    """,
+                    (str(runtime_ids[1]),),
+                )
+                cursor.execute("ALTER TABLE t_l2_observations ENABLE TRIGGER USER")
+                cursor.execute("ALTER TABLE t_l2_latest ENABLE TRIGGER USER")
+                cursor.execute(
+                    """
+                    SELECT event_id, entity_instance_id, calculated_at
+                    FROM t_l2_observations
+                    WHERE calculated_at >= %s AND calculated_at < %s
+                    ORDER BY calculated_at, entity_instance_id
+                    """,
+                    (observed_at, observed_at + timedelta(minutes=15)),
+                )
+                first_runtime_events = cursor.fetchall()
+                for event_id, entity_id, delivered_at in first_runtime_events:
+                    receipt_id = uuid5(
+                        NAMESPACE_URL,
+                        f"receipt:{event_id}:{runtime_ids[0]}",
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_en9_acceptance_ws_receipts
+                          (id, application_id, event_id, entity_instance_id,
+                           user_id, session_id, runtime_instance_id, delivered_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            str(receipt_id), str(application.id), str(event_id),
+                            str(entity_id), str(user_id), str(session_id),
+                            str(runtime_ids[0]), delivered_at,
+                        ),
+                    )
+                for minute in range(15):
                     delivered_at = observed_at + timedelta(minutes=minute)
-                    runtime_id = runtime_ids[0]
-                    for entity_id in (
-                        UUID("85000000-0000-0000-0000-000000000101"),
-                        UUID("85000000-0000-0000-0000-000000000102"),
-                        UUID("85000000-0000-0000-0000-000000000103"),
-                    ):
-                        event_id = uuid5(
-                            NAMESPACE_URL,
-                            f"en9:receipt-event:{minute}:{entity_id}",
-                        )
-                        cursor.execute(
-                            """
-                            INSERT INTO t_en9_acceptance_ws_receipts
-                              (id, application_id, event_id,
-                               entity_instance_id, user_id, session_id,
-                               runtime_instance_id, delivered_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (
-                                str(uuid5(NAMESPACE_URL, f"receipt:{event_id}")),
-                                str(application.id), str(event_id), str(entity_id),
-                                str(user_id), str(session_id), str(runtime_id),
-                                delivered_at,
-                            ),
-                        )
+                    cursor.execute(
+                        """
+                        INSERT INTO t_runtime_health_samples
+                          (runtime_instance_id, sampled_at, pipeline_running,
+                           mqtt_connected, last_message_at)
+                        VALUES (%s, %s, TRUE, TRUE, %s)
+                        """,
+                        (str(runtime_ids[0]), delivered_at, delivered_at),
+                    )
             connection.commit()
 
         single_runtime = run_en9_acceptance(
@@ -334,34 +365,50 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
         }
         self.assertFalse(single_runtime.passed)
         self.assertTrue(single_runtime_checks["EN9_L2_CONTINUOUS_HISTORY"])
-        self.assertTrue(single_runtime_checks["EN9_AUTHENTICATED_WS_RECEIPTS"])
+        self.assertFalse(single_runtime_checks["EN9_AUTHENTICATED_WS_RECEIPTS"])
         self.assertFalse(single_runtime_checks["EN9_RESTART_CONTINUITY"])
 
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                for entity_id in (
-                    UUID("85000000-0000-0000-0000-000000000101"),
-                    UUID("85000000-0000-0000-0000-000000000102"),
-                    UUID("85000000-0000-0000-0000-000000000103"),
-                ):
-                    event_id = uuid5(
+                cursor.execute(
+                    """
+                    SELECT event_id, entity_instance_id, calculated_at
+                    FROM t_l2_observations
+                    WHERE calculated_at >= %s AND calculated_at <= %s
+                    ORDER BY calculated_at, entity_instance_id
+                    """,
+                    (observed_at + timedelta(minutes=15), generated_at),
+                )
+                second_runtime_events = cursor.fetchall()
+                for event_id, entity_id, delivered_at in second_runtime_events:
+                    receipt_id = uuid5(
                         NAMESPACE_URL,
-                        f"en9:restart-proof:{entity_id}",
+                        f"receipt:{event_id}:{runtime_ids[1]}",
                     )
                     cursor.execute(
                         """
                         INSERT INTO t_en9_acceptance_ws_receipts
                           (id, application_id, event_id, entity_instance_id,
-                           user_id, session_id, runtime_instance_id,
-                           delivered_at)
+                           user_id, session_id, runtime_instance_id, delivered_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
                         """,
                         (
-                            str(uuid5(NAMESPACE_URL, f"receipt:{event_id}")),
-                            str(application.id), str(event_id), str(entity_id),
-                            str(user_id), str(session_id), str(runtime_ids[1]),
-                            generated_at,
+                            str(receipt_id), str(application.id), str(event_id),
+                            str(entity_id), str(user_id), str(session_id),
+                            str(runtime_ids[1]), delivered_at,
                         ),
+                    )
+                for minute in range(15, 31):
+                    delivered_at = observed_at + timedelta(minutes=minute)
+                    cursor.execute(
+                        """
+                        INSERT INTO t_runtime_health_samples
+                          (runtime_instance_id, sampled_at, pipeline_running,
+                           mqtt_connected, last_message_at)
+                        VALUES (%s, %s, TRUE, TRUE, %s)
+                        """,
+                        (str(runtime_ids[1]), delivered_at, delivered_at),
                     )
             connection.commit()
 
@@ -384,6 +431,140 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
         )
         self.assertEqual(report.digest, persisted["digest"])
         self.assertTrue(persisted["passed"])
+
+        def check_passed(code: str) -> bool:
+            checked = run_en9_acceptance(
+                application.id,
+                1800,
+                connection_factory=self._connection,
+                clock=lambda: generated_at,
+            )
+            return {item.code: item.passed for item in checked.checks}[code]
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT ON (latest.event_id)
+                           source.l0_observation_id, l0.tag_id,
+                           (
+                             SELECT binding.l0_tag_id
+                             FROM t_point_processing_input_bindings AS binding
+                             JOIN t_point_processing_inputs AS input
+                               ON input.id = binding.input_id
+                             WHERE binding.installed_processing_id = %s
+                               AND input.input_key = 'active_power_raw'
+                           )
+                    FROM t_point_processing_output_bindings AS binding
+                    JOIN t_point_processing_outputs AS output
+                      ON output.id = binding.output_id
+                    JOIN t_l2_observations AS latest
+                      ON latest.entity_instance_id = binding.entity_instance_id
+                    JOIN t_l2_observation_sources AS source
+                      ON source.l2_event_id = latest.event_id
+                     AND source.l2_observed_at = latest.observed_at
+                    JOIN t_l0_observation_dedup AS l0
+                      ON l0.observation_id = source.l0_observation_id
+                    WHERE binding.installed_processing_id = %s
+                      AND output.entity_definition_id = 'pcs.fault_codes'
+                    ORDER BY latest.event_id, source.l0_observation_id
+                    """,
+                    (str(application.installed_processing_id),) * 2,
+                )
+                corrupted_sources = cursor.fetchall()
+                wrong_tag_id = corrupted_sources[0][2]
+                cursor.execute(
+                    "ALTER TABLE t_l0_observation_dedup DISABLE TRIGGER USER"
+                )
+                for source_id, _original_tag_id, _wrong_tag_id in corrupted_sources:
+                    cursor.execute(
+                        "UPDATE t_l0_observation_dedup SET tag_id = %s "
+                        "WHERE observation_id = %s",
+                        (str(wrong_tag_id), str(source_id)),
+                    )
+            connection.commit()
+        self.assertFalse(check_passed("EN9_FAULT_SOURCE_EVIDENCE"))
+        self.assertFalse(check_passed("EN9_L2_CONTINUOUS_HISTORY"))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                for source_id, original_tag_id, _wrong_tag_id in corrupted_sources:
+                    cursor.execute(
+                        "UPDATE t_l0_observation_dedup SET tag_id = %s "
+                        "WHERE observation_id = %s",
+                        (str(original_tag_id), str(source_id)),
+                    )
+                cursor.execute(
+                    "ALTER TABLE t_l0_observation_dedup ENABLE TRIGGER USER"
+                )
+            connection.commit()
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE t_l2_observations DISABLE TRIGGER USER")
+                cursor.execute(
+                    "UPDATE t_l2_observations SET quality = 64 WHERE calculated_at <= %s",
+                    (generated_at,),
+                )
+            connection.commit()
+        self.assertFalse(check_passed("EN9_L2_CONTINUOUS_HISTORY"))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_l2_observations SET quality = 192 WHERE calculated_at <= %s",
+                    (generated_at,),
+                )
+                cursor.execute("ALTER TABLE t_l2_observations ENABLE TRIGGER USER")
+            connection.commit()
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE t_l2_observations DISABLE TRIGGER USER")
+                cursor.execute(
+                    "UPDATE t_l2_observations SET calculated_at = calculated_at - INTERVAL '1 day'"
+                )
+            connection.commit()
+        self.assertFalse(check_passed("EN9_L2_CONTINUOUS_HISTORY"))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_l2_observations SET calculated_at = calculated_at + INTERVAL '1 day'"
+                )
+                cursor.execute("ALTER TABLE t_l2_observations ENABLE TRIGGER USER")
+            connection.commit()
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE t_runtime_instances DISABLE TRIGGER USER")
+                cursor.execute(
+                    "UPDATE t_runtime_instances SET started_at = %s WHERE id = %s",
+                    (observed_at, str(runtime_ids[1])),
+                )
+            connection.commit()
+        self.assertFalse(check_passed("EN9_RESTART_CONTINUITY"))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_runtime_instances SET started_at = %s WHERE id = %s",
+                    (observed_at + timedelta(minutes=15), str(runtime_ids[1])),
+                )
+                cursor.execute("ALTER TABLE t_runtime_instances ENABLE TRIGGER USER")
+            connection.commit()
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE t_runtime_health_samples DISABLE TRIGGER USER")
+                cursor.execute(
+                    "UPDATE t_runtime_health_samples SET mqtt_connected = FALSE"
+                )
+            connection.commit()
+        self.assertFalse(check_passed("EN9_RUNTIME_MQTT_COLLECTION_HEALTH"))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_runtime_health_samples SET mqtt_connected = TRUE"
+                )
+                cursor.execute("ALTER TABLE t_runtime_health_samples ENABLE TRIGGER USER")
+            connection.commit()
 
         with self._connection() as connection:
             with connection.cursor() as cursor:

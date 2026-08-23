@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from types import SimpleNamespace
 import unittest
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -59,11 +61,12 @@ class _AcceptanceEvidence:
         self.bindings = []
 
     def bind(self, application_id, entity_ids, principal):
-        binding = object()
+        application_id = UUID("91000000-0000-0000-0000-000000000020")
+        binding = SimpleNamespace(application_id=application_id)
         self.bindings.append((application_id, tuple(entity_ids), principal, binding))
         return binding
 
-    def record_delivery(self, binding, event, runtime_instance_id):
+    def record_acknowledgement(self, binding, event, runtime_instance_id):
         return None
 
 
@@ -137,7 +140,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await dispatcher.run_once(limit=20), 1)
         self.assertEqual(repository.published, [EVENT_ID])
 
-    async def test_authenticated_acceptance_subscription_records_actual_delivery(self) -> None:
+    async def test_authenticated_acceptance_subscription_records_only_client_ack(self) -> None:
         runtime_id = UUID("91000000-0000-0000-0000-000000000003")
         binding = object()
 
@@ -145,7 +148,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.deliveries = []
 
-            def record_delivery(self, actual_binding, event, actual_runtime_id):
+            def record_acknowledgement(self, actual_binding, event, actual_runtime_id):
                 self.deliveries.append(
                     (actual_binding, event.event_id, actual_runtime_id)
                 )
@@ -169,10 +172,102 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
 
         await broadcaster.publish(event)
 
+        self.assertEqual([], recorder.deliveries)
+        nonce = socket.messages[-1]["acceptance_ack_nonce"]
+        await broadcaster.acknowledge(socket, EVENT_ID, nonce)
+
         self.assertEqual(
             [(binding, EVENT_ID, runtime_id)],
             recorder.deliveries,
         )
+
+    async def test_acceptance_ack_rejects_event_not_sent_to_socket(self) -> None:
+        broadcaster = EntityObservationBroadcaster(
+            receipt_recorder=_AcceptanceEvidence(),
+        )
+        socket = _Socket()
+        await broadcaster.connect(socket)
+        await broadcaster.subscribe(
+            socket,
+            (ENTITY_ID,),
+            acceptance_binding=object(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(socket, EVENT_ID, "not-a-real-nonce")
+
+    async def test_acceptance_ack_nonce_blocks_preack_cross_socket_and_replay(self) -> None:
+        runtime_id = UUID("91000000-0000-0000-0000-000000000003")
+        application_id = UUID("91000000-0000-0000-0000-000000000020")
+        binding = SimpleNamespace(application_id=application_id)
+
+        class Recorder:
+            def __init__(self) -> None:
+                self.deliveries = []
+
+            def record_acknowledgement(self, actual_binding, event, actual_runtime_id):
+                self.deliveries.append((actual_binding, event.event_id, actual_runtime_id))
+
+        class BlockingSocket(_Socket):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_json(self, message) -> None:
+                self.messages.append(message)
+                self.entered.set()
+                await self.release.wait()
+
+        recorder = Recorder()
+        broadcaster = EntityObservationBroadcaster(
+            receipt_recorder=recorder,
+            runtime_instance_id=runtime_id,
+        )
+        socket = BlockingSocket()
+        other = _Socket()
+        for target in (socket, other):
+            await broadcaster.connect(target)
+            await broadcaster.subscribe(
+                target,
+                (ENTITY_ID,),
+                acceptance_binding=binding,
+            )
+        event = OutboxEvent(EVENT_ID, ENTITY_ID, {"value": 12.345})
+        publishing = asyncio.create_task(broadcaster.publish(event))
+        await socket.entered.wait()
+        nonce = socket.messages[-1]["acceptance_ack_nonce"]
+
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(socket, EVENT_ID, nonce)
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(other, EVENT_ID, nonce)
+
+        socket.release.set()
+        await publishing
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(other, EVENT_ID, nonce, application_id)
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(
+                socket,
+                EVENT_ID,
+                nonce,
+                UUID("91000000-0000-0000-0000-000000000021"),
+            )
+        await broadcaster.acknowledge(
+            socket,
+            EVENT_ID,
+            nonce,
+            application_id,
+        )
+        with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
+            await broadcaster.acknowledge(
+                socket,
+                EVENT_ID,
+                nonce,
+                application_id,
+            )
+        self.assertEqual(1, len(recorder.deliveries))
 
 
 class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
@@ -286,6 +381,45 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
         self.assertEqual("operator", principal.username)
         self.assertEqual("operator", principal.role)
 
+    def test_acceptance_ack_is_accepted_only_after_server_sent_event(self) -> None:
+        app = self.build_app()
+        application_id = UUID("91000000-0000-0000-0000-000000000020")
+        broadcaster = app.dependency_overrides[
+            get_entity_observation_broadcaster
+        ]()
+        with TestClient(app, base_url="https://testserver") as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": "operator", "password": self.password},
+            )
+            ticket = client.post(
+                "/api/v1/auth/ws-ticket",
+                headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+            ).json()["ticket"]
+            with client.websocket_connect(
+                "wss://testserver/api/v1/ws/entity-observations"
+            ) as websocket:
+                websocket.send_json({"authenticate": {"ticket": ticket}})
+                websocket.receive_json()
+                websocket.send_json({
+                    "subscribe": [str(ENTITY_ID)],
+                    "acceptance_application_id": str(application_id),
+                })
+                websocket.receive_json()
+                event = OutboxEvent(EVENT_ID, ENTITY_ID, {
+                    "processing_revision_id": "revision",
+                    "site_configuration_version": 1,
+                })
+                asyncio.run(broadcaster.publish(event))
+                frame = websocket.receive_json()
+                self.assertEqual("entity_observation", frame["type"])
+                websocket.send_json({
+                    "acknowledge_acceptance_event": str(EVENT_ID),
+                    "acceptance_ack_nonce": frame["acceptance_ack_nonce"],
+                    "acceptance_application_id": str(application_id),
+                })
+                self.assertEqual("acknowledged", websocket.receive_json()["type"])
+
 
 @unittest.skipUnless(
     os.environ.get("ZIZU_POSTGRES_TEST") == "1",
@@ -320,6 +454,9 @@ class PostgresEntityObservationOutboxTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 DataTrunkMigrationPostgresTest._reset_through_037(cursor)
                 DataTrunkMigrationPostgresTest._apply_038(cursor)
+                DataTrunkMigrationPostgresTest._apply_039(cursor)
+                DataTrunkMigrationPostgresTest._apply_040(cursor)
+                DataTrunkMigrationPostgresTest._apply_041(cursor)
         init_db_pool(min_conn=1, max_conn=4)
 
     def tearDown(self) -> None:

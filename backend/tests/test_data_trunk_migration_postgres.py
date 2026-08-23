@@ -38,6 +38,7 @@ MIGRATION_024 = MIGRATIONS_ROOT / "migration_024_entity_instances.sql"
 MIGRATION_038 = MIGRATIONS_ROOT / "migration_038_pcs_data_trunk.sql"
 MIGRATION_039 = MIGRATIONS_ROOT / "migration_039_pcs_data_trunk_contract_gate.sql"
 MIGRATION_040 = MIGRATIONS_ROOT / "migration_040_point_processing.sql"
+MIGRATION_041 = MIGRATIONS_ROOT / "migration_041_en9_runtime_evidence.sql"
 
 
 @unittest.skipUnless(
@@ -82,6 +83,10 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     def _apply_040(cursor) -> None:
         cursor.execute(MIGRATION_040.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _apply_041(cursor) -> None:
+        cursor.execute(MIGRATION_041.read_text(encoding="utf-8"))
+
     def test_040_hard_cuts_point_conversion_to_point_processing(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
@@ -90,6 +95,7 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 self._apply_038(cursor)
                 self._apply_039(cursor)
                 self._apply_040(cursor)
+                self._apply_041(cursor)
 
                 cursor.execute(
                     """
@@ -142,6 +148,8 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 self._apply_039(cursor)
                 self._apply_040(cursor)
                 self._apply_040(cursor)
+                self._apply_041(cursor)
+                self._apply_041(cursor)
                 cursor.execute(
                     """
                     SELECT count(*)
@@ -151,6 +159,37 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     """
                 )
                 self.assertEqual(cursor.fetchone(), (0,))
+
+    def test_041_upgrades_a_database_that_already_recorded_040(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_037(cursor)
+                self._apply_038(cursor)
+                self._apply_039(cursor)
+                self._apply_040(cursor)
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())"
+                )
+                cursor.execute(
+                    "INSERT INTO schema_migrations(version) VALUES ('040') "
+                    "ON CONFLICT DO NOTHING"
+                )
+                self._apply_041(cursor)
+                cursor.execute(
+                    """
+                    SELECT to_regclass('t_runtime_health_samples'),
+                           column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 't_l2_observations'
+                      AND column_name = 'producing_runtime_instance_id'
+                    """
+                )
+                self.assertEqual(
+                    cursor.fetchone(),
+                    ("t_runtime_health_samples", "producing_runtime_instance_id"),
+                )
 
     def test_039_upgrades_038_and_replays_contract_triggers(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

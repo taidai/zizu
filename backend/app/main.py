@@ -202,14 +202,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _data_trunk_tasks = []
     _data_trunk_stop = asyncio.Event()
     try:
-        from app.api.websocket import get_entity_observation_broadcaster
+        from app.api.websocket import (
+            get_en9_stream_evidence,
+            get_entity_observation_broadcaster,
+        )
         from app.services.data_trunk_outbox import (
             OutboxDispatcher,
             PostgresOutboxRepository,
         )
         from app.services.data_trunk_postgres import PostgresDataTrunkRepository
+        from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 
         freshness_repository = PostgresDataTrunkRepository()
+        stream_evidence = get_en9_stream_evidence()
+        await asyncio.to_thread(
+            stream_evidence.register_runtime,
+            RUNTIME_INSTANCE_ID,
+        )
         _outbox_dispatcher = OutboxDispatcher(
             PostgresOutboxRepository(),
             get_entity_observation_broadcaster(),
@@ -240,9 +249,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     logger.warning("[DataTrunk] outbox tick failed: {}", error)
                 await _wait_or_stop(0.25)
 
+        async def _runtime_health_loop() -> None:
+            while not _data_trunk_stop.is_set():
+                try:
+                    mqtt_connected = bool(
+                        _pipeline._mqtt and _pipeline._mqtt.is_connected
+                    )
+                    if _pipeline.metrics.last_message_at is not None:
+                        await asyncio.to_thread(
+                            stream_evidence.record_health,
+                            RUNTIME_INSTANCE_ID,
+                            pipeline_running=(
+                                _pipeline.metrics.status.name == "RUNNING"
+                            ),
+                            mqtt_connected=mqtt_connected,
+                            last_message_at=_pipeline.metrics.last_message_at,
+                        )
+                except Exception as error:
+                    logger.warning(
+                        "[DataTrunk] runtime health evidence failed: {}",
+                        error,
+                    )
+                await _wait_or_stop(30.0)
+
         _data_trunk_tasks = [
             asyncio.create_task(_freshness_loop(), name="data_trunk_freshness"),
             asyncio.create_task(_outbox_loop(), name="data_trunk_outbox"),
+            asyncio.create_task(
+                _runtime_health_loop(),
+                name="data_trunk_runtime_health",
+            ),
         ]
         logger.success("[Main] L2 freshness and outbox dispatch started ✅")
     except Exception as error:
