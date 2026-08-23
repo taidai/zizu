@@ -203,8 +203,11 @@ def persist_point_processing_assets(
                     """
                     INSERT INTO t_point_processing_inputs
                       (id, revision_id, input_key, source_kind, data_type, unit,
-                       required, stable_source_key, aliases)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       required, stable_source_key, aliases, expected_group,
+                       expected_address, expected_wire_data_type,
+                       expected_decimal, expected_read_only)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s)
                     ON CONFLICT (revision_id, input_key) DO NOTHING
                     """,
                     (
@@ -217,6 +220,11 @@ def persist_point_processing_assets(
                         item.required,
                         item.source_key,
                         list(item.aliases),
+                        item.source_contract.get("group") if item.source_contract else None,
+                        item.source_contract.get("address") if item.source_contract else None,
+                        item.source_contract.get("wireDataType") if item.source_contract else None,
+                        item.source_contract.get("decimal") if item.source_contract else None,
+                        item.source_contract.get("readOnly") if item.source_contract else None,
                     ),
                 )
 
@@ -466,7 +474,8 @@ class PostgresPointProcessingCatalog:
         cursor.execute(
             """
             SELECT input_key, source_kind, stable_source_key, aliases,
-                   data_type, unit, required
+                   data_type, unit, required, expected_group, expected_address,
+                   expected_wire_data_type, expected_decimal, expected_read_only
             FROM t_point_processing_inputs
             WHERE revision_id = %s
             ORDER BY input_key
@@ -482,6 +491,17 @@ class PostgresPointProcessingCatalog:
                 data_type=item[4],
                 unit=item[5],
                 required=item[6],
+                source_contract=(
+                    None
+                    if item[7] is None
+                    else MappingProxyType({
+                        "group": item[7],
+                        "address": item[8],
+                        "wireDataType": item[9],
+                        "decimal": item[10],
+                        "readOnly": item[11],
+                    })
+                ),
             )
             for item in cursor.fetchall()
         )
@@ -1200,24 +1220,35 @@ class PostgresPointProcessingRepository:
             cursor.execute(
                 f"""
                 INSERT INTO t_tags
-                  ({columns}, read_write, enabled,
+                  ({columns}, source_type, source_path, unit_from, unit_to,
+                   read_write, enabled,
                    wire_data_type, value_data_type, source_address,
-                   decimal, read_only)
+                   decimal, read_only, freshness_seconds)
                 VALUES (
                   {values},
+                  'neuron',
+                  (SELECT COALESCE(source_catalog_key, name)
+                   FROM t_nodes WHERE id = %s) || '/' || %s || '/' || %s,
+                  %s, %s,
                   'R', TRUE, %s, %s, %s, %s, TRUE
+                  , %s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                   name = EXCLUDED.name,
                   data_type = EXCLUDED.data_type,
                   unit = EXCLUDED.unit,
+                  source_type = 'neuron',
+                  source_path = EXCLUDED.source_path,
+                  unit_from = EXCLUDED.unit_from,
+                  unit_to = EXCLUDED.unit_to,
                   read_write = 'R',
                   enabled = TRUE,
                   wire_data_type = EXCLUDED.wire_data_type,
                   value_data_type = EXCLUDED.value_data_type,
                   source_address = EXCLUDED.source_address,
                   decimal = EXCLUDED.decimal,
-                  read_only = TRUE
+                  read_only = TRUE,
+                  freshness_seconds = EXCLUDED.freshness_seconds
                 WHERE t_tags.node_id = EXCLUDED.node_id
                 """,
                 (
@@ -1226,10 +1257,16 @@ class PostgresPointProcessingRepository:
                     after["name"],
                     after["value_data_type"],
                     after.get("unit"),
+                    plan.node_id,
+                    after["group"],
+                    after["name"],
+                    after.get("unit"),
+                    after.get("unit"),
                     after["wire_data_type"],
                     after["value_data_type"],
                     after["source_address"],
                     after.get("decimal"),
+                    after["freshness_seconds"],
                 ),
             )
 

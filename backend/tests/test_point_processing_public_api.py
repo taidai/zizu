@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 os.environ.setdefault("DB_PASSWORD", "database-secret-value")
@@ -212,6 +213,63 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 for event in identity_repository.audits
             )
         )
+
+    async def test_acceptance_report_is_authenticated_and_persistently_addressable(self) -> None:
+        app, _, _ = self.build_app()
+        application_id = UUID("84000000-0000-0000-0000-000000000101")
+        report_id = UUID("84000000-0000-0000-0000-000000000102")
+        report_body = {
+            "id": str(report_id),
+            "application_id": str(application_id),
+            "passed": True,
+            "checks": [],
+        }
+        report = Mock()
+        report.public_dict.return_value = report_body
+        transport = httpx.ASGITransport(app=app)
+        with (
+            patch(
+                "app.services.en9_point_processing_acceptance.run_en9_acceptance",
+                return_value=report,
+            ) as run_acceptance,
+            patch(
+                "app.services.en9_point_processing_acceptance.get_en9_acceptance_report",
+                return_value=report_body,
+            ) as get_report,
+        ):
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="https://testserver",
+            ) as client:
+                anonymous = await client.post(
+                    f"/api/v1/point-processing-applications/{application_id}/acceptance",
+                    json={"observed_for_seconds": 1800},
+                )
+                operator_headers = await self.login(client, "operator")
+                engineer_headers = await self.login(client, "engineer")
+                operator = await client.post(
+                    f"/api/v1/point-processing-applications/{application_id}/acceptance",
+                    headers=operator_headers,
+                    json={"observed_for_seconds": 1800},
+                )
+                created = await client.post(
+                    f"/api/v1/point-processing-applications/{application_id}/acceptance",
+                    headers=engineer_headers,
+                    json={"observed_for_seconds": 1800},
+                )
+                fetched = await client.get(
+                    f"/api/v1/point-processing-acceptance-reports/{report_id}",
+                    headers=engineer_headers,
+                )
+
+        self.assertEqual(401, anonymous.status_code, anonymous.text)
+        self.assertEqual(403, operator.status_code, operator.text)
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual(report_body, created.json())
+        self.assertEqual(200, fetched.status_code, fetched.text)
+        self.assertEqual(report_body, fetched.json())
+        run_acceptance.assert_called_once_with(application_id, 1800.0)
+        get_report.assert_called_once_with(report_id)
 
 
 if __name__ == "__main__":

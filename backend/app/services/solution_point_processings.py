@@ -36,6 +36,7 @@ class PointProcessingInput:
     data_type: str
     unit: str | None
     required: bool
+    source_contract: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -219,13 +220,33 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
                 "Point processing input is invalid",
             )
         required_fields = {"id", "sourceKind", "sourceKey", "aliases", "dataType", "required"}
-        if set(raw) - (required_fields | {"unit"}) or not required_fields.issubset(raw):
+        if set(raw) - (required_fields | {"unit", "sourceContract"}) or not required_fields.issubset(raw):
             raise PointProcessingAssetError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input fields are invalid",
             )
         input_id = raw.get("id")
         aliases = raw.get("aliases")
+        source_contract = raw.get("sourceContract")
+        if source_contract is not None and (
+            not isinstance(source_contract, Mapping)
+            or set(source_contract) != {
+                "group", "address", "wireDataType", "decimal", "readOnly"
+            }
+            or not isinstance(source_contract.get("group"), str)
+            or not source_contract["group"].strip()
+            or not isinstance(source_contract.get("address"), str)
+            or not source_contract["address"].strip()
+            or not isinstance(source_contract.get("wireDataType"), str)
+            or not source_contract["wireDataType"].strip()
+            or not isinstance(source_contract.get("decimal"), (int, float, type(None)))
+            or isinstance(source_contract.get("decimal"), bool)
+            or source_contract.get("readOnly") is not True
+        ):
+            raise PointProcessingAssetError(
+                "POINT_PROCESSING_INPUT_INVALID",
+                "Point processing source contract is invalid",
+            )
         if (
             not isinstance(input_id, str)
             or not input_id.strip()
@@ -254,6 +275,9 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
                 data_type=raw["dataType"],
                 unit=raw.get("unit"),
                 required=raw["required"],
+                source_contract=(
+                    None if source_contract is None else _freeze(source_contract)
+                ),
             )
         )
     return tuple(sorted(parsed, key=lambda item: item.input_id))
@@ -533,6 +557,7 @@ def _asset_dict(asset: PointProcessingAsset) -> dict[str, Any]:
                 "data_type": item.data_type,
                 "unit": item.unit,
                 "required": item.required,
+                "source_contract": _plain(item.source_contract),
             }
             for item in asset.inputs
         ],
@@ -569,6 +594,7 @@ def _asset_from_dict(raw: Mapping[str, Any]) -> PointProcessingAsset:
                 data_type=item["data_type"],
                 unit=item["unit"],
                 required=item["required"],
+                source_contract=_freeze(item.get("source_contract")),
             )
             for item in raw["inputs"]
         ),

@@ -116,7 +116,7 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
             )
         )
 
-        observed_at = datetime(2026, 8, 23, 1, tzinfo=UTC)
+        observed_at = datetime.now(UTC)
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -163,15 +163,23 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
 
         report = run_en9_acceptance(
             application.id,
-            10,
+            0,
             connection_factory=self._connection,
-            ws_authenticated=True,
             clock=lambda: observed_at + timedelta(seconds=1),
         )
 
         self.assertEqual(90, report.required_input_count)
         self.assertEqual(3, report.output_entity_count)
         self.assertTrue(report.passed, report.public_dict())
+        from app.services.en9_point_processing_acceptance import (
+            get_en9_acceptance_report,
+        )
+        persisted = get_en9_acceptance_report(
+            report.id,
+            connection_factory=self._connection,
+        )
+        self.assertEqual(report.digest, persisted["digest"])
+        self.assertTrue(persisted["passed"])
 
 
 if __name__ == "__main__":

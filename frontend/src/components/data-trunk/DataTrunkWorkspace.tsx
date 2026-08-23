@@ -10,6 +10,8 @@ import {
   fetchNodeDataTrunk,
   fetchPointProcessingPlan,
   fetchPointProcessingTemplates,
+  runEN9PointProcessingAcceptance,
+  type EN9AcceptanceReport,
   type EntityInstance,
   type EntityInstanceObservation,
   type Node,
@@ -43,11 +45,12 @@ export default function DataTrunkWorkspace({
   const [selections, setSelections] = useState<Record<string, string>>({})
   const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
   const [application, setApplication] = useState<PointProcessingApplication | null>(null)
+  const [acceptance, setAcceptance] = useState<EN9AcceptanceReport | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
   const [observations, setObservations] = useState<Map<string, EntityInstanceObservation>>(new Map())
   const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'plan' | 'apply' | null>(null)
+  const [busy, setBusy] = useState<'plan' | 'apply' | 'acceptance' | null>(null)
   const [error, setError] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
 
@@ -115,6 +118,7 @@ export default function DataTrunkWorkspace({
   useEffect(() => {
     setPlan(null)
     setApplication(null)
+    setAcceptance(null)
     setSelectedRevisionId('')
     setSelections({})
     setResultUnknown(false)
@@ -206,15 +210,28 @@ export default function DataTrunkWorkspace({
     }
   }
 
-  const completedStage = application || plan?.status === 'applied'
+  const handleAcceptance = async () => {
+    if (!application) return
+    setBusy('acceptance')
+    setError('')
+    try {
+      setAcceptance(await runEN9PointProcessingAcceptance(application.id, 0))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '机器验收失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const completedStage = acceptance?.passed
     ? 4
-    : plan?.status === 'ready'
+    : application || plan?.status === 'applied'
       ? 3
-      : plan?.status === 'blocked'
+      : plan
         ? 2
         : selectedTemplate
           ? 1
-          : trunk?.l1_summary.installed ? 4 : 0
+          : trunk?.l1_summary.installed ? 3 : 0
 
   if (loading) {
     return <div className="neu-card p-6 text-sm text-gray-500">正在读取节点数据主干...</div>
@@ -269,7 +286,15 @@ export default function DataTrunkWorkspace({
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">已安装输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div>
               <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">站点配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.site_configuration_version ?? observations.values().next().value?.site_configuration_version ?? '等待安装'}</div></div>
-              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">运行验收</div><div className="mt-1 text-sm font-semibold text-gray-900">{application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div></div>
+              <div className="border-l-2 border-blue-500 pl-3">
+                <div className="text-[10px] text-gray-500">运行验收</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">{acceptance ? (acceptance.passed ? '机器验收通过' : '机器验收未通过') : application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div>
+                {application && !acceptance && (
+                  <button type="button" disabled={busy !== null} onClick={() => void handleAcceptance()} className="neu-btn mt-2 px-2 py-1 text-[10px] text-blue-700 disabled:opacity-50">
+                    {busy === 'acceptance' ? '验收中...' : '运行机器验收'}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <PointProcessingPlanPanel

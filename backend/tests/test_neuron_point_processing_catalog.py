@@ -54,7 +54,7 @@ class NeuronPointProcessingCatalogTest(unittest.TestCase):
         self.assertEqual(64, len(scan.digest))
         self.assertEqual([], neuron.mutating_calls)
 
-    def test_scan_reports_duplicate_address_and_missing_interval_as_blockers(self) -> None:
+    def test_scan_preserves_per_point_interval_without_globally_blocking_catalog(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
 
         neuron = FakeNeuron(interval=0)
@@ -62,14 +62,8 @@ class NeuronPointProcessingCatalogTest(unittest.TestCase):
 
         scan = NeuronPointCatalog(neuron).scan("EN9-PCS")
 
-        self.assertEqual(
-            {
-                "NEURON_GROUP_INTERVAL_MISSING",
-                "NEURON_POINT_ADDRESS_DUPLICATE",
-                "NEURON_POINT_NAME_DUPLICATE",
-            },
-            {item["code"] for item in scan.blockers},
-        )
+        self.assertEqual((), scan.blockers)
+        self.assertTrue(all(point.group_interval_ms == 0 for point in scan.points))
         self.assertEqual([], neuron.mutating_calls)
 
 

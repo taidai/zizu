@@ -31,7 +31,7 @@ export default function PointProcessingPlanPanel({
   selectedTemplate: PointProcessingTemplate | null
   selections: Record<string, string>
   plan: PointProcessingPlan | null
-  busy: 'plan' | 'apply' | null
+  busy: 'plan' | 'apply' | 'acceptance' | null
   resultUnknown: boolean
   onTemplateChange: (revisionId: string) => void
   onSelectionChange: (inputId: string, sourceId: string) => void

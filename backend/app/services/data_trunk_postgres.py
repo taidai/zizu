@@ -5,7 +5,7 @@ import hashlib
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -100,14 +100,23 @@ class PostgresDataTrunkRepository:
                 try:
                     with connection.cursor() as cursor:
                         accepted = self._insert_l0(cursor, raw_observations)
-                        late_l0 = self._advance_l0_latest(cursor, accepted)
+                        advanced_l0, late_l0 = self._advance_l0_latest(
+                            cursor,
+                            accepted,
+                        )
                         if accepted:
-                            snapshot = self._load_conversion_snapshot(cursor, accepted)
+                            calculated_at = self._clock()
+                            snapshot = self._load_conversion_snapshot(
+                                cursor,
+                                accepted,
+                                calculated_at=calculated_at,
+                            )
                             produced = self._evaluate_batch(
                                 snapshot,
                                 accepted,
                                 evaluator,
-                                calculated_at=self._clock(),
+                                advanced_observations=advanced_l0,
+                                calculated_at=calculated_at,
                             )
                             produced = self._select_history_observations(
                                 cursor,
@@ -501,8 +510,12 @@ class PostgresDataTrunkRepository:
         return tuple(accepted)
 
     @staticmethod
-    def _advance_l0_latest(cursor, observations: tuple[RawObservation, ...]) -> int:
+    def _advance_l0_latest(
+        cursor,
+        observations: tuple[RawObservation, ...],
+    ) -> tuple[tuple[RawObservation, ...], int]:
         late = 0
+        advanced: list[RawObservation] = []
         for observation in observations:
             compatibility, raw = _raw_columns(observation.value)
             order_key = _raw_order_key(observation)
@@ -568,12 +581,16 @@ class PostgresDataTrunkRepository:
             )
             if cursor.fetchone() is None:
                 late += 1
-        return late
+            else:
+                advanced.append(observation)
+        return tuple(advanced), late
 
     @staticmethod
     def _load_conversion_snapshot(
         cursor,
         observations: tuple[RawObservation, ...],
+        *,
+        calculated_at: datetime,
     ) -> _ConversionSnapshot:
         tag_ids = tuple(sorted({item.tag_id for item in observations}, key=str))
 
@@ -821,7 +838,7 @@ class PostgresDataTrunkRepository:
                        latest.raw_value_bool, latest.raw_unit, latest.quality,
                        latest.ts, latest.updated_at, latest.observation_id,
                        latest.source_message_id, latest.source_sequence,
-                       latest.source_digest
+                       latest.source_digest, tag.freshness_seconds
                 FROM t_telemetry_latest AS latest
                 JOIN t_tags AS tag ON tag.id = latest.tag_id
                 WHERE latest.tag_id = ANY(%s::uuid[])
@@ -843,7 +860,16 @@ class PostgresDataTrunkRepository:
                     source_message_id,
                     source_sequence,
                     source_digest,
+                    input_freshness_seconds,
                 ) = row
+                effective_quality = TrunkQuality(quality)
+                if (
+                    input_freshness_seconds is not None
+                    and source_timestamp
+                    + timedelta(seconds=float(input_freshness_seconds))
+                    <= calculated_at
+                ):
+                    effective_quality = min(effective_quality, TrunkQuality.STALE)
                 current_inputs[InputReference.l0(UUID(str(input_tag_id)))] = RawObservation(
                     observation_id=UUID(str(observation_id)),
                     node_id=UUID(str(node_id)),
@@ -851,7 +877,7 @@ class PostgresDataTrunkRepository:
                     source_key=source_key,
                     value=TypedValue(ValueKind.BOOL, raw_value_bool),
                     raw_unit=raw_unit,
-                    quality=TrunkQuality(quality),
+                    quality=effective_quality,
                     source_timestamp=source_timestamp,
                     received_at=received_at,
                     source_message_id=source_message_id,
@@ -884,12 +910,13 @@ class PostgresDataTrunkRepository:
         observations: tuple[RawObservation, ...],
         evaluator: ConversionEvaluator,
         *,
+        advanced_observations: tuple[RawObservation, ...],
         calculated_at: datetime,
     ) -> tuple[L2Observation, ...]:
         produced: list[L2Observation] = []
-        accepted_inputs = {
+        advanced_inputs = {
             InputReference.l0(observation.tag_id): observation
-            for observation in observations
+            for observation in advanced_observations
         }
         for observation in sorted(
             observations,
@@ -921,13 +948,13 @@ class PostgresDataTrunkRepository:
         boolean_affected = tuple(
             item for item in snapshot.installed
             if isinstance(item.transform, BooleanSetTransform)
-            and any(entry.input in accepted_inputs for entry in item.transform.inputs)
+            and any(entry.input in advanced_inputs for entry in item.transform.inputs)
         )
         if boolean_affected:
             produced.extend(
                 evaluator(
                     installed=boolean_affected,
-                    current_inputs={**snapshot.current_inputs, **accepted_inputs},
+                    current_inputs=snapshot.current_inputs,
                     site_configuration_version=snapshot.site_configuration_version,
                     calculated_at=calculated_at,
                 )

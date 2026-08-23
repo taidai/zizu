@@ -358,7 +358,10 @@ class PcsNumericConversionTest(unittest.TestCase):
         output = evaluate_processing(**fixture)[0]
 
         self.assertEqual(
-            TypedValue.code_set(("EN9_405889_00", "EN9_405896_15")),
+            TypedValue.code_set((
+                "pcs.hardware.epo",
+                "pcs.grid.low_voltage_ride_through_timeout",
+            )),
             output.value,
         )
         self.assertEqual(TrunkQuality.GOOD, output.quality)
@@ -438,8 +441,8 @@ class PcsNumericConversionTest(unittest.TestCase):
                             BooleanCodeInput(
                                 input=reference,
                                 code=(
-                                    "EN9_405889_00" if index == 0
-                                    else "EN9_405896_15" if index == 87
+                                    "pcs.hardware.epo" if index == 0
+                                    else "pcs.grid.low_voltage_ride_through_timeout" if index == 87
                                     else f"EN9_FAULT_{index:02d}"
                                 ),
                             )

@@ -86,11 +86,7 @@ class SolutionPointProcessingAssetTest(unittest.TestCase):
         self.assertEqual(0.1, fixture["points"][0]["decimal"])
         self.assertEqual(
             {entry["code"] for entry in by_definition["pcs.fault_codes"].transform["entries"]},
-            {
-                f"EN9_{point['address'].split('!')[1].replace('.', '_').rsplit('_', 1)[0]}_"
-                f"{int(point['address'].rsplit('.', 1)[1]):02d}"
-                for point in fixture["points"][2:]
-            },
+            {point["code"] for point in fixture["points"][2:]},
         )
 
     def test_rejects_arbitrary_expression_rule(self) -> None:

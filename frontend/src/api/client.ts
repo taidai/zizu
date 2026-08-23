@@ -1109,6 +1109,22 @@ export interface PointProcessingApplication {
   output_entity_instance_ids: string[]
 }
 
+export interface EN9AcceptanceReport {
+  id: string
+  application_id: string
+  required_input_count: number
+  output_entity_count: number
+  observed_for_seconds: number
+  passed: boolean
+  generated_at: string
+  digest: string
+  checks: Array<{
+    code: string
+    passed: boolean
+    evidence: Record<string, number | string | boolean>
+  }>
+}
+
 export interface EntityInstanceObservation {
   type?: 'entity_observation'
   event_id: string | null
@@ -1126,7 +1142,7 @@ export interface EntityInstanceObservation {
   age_ms: number
   fresh?: boolean
   quality_good?: boolean
-  conversion_revision_id: string | null
+  processing_revision_id: string | null
   site_configuration_version: number | null
   source_digest?: string | null
   source_summary?: { digest?: string } | string | null
@@ -1211,6 +1227,19 @@ export async function applyPointProcessingPlan(
   if (!response.ok) throw await dataTrunkError(response, `应用点位加工计划失败：${response.status}`)
   try { return await response.json() }
   catch (cause) { throw new DataTrunkResultUnknownError(cause) }
+}
+
+export async function runEN9PointProcessingAcceptance(
+  applicationId: string,
+  observedForSeconds = 0,
+): Promise<EN9AcceptanceReport> {
+  const response = await apiFetch(`${API_BASE}/point-processing-applications/${encodeURIComponent(applicationId)}/acceptance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ observed_for_seconds: observedForSeconds }),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `运行 EN9 机器验收失败：${response.status}`)
+  return response.json() as Promise<EN9AcceptanceReport>
 }
 
 export async function fetchEntityInstanceHistory(

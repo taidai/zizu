@@ -64,7 +64,8 @@ ALTER TABLE t_tags
   ADD COLUMN IF NOT EXISTS value_data_type TEXT,
   ADD COLUMN IF NOT EXISTS source_address TEXT,
   ADD COLUMN IF NOT EXISTS decimal DOUBLE PRECISION,
-  ADD COLUMN IF NOT EXISTS read_only BOOLEAN;
+  ADD COLUMN IF NOT EXISTS read_only BOOLEAN,
+  ADD COLUMN IF NOT EXISTS freshness_seconds DOUBLE PRECISION;
 
 UPDATE t_tags
 SET value_data_type = COALESCE(value_data_type, data_type),
@@ -83,7 +84,29 @@ ALTER TABLE t_tags
   DROP CONSTRAINT IF EXISTS chk_tags_decimal_finite,
   ADD CONSTRAINT chk_tags_decimal_finite CHECK (
     decimal IS NULL OR (decimal = decimal AND abs(decimal) < 1e308)
+  ),
+  DROP CONSTRAINT IF EXISTS chk_tags_freshness_seconds,
+  ADD CONSTRAINT chk_tags_freshness_seconds CHECK (
+    freshness_seconds IS NULL OR freshness_seconds > 0
   );
+
+ALTER TABLE t_point_processing_inputs
+  ADD COLUMN IF NOT EXISTS expected_group TEXT,
+  ADD COLUMN IF NOT EXISTS expected_address TEXT,
+  ADD COLUMN IF NOT EXISTS expected_wire_data_type TEXT,
+  ADD COLUMN IF NOT EXISTS expected_decimal DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS expected_read_only BOOLEAN;
+
+CREATE TABLE IF NOT EXISTS t_en9_acceptance_reports (
+  id UUID PRIMARY KEY,
+  application_id UUID NOT NULL REFERENCES t_point_processing_applications(id),
+  status TEXT NOT NULL CHECK (status IN ('passed','failed')),
+  observed_for_seconds DOUBLE PRECISION NOT NULL CHECK (observed_for_seconds >= 0),
+  generated_at TIMESTAMPTZ NOT NULL,
+  evidence JSONB NOT NULL,
+  digest CHAR(64) NOT NULL,
+  UNIQUE(application_id, digest)
+);
 
 ALTER TABLE t_entity_instances
   DROP CONSTRAINT IF EXISTS chk_entity_instance_source_kind;
@@ -280,7 +303,8 @@ BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     't_point_processing_plan_items',
     't_boolean_set_transform_rules',
-    't_boolean_set_mapping_entries'
+    't_boolean_set_mapping_entries',
+    't_en9_acceptance_reports'
   ] LOOP
     trigger_name := 'trg_' || table_name || '_append_only';
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', trigger_name, table_name);

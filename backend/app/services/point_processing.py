@@ -930,7 +930,6 @@ def _scan_plan_inputs(
         item for item in existing_sources
         if item.source_kind == "l0" and item.node_id == node_id
     )
-    freshness_seconds = max(3 * scan.group_interval_ms / 1000, 5.0)
     for input_contract in template.inputs:
         accepted_names = {
             _normalized_source_key(input_contract.source_key),
@@ -954,6 +953,31 @@ def _scan_plan_inputs(
             )
             continue
         point = matches[0]
+        source_contract = input_contract.source_contract
+        if source_contract is not None and (
+            point.group != source_contract["group"]
+            or point.address != source_contract["address"]
+            or point.wire_data_type != source_contract["wireDataType"]
+            or point.value_data_type != input_contract.data_type
+            or point.decimal != source_contract["decimal"]
+            or point.read_only is not source_contract["readOnly"]
+        ):
+            blockers.append(
+                MappingProxyType({
+                    "code": "NEURON_POINT_CONTRACT_MISMATCH",
+                    "input_id": input_contract.input_id,
+                })
+            )
+            continue
+        if point.group_interval_ms <= 0:
+            blockers.append(
+                MappingProxyType({
+                    "code": "NEURON_GROUP_INTERVAL_MISSING",
+                    "input_id": input_contract.input_id,
+                })
+            )
+            continue
+        freshness_seconds = max(3 * point.group_interval_ms / 1000, 5.0)
         existing = next(
             (
                 source for source in existing_l0

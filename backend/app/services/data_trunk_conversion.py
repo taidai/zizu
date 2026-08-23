@@ -187,19 +187,12 @@ def _evaluate_boolean_set_output(
 
     sources: list[RawObservation] = []
     active_codes: list[str] = []
+    failure_reason: str | None = None
     for item in transform.inputs:
         source = current_inputs.get(item.input)
         if source is None:
             if item.required:
-                return _boolean_set_observation(
-                    installed,
-                    sources,
-                    site_configuration_version,
-                    calculated_at,
-                    value=None,
-                    quality=TrunkQuality.BAD,
-                    reason="REQUIRED_INPUT_MISSING",
-                )
+                failure_reason = failure_reason or "REQUIRED_INPUT_MISSING"
             continue
         if not isinstance(source, RawObservation):
             raise DataTrunkError(
@@ -211,17 +204,21 @@ def _evaluate_boolean_set_output(
             source.value.value,
             bool,
         ):
-            return _boolean_set_observation(
-                installed,
-                sources,
-                site_configuration_version,
-                calculated_at,
-                value=None,
-                quality=TrunkQuality.BAD,
-                reason="TYPE_MISMATCH",
-            )
+            failure_reason = failure_reason or "TYPE_MISMATCH"
+            continue
         if source.value.value:
             active_codes.append(item.code)
+
+    if failure_reason is not None:
+        return _boolean_set_observation(
+            installed,
+            sources,
+            site_configuration_version,
+            calculated_at,
+            value=None,
+            quality=TrunkQuality.BAD,
+            reason=failure_reason,
+        )
 
     quality = min((source.quality for source in sources), default=TrunkQuality.GOOD)
     if quality in {TrunkQuality.BAD, TrunkQuality.STALE}:

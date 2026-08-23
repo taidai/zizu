@@ -1,7 +1,6 @@
 """Read-only normalization of a Neuron point catalog for point-processing plans."""
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import hashlib
@@ -33,6 +32,7 @@ class NeuronPointReader(Protocol):
 @dataclass(frozen=True)
 class ScannedPoint:
     group: str
+    group_interval_ms: int
     name: str
     address: str
     wire_data_type: str
@@ -67,36 +67,31 @@ class NeuronPointCatalog:
             and not isinstance(group.get("interval"), bool)
             and int(group["interval"]) > 0
         }
-        if not groups or len(intervals) != 1 or any(
-            not isinstance(group, Mapping)
-            or not isinstance(group.get("interval"), (int, float))
-            or isinstance(group.get("interval"), bool)
-            or int(group["interval"]) <= 0
-            for group in groups
-        ):
-            blockers.append(_blocker("NEURON_GROUP_INTERVAL_MISSING", "group"))
+        if not groups:
+            blockers.append(_blocker("NEURON_CATALOG_EMPTY", "group"))
         group_interval_ms = next(iter(intervals)) if len(intervals) == 1 else 0
 
         points: list[ScannedPoint] = []
         for group in sorted(groups, key=lambda item: str(item.get("name", ""))):
             group_name = str(group.get("name", "")).strip()
             if not group_name:
-                blockers.append(_blocker("NEURON_GROUP_NAME_MISSING", "group"))
                 continue
+            interval = group.get("interval")
+            normalized_interval = (
+                int(interval)
+                if isinstance(interval, (int, float))
+                and not isinstance(interval, bool)
+                and int(interval) > 0
+                else 0
+            )
             for raw in self._client.get_tags(node_name, group_name):
-                point, point_blockers = _normalize_point(group_name, raw)
-                blockers.extend(point_blockers)
+                point, _point_blockers = _normalize_point(
+                    group_name,
+                    normalized_interval,
+                    raw,
+                )
                 if point is not None:
                     points.append(point)
-
-        addresses = Counter(item.address for item in points)
-        names = Counter(_normalized_name(item.name) for item in points)
-        for address, count in sorted(addresses.items()):
-            if count > 1:
-                blockers.append(_blocker("NEURON_POINT_ADDRESS_DUPLICATE", address))
-        for name, count in sorted(names.items()):
-            if count > 1:
-                blockers.append(_blocker("NEURON_POINT_NAME_DUPLICATE", name))
 
         canonical_points = tuple(
             sorted(points, key=lambda item: (item.address, item.group, item.name))
@@ -128,6 +123,7 @@ class NeuronPointCatalog:
 
 def _normalize_point(
     group_name: str,
+    group_interval_ms: int,
     raw: Mapping[str, Any],
 ) -> tuple[ScannedPoint | None, tuple[Mapping[str, str], ...]]:
     name = str(raw.get("name", "")).strip()
@@ -163,6 +159,7 @@ def _normalize_point(
     return (
         ScannedPoint(
             group=group_name,
+            group_interval_ms=group_interval_ms,
             name=name,
             address=address,
             wire_data_type=type_contract[0],

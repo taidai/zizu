@@ -374,10 +374,10 @@ class DataTrunkPostgresTest(unittest.TestCase):
             VALUES
               ('00000000-0000-0000-0000-000000000215',
                '00000000-0000-0000-0000-000000000213',
-               'EN9_405889_00', 'EPO故障', 'HARDWARE'),
+               'pcs.hardware.epo', 'EPO故障', 'HARDWARE'),
               ('00000000-0000-0000-0000-000000000215',
                '00000000-0000-0000-0000-000000000214',
-               'EN9_405890_01', '风扇故障', 'HARDWARE');
+               'pcs.hardware.fan_failure', '风扇故障', 'HARDWARE');
             INSERT INTO t_point_processing_input_bindings
               (installed_processing_id, input_id, source_kind, l0_tag_id,
                confirmed_by)
@@ -900,7 +900,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     (str(BOOLEAN_FAULT_ENTITY_ID),),
                 )
                 self.assertEqual(
-                    (["EN9_405890_01"], 192, None),
+                    (["pcs.hardware.fan_failure"], 192, None),
                     cursor.fetchone(),
                 )
 
@@ -964,6 +964,79 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     (2, started + timedelta(seconds=60)),
                     cursor.fetchone(),
                 )
+
+    def test_fault_set_becomes_stale_when_one_required_input_stops(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_boolean_set_processing(cursor)
+                cursor.execute(
+                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id IN (%s, %s)",
+                    (str(BOOLEAN_FAULT_A_TAG_ID), str(BOOLEAN_FAULT_B_TAG_ID)),
+                )
+        started = datetime(2026, 8, 17, tzinfo=UTC)
+        current_time = [started + timedelta(seconds=1)]
+        trunk = DataTrunk(PostgresDataTrunkRepository(
+            connection_factory=self._connection,
+            clock=lambda: current_time[0],
+        ))
+        trunk.ingest((
+            self.raw_bool(tag_id=BOOLEAN_FAULT_A_TAG_ID, source_key="EPO故障", value=False, sequence=20, observed_at=started),
+            self.raw_bool(tag_id=BOOLEAN_FAULT_B_TAG_ID, source_key="风扇故障", value=False, sequence=21, observed_at=started),
+        ))
+        current_time[0] = started + timedelta(seconds=10)
+        receipt = trunk.ingest((self.raw_bool(
+            tag_id=BOOLEAN_FAULT_A_TAG_ID,
+            source_key="EPO故障",
+            value=True,
+            sequence=22,
+            observed_at=started + timedelta(seconds=10),
+        ),))
+
+        self.assertEqual(1, len(receipt.l2_event_ids))
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_codes, quality, reason,
+                           (SELECT count(*) FROM t_l2_observation_sources source
+                            WHERE source.l2_event_id = latest.event_id
+                              AND source.l2_observed_at = latest.observed_at)
+                    FROM t_l2_latest latest
+                    WHERE entity_instance_id = %s
+                    """,
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                self.assertEqual(
+                    (None, int(TrunkQuality.STALE), "INPUT_STALE", 2),
+                    cursor.fetchone(),
+                )
+
+    def test_late_boolean_input_cannot_rewrite_current_fault_set(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                self._seed_boolean_set_processing(cursor)
+        started = datetime(2026, 8, 17, tzinfo=UTC)
+        self.trunk.ingest((
+            self.raw_bool(tag_id=BOOLEAN_FAULT_A_TAG_ID, source_key="EPO故障", value=True, sequence=30, observed_at=started + timedelta(seconds=20)),
+            self.raw_bool(tag_id=BOOLEAN_FAULT_B_TAG_ID, source_key="风扇故障", value=False, sequence=31, observed_at=started + timedelta(seconds=20)),
+        ))
+        late = self.trunk.ingest((self.raw_bool(
+            tag_id=BOOLEAN_FAULT_A_TAG_ID,
+            source_key="EPO故障",
+            value=False,
+            sequence=32,
+            observed_at=started + timedelta(seconds=10),
+        ),))
+
+        self.assertEqual(0, len(late.l2_event_ids))
+        self.assertEqual(1, late.late_observation_count)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT value_codes FROM t_l2_latest WHERE entity_instance_id = %s",
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                self.assertEqual((["pcs.hardware.epo"],), cursor.fetchone())
 
     def test_freshness_scheduler_writes_stale_state_atomically_and_idempotently(
         self,

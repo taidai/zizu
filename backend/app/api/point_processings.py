@@ -56,6 +56,11 @@ class ApplyPointProcessingRequest(BaseModel):
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
 
 
+class RunEN9AcceptanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    observed_for_seconds: float = Field(ge=0, le=86400)
+
+
 def _raise_point_processing_http(exc: PointProcessingError) -> NoReturn:
     status_by_code = {
         "POINT_PROCESSING_PLAN_NOT_FOUND": status.HTTP_404_NOT_FOUND,
@@ -166,3 +171,50 @@ async def apply_point_processing_plan(
         ).public_dict()
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
+
+
+@router.post(
+    "/point-processing-applications/{application_id}/acceptance",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def run_en9_point_processing_acceptance(
+    application_id: UUID,
+    body: RunEN9AcceptanceRequest,
+    _principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+) -> dict:
+    from app.services.en9_point_processing_acceptance import run_en9_acceptance
+
+    try:
+        return run_en9_acceptance(
+            application_id,
+            body.observed_for_seconds,
+        ).public_dict()
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if code == "EN9_APPLICATION_NOT_FOUND"
+                else status.HTTP_422_UNPROCESSABLE_CONTENT
+            ),
+            detail={"code": code},
+        ) from exc
+
+
+@router.get(
+    "/point-processing-acceptance-reports/{report_id}",
+    **protected(CONFIGURATION_READ),
+)
+async def read_en9_point_processing_acceptance(report_id: UUID) -> dict:
+    from app.services.en9_point_processing_acceptance import (
+        get_en9_acceptance_report,
+    )
+
+    try:
+        return get_en9_acceptance_report(report_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": str(exc)},
+        ) from exc

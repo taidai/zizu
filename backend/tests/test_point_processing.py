@@ -169,6 +169,42 @@ class PointProcessingTest(unittest.TestCase):
 
         self.assertEqual("POINT_PROCESSING_PLAN_STALE", caught.exception.code)
 
+    def test_en9_preview_blocks_decimal_contract_mismatch(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingDelivery,
+            PreviewPointProcessing,
+        )
+        from tests.test_neuron_point_processing_catalog import FakeNeuron
+
+        neuron = FakeNeuron()
+        neuron.tags[0]["decimal"] = 1.0
+        service = PointProcessingDelivery(
+            InMemoryPointProcessingRepository(),
+            InMemoryPointProcessingCatalog(
+                templates={EN9_REVISION_ID: _assets()["pcs.en9"]},
+                node_source_keys={NODE_ID: "EN9-PCS"},
+            ),
+            point_scanner=NeuronPointCatalog(neuron),
+        )
+
+        plan = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=EN9_REVISION_ID,
+            input_selections={},
+            actor="user:engineer",
+            entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
+            solution_installation_id=SOLUTION_INSTALLATION_ID,
+        ))
+
+        self.assertEqual("blocked", plan.status)
+        self.assertIn(
+            "NEURON_POINT_CONTRACT_MISMATCH",
+            {item["code"] for item in plan.blockers},
+        )
+
     def test_applied_template_exposes_installed_runtime_snapshot(self) -> None:
         from app.services.data_trunk_contracts import (
             EnumTransform,

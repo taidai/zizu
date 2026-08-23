@@ -102,16 +102,32 @@ class PointProcessingPostgresTest(unittest.TestCase):
                       (SELECT count(*) FROM t_tags
                        WHERE node_id = %s
                          AND source_address IS NOT NULL
-                         AND read_only IS NOT TRUE)
+                         AND read_only IS NOT TRUE),
+                      (SELECT count(*) FROM t_tags
+                       WHERE node_id = %s
+                         AND source_address IS NOT NULL
+                         AND (
+                           source_type IS DISTINCT FROM 'neuron'
+                           OR source_path NOT LIKE 'edge-pcs-a/data/%%'
+                           OR freshness_seconds IS DISTINCT FROM 5.0
+                         )),
+                      (SELECT count(*) FROM t_point_processing_inputs
+                       WHERE revision_id = %s
+                         AND expected_group = 'data'
+                         AND expected_address IS NOT NULL
+                         AND expected_wire_data_type IS NOT NULL
+                         AND expected_read_only IS TRUE)
                     """,
                     (
                         str(node_id),
                         str(application.installed_processing_id),
                         str(application.installed_processing_id),
                         str(node_id),
+                        str(node_id),
+                        str(en9_revision),
                     ),
                 )
-                self.assertEqual((90, 90, 3, 0), cursor.fetchone())
+                self.assertEqual((90, 90, 3, 0, 0, 90), cursor.fetchone())
 
     @classmethod
     def setUpClass(cls) -> None:

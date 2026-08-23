@@ -1,13 +1,17 @@
-"""Read-only, machine-verifiable EN9 point-processing acceptance report."""
+"""Machine-verifiable, immutable EN9 point-processing acceptance reports."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
+
+from psycopg2.extras import Json
 
 
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
@@ -25,6 +29,7 @@ class AcceptanceCheck:
 
 @dataclass(frozen=True)
 class AcceptanceReport:
+    id: UUID
     application_id: UUID
     required_input_count: int
     output_entity_count: int
@@ -32,15 +37,18 @@ class AcceptanceReport:
     passed: bool
     checks: tuple[AcceptanceCheck, ...]
     generated_at: datetime
+    digest: str
 
     def public_dict(self) -> dict[str, object]:
         return {
+            "id": str(self.id),
             "application_id": str(self.application_id),
             "required_input_count": self.required_input_count,
             "output_entity_count": self.output_entity_count,
             "observed_for_seconds": self.observed_for_seconds,
             "passed": self.passed,
             "generated_at": self.generated_at.isoformat(),
+            "digest": self.digest,
             "checks": [
                 {
                     "code": item.code,
@@ -57,10 +65,9 @@ def run_en9_acceptance(
     observed_for_seconds: float,
     *,
     connection_factory: ConnectionFactory | None = None,
-    ws_authenticated: bool = False,
     clock: Callable[[], datetime] | None = None,
 ) -> AcceptanceReport:
-    """Evaluate persisted EN9 evidence without changing configuration or runtime."""
+    """Evaluate persisted EN9 evidence and append an immutable report."""
     if observed_for_seconds < 0:
         raise ValueError("observed_for_seconds cannot be negative")
     if connection_factory is None:
@@ -75,7 +82,7 @@ def run_en9_acceptance(
                 SELECT installed.id, installed.revision_id,
                        installed.site_configuration_version,
                        installed.current, template.asset_id, revision.revision,
-                       state.current_version
+                       state.current_version, application.applied_at
                 FROM t_point_processing_applications AS application
                 JOIN t_installed_point_processings AS installed
                   ON installed.id = application.installed_processing_id
@@ -99,6 +106,7 @@ def run_en9_acceptance(
                 asset_id,
                 revision_number,
                 current_site_version,
+                applied_at,
             ) = installation
             cursor.execute(
                 """
@@ -121,14 +129,18 @@ def run_en9_acceptance(
                 SELECT count(*),
                        count(*) FILTER (WHERE latest.quality = 192),
                        count(*) FILTER (
-                         WHERE latest.ts >= %s - (%s * INTERVAL '1 second')
+                         WHERE tag.freshness_seconds IS NOT NULL
+                           AND latest.ts + (
+                             tag.freshness_seconds * INTERVAL '1 second'
+                           ) > %s
                        )
                 FROM t_point_processing_input_bindings AS binding
                 JOIN t_telemetry_latest AS latest
                   ON latest.tag_id = binding.l0_tag_id
+                JOIN t_tags AS tag ON tag.id = binding.l0_tag_id
                 WHERE binding.installed_processing_id = %s
                 """,
-                (generated_at, observed_for_seconds, str(installed_id)),
+                (generated_at, str(installed_id)),
             )
             l0_latest_count, l0_good_count, l0_fresh_count = cursor.fetchone()
             cursor.execute(
@@ -140,14 +152,27 @@ def run_en9_acceptance(
                 LEFT JOIN t_l2_latest AS latest
                   ON latest.entity_instance_id = output_binding.entity_instance_id
                  AND latest.quality = 192
+                 AND latest.processing_revision_id = %s
+                 AND latest.site_configuration_version = %s
                 LEFT JOIN t_l2_observations AS observation
                   ON observation.entity_instance_id = output_binding.entity_instance_id
+                 AND observation.processing_revision_id = %s
+                 AND observation.site_configuration_version = %s
+                 AND observation.calculated_at >= %s
                 LEFT JOIN t_l2_stream_outbox AS outbox
                   ON outbox.entity_instance_id = output_binding.entity_instance_id
+                 AND outbox.payload->>'processing_revision_id' = %s
+                 AND (outbox.payload->>'site_configuration_version')::bigint = %s
+                 AND outbox.created_at >= %s
                 WHERE output_binding.installed_processing_id = %s
                   AND latest.entity_instance_id IS NOT NULL
                 """,
-                (str(installed_id),),
+                (
+                    str(revision_id), site_version,
+                    str(revision_id), site_version, applied_at,
+                    str(revision_id), site_version, applied_at,
+                    str(installed_id),
+                ),
             )
             l2_latest_count, l2_history_count, outbox_count = cursor.fetchone()
             cursor.execute(
@@ -157,6 +182,8 @@ def run_en9_acceptance(
                 JOIN t_point_processing_outputs AS output ON output.id = binding.output_id
                 JOIN t_l2_latest AS latest
                   ON latest.entity_instance_id = binding.entity_instance_id
+                 AND latest.processing_revision_id = %s
+                 AND latest.site_configuration_version = %s
                 JOIN t_l2_observation_sources AS source
                   ON source.l2_event_id = latest.event_id
                  AND source.l2_observed_at = latest.observed_at
@@ -164,7 +191,7 @@ def run_en9_acceptance(
                 WHERE binding.installed_processing_id = %s
                   AND output.entity_definition_id = 'pcs.fault_codes'
                 """,
-                (str(installed_id),),
+                (str(revision_id), site_version, str(installed_id)),
             )
             fault_source_count = cursor.fetchone()[0]
             cursor.execute(
@@ -181,10 +208,12 @@ def run_en9_acceptance(
                 JOIN t_telemetry_latest AS source ON source.tag_id = input_binding.l0_tag_id
                 JOIN t_l2_latest AS latest
                   ON latest.entity_instance_id = binding.entity_instance_id
+                 AND latest.processing_revision_id = %s
+                 AND latest.site_configuration_version = %s
                 WHERE binding.installed_processing_id = %s
                   AND output.entity_definition_id = 'pcs.active_power'
                 """,
-                (str(installed_id),),
+                (str(revision_id), site_version, str(installed_id)),
             )
             power = cursor.fetchone()
             cursor.execute(
@@ -199,12 +228,23 @@ def run_en9_acceptance(
                 JOIN t_point_processing_outputs AS output ON output.id = binding.output_id
                 JOIN t_l2_latest AS latest
                   ON latest.entity_instance_id = binding.entity_instance_id
+                 AND latest.processing_revision_id = %s
+                 AND latest.site_configuration_version = %s
                 WHERE binding.installed_processing_id = %s
                   AND output.entity_definition_id = 'pcs.operating_state'
                 """,
-                (str(installed_id),),
+                (str(revision_id), site_version, str(installed_id)),
             )
             state = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT count(*)
+                FROM t_ingestion_failures
+                WHERE created_at >= %s AND resolved_at IS NULL
+                """,
+                (applied_at,),
+            )
+            ingestion_failure_count = cursor.fetchone()[0]
 
     power_scale_ok = bool(power and float(power[0]) == 1.0)
     power_sign_ok = bool(
@@ -247,17 +287,42 @@ def run_en9_acceptance(
             {"mapped": bool(state and state[1])},
         ),
         AcceptanceCheck(
-            "EN9_AUTHENTICATED_WS",
-            ws_authenticated,
-            {"authenticated": ws_authenticated},
+            "EN9_WS_STREAM_EVIDENCE",
+            outbox_count == 3,
+            {"stream_entities": outbox_count},
         ),
         AcceptanceCheck(
             "EN9_RESTART_CONTINUITY",
-            bool(current) and int(site_version) == int(current_site_version),
-            {"current": bool(current), "site_version": int(site_version)},
+            bool(current)
+            and int(site_version) == int(current_site_version)
+            and (generated_at - applied_at).total_seconds() >= observed_for_seconds
+            and ingestion_failure_count == 0,
+            {
+                "current": bool(current),
+                "site_version": int(site_version),
+                "unresolved_ingestion_failures": ingestion_failure_count,
+            },
         ),
     )
-    return AcceptanceReport(
+    evidence = {
+        "application_id": str(application_id),
+        "required_input_count": int(input_count),
+        "output_entity_count": int(output_count),
+        "observed_for_seconds": float(observed_for_seconds),
+        "generated_at": generated_at.isoformat(),
+        "checks": [
+            {"code": item.code, "passed": item.passed, "evidence": dict(item.evidence)}
+            for item in checks
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(
+        evidence,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    report = AcceptanceReport(
+        id=uuid5(NAMESPACE_URL, f"zizu/en9-acceptance/{application_id}/{digest}"),
         application_id=application_id,
         required_input_count=int(input_count),
         output_entity_count=int(output_count),
@@ -265,4 +330,60 @@ def run_en9_acceptance(
         passed=all(item.passed for item in checks),
         checks=checks,
         generated_at=generated_at,
+        digest=digest,
     )
+    with connection_factory() as connection:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_en9_acceptance_reports
+                      (id, application_id, status, observed_for_seconds,
+                       generated_at, evidence, digest)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (application_id, digest) DO NOTHING
+                    """,
+                    (
+                        str(report.id), str(application_id),
+                        "passed" if report.passed else "failed",
+                        observed_for_seconds, generated_at, Json(evidence), digest,
+                    ),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    return report
+
+
+def get_en9_acceptance_report(
+    report_id: UUID,
+    *,
+    connection_factory: ConnectionFactory | None = None,
+) -> dict[str, object]:
+    if connection_factory is None:
+        from app.services.telemetry_store import get_connection
+
+        connection_factory = get_connection
+    with connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, application_id, status, observed_for_seconds,
+                       generated_at, evidence, digest
+                FROM t_en9_acceptance_reports WHERE id = %s
+                """,
+                (str(report_id),),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        raise ValueError("EN9_ACCEPTANCE_REPORT_NOT_FOUND")
+    return {
+        "id": str(row[0]),
+        "application_id": str(row[1]),
+        "passed": row[2] == "passed",
+        "observed_for_seconds": float(row[3]),
+        "generated_at": row[4].isoformat(),
+        "digest": row[6].strip(),
+        **dict(row[5]),
+    }
