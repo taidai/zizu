@@ -242,6 +242,54 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
         self.assertEqual(self.repository.installation_count(), 1)
         self.assertEqual(self.repository.audit_count(), 1)
 
+    def test_preview_blocks_non_numeric_or_dimensionally_wrong_source(self) -> None:
+        from dataclasses import replace
+
+        from app.services.business_metrics import BusinessMetricDelivery
+
+        original = self.catalog.sources[0]
+        cases = (
+            replace(original, data_type="BOOL"),
+            replace(original, unit="kW"),
+        )
+        for incompatible in cases:
+            with self.subTest(data_type=incompatible.data_type, unit=incompatible.unit):
+                self.catalog.replace_sources((incompatible,))
+                plan = BusinessMetricDelivery(
+                    self.catalog, self.repository
+                ).preview(self._preview_request())
+                self.assertEqual(plan.status, "blocked")
+                self.assertEqual(
+                    plan.blockers,
+                    ({"code": "BUSINESS_METRIC_SOURCE_INCOMPATIBLE"},),
+                )
+
+    def test_preview_turns_invalid_iana_timezone_into_stable_blocker(self) -> None:
+        from app.services.business_metrics import (
+            BusinessMetricDelivery,
+            InMemoryBusinessMetricCatalog,
+            MetricNode,
+        )
+
+        catalog = InMemoryBusinessMetricCatalog(
+            templates=(self.template,),
+            nodes=(
+                MetricNode(self.site_id, "SITE", None, "Mars/Olympus", 30),
+                MetricNode(self.child_id, "INVERTER", self.site_id, None),
+            ),
+            sources=self.catalog.sources,
+        )
+
+        plan = BusinessMetricDelivery(catalog, self.repository).preview(
+            self._preview_request()
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            plan.blockers,
+            ({"code": "BUSINESS_METRIC_TIMEZONE_INVALID"},),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

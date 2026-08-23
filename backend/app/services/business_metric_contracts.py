@@ -78,6 +78,7 @@ class ResolvedMetricSource:
     data_type: str
     unit: str | None
     estimated: bool
+    direction: str = "R"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "method", MetricAggregator(self.method))

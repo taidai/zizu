@@ -10,6 +10,9 @@ import hashlib
 import json
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pint import UndefinedUnitError, UnitRegistry
 
 from app.services.business_metric_contracts import (
     BusinessMetricTemplate,
@@ -18,6 +21,9 @@ from app.services.business_metric_contracts import (
     ResolvedMetricSource,
 )
 from app.services.solution_business_metrics import compile_business_metric
+
+
+_UNITS = UnitRegistry()
 
 
 class BusinessMetricError(ValueError):
@@ -42,6 +48,7 @@ class MetricSourceCandidate:
     entity_definition_id: str
     data_type: str
     unit: str | None
+    direction: str = "R"
 
 
 @dataclass(frozen=True)
@@ -92,6 +99,7 @@ class MetricInstallationPlan:
     blockers: tuple[dict[str, str], ...]
     digest: str
     planned_by: str
+    previous_installation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +114,7 @@ class MetricInstallation:
     site_configuration_version: int
     state: str
     plan_digest: str
+    installed_processing_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -179,11 +188,6 @@ class BusinessMetricDelivery:
             raise BusinessMetricError("BUSINESS_METRIC_PLAN_DIGEST_MISMATCH", "Plan digest does not match")
         if plan.blockers:
             raise BusinessMetricError("BUSINESS_METRIC_PLAN_BLOCKED", "Blocked plans cannot be installed")
-        refreshed = self._compile_preview(
-            PreviewMetricInstallation(plan.node_id, plan.template_id, command.actor)
-        )
-        if refreshed.digest != plan.digest:
-            raise BusinessMetricError("BUSINESS_METRIC_PLAN_STALE", "Plan sources or site configuration changed")
         processing_revision_id = uuid5(
             NAMESPACE_URL,
             f"zizu/business-metric-processing/{plan.internal_processing_digest}",
@@ -203,6 +207,18 @@ class BusinessMetricDelivery:
             state="active",
             plan_digest=plan.digest,
         )
+        existing = self._repository.get_installation(installation.id)
+        if existing is not None:
+            return self._repository.apply_installation(
+                existing,
+                actor=command.actor,
+                idempotency_key=command.idempotency_key,
+            )
+        refreshed = self._compile_preview(
+            PreviewMetricInstallation(plan.node_id, plan.template_id, command.actor)
+        )
+        if refreshed.digest != plan.digest:
+            raise BusinessMetricError("BUSINESS_METRIC_PLAN_STALE", "Plan sources or site configuration changed")
         return self._repository.apply_installation(
             installation, actor=command.actor, idempotency_key=command.idempotency_key
         )
@@ -234,6 +250,9 @@ class BusinessMetricDelivery:
                 self._catalog.list_sources(request.node_id) if node is not None else ()
             ),
             site_configuration_version=self._repository.site_configuration_version(),
+            existing_installations=self._repository.installed_for_node(
+                request.node_id
+            ),
         )
 
     def _required_template(self, template_id: str) -> BusinessMetricTemplate:
@@ -325,7 +344,17 @@ def _compile_plan_from_state(
     catalog: BusinessMetricCatalog,
     candidates: tuple[MetricSourceCandidate, ...],
     site_configuration_version: int,
+    existing_installations: tuple[MetricInstallation, ...],
 ) -> MetricInstallationPlan:
+    previous = max(
+        (
+            item
+            for item in existing_installations
+            if item.template_id == template.template_id
+        ),
+        key=lambda item: item.site_configuration_version,
+        default=None,
+    )
     timezone: str | None = None
     raw_retention: int | None = None
     blocker: str | None = None
@@ -335,7 +364,12 @@ def _compile_plan_from_state(
         timezone, raw_retention = _site_contract(node, catalog)
         if timezone is None:
             blocker = "BUSINESS_METRIC_TIMEZONE_INVALID"
-        elif raw_retention is None or raw_retention < 0:
+        else:
+            try:
+                ZoneInfo(timezone)
+            except ZoneInfoNotFoundError:
+                blocker = "BUSINESS_METRIC_TIMEZONE_INVALID"
+        if blocker is None and (raw_retention is None or raw_retention < 0):
             blocker = "BUSINESS_METRIC_RETENTION_INVALID"
 
     source: ResolvedMetricSource | None = None
@@ -353,6 +387,9 @@ def _compile_plan_from_state(
                 "raw_detail_retention_days": raw_retention,
                 "site_configuration_version": site_configuration_version,
                 "blockers": list(blockers),
+                "previous_installation_id": (
+                    str(previous.id) if previous is not None else None
+                ),
             }
         )
         return MetricInstallationPlan(
@@ -371,6 +408,7 @@ def _compile_plan_from_state(
             blockers=blockers,
             digest=digest,
             planned_by=request.actor,
+            previous_installation_id=(previous.id if previous is not None else None),
         )
 
     assert source is not None and timezone is not None and raw_retention is not None
@@ -394,6 +432,9 @@ def _compile_plan_from_state(
             "sources": [_source_content(source)],
             "internal_processing_digest": compiled.content_digest,
             "output_entity_instance_id": str(output_entity_id),
+            "previous_installation_id": (
+                str(previous.id) if previous is not None else None
+            ),
         }
     )
     return MetricInstallationPlan(
@@ -412,6 +453,7 @@ def _compile_plan_from_state(
         blockers=(),
         digest=digest,
         planned_by=request.actor,
+        previous_installation_id=(previous.id if previous is not None else None),
     )
 
 
@@ -447,6 +489,8 @@ def _resolve_source(
             return None, "BUSINESS_METRIC_SOURCE_AMBIGUOUS"
         if len(matches) == 1:
             candidate = matches[0]
+            if not _source_compatible(template, option.method, candidate):
+                return None, "BUSINESS_METRIC_SOURCE_INCOMPATIBLE"
             return (
                 ResolvedMetricSource(
                     candidate.entity_instance_id,
@@ -455,10 +499,32 @@ def _resolve_source(
                     candidate.data_type,
                     candidate.unit,
                     option.method is MetricAggregator.POWER_INTEGRAL,
+                    candidate.direction,
                 ),
                 None,
             )
     return None, "BUSINESS_METRIC_SOURCE_MISSING"
+
+
+def _source_compatible(
+    template: BusinessMetricTemplate,
+    method: MetricAggregator,
+    candidate: MetricSourceCandidate,
+) -> bool:
+    if candidate.data_type not in {"FLOAT", "INT"}:
+        return False
+    if candidate.direction not in {"R", "RW"}:
+        return False
+    if candidate.unit is None or template.output_unit is None:
+        return candidate.unit is template.output_unit
+    try:
+        source_unit = _UNITS.Unit(candidate.unit)
+        output_unit = _UNITS.Unit(template.output_unit)
+    except (UndefinedUnitError, ValueError):
+        return False
+    if method is MetricAggregator.POWER_INTEGRAL:
+        return (source_unit * _UNITS.hour).is_compatible_with(output_unit)
+    return source_unit.is_compatible_with(output_unit)
 
 
 def _subtree_ids(root_node_id: UUID, nodes: dict[UUID, MetricNode]) -> set[UUID]:
@@ -481,6 +547,7 @@ def _source_content(source: ResolvedMetricSource) -> dict[str, Any]:
         "data_type": source.data_type,
         "unit": source.unit,
         "estimated": source.estimated,
+        "direction": source.direction,
     }
 
 

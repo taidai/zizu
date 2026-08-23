@@ -90,15 +90,28 @@ def persist_internal_business_metric_asset(
     cursor.execute(
         """
         INSERT INTO t_point_processing_revisions
-          (id, template_id, revision, content_digest, published_at)
-        VALUES (%s, %s, %s, %s, now())
+          (id, template_id, revision, content_digest, published_at,
+           internal_kind)
+        VALUES (%s, %s, %s, %s, now(), 'business_metric')
         ON CONFLICT (template_id, revision) DO NOTHING
         """,
         (revision_id, template_id, asset.revision, asset.content_digest),
     )
-    cursor.execute("SELECT id, content_digest FROM t_point_processing_revisions WHERE template_id=%s AND revision=%s", (template_id, asset.revision))
+    cursor.execute(
+        """
+        SELECT id, content_digest, internal_kind
+        FROM t_point_processing_revisions
+        WHERE template_id=%s AND revision=%s
+        """,
+        (template_id, asset.revision),
+    )
     stored_revision = cursor.fetchone()
-    if stored_revision is None or stored_revision[0] != revision_id or stored_revision[1].strip() != asset.content_digest:
+    if (
+        stored_revision is None
+        or stored_revision[0] != revision_id
+        or stored_revision[1].strip() != asset.content_digest
+        or stored_revision[2] != "business_metric"
+    ):
         raise BusinessMetricError("BUSINESS_METRIC_INTERNAL_ASSET_CONFLICT", "Internal processing revision conflicts")
     if package_record_id is not None:
         cursor.execute(
@@ -168,6 +181,20 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_plain(item) for item in value]
     return value
+
+
+def _capability_content(
+    template: BusinessMetricTemplate,
+    plan: MetricInstallationPlan,
+) -> dict[str, Any]:
+    return {
+        "temporalSemantics": template.temporal_semantics,
+        "controlEligible": False,
+        "templateDigest": template.content_digest,
+        "sourceEntityInstanceIds": [
+            str(item.entity_instance_id) for item in plan.sources
+        ],
+    }
 
 
 class PostgresBusinessMetricCatalog:
@@ -265,7 +292,7 @@ class PostgresBusinessMetricCatalog:
               WHERE child.enabled = TRUE
             )
             SELECT entity.id, device.node_id, entity.definition_id,
-                   entity.data_type, entity.unit
+                   entity.data_type, entity.unit, entity.direction
             FROM t_entity_instances AS entity
             JOIN t_device_instances AS device ON device.id = entity.device_instance_id
             JOIN subtree ON subtree.id = device.node_id
@@ -371,8 +398,9 @@ class PostgresBusinessMetricRepository:
                       (id, node_id, template_revision_id,
                        base_site_configuration_version, frozen_timezone,
                        raw_detail_retention_days, source_digest,
-                       internal_processing_digest, status, digest, planned_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       internal_processing_digest, previous_installation_id,
+                       status, digest, planned_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     (
@@ -384,6 +412,7 @@ class PostgresBusinessMetricRepository:
                         plan.raw_detail_retention_days,
                         source_digest,
                         plan.internal_processing_digest,
+                        plan.previous_installation_id,
                         plan.status,
                         plan.digest,
                         plan.planned_by,
@@ -399,19 +428,100 @@ class PostgresBusinessMetricRepository:
                         "BUSINESS_METRIC_PLAN_CONFLICT",
                         "Plan identity conflicts with immutable evidence",
                     )
+                template = parse_business_metric_asset(revision[1])
+                previous_sources: dict[int, dict[str, Any]] = {}
+                previous_output: dict[str, Any] | None = None
+                previous_capability: dict[str, Any] | None = None
+                if plan.previous_installation_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT installed.id, installed.entity_instance_id,
+                               installed.template_revision_id,
+                               installed.installed_processing_id,
+                               entity.definition_id, entity.data_type, entity.unit
+                        FROM t_installed_business_metrics AS installed
+                        JOIN t_entity_instances AS entity
+                          ON entity.id = installed.entity_instance_id
+                        WHERE installed.id = %s
+                        """,
+                        (plan.previous_installation_id,),
+                    )
+                    previous_row = cursor.fetchone()
+                    if previous_row is None:
+                        raise BusinessMetricError(
+                            "BUSINESS_METRIC_PLAN_STALE",
+                            "Previous business metric installation is unavailable",
+                        )
+                    previous_output = {
+                        "installationId": str(previous_row[0]),
+                        "entityInstanceId": str(previous_row[1]),
+                        "templateRevisionId": str(previous_row[2]),
+                        "installedProcessingId": str(previous_row[3]),
+                        "entityDefinition": previous_row[4],
+                        "dataType": previous_row[5],
+                        "unit": previous_row[6],
+                    }
+                    cursor.execute(
+                        """
+                        SELECT binding.ordinal, binding.entity_instance_id,
+                               binding.entity_definition_id, binding.method,
+                               binding.data_type, binding.unit,
+                               binding.estimated, binding.direction
+                        FROM t_business_metric_source_bindings AS binding
+                        JOIN t_entity_instances AS entity
+                          ON entity.id = binding.entity_instance_id
+                        WHERE binding.installed_metric_id = %s
+                        ORDER BY binding.ordinal
+                        """,
+                        (plan.previous_installation_id,),
+                    )
+                    previous_sources = {
+                        int(row[0]): {
+                            "entity_instance_id": str(row[1]),
+                            "entity_definition_id": row[2],
+                            "method": row[3],
+                            "data_type": row[4],
+                            "unit": row[5],
+                            "estimated": row[6],
+                            "direction": row[7],
+                        }
+                        for row in cursor.fetchall()
+                    }
+                    cursor.execute(
+                        """
+                        SELECT content
+                        FROM t_entity_capability_contracts
+                        WHERE installed_metric_id = %s
+                        ORDER BY created_at DESC, id DESC LIMIT 1
+                        """,
+                        (plan.previous_installation_id,),
+                    )
+                    capability_row = cursor.fetchone()
+                    previous_capability = (
+                        dict(capability_row[0]) if capability_row is not None else None
+                    )
                 items: list[dict[str, Any]] = []
                 for ordinal, source in enumerate(plan.sources):
+                    after = _source_content(source)
+                    before = previous_sources.get(ordinal)
                     items.append(
                         {
                             "item_key": f"source:{ordinal}",
                             "ordinal": ordinal,
                             "item_kind": "source",
-                            "action": "add",
+                            "action": (
+                                "preserve"
+                                if before == after
+                                else "update"
+                                if before is not None
+                                else "add"
+                            ),
                             "source_entity_instance_id": source.entity_instance_id,
                             "method": source.method.value,
                             "estimated": source.estimated,
                             "blocker_code": None,
-                            "after": _source_content(source),
+                            "before": before,
+                            "after": after,
                         }
                     )
                 if plan.status == "ready":
@@ -421,11 +531,20 @@ class PostgresBusinessMetricRepository:
                                 "item_key": "output:metric_value",
                                 "ordinal": len(items),
                                 "item_kind": "output",
-                                "action": "add",
+                                "action": (
+                                    "reuse"
+                                    if previous_output is not None
+                                    and previous_output["entityInstanceId"]
+                                    == str(plan.output_entity_instance_id)
+                                    else "update"
+                                    if previous_output is not None
+                                    else "add"
+                                ),
                                 "source_entity_instance_id": None,
                                 "method": None,
                                 "estimated": None,
                                 "blocker_code": None,
+                                "before": previous_output,
                                 "after": {
                                     **dict(revision[1]["output"]),
                                     "entityInstanceId": str(
@@ -437,15 +556,20 @@ class PostgresBusinessMetricRepository:
                                 "item_key": "capability:windowed",
                                 "ordinal": len(items) + 1,
                                 "item_kind": "capability",
-                                "action": "add",
+                                "action": (
+                                    "preserve"
+                                    if previous_capability
+                                    == _capability_content(template, plan)
+                                    else "update"
+                                    if previous_capability is not None
+                                    else "add"
+                                ),
                                 "source_entity_instance_id": None,
                                 "method": None,
                                 "estimated": None,
                                 "blocker_code": None,
-                                "after": {
-                                    "temporalSemantics": "windowed",
-                                    "controlEligible": False,
-                                },
+                                "before": previous_capability,
+                                "after": _capability_content(template, plan),
                             },
                         )
                     )
@@ -460,6 +584,7 @@ class PostgresBusinessMetricRepository:
                             "method": None,
                             "estimated": None,
                             "blocker_code": blocker["code"],
+                            "before": None,
                             "after": dict(blocker),
                         }
                     )
@@ -470,7 +595,7 @@ class PostgresBusinessMetricRepository:
                           (plan_id, item_key, ordinal, item_kind, action,
                            source_entity_instance_id, method, estimated,
                            blocker_code, before_value, after_value)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (plan_id, item_key) DO NOTHING
                         """,
                         (
@@ -483,6 +608,11 @@ class PostgresBusinessMetricRepository:
                             item["method"],
                             item["estimated"],
                             item["blocker_code"],
+                            (
+                                Json(item.get("before"))
+                                if item.get("before") is not None
+                                else None
+                            ),
                             Json(item["after"]),
                         ),
                     )
@@ -491,7 +621,12 @@ class PostgresBusinessMetricRepository:
     def installed_for_node(self, node_id: UUID) -> tuple[MetricInstallation, ...]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(self._installation_select() + " WHERE installed.node_id = %s ORDER BY installed.installed_at", (node_id,))
+                cursor.execute(
+                    self._installation_select()
+                    + " WHERE installed.node_id = %s AND processing.current = TRUE "
+                    "ORDER BY installed.installed_at",
+                    (node_id,),
+                )
                 return tuple(MetricInstallation(*row) for row in cursor.fetchall())
 
     def get_installation(self, installation_id: UUID) -> MetricInstallation | None:
@@ -529,30 +664,6 @@ class PostgresBusinessMetricRepository:
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (f"business-metric:{command.actor}:{command.idempotency_key}",),
                 )
-                cursor.execute(
-                    """
-                    SELECT id FROM t_installed_business_metrics
-                    WHERE installed_by = %s AND idempotency_key = %s
-                    """,
-                    (command.actor, command.idempotency_key),
-                )
-                existing = cursor.fetchone()
-                if existing is not None:
-                    result = self._installation_with_cursor(cursor, existing[0])
-                    if result is None or result.plan_digest != command.expected_digest:
-                        raise BusinessMetricError(
-                            "BUSINESS_METRIC_IDEMPOTENCY_CONFLICT",
-                            "Idempotency key belongs to another plan",
-                        )
-                    return result
-
-                cursor.execute(
-                    """
-                    SELECT current_version FROM t_site_configuration_state
-                    WHERE singleton = TRUE FOR UPDATE
-                    """
-                )
-                current_version = int(cursor.fetchone()[0])
                 plan, template, template_revision_id = self._load_plan(
                     cursor, command.plan_id
                 )
@@ -569,6 +680,72 @@ class PostgresBusinessMetricRepository:
                     raise BusinessMetricError(
                         "BUSINESS_METRIC_PLAN_BLOCKED", "Blocked plans cannot be installed"
                     )
+                request_digest = _digest(
+                    {
+                        "plan_id": str(command.plan_id),
+                        "expected_digest": command.expected_digest,
+                    }
+                )
+                cursor.execute(
+                    """
+                    SELECT installed_metric_id, request_digest
+                    FROM t_business_metric_audit
+                    WHERE actor = %s AND idempotency_key = %s
+                    """,
+                    (command.actor, command.idempotency_key),
+                )
+                idempotency = cursor.fetchone()
+                if idempotency is not None:
+                    if idempotency[1].strip() != request_digest:
+                        raise BusinessMetricError(
+                            "BUSINESS_METRIC_IDEMPOTENCY_CONFLICT",
+                            "Idempotency key belongs to another request",
+                        )
+                    result = self._installation_with_cursor(cursor, idempotency[0])
+                    if result is None:
+                        raise BusinessMetricError(
+                            "BUSINESS_METRIC_IDEMPOTENCY_CONFLICT",
+                            "Idempotency evidence has no installation",
+                        )
+                    return result
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM t_installed_business_metrics
+                    WHERE source_plan_id = %s
+                    ORDER BY installed_at, id LIMIT 1
+                    """,
+                    (plan.id,),
+                )
+                installed_for_plan = cursor.fetchone()
+                if installed_for_plan is not None:
+                    result = self._installation_with_cursor(
+                        cursor, installed_for_plan[0]
+                    )
+                    assert result is not None
+                    self._insert_audit(
+                        cursor,
+                        installed_metric_id=result.id,
+                        plan_id=plan.id,
+                        action="reused",
+                        actor=command.actor,
+                        evidence={
+                            "planId": str(plan.id),
+                            "planDigest": plan.digest,
+                            "reusedInstallationId": str(result.id),
+                        },
+                        idempotency_key=command.idempotency_key,
+                        request_digest=request_digest,
+                        resulting_state=result.state,
+                    )
+                    return result
+                cursor.execute(
+                    """
+                    SELECT current_version FROM t_site_configuration_state
+                    WHERE singleton = TRUE FOR UPDATE
+                    """
+                )
+                current_version = int(cursor.fetchone()[0])
                 node = PostgresBusinessMetricCatalog.get_node_with_cursor(
                     cursor, plan.node_id
                 )
@@ -584,8 +761,20 @@ class PostgresBusinessMetricRepository:
                     catalog=_CursorBusinessMetricCatalog(cursor),
                     candidates=candidates,
                     site_configuration_version=current_version,
+                    existing_installations=self._installed_for_node_with_cursor(
+                        cursor, plan.node_id
+                    ),
                 )
                 if refreshed.digest != plan.digest:
+                    if refreshed.blockers and refreshed.blockers[0]["code"] in {
+                        "BUSINESS_METRIC_SOURCE_INCOMPATIBLE",
+                        "BUSINESS_METRIC_TIMEZONE_INVALID",
+                    }:
+                        code = refreshed.blockers[0]["code"]
+                        raise BusinessMetricError(
+                            code,
+                            "Business metric source or timezone contract changed",
+                        )
                     raise BusinessMetricError(
                         "BUSINESS_METRIC_PLAN_STALE",
                         "Plan sources or site configuration changed",
@@ -670,6 +859,9 @@ class PostgresBusinessMetricRepository:
                         PostgresPointProcessingCatalog(),
                         transaction=connection,
                         verified_source_catalog_digest=point_plan.source_catalog_digest,
+                        trusted_business_metric_owner_key=(
+                            plan.output_entity_instance_id
+                        ),
                     )
                 except PointProcessingError as exc:
                     raise BusinessMetricError(
@@ -719,8 +911,9 @@ class PostgresBusinessMetricRepository:
                         """
                         INSERT INTO t_business_metric_source_bindings
                           (installed_metric_id, ordinal, entity_instance_id,
-                           entity_definition_id, method, estimated, source_digest)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                           entity_definition_id, method, data_type, unit,
+                           direction, estimated, source_digest)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             installation_id,
@@ -728,18 +921,14 @@ class PostgresBusinessMetricRepository:
                             source.entity_instance_id,
                             source.entity_definition_id,
                             source.method.value,
+                            source.data_type,
+                            source.unit,
+                            source.direction,
                             source.estimated,
                             _digest(_source_content(source)),
                         ),
                     )
-                capability = {
-                    "temporalSemantics": template.temporal_semantics,
-                    "controlEligible": False,
-                    "templateDigest": template.content_digest,
-                    "sourceEntityInstanceIds": [
-                        str(item.entity_instance_id) for item in plan.sources
-                    ],
-                }
+                capability = _capability_content(template, plan)
                 capability_digest = _digest(capability)
                 cursor.execute(
                     """
@@ -766,29 +955,71 @@ class PostgresBusinessMetricRepository:
                     "pointProcessingApplicationId": str(application.id),
                     "siteConfigurationVersion": next_version,
                 }
-                audit_digest = _digest(audit_evidence)
-                cursor.execute(
-                    """
-                    INSERT INTO t_business_metric_audit
-                      (id, installed_metric_id, plan_id, action, actor,
-                       evidence, digest)
-                    VALUES (%s, %s, %s, 'installed', %s, %s, %s)
-                    """,
-                    (
-                        uuid5(
-                            NAMESPACE_URL,
-                            f"zizu/business-metric-audit/{installation_id}/{audit_digest}",
-                        ),
-                        installation_id,
-                        plan.id,
-                        command.actor,
-                        Json(audit_evidence),
-                        audit_digest,
+                self._insert_audit(
+                    cursor,
+                    installed_metric_id=installation_id,
+                    plan_id=plan.id,
+                    action=(
+                        "upgraded"
+                        if plan.previous_installation_id is not None
+                        else "installed"
                     ),
+                    actor=command.actor,
+                    evidence=audit_evidence,
+                    idempotency_key=command.idempotency_key,
+                    request_digest=request_digest,
+                    resulting_state="active",
                 )
                 result = self._installation_with_cursor(cursor, installation_id)
                 assert result is not None
                 return result
+
+    @staticmethod
+    def _insert_audit(
+        cursor: Any,
+        *,
+        installed_metric_id: UUID,
+        plan_id: UUID,
+        action: str,
+        actor: str,
+        evidence: dict[str, Any],
+        idempotency_key: str | None,
+        request_digest: str | None,
+        resulting_state: str | None,
+    ) -> None:
+        audit_content = {
+            "action": action,
+            "actor": actor,
+            "evidence": evidence,
+            "idempotency_key": idempotency_key,
+            "request_digest": request_digest,
+            "resulting_state": resulting_state,
+        }
+        audit_digest = _digest(audit_content)
+        cursor.execute(
+            """
+            INSERT INTO t_business_metric_audit
+              (id, installed_metric_id, plan_id, action, actor,
+               idempotency_key, request_digest, resulting_state,
+               evidence, digest)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                uuid5(
+                    NAMESPACE_URL,
+                    f"zizu/business-metric-audit/{installed_metric_id}/{audit_digest}",
+                ),
+                installed_metric_id,
+                plan_id,
+                action,
+                actor,
+                idempotency_key,
+                request_digest,
+                resulting_state,
+                Json(evidence),
+                audit_digest,
+            ),
+        )
 
     @staticmethod
     def _installation_select() -> str:
@@ -797,7 +1028,7 @@ class PostgresBusinessMetricRepository:
                    revision.revision, installed.entity_instance_id,
                    processing.revision_id, installed.frozen_timezone,
                    installed.site_configuration_version, installed.state,
-                   plan.digest
+                   plan.digest, processing.id
             FROM t_installed_business_metrics AS installed
             JOIN t_business_metric_revisions AS revision
               ON revision.id = installed.template_revision_id
@@ -820,6 +1051,18 @@ class PostgresBusinessMetricRepository:
         row = cursor.fetchone()
         return MetricInstallation(*row) if row else None
 
+    @classmethod
+    def _installed_for_node_with_cursor(
+        cls, cursor: Any, node_id: UUID
+    ) -> tuple[MetricInstallation, ...]:
+        cursor.execute(
+            cls._installation_select()
+            + " WHERE installed.node_id = %s AND processing.current = TRUE "
+            "ORDER BY installed.installed_at",
+            (node_id,),
+        )
+        return tuple(MetricInstallation(*row) for row in cursor.fetchall())
+
     @staticmethod
     def _load_plan(
         cursor: Any, plan_id: UUID
@@ -834,7 +1077,9 @@ class PostgresBusinessMetricRepository:
                    revision.revision, revision.content_digest,
                    plan.frozen_timezone, plan.raw_detail_retention_days,
                    plan.base_site_configuration_version,
-                   plan.internal_processing_digest, plan.status, plan.digest,
+                   plan.internal_processing_digest,
+                   plan.previous_installation_id,
+                   plan.status, plan.digest,
                    plan.planned_by, revision.content, revision.id
             FROM t_business_metric_installation_plans AS plan
             JOIN t_business_metric_revisions AS revision
@@ -849,7 +1094,7 @@ class PostgresBusinessMetricRepository:
         row = cursor.fetchone()
         if row is None:
             return None, None, None
-        template = parse_business_metric_asset(row[12])
+        template = parse_business_metric_asset(row[13])
         cursor.execute(
             """
             SELECT item_kind, source_entity_instance_id, method, estimated,
@@ -872,6 +1117,7 @@ class PostgresBusinessMetricRepository:
                         after["data_type"],
                         after.get("unit"),
                         bool(estimated),
+                        after.get("direction", "R"),
                     )
                 )
             elif kind == "output":
@@ -890,12 +1136,13 @@ class PostgresBusinessMetricRepository:
             sources=tuple(sources),
             internal_processing_digest=(row[8].strip() if row[8] else None),
             output_entity_instance_id=output_entity_id,
-            status=row[9],
+            status=row[10],
             blockers=tuple(blockers),
-            digest=row[10].strip(),
-            planned_by=row[11],
+            digest=row[11].strip(),
+            planned_by=row[12],
+            previous_installation_id=row[9],
         )
-        return plan, template, row[13]
+        return plan, template, row[14]
 
     @staticmethod
     def _create_solution_lineage(

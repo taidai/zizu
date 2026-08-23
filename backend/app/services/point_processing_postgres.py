@@ -75,6 +75,32 @@ def _supports_processing_scope(cursor: Any) -> bool:
     return bool(cursor.fetchone()[0])
 
 
+def _supports_internal_revision_kind(cursor: Any) -> bool:
+    cursor.execute(
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 't_point_processing_revisions'
+            AND column_name = 'internal_kind'
+        )
+        """
+    )
+    return bool(cursor.fetchone()[0])
+
+
+def _internal_revision_kind(cursor: Any, revision_id: UUID) -> str | None:
+    if not _supports_internal_revision_kind(cursor):
+        return None
+    cursor.execute(
+        "SELECT internal_kind FROM t_point_processing_revisions WHERE id = %s",
+        (revision_id,),
+    )
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
 def persist_point_processing_assets(
     cursor: Any,
     package: PackageImport,
@@ -434,13 +460,14 @@ class PostgresPointProcessingCatalog:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT revision.id
                     FROM t_point_processing_revisions AS revision
                     JOIN t_point_processing_templates AS template
                       ON template.id = revision.template_id
                     WHERE upper(template.device_category) = upper(%s)
                       AND template.status = 'active'
+                      {"AND revision.internal_kind IS NULL" if _supports_internal_revision_kind(cursor) else ""}
                     ORDER BY template.asset_id, revision.revision, revision.id
                     """,
                     (device_category,),
@@ -598,7 +625,24 @@ class PostgresPointProcessingCatalog:
         return tuple(PointProcessingSource(*row) for row in cursor.fetchall())
 
     @staticmethod
-    def _load_asset(cursor: Any, revision_id: UUID) -> PointProcessingAsset | None:
+    def _load_asset(
+        cursor: Any,
+        revision_id: UUID,
+        *,
+        include_internal: bool = False,
+    ) -> PointProcessingAsset | None:
+        if _supports_internal_revision_kind(cursor):
+            cursor.execute(
+                """
+                SELECT internal_kind
+                FROM t_point_processing_revisions
+                WHERE id = %s
+                """,
+                (revision_id,),
+            )
+            internal = cursor.fetchone()
+            if internal is not None and internal[0] is not None and not include_internal:
+                return None
         cursor.execute(
             """
             SELECT template.asset_id, template.display_name,
@@ -1142,6 +1186,7 @@ class PostgresPointProcessingRepository:
         *,
         transaction: Any | None = None,
         verified_source_catalog_digest: str | None = None,
+        trusted_business_metric_owner_key: UUID | None = None,
     ) -> PointProcessingApplication:
         del catalog
         if not command.actor.strip() or not command.idempotency_key.strip():
@@ -1250,9 +1295,22 @@ class PostgresPointProcessingRepository:
                         IN SHARE ROW EXCLUSIVE MODE
                         """
                     )
+                    internal_kind = _internal_revision_kind(
+                        cursor, plan.template_revision_id
+                    )
+                    trusted_internal_apply = (
+                        transaction is not None
+                        and trusted_business_metric_owner_key is not None
+                    )
+                    if internal_kind is not None and not trusted_internal_apply:
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_INTERNAL_REVISION",
+                            "Internal point-processing revisions require their owning delivery transaction",
+                        )
                     template = PostgresPointProcessingCatalog._load_asset(
                         cursor,
                         plan.template_revision_id,
+                        include_internal=trusted_internal_apply,
                     )
                     if template is None or template.status != "active":
                         raise PointProcessingError(
@@ -1372,7 +1430,45 @@ class PostgresPointProcessingRepository:
                     self._verify_package_ownership(cursor, plan, current_version)
                     self._apply_l0_plan_items(cursor, plan)
 
-                    if processing_scope == "node":
+                    processing_owner_key = (
+                        trusted_business_metric_owner_key
+                        if processing_scope == "business_metric"
+                        else None
+                    )
+                    if processing_scope == "business_metric":
+                        planned_output_ids = {
+                            UUID(item["output_entity_instance_id"])
+                            for item in plan.items
+                            if item.get("kind") == "output_binding"
+                            and item.get("output_entity_instance_id")
+                        }
+                        if processing_owner_key not in planned_output_ids:
+                            raise PointProcessingError(
+                                "POINT_PROCESSING_INTERNAL_OWNER_INVALID",
+                                "Internal point-processing owner must be its planned output entity",
+                            )
+                        cursor.execute(
+                            """
+                            SELECT id
+                            FROM t_installed_point_processings
+                            WHERE node_id = %s AND current = TRUE
+                              AND processing_scope = 'business_metric'
+                              AND processing_owner_key = %s
+                            FOR UPDATE
+                            """,
+                            (plan.node_id, processing_owner_key),
+                        )
+                        current_installed = cursor.fetchone()
+                        if current_installed is not None:
+                            cursor.execute(
+                                """
+                                UPDATE t_installed_point_processings
+                                SET current = FALSE
+                                WHERE id = %s
+                                """,
+                                (current_installed[0],),
+                            )
+                    elif processing_scope == "node":
                         scope_filter = (
                             "AND processing_scope = 'node'"
                             if supports_processing_scope
@@ -1438,10 +1534,15 @@ class PostgresPointProcessingRepository:
                             INSERT INTO t_installed_point_processings
                               (id, node_id, revision_id, source_plan_id,
                                solution_installation_id, site_configuration_version,
-                               installed_by, current, processing_scope)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                               installed_by, current, processing_scope,
+                               processing_owner_key)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
                             """,
-                            (*installed_values, processing_scope),
+                            (
+                                *installed_values,
+                                processing_scope,
+                                processing_owner_key,
+                            ),
                         )
                     else:
                         cursor.execute(

@@ -201,6 +201,22 @@ class PostgresDataTrunkRepository:
                     with connection.cursor() as cursor:
                         cursor.execute(
                             """
+                            SELECT EXISTS (
+                              SELECT 1
+                              FROM information_schema.columns
+                              WHERE table_schema = 'public'
+                                AND table_name = 't_installed_point_processings'
+                                AND column_name = 'processing_scope'
+                            )
+                            """
+                        )
+                        scope_filter = (
+                            "AND installed.processing_scope = 'node'"
+                            if cursor.fetchone()[0]
+                            else ""
+                        )
+                        cursor.execute(
+                            f"""
                             SELECT installed.id, installed.revision_id,
                                    output.id, output_binding.entity_instance_id,
                                    output.entity_definition_id, output.data_type,
@@ -221,6 +237,7 @@ class PostgresDataTrunkRepository:
                               ON run.installed_processing_id = installed.id
                              AND run.output_id = output.id
                             WHERE installed.current = TRUE
+                              {scope_filter}
                               AND (
                                 run.last_evaluated_at IS NULL
                                 OR run.last_evaluated_at

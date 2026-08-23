@@ -142,6 +142,7 @@ def compile_business_metric(
                     "dataType": item.data_type,
                     "unit": item.unit,
                     "estimated": item.estimated,
+                    "direction": item.direction,
                 }
                 for item in sources
             ],
@@ -383,6 +384,7 @@ def _validate_resolution(template: BusinessMetricTemplate, resolution: MetricSou
             or source.data_type not in _DATA_TYPES
             or not isinstance(source.unit, (str, type(None)))
             or not isinstance(source.estimated, bool)
+            or source.direction not in {"R", "RW"}
         ):
             raise _invalid("Business metric resolved source contract is invalid")
         identifiers.add(source.entity_instance_id)

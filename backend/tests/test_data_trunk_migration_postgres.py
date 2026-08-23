@@ -169,7 +169,52 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 cursor.execute("SELECT to_regclass('t_business_metric_revisions')")
                 self.assertEqual(cursor.fetchone(), (None,))
 
-    def test_043_append_only_tables_reject_update_delete_and_truncate(self) -> None:
+    def test_043_rejects_schema_041_without_schema_042(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_043(cursor)
+                self.assertIn("complete schema 042", str(raised.exception))
+                cursor.execute("SELECT to_regclass('t_business_metric_templates')")
+                self.assertEqual(cursor.fetchone(), (None,))
+
+    def test_043_rejects_all_twelve_malformed_existing_tables(self) -> None:
+        table_names = (
+            "t_business_metric_templates",
+            "t_business_metric_revisions",
+            "t_business_metric_installation_plans",
+            "t_business_metric_plan_items",
+            "t_installed_business_metrics",
+            "t_business_metric_source_bindings",
+            "t_business_metric_projections",
+            "t_business_metric_window_results",
+            "t_business_metric_recomputations",
+            "t_entity_capability_contracts",
+            "t_business_metric_audit",
+            "t_business_metric_acceptance_reports",
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                for table_name in table_names:
+                    cursor.execute(
+                        sql.SQL("CREATE TABLE {} (id UUID PRIMARY KEY)").format(
+                            sql.Identifier(table_name)
+                        )
+                    )
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_043(cursor)
+                self.assertIn("malformed", str(raised.exception))
+
+    def test_043_template_mutation_and_all_append_only_truncations_are_rejected(self) -> None:
         immutable = (
             "t_business_metric_templates",
             "t_business_metric_revisions",
@@ -221,7 +266,7 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     "WHERE tgrelid = 't_business_metric_projections'::regclass "
                     "AND NOT tgisinternal"
                 )
-                self.assertEqual(cursor.fetchone(), (0,))
+                self.assertEqual(cursor.fetchone(), (2,))
 
     def test_042_adds_canonical_formula_and_frozen_selector_schema(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
