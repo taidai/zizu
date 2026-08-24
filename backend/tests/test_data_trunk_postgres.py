@@ -700,6 +700,41 @@ class DataTrunkPostgresTest(unittest.TestCase):
             outbox=1,
         )
 
+    def test_projection_wakeup_runs_after_commit_and_cannot_fail_ingest(self) -> None:
+        observed_event_ids = []
+        test_case = self
+
+        class FailingProjectionObserver:
+            def observe_committed(self, event_ids):
+                with psycopg2.connect(**test_case.connection_kwargs) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT count(*) FROM t_l2_observations "
+                            "WHERE event_id = ANY(%s::uuid[])",
+                            ([str(item) for item in event_ids],),
+                        )
+                        test_case.assertEqual(cursor.fetchone()[0], len(event_ids))
+                observed_event_ids.extend(event_ids)
+                raise RuntimeError("injected post-commit wake-up failure")
+
+        trunk = DataTrunk(
+            self.repository,
+            projection_observer=FailingProjectionObserver(),
+        )
+
+        receipt = trunk.ingest((self.raw_power(12345.0, sequence=1),))
+
+        self.assertEqual(receipt.l2_event_ids, (EXPECTED_EVENT_ID,))
+        self.assertEqual(observed_event_ids, [EXPECTED_EVENT_ID])
+        self.assert_counts(
+            l0=1,
+            l0_latest=1,
+            l2=1,
+            l2_latest=1,
+            sources=1,
+            outbox=1,
+        )
+
     def test_due_formula_reads_frozen_l2_members_and_commits_history(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:

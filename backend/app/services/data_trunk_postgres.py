@@ -1746,4 +1746,11 @@ def _normalized_l2_columns(values: tuple[object, ...]) -> tuple[object, ...]:
 
 
 def build_postgres_data_trunk() -> DataTrunk:
-    return DataTrunk(PostgresDataTrunkRepository())
+    from app.services.metric_projection_postgres import (
+        get_default_metric_projection,
+    )
+
+    return DataTrunk(
+        PostgresDataTrunkRepository(),
+        projection_observer=get_default_metric_projection(),
+    )

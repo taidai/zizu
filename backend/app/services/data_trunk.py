@@ -65,11 +65,21 @@ class DataTrunkRepository(Protocol):
     ) -> tuple[UUID, ...]: ...
 
 
+class ProjectionObserver(Protocol):
+    def observe_committed(self, event_ids: tuple[UUID, ...]) -> object: ...
+
+
 class DataTrunk:
     """隐藏转换查找、时序推进、来源图、outbox 与事务顺序。"""
 
-    def __init__(self, repository: DataTrunkRepository) -> None:
+    def __init__(
+        self,
+        repository: DataTrunkRepository,
+        *,
+        projection_observer: ProjectionObserver | None = None,
+    ) -> None:
         self._repository = repository
+        self._projection_observer = projection_observer
 
     def ingest(self, raw_observations: Sequence[RawObservation]) -> CommitReceipt:
         batch = tuple(raw_observations)
@@ -78,7 +88,9 @@ class DataTrunk:
                 "DATA_TRUNK_BATCH_EMPTY",
                 "Raw observation batch is empty",
             )
-        return self._repository.transact(batch, evaluate_processing)
+        receipt = self._repository.transact(batch, evaluate_processing)
+        self._notify_projection(receipt.l2_event_ids)
+        return receipt
 
     def record_failure(
         self,
@@ -114,7 +126,19 @@ class DataTrunk:
 
     def evaluate_due_formulas(self) -> tuple[UUID, ...]:
         """Evaluate installed typed formulas that reached their configured cadence."""
-        return self._repository.evaluate_due_formulas(evaluate_processing)
+        event_ids = self._repository.evaluate_due_formulas(evaluate_processing)
+        self._notify_projection(event_ids)
+        return event_ids
+
+    def _notify_projection(self, event_ids: tuple[UUID, ...]) -> None:
+        if self._projection_observer is None or not event_ids:
+            return
+        try:
+            self._projection_observer.observe_committed(event_ids)
+        except Exception:
+            # The database transaction has already committed.  Projection is a
+            # recoverable wake-up path and its one-second scan will catch up.
+            return
 
 
 class InMemoryDataTrunkRepository:

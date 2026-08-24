@@ -591,7 +591,7 @@ BEGIN
       schema_043_function_contracts
     FROM (VALUES
       ('guard_business_metric_projection',
-       'e7f2e3707497c2a80ef285a1eabe3038'),
+       '772e456d6b8c31c69b6cddf3aa849e99'),
       ('reject_data_trunk_append_only',
        '055c32ce480d817fe7a82c47d42214bf'),
       ('validate_business_metric_acceptance_runtime',
@@ -1239,10 +1239,8 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
-    IF NEW.installed_metric_id IS DISTINCT FROM OLD.installed_metric_id
-       OR NEW.window_started_at IS DISTINCT FROM OLD.window_started_at
-       OR NEW.window_ended_at IS DISTINCT FROM OLD.window_ended_at THEN
-      RAISE EXCEPTION 'business metric projection identity is immutable'
+    IF NEW.installed_metric_id IS DISTINCT FROM OLD.installed_metric_id THEN
+      RAISE EXCEPTION 'business metric projection installation is immutable'
         USING ERRCODE = '55000';
     END IF;
     RETURN NEW;

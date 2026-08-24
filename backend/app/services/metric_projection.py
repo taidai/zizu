@@ -694,12 +694,11 @@ def _project_relevant_events(
         if not isinstance(event, L2Observation):
             raise TypeError("metric events must be committed L2 observations")
 
-    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
     relevant: list[L2Observation] = []
     for event in events:
         observed_at = _utc(event.observed_at, "event timestamp")
         if method is MetricAggregator.COUNTER_DELTA:
-            if lookback_start <= observed_at <= window.end:
+            if _counter_range_contains(window, observed_at):
                 relevant.append(event)
         elif window.contains(observed_at):
             relevant.append(event)
@@ -755,12 +754,19 @@ def _counter_relevant_samples(
 ) -> tuple[_Sample, ...]:
     if window is None:
         return samples
-    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
     return tuple(
         sample
         for sample in samples
-        if lookback_start <= sample.observed_at <= window.end
+        if _counter_range_contains(window, sample.observed_at)
     )
+
+
+def _counter_range_contains(window: MetricWindow, instant: datetime) -> bool:
+    candidate = _utc(instant, "event timestamp")
+    lookback_start = window.start - timedelta(seconds=window.duration_seconds)
+    if candidate < lookback_start:
+        return False
+    return candidate <= window.end if window.include_end else candidate < window.end
 
 
 def _counter_samples(

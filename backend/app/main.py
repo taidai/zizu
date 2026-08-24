@@ -212,10 +212,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         from app.services.data_trunk_postgres import PostgresDataTrunkRepository
         from app.services.data_trunk import DataTrunk
+        from app.services.metric_projection_postgres import (
+            get_default_metric_projection,
+        )
         from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 
         freshness_repository = PostgresDataTrunkRepository()
-        formula_trunk = DataTrunk(freshness_repository)
+        metric_projection = get_default_metric_projection()
+        formula_trunk = DataTrunk(
+            freshness_repository,
+            projection_observer=metric_projection,
+        )
         stream_evidence = get_en9_stream_evidence()
         await asyncio.to_thread(
             stream_evidence.register_runtime,
@@ -262,6 +269,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     )
                 await _wait_or_stop(1.0)
 
+        async def _metric_projection_loop() -> None:
+            while not _data_trunk_stop.is_set():
+                try:
+                    await asyncio.to_thread(
+                        metric_projection.advance,
+                        now=datetime.now(timezone.utc),
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "[MetricProjection] projection tick failed: {}",
+                        error,
+                    )
+                await _wait_or_stop(1.0)
+
         async def _runtime_health_loop() -> None:
             while not _data_trunk_stop.is_set():
                 try:
@@ -293,12 +314,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 name="data_trunk_typed_formulas",
             ),
             asyncio.create_task(
+                _metric_projection_loop(),
+                name="business_metric_projection",
+            ),
+            asyncio.create_task(
                 _runtime_health_loop(),
                 name="data_trunk_runtime_health",
             ),
         ]
         logger.success(
-            "[Main] L2 freshness, typed formulas and outbox dispatch started ✅"
+            "[Main] L2 freshness, metrics, typed formulas and outbox dispatch started ✅"
         )
     except Exception as error:
         from app.core.config import settings

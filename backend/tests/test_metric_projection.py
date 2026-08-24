@@ -82,6 +82,7 @@ class MetricProjectionTest(unittest.TestCase):
         source_unit: str | None = None,
         output_unit: str | None = None,
         window_minutes: int = 15,
+        aligned_daily: bool = False,
     ):
         source_unit = source_unit or ("kWh" if method == "counter_delta" else "kW")
         output_unit = output_unit or (
@@ -99,7 +100,11 @@ class MetricProjectionTest(unittest.TestCase):
                 "unit": output_unit,
                 "temporalSemantics": "windowed",
             },
-            "window": {"kind": "rolling", "duration": f"{window_minutes}m"},
+            "window": (
+                {"kind": "aligned_daily"}
+                if aligned_daily
+                else {"kind": "rolling", "duration": f"{window_minutes}m"}
+            ),
             "sources": [
                 {
                     "method": method,
@@ -112,7 +117,9 @@ class MetricProjectionTest(unittest.TestCase):
                 "minimumUsableCoverage": minimum_coverage,
             },
             "allowedLateness": "1m",
-            "correction": {"automaticHorizon": "6h"},
+            "correction": {
+                "automaticHorizon": "7d" if aligned_daily else "6h"
+            },
             "flow": {"direction": flow_direction, "normalize": True},
             "capabilities": {"controlEligible": False},
         }
@@ -1208,6 +1215,7 @@ class MetricProjectionTest(unittest.TestCase):
         self,
         *,
         maximum_sample_gap_seconds: int = 2 * 60,
+        aligned_daily: bool = False,
     ) -> MetricProjectionState:
         return MetricProjectionState(
             revision=self.compiled(
@@ -1216,9 +1224,175 @@ class MetricProjectionTest(unittest.TestCase):
                 output_unit="kWh",
                 good_coverage=0.9,
                 minimum_coverage=0.5,
+                aligned_daily=aligned_daily,
             ),
             counter_contract=CounterContract(maximum=999999),
             maximum_sample_gap_seconds=maximum_sample_gap_seconds,
+        )
+
+    def test_aligned_daily_counter_excludes_end_before_identity_validation(self) -> None:
+        now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+        window = aligned_daily_window(now, "Asia/Shanghai")
+        baseline = replace(
+            self.event(0, 1000, event_number=101, unit="Wh"),
+            observed_at=window.start,
+        )
+        endpoint = replace(
+            self.event(0, 1300, event_number=102, unit="Wh"),
+            observed_at=window.end - timedelta(microseconds=1),
+        )
+
+        for offset, expected_lifecycle in (
+            (-1, MetricLifecycle.INVALID),
+            (0, MetricLifecycle.PROVISIONAL),
+            (1, MetricLifecycle.PROVISIONAL),
+        ):
+            with self.subTest(offset_microseconds=offset):
+                pollutant = replace(
+                    self.event(0, 9999, event_number=103, unit="Wh"),
+                    event_id=None,
+                    observed_at=window.end + timedelta(microseconds=offset),
+                )
+                decision = project_metric(
+                    self.counter_state(aligned_daily=True),
+                    (baseline, endpoint, pollutant),
+                    now,
+                )
+
+                self.assertEqual(decision.lifecycle, expected_lifecycle)
+                if offset == -1:
+                    self.assertEqual(decision.reason, "EVENT_ID_INVALID")
+                else:
+                    self.assertEqual(decision.value, Decimal("0.3"))
+                    self.assertEqual(
+                        decision.source_event_ids,
+                        (baseline.event_id, endpoint.event_id),
+                    )
+
+    def test_aligned_daily_counter_excludes_end_before_unit_validation(self) -> None:
+        now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+        window = aligned_daily_window(now, "Asia/Shanghai")
+        baseline = replace(
+            self.event(0, 1000, event_number=111, unit="Wh"),
+            observed_at=window.start,
+        )
+        endpoint = replace(
+            self.event(0, 1300, event_number=112, unit="Wh"),
+            observed_at=window.end - timedelta(microseconds=2),
+        )
+
+        for offset, expected_lifecycle in (
+            (-1, MetricLifecycle.INVALID),
+            (0, MetricLifecycle.PROVISIONAL),
+            (1, MetricLifecycle.PROVISIONAL),
+        ):
+            with self.subTest(offset_microseconds=offset):
+                pollutant = replace(
+                    self.event(0, 9999, event_number=113, unit="kWh"),
+                    observed_at=window.end + timedelta(microseconds=offset),
+                )
+                decision = project_metric(
+                    self.counter_state(aligned_daily=True),
+                    (baseline, endpoint, pollutant),
+                    now,
+                )
+
+                self.assertEqual(decision.lifecycle, expected_lifecycle)
+                if offset == -1:
+                    self.assertEqual(decision.reason, "UNIT_MISMATCH")
+                else:
+                    self.assertEqual(decision.value, Decimal("0.3"))
+
+    def test_aligned_daily_counter_excludes_end_before_duplicate_validation(self) -> None:
+        now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+        window = aligned_daily_window(now, "Asia/Shanghai")
+        baseline = replace(
+            self.event(0, 1000, event_number=121, unit="Wh"),
+            observed_at=window.start,
+        )
+        endpoint = replace(
+            self.event(0, 1300, event_number=122, unit="Wh"),
+            observed_at=window.end - timedelta(microseconds=2),
+        )
+
+        for offset, expected_lifecycle in (
+            (-1, MetricLifecycle.INVALID),
+            (0, MetricLifecycle.PROVISIONAL),
+            (1, MetricLifecycle.PROVISIONAL),
+        ):
+            with self.subTest(offset_microseconds=offset):
+                conflict = replace(
+                    endpoint,
+                    value=TypedValue.float(9999),
+                    observed_at=window.end + timedelta(microseconds=offset),
+                )
+                decision = project_metric(
+                    self.counter_state(aligned_daily=True),
+                    (baseline, endpoint, conflict),
+                    now,
+                )
+
+                self.assertEqual(decision.lifecycle, expected_lifecycle)
+                if offset == -1:
+                    self.assertEqual(decision.reason, "DUPLICATE_EVENT_CONFLICT")
+                else:
+                    self.assertEqual(decision.value, Decimal("0.3"))
+
+    def test_counter_boundary_evidence_follows_daily_and_rolling_closure(self) -> None:
+        daily_now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+        daily = aligned_daily_window(daily_now, "Asia/Shanghai")
+        daily_baseline = replace(
+            self.event(0, 1000, event_number=131, unit="Wh"),
+            observed_at=daily.start,
+        )
+        daily_endpoint = replace(
+            self.event(0, 1300, event_number=132, unit="Wh"),
+            observed_at=daily.end - timedelta(microseconds=2),
+        )
+        invalid_before_end = replace(
+            self.event(0, 1350, event_number=135, unit="Wh"),
+            event_id=None,
+            observed_at=daily.end - timedelta(microseconds=1),
+        )
+        next_midnight = replace(
+            self.event(0, 1400, event_number=133, unit="Wh"),
+            observed_at=daily.end,
+        )
+        after_midnight = replace(
+            self.event(0, 1500, event_number=134, unit="Wh"),
+            observed_at=daily.end + timedelta(microseconds=1),
+        )
+
+        daily_decision = project_metric(
+            self.counter_state(aligned_daily=True),
+            (
+                daily_baseline,
+                daily_endpoint,
+                invalid_before_end,
+                next_midnight,
+                after_midnight,
+            ),
+            daily_now,
+        )
+
+        self.assertEqual(daily_decision.reason, "EVENT_ID_INVALID")
+        self.assertEqual(
+            daily_decision.source_event_ids,
+            (daily_baseline.event_id, daily_endpoint.event_id),
+        )
+
+        rolling_baseline = self.event(-1, 1000, event_number=141, unit="Wh")
+        rolling_end = self.event(15, 1300, event_number=142, unit="Wh")
+        rolling_decision = project_metric(
+            self.counter_state(),
+            (rolling_baseline, rolling_end),
+            self.BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(rolling_decision.value, Decimal("0.3"))
+        self.assertEqual(
+            rolling_decision.source_event_ids,
+            (rolling_baseline.event_id, rolling_end.event_id),
         )
 
     def test_counter_uses_exact_window_start_as_boundary_baseline(self) -> None:
