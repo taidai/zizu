@@ -134,6 +134,7 @@ class MetricProjectionCounterTest(unittest.TestCase):
                 source_observation_ids=(),
                 source_digest="1" * 64,
                 source_order_key="1",
+                event_time_basis="observed_at",
             ),
             L2Observation(
                 event_id=UUID(int=2),
@@ -151,6 +152,7 @@ class MetricProjectionCounterTest(unittest.TestCase):
                 source_observation_ids=(),
                 source_digest="2" * 64,
                 source_order_key="2",
+                event_time_basis="observed_at",
             ),
         )
 

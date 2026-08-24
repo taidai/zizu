@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum, IntEnum
 import math
 from types import MappingProxyType
@@ -30,14 +31,14 @@ class ValueKind(str, Enum):
 @dataclass(frozen=True)
 class TypedValue:
     kind: ValueKind
-    value: float | int | bool | str | tuple[str, ...] | None
+    value: Decimal | float | int | bool | str | tuple[str, ...] | None
 
     @classmethod
-    def float(cls, value: float | None) -> "TypedValue":
+    def float(cls, value: Decimal | float | None) -> "TypedValue":
         return cls(ValueKind.FLOAT, value)
 
     @classmethod
-    def integer(cls, value: int | None) -> "TypedValue":
+    def integer(cls, value: Decimal | int | None) -> "TypedValue":
         return cls(ValueKind.INT, value)
 
     @classmethod
@@ -68,10 +69,10 @@ class RawObservation:
     source_message_id: str | None
     source_sequence: int | None
     source_digest: str
-    event_time_basis: str = "observed_at"
+    event_time_basis: str
 
     def __post_init__(self) -> None:
-        if self.event_time_basis not in {"observed_at", "received_at"}:
+        if self.event_time_basis not in {"unknown", "observed_at", "received_at"}:
             raise ValueError("raw observation event time basis is invalid")
 
 
@@ -326,13 +327,14 @@ class L2Observation:
     source_observation_ids: tuple[UUID, ...]
     source_digest: str
     source_order_key: str
-    event_time_basis: str = "observed_at"
+    event_time_basis: str
 
     def __post_init__(self) -> None:
         if self.event_time_basis not in {
             "observed_at",
             "received_at",
             "calculated_at",
+            "unknown",
         }:
             raise ValueError("L2 observation event time basis is invalid")
 

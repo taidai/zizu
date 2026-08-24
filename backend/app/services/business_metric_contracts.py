@@ -37,7 +37,7 @@ class MetricLifecycle(str, Enum):
 @dataclass(frozen=True)
 class MetricCounterContract:
     maximum: Decimal
-    bit_width: int | None
+    bit_width: int
     reset_on_decrease: bool
     rollover_on_decrease: bool
 
@@ -45,13 +45,10 @@ class MetricCounterContract:
         maximum = Decimal(self.maximum)
         if not maximum.is_finite() or maximum < 0:
             raise ValueError("counter maximum must be finite and non-negative")
-        if self.bit_width is not None:
-            if self.bit_width not in {16, 32, 64}:
-                raise ValueError("counter bit width must be 16, 32, or 64")
-            if maximum != Decimal((1 << self.bit_width) - 1):
-                raise ValueError("counter maximum must match bit width")
-        if self.rollover_on_decrease and self.bit_width is None:
-            raise ValueError("counter rollover requires bit width")
+        if self.bit_width not in {16, 32, 64}:
+            raise ValueError("counter bit width must be 16, 32, or 64")
+        if maximum != Decimal((1 << self.bit_width) - 1):
+            raise ValueError("counter maximum must match bit width")
         if not isinstance(self.reset_on_decrease, bool) or not isinstance(
             self.rollover_on_decrease, bool
         ):

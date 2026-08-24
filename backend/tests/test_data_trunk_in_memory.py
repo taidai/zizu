@@ -28,6 +28,7 @@ class InMemoryDataTrunkTest(unittest.TestCase):
             source_message_id="message-digest",
             source_sequence=None,
             source_digest="a" * 64,
+            event_time_basis="observed_at",
         )
         installed = InstalledPointProcessing.numeric(
             installation_id=UUID("00000000-0000-0000-0000-000000000201"),

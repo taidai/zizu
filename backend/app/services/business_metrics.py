@@ -497,6 +497,8 @@ def _resolve_source(
             return None, "BUSINESS_METRIC_SOURCE_AMBIGUOUS"
         if len(matches) == 1:
             candidate = matches[0]
+            if candidate.producer_contract_digest is None:
+                return None, "BUSINESS_METRIC_SOURCE_PRODUCER_CONTRACT_MISSING"
             if not _source_compatible(template, option.method, candidate):
                 return None, "BUSINESS_METRIC_SOURCE_INCOMPATIBLE"
             return (
@@ -565,7 +567,7 @@ def _source_content(source: ResolvedMetricSource) -> dict[str, Any]:
             None
             if source.counter_contract is None
             else {
-                "maximum": str(source.counter_contract.maximum),
+                "maximum": _decimal_text(source.counter_contract.maximum),
                 "bit_width": source.counter_contract.bit_width,
                 "reset_on_decrease": source.counter_contract.reset_on_decrease,
                 "rollover_on_decrease": source.counter_contract.rollover_on_decrease,
@@ -584,7 +586,7 @@ def _producer_contract_digest(
     unit: str | None,
     freshness_seconds: Decimal | float | int | str,
 ) -> str:
-    freshness = format(Decimal(str(freshness_seconds)).normalize(), "f")
+    freshness = _decimal_text(Decimal(str(freshness_seconds)))
     return _digest(
         {
             "processing_revision_id": str(processing_revision_id),
@@ -602,3 +604,10 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _decimal_text(value: Decimal) -> str:
+    decimal = Decimal(value)
+    if decimal.is_zero():
+        return "0"
+    return format(decimal.normalize(), "f")

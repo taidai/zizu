@@ -163,6 +163,7 @@ class ReferenceEmsPackageTest(unittest.IsolatedAsyncioTestCase):
                 stable_source_key=item.stable_source_key,
                 data_type=item.data_type,
                 unit=item.unit,
+                timestamp_trusted=False,
             )
             for item in point_sources
         }

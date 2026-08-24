@@ -351,6 +351,7 @@ class TagMetadata:
     stable_source_key: str
     data_type: str
     unit: str | None
+    timestamp_trusted: bool
 
 
 class RawObservationAdapter:
@@ -393,7 +394,12 @@ class RawObservationAdapter:
                     source_message_id=source_message_id,
                     source_sequence=source_sequence,
                     source_digest=digest,
-                    event_time_basis=parsed.event_time_basis,
+                    event_time_basis=(
+                        "received_at"
+                        if parsed.event_time_basis == "received_at"
+                        or not metadata.timestamp_trusted
+                        else "observed_at"
+                    ),
                 )
             )
         return tuple(observations)

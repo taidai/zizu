@@ -391,6 +391,7 @@ class DataPipeline:
                 stable_source_key=stable_key,
                 data_type=str(data_type),
                 unit=rule.unit_from,
+                timestamp_trusted=False,
             )
         return catalog
 
@@ -420,7 +421,8 @@ class DataPipeline:
                                    t.range_max,
                                    t.source_type,
                                    t.source_path,
-                                   n.source_catalog_key
+                                   n.source_catalog_key,
+                                   t.timestamp_trusted
                             FROM t_tags t
                             JOIN t_nodes n ON t.node_id = n.id
                             WHERE t.enabled = true AND n.enabled = true;
@@ -439,7 +441,8 @@ class DataPipeline:
             for row in rows:
                 (tag_name, node_name, tag_id, node_id, data_type,
                  scale_factor, offset, unit_from, unit_to, range_min, range_max,
-                 source_type, source_path, node_source_catalog_key) = row
+                 source_type, source_path, node_source_catalog_key,
+                 timestamp_trusted) = row
 
                 rule = TagNormalizationRule(
                     tag_name=tag_name,
@@ -463,6 +466,7 @@ class DataPipeline:
                     ),
                     data_type=str(getattr(data_type, "value", data_type)),
                     unit=unit_from or unit_to,
+                    timestamp_trusted=bool(timestamp_trusted),
                 )
                 new_raw_node_tag_map[(node_name, tag_name)] = raw_metadata
 

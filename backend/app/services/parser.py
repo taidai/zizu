@@ -99,14 +99,14 @@ def _extract_timestamp(data: dict, received_at) -> tuple[int, str]:
         if isinstance(val, (int, float)):
             # 判断是秒还是毫秒: > 10位数字 → 毫秒
             if val > 1e12:
-                return int(val), "observed_at"
-            return int(val * 1000), "observed_at"
+                return int(val), "unknown"
+            return int(val * 1000), "unknown"
         if isinstance(val, str):
             from datetime import datetime as dt
 
             try:
                 parsed = dt.fromisoformat(val.replace("Z", "+00:00"))
-                return int(parsed.timestamp() * 1000), "observed_at"
+                return int(parsed.timestamp() * 1000), "unknown"
             except (ValueError, OSError):
                 continue
 

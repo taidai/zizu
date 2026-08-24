@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -485,7 +486,8 @@ class PostgresDataTrunkRepository:
             """
             SELECT latest.entity_instance_id, latest.event_id,
                    entity.definition_id, entity.data_type, entity.unit,
-                   latest.value_float, latest.value_int, latest.value_bool,
+                   latest.value_float, latest.value_int, latest.value_numeric,
+                   latest.value_bool,
                    latest.value_text, latest.value_codes,
                    latest.quality, latest.reason, latest.observed_at,
                    latest.received_at, latest.calculated_at,
@@ -504,17 +506,17 @@ class PostgresDataTrunkRepository:
         result: dict[InputReference, L2Observation] = {}
         for row in cursor.fetchall():
             kind = ValueKind(row[3])
-            quality = TrunkQuality(int(row[10]))
-            values = row[5:10]
+            quality = TrunkQuality(int(row[11]))
+            values = row[5:11]
             value = None
             if quality not in {TrunkQuality.BAD, TrunkQuality.STALE}:
                 value = {
-                    ValueKind.FLOAT: values[0],
-                    ValueKind.INT: values[1],
-                    ValueKind.BOOL: values[2],
-                    ValueKind.STRING: values[3],
-                    ValueKind.ENUM: values[3],
-                    ValueKind.CODE_SET: tuple(values[4]) if values[4] is not None else None,
+                    ValueKind.FLOAT: values[2] if values[2] is not None else values[0],
+                    ValueKind.INT: values[2] if values[2] is not None else values[1],
+                    ValueKind.BOOL: values[3],
+                    ValueKind.STRING: values[4],
+                    ValueKind.ENUM: values[4],
+                    ValueKind.CODE_SET: tuple(values[5]) if values[5] is not None else None,
                 }[kind]
             entity_id = UUID(str(row[0]))
             result[InputReference.l2(entity_id)] = L2Observation(
@@ -524,16 +526,16 @@ class PostgresDataTrunkRepository:
                 value=TypedValue(kind, value),
                 unit=row[4],
                 quality=quality,
-                reason=row[11],
-                observed_at=row[12],
-                received_at=row[13],
-                calculated_at=row[14],
-                processing_revision_id=UUID(str(row[15])),
-                site_configuration_version=int(row[16]),
+                reason=row[12],
+                observed_at=row[13],
+                received_at=row[14],
+                calculated_at=row[15],
+                processing_revision_id=UUID(str(row[16])),
+                site_configuration_version=int(row[17]),
                 source_observation_ids=(),
-                source_digest=row[17].strip(),
-                source_order_key=row[18],
-                event_time_basis=row[19],
+                source_digest=row[18].strip(),
+                source_order_key=row[19],
+                event_time_basis=row[20],
             )
         return result
 
@@ -884,13 +886,13 @@ class PostgresDataTrunkRepository:
                    is_virtual, quality, observation_id, source_message_id,
                    source_sequence, source_digest, raw_unit,
                    raw_value_float, raw_value_int, raw_value_bool,
-                   raw_value_text)
+                   raw_value_text, event_time_basis, event_received_at)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   FALSE, %s, %s, %s,
                   %s, %s, %s,
-                  %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -905,6 +907,8 @@ class PostgresDataTrunkRepository:
                     observation.source_digest,
                     observation.raw_unit,
                     *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
                 ),
             )
             accepted.append(observation)
@@ -928,14 +932,15 @@ class PostgresDataTrunkRepository:
                    is_virtual, quality, updated_at, observation_id,
                    source_message_id, source_sequence, source_digest,
                    source_order_key, raw_unit, raw_value_float,
-                   raw_value_int, raw_value_bool, raw_value_text)
+                   raw_value_int, raw_value_bool, raw_value_text,
+                   event_time_basis, event_received_at)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   FALSE, %s, now(), %s,
                   %s, %s, %s,
                   %s, %s, %s,
-                  %s, %s, %s
+                  %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (node_id, tag_id) DO UPDATE SET
                   ts = EXCLUDED.ts,
@@ -955,11 +960,25 @@ class PostgresDataTrunkRepository:
                   raw_value_float = EXCLUDED.raw_value_float,
                   raw_value_int = EXCLUDED.raw_value_int,
                   raw_value_bool = EXCLUDED.raw_value_bool,
-                  raw_value_text = EXCLUDED.raw_value_text
+                  raw_value_text = EXCLUDED.raw_value_text,
+                  event_time_basis = EXCLUDED.event_time_basis,
+                  event_received_at = EXCLUDED.event_received_at
                 WHERE
-                  EXCLUDED.ts > t_telemetry_latest.ts
+                  CASE EXCLUDED.event_time_basis
+                    WHEN 'observed_at' THEN EXCLUDED.ts
+                    ELSE EXCLUDED.event_received_at
+                  END > CASE t_telemetry_latest.event_time_basis
+                    WHEN 'observed_at' THEN t_telemetry_latest.ts
+                    ELSE t_telemetry_latest.event_received_at
+                  END
                   OR (
-                    EXCLUDED.ts = t_telemetry_latest.ts
+                    CASE EXCLUDED.event_time_basis
+                      WHEN 'observed_at' THEN EXCLUDED.ts
+                      ELSE EXCLUDED.event_received_at
+                    END = CASE t_telemetry_latest.event_time_basis
+                      WHEN 'observed_at' THEN t_telemetry_latest.ts
+                      ELSE t_telemetry_latest.event_received_at
+                    END
                     AND EXCLUDED.source_order_key
                       > COALESCE(t_telemetry_latest.source_order_key, '')
                   )
@@ -978,6 +997,8 @@ class PostgresDataTrunkRepository:
                     order_key,
                     observation.raw_unit,
                     *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
                 ),
             )
             if cursor.fetchone() is None:
@@ -1275,9 +1296,10 @@ class PostgresDataTrunkRepository:
                 """
                 SELECT latest.node_id, latest.tag_id, tag.name,
                        latest.raw_value_bool, latest.raw_unit, latest.quality,
-                       latest.ts, latest.updated_at, latest.observation_id,
+                       latest.ts, latest.event_received_at, latest.observation_id,
                        latest.source_message_id, latest.source_sequence,
-                       latest.source_digest, tag.freshness_seconds
+                       latest.source_digest, tag.freshness_seconds,
+                       latest.event_time_basis
                 FROM t_telemetry_latest AS latest
                 JOIN t_tags AS tag ON tag.id = latest.tag_id
                 WHERE latest.tag_id = ANY(%s::uuid[])
@@ -1300,6 +1322,7 @@ class PostgresDataTrunkRepository:
                     source_sequence,
                     source_digest,
                     input_freshness_seconds,
+                    event_time_basis,
                 ) = row
                 effective_quality = TrunkQuality(quality)
                 if (
@@ -1322,6 +1345,7 @@ class PostgresDataTrunkRepository:
                     source_message_id=source_message_id,
                     source_sequence=source_sequence,
                     source_digest=source_digest.strip(),
+                    event_time_basis=event_time_basis,
                 )
 
         cursor.execute(
@@ -1416,7 +1440,7 @@ class PostgresDataTrunkRepository:
             if state is None:
                 cursor.execute(
                     """
-                    SELECT value_float, value_int, value_bool, value_text,
+                    SELECT value_float, value_int, value_numeric, value_bool, value_text,
                            value_codes, quality, observed_at
                     FROM t_l2_latest
                     WHERE entity_instance_id = %s
@@ -1427,9 +1451,9 @@ class PostgresDataTrunkRepository:
                 row = cursor.fetchone()
                 if row is not None:
                     state = (
-                        _normalized_l2_columns(row[:5]),
-                        int(row[5]),
-                        row[6],
+                        _normalized_l2_columns(row[:6]),
+                        int(row[6]),
+                        row[7],
                     )
             current = (
                 _normalized_l2_columns(_l2_columns(observation.value)),
@@ -1473,13 +1497,13 @@ class PostgresDataTrunkRepository:
                 INSERT INTO t_l2_observations
                   (observed_at, event_id, entity_instance_id,
                    received_at, calculated_at, value_float, value_int,
-                   value_bool, value_text, value_codes, quality, reason,
+                   value_numeric, value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
                     source_digest, source_order_key,
                     producing_runtime_instance_id, event_time_basis)
                 VALUES (
                   %s, %s, %s,
-                  %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s, %s
@@ -1517,13 +1541,13 @@ class PostgresDataTrunkRepository:
                 INSERT INTO t_l2_latest
                   (entity_instance_id, event_id, observed_at,
                    received_at, calculated_at, value_float, value_int,
-                   value_bool, value_text, value_codes, quality, reason,
+                   value_numeric, value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
                     source_digest, source_order_key,
                     producing_runtime_instance_id, event_time_basis)
                 VALUES (
                   %s, %s, %s,
-                  %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s, %s
@@ -1535,6 +1559,7 @@ class PostgresDataTrunkRepository:
                   calculated_at = EXCLUDED.calculated_at,
                   value_float = EXCLUDED.value_float,
                   value_int = EXCLUDED.value_int,
+                  value_numeric = EXCLUDED.value_numeric,
                   value_bool = EXCLUDED.value_bool,
                   value_text = EXCLUDED.value_text,
                   value_codes = EXCLUDED.value_codes,
@@ -1551,23 +1576,27 @@ class PostgresDataTrunkRepository:
                   CASE EXCLUDED.event_time_basis
                     WHEN 'observed_at' THEN EXCLUDED.observed_at
                     WHEN 'received_at' THEN EXCLUDED.received_at
-                    ELSE EXCLUDED.calculated_at
+                    WHEN 'calculated_at' THEN EXCLUDED.calculated_at
+                    ELSE EXCLUDED.received_at
                   END
                     > CASE t_l2_latest.event_time_basis
                         WHEN 'observed_at' THEN t_l2_latest.observed_at
                         WHEN 'received_at' THEN t_l2_latest.received_at
-                        ELSE t_l2_latest.calculated_at
+                        WHEN 'calculated_at' THEN t_l2_latest.calculated_at
+                        ELSE t_l2_latest.received_at
                       END
                   OR (
                     CASE EXCLUDED.event_time_basis
                       WHEN 'observed_at' THEN EXCLUDED.observed_at
                       WHEN 'received_at' THEN EXCLUDED.received_at
-                      ELSE EXCLUDED.calculated_at
+                      WHEN 'calculated_at' THEN EXCLUDED.calculated_at
+                      ELSE EXCLUDED.received_at
                     END
                       = CASE t_l2_latest.event_time_basis
                           WHEN 'observed_at' THEN t_l2_latest.observed_at
                           WHEN 'received_at' THEN t_l2_latest.received_at
-                          ELSE t_l2_latest.calculated_at
+                          WHEN 'calculated_at' THEN t_l2_latest.calculated_at
+                          ELSE t_l2_latest.received_at
                         END
                     AND EXCLUDED.source_order_key > t_l2_latest.source_order_key
                   )
@@ -1601,16 +1630,20 @@ class PostgresDataTrunkRepository:
                 continue
             cursor.execute(
                 """
-                SELECT observation_id, source_digest
-                FROM t_l0_observation_dedup
-                WHERE observation_id = ANY(%s::uuid[])
-                ORDER BY observation_id
+                SELECT DISTINCT ON (dedup.observation_id)
+                       dedup.observation_id, dedup.source_digest,
+                       telemetry.event_time_basis
+                FROM t_l0_observation_dedup AS dedup
+                JOIN t_telemetry AS telemetry
+                  ON telemetry.observation_id = dedup.observation_id
+                WHERE dedup.observation_id = ANY(%s::uuid[])
+                ORDER BY dedup.observation_id, telemetry.ts DESC
                 """,
                 ([str(item) for item in observation.source_observation_ids],),
             )
             l0_sources = {
-                UUID(str(source_id)): (source_digest.strip(),)
-                for source_id, source_digest in cursor.fetchall()
+                UUID(str(source_id)): (source_digest.strip(), event_time_basis)
+                for source_id, source_digest, event_time_basis in cursor.fetchall()
             }
             unresolved = tuple(
                 source_id for source_id in observation.source_observation_ids
@@ -1644,7 +1677,7 @@ class PostgresDataTrunkRepository:
                     "POINT_PROCESSING_SOURCE_MISSING",
                     "L2 source observation is unavailable",
                 )
-            for source_id, (source_digest,) in l0_sources.items():
+            for source_id, (source_digest, source_event_time_basis) in l0_sources.items():
                 cursor.execute(
                     """
                 INSERT INTO t_l2_observation_sources
@@ -1659,7 +1692,7 @@ class PostgresDataTrunkRepository:
                         observation.observed_at,
                         str(source_id),
                         source_digest,
-                        observation.event_time_basis,
+                        source_event_time_basis,
                     ),
                 )
             for source_id, (
@@ -1692,6 +1725,8 @@ class PostgresDataTrunkRepository:
             payload_value = observation.value.value
             if isinstance(payload_value, tuple):
                 payload_value = list(payload_value)
+            elif isinstance(payload_value, Decimal):
+                payload_value = _decimal_text(payload_value)
             payload = {
                 "event_id": str(observation.event_id),
                 "entity_instance_id": str(observation.entity_instance_id),
@@ -1770,22 +1805,28 @@ def _l2_columns(
 ) -> tuple[
     float | None,
     int | None,
+    Decimal | None,
     bool | None,
     str | None,
     list[str] | None,
 ]:
     if value.value is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     if value.kind is ValueKind.FLOAT:
-        return float(value.value), None, None, None, None
+        if isinstance(value.value, Decimal):
+            return None, None, value.value, None, None, None
+        return float(value.value), None, None, None, None, None
     if value.kind is ValueKind.INT:
-        return None, int(value.value), None, None, None
+        integer = int(value.value)
+        if isinstance(value.value, Decimal) or not -(1 << 63) <= integer <= (1 << 63) - 1:
+            return None, None, Decimal(value.value), None, None, None
+        return None, integer, None, None, None, None
     if value.kind is ValueKind.BOOL:
-        return None, None, bool(value.value), None, None
+        return None, None, None, bool(value.value), None, None
     if value.kind in {ValueKind.STRING, ValueKind.ENUM}:
-        return None, None, None, str(value.value), None
+        return None, None, None, None, str(value.value), None
     if value.kind is ValueKind.CODE_SET:
-        return None, None, None, None, list(value.value)
+        return None, None, None, None, None, list(value.value)
     raise DataTrunkError(
         "POINT_PROCESSING_VALUE_INVALID",
         "Unsupported L2 typed value",
@@ -1793,7 +1834,13 @@ def _l2_columns(
 
 
 def _normalized_l2_columns(values: tuple[object, ...]) -> tuple[object, ...]:
-    return (*values[:4], None if values[4] is None else tuple(values[4]))
+    return (*values[:5], None if values[5] is None else tuple(values[5]))
+
+
+def _decimal_text(value: Decimal) -> str:
+    if value.is_zero():
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def build_postgres_data_trunk() -> DataTrunk:

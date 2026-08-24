@@ -39,6 +39,12 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
                         "method": "counter_delta",
                         "entityDefinition": "pv.energy_total",
                         "priority": 1,
+                        "counter": {
+                            "maximum": "4294967295",
+                            "bitWidth": 32,
+                            "resetOnDecrease": False,
+                            "rolloverOnDecrease": True,
+                        },
                     },
                     {
                         "method": "power_integral",
@@ -68,6 +74,7 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
                     "pv.energy_total",
                     "FLOAT",
                     "kWh",
+                    producer_contract_digest="a" * 64,
                 ),
             ),
         )
@@ -156,6 +163,24 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
         self.assertEqual(source.producer_contract_digest, "a" * 64)
         self.assertEqual(source.counter_contract, counter_contract)
 
+    def test_preview_blocks_source_without_immutable_producer_digest(self) -> None:
+        from dataclasses import replace
+
+        self.catalog.replace_sources(
+            tuple(
+                replace(source, producer_contract_digest=None)
+                for source in self.catalog.sources
+            )
+        )
+
+        plan = self.delivery.preview(self._preview_request())
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            plan.blockers,
+            ({"code": "BUSINESS_METRIC_SOURCE_PRODUCER_CONTRACT_MISSING"},),
+        )
+
     def test_preview_uses_power_integral_only_when_counter_is_absent(self) -> None:
         from app.services.business_metrics import MetricSourceCandidate
 
@@ -168,6 +193,7 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
                     "pv.active_power",
                     "FLOAT",
                     "kW",
+                    producer_contract_digest="b" * 64,
                 ),
             )
         )

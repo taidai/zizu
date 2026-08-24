@@ -35,6 +35,12 @@ class SolutionPackageArchiveBusinessMetricTest(unittest.TestCase):
                     "method": "counter_delta",
                     "entityDefinition": "pv.energy_total",
                     "priority": 1,
+                    "counter": {
+                        "maximum": "4294967295",
+                        "bitWidth": 32,
+                        "resetOnDecrease": False,
+                        "rolloverOnDecrease": True,
+                    },
                 }
             ],
             "quality": {"goodCoverage": 0.98, "minimumUsableCoverage": 0.8},

@@ -35,6 +35,12 @@ class SolutionBusinessMetricTest(unittest.TestCase):
                     "method": "counter_delta",
                     "entityDefinition": "pv.energy_total",
                     "priority": 1,
+                    "counter": {
+                        "maximum": "4294967295",
+                        "bitWidth": 32,
+                        "resetOnDecrease": False,
+                        "rolloverOnDecrease": True,
+                    },
                 },
                 {
                     "method": "power_integral",
@@ -141,6 +147,31 @@ class SolutionBusinessMetricTest(unittest.TestCase):
             "BUSINESS_METRIC_ASSET_INVALID",
         ):
             parse_business_metric_asset(raw)
+
+    def test_counter_source_requires_complete_bit_width_contract(self) -> None:
+        missing = self.pv_energy_today()
+        del missing["sources"][0]["counter"]
+        without_width = self.pv_energy_today()
+        del without_width["sources"][0]["counter"]["bitWidth"]
+
+        for raw in (missing, without_width):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(
+                    BusinessMetricAssetError,
+                    "BUSINESS_METRIC_ASSET_INVALID",
+                ):
+                    parse_business_metric_asset(raw)
+
+    def test_counter_decimal_spelling_does_not_change_template_digest(self) -> None:
+        integer = self.pv_energy_today()
+        decimal = self.pv_energy_today()
+        integer["sources"][0]["counter"]["maximum"] = "4294967295"
+        decimal["sources"][0]["counter"]["maximum"] = "4294967295.0"
+
+        self.assertEqual(
+            parse_business_metric_asset(integer).content_digest,
+            parse_business_metric_asset(decimal).content_digest,
+        )
 
     def test_compilation_rejects_mutable_source_resolution(self) -> None:
         template = parse_business_metric_asset(self.pv_energy_today())

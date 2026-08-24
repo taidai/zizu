@@ -34,6 +34,11 @@ class BusinessMetricPostgresTest(unittest.TestCase):
     SOURCE_BINDING_ID = UUID("91000000-0000-0000-0000-000000000013")
     SECOND_TEMPLATE_ROW_ID = UUID("91000000-0000-0000-0000-000000000014")
     SECOND_TEMPLATE_REVISION_ID = UUID("91000000-0000-0000-0000-000000000015")
+    SOURCE_PP_TEMPLATE_ID = UUID("91000000-0000-0000-0000-000000000016")
+    SOURCE_PP_REVISION_ID = UUID("91000000-0000-0000-0000-000000000017")
+    SOURCE_PP_OUTPUT_ID = UUID("91000000-0000-0000-0000-000000000018")
+    SOURCE_PP_PLAN_ID = UUID("91000000-0000-0000-0000-000000000019")
+    SOURCE_PP_INSTALLATION_ID = UUID("91000000-0000-0000-0000-000000000020")
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -83,6 +88,12 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     "method": "counter_delta",
                     "entityDefinition": "pv.energy_total",
                     "priority": 1,
+                    "counter": {
+                        "maximum": "4294967295",
+                        "bitWidth": 32,
+                        "resetOnDecrease": False,
+                        "rolloverOnDecrease": True,
+                    },
                 },
                 {
                     "method": "power_integral",
@@ -100,8 +111,16 @@ class BusinessMetricPostgresTest(unittest.TestCase):
     def test_schema_freezes_runtime_source_and_explicit_event_time_contracts(self) -> None:
         expected = {
             ("t_l2_observations", "event_time_basis"),
+            ("t_l2_observations", "commit_sequence"),
+            ("t_l2_observations", "value_numeric"),
             ("t_l2_latest", "event_time_basis"),
+            ("t_l2_latest", "value_numeric"),
             ("t_l2_observation_sources", "source_event_time_basis"),
+            ("t_tags", "timestamp_trusted"),
+            ("t_telemetry", "event_time_basis"),
+            ("t_telemetry", "event_received_at"),
+            ("t_telemetry_latest", "event_time_basis"),
+            ("t_telemetry_latest", "event_received_at"),
             ("t_business_metric_source_bindings", "maximum_sample_gap_seconds"),
             ("t_business_metric_source_bindings", "producer_contract_digest"),
             ("t_business_metric_source_bindings", "counter_maximum"),
@@ -110,6 +129,7 @@ class BusinessMetricPostgresTest(unittest.TestCase):
             ("t_business_metric_source_bindings", "counter_rollover_on_decrease"),
             ("t_business_metric_window_results", "first_source_effective_at"),
             ("t_business_metric_window_results", "last_source_effective_at"),
+            ("t_business_metric_projections", "last_commit_sequence"),
         }
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -120,8 +140,16 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     WHERE table_schema = 'public'
                       AND (table_name, column_name) IN (
                         ('t_l2_observations', 'event_time_basis'),
+                        ('t_l2_observations', 'commit_sequence'),
+                        ('t_l2_observations', 'value_numeric'),
                         ('t_l2_latest', 'event_time_basis'),
+                        ('t_l2_latest', 'value_numeric'),
                         ('t_l2_observation_sources', 'source_event_time_basis'),
+                        ('t_tags', 'timestamp_trusted'),
+                        ('t_telemetry', 'event_time_basis'),
+                        ('t_telemetry', 'event_received_at'),
+                        ('t_telemetry_latest', 'event_time_basis'),
+                        ('t_telemetry_latest', 'event_received_at'),
                         ('t_business_metric_source_bindings', 'maximum_sample_gap_seconds'),
                         ('t_business_metric_source_bindings', 'producer_contract_digest'),
                         ('t_business_metric_source_bindings', 'counter_maximum'),
@@ -129,14 +157,15 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                         ('t_business_metric_source_bindings', 'counter_reset_on_decrease'),
                         ('t_business_metric_source_bindings', 'counter_rollover_on_decrease'),
                         ('t_business_metric_window_results', 'first_source_effective_at'),
-                        ('t_business_metric_window_results', 'last_source_effective_at')
+                        ('t_business_metric_window_results', 'last_source_effective_at'),
+                        ('t_business_metric_projections', 'last_commit_sequence')
                       )
                     """
                 )
                 actual = set(cursor.fetchall())
         self.assertEqual(actual, expected)
 
-    def _seed_site_and_template(self) -> None:
+    def _seed_site_and_template(self, *, install_source_producer: bool = True) -> None:
         from app.services.solution_business_metrics import parse_business_metric_asset
 
         template = parse_business_metric_asset(self.template_raw)
@@ -281,6 +310,74 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     ),
                 )
                 cursor.execute(
+                    """
+                    DO $source_producer$
+                    BEGIN
+                    IF %s THEN
+                    UPDATE t_entity_instance_bindings
+                    SET active = FALSE WHERE entity_instance_id = %s;
+                    UPDATE t_entity_instances
+                    SET source_kind = 'point_processing' WHERE id = %s;
+                    INSERT INTO t_point_processing_templates
+                      (id, asset_id, device_category, brand, model,
+                       display_name, status)
+                    VALUES (%s, 'business-metric-source', 'inverter', 'Test',
+                            'Source', 'Business metric source', 'active');
+                    INSERT INTO t_point_processing_revisions
+                      (id, template_id, revision, content_digest, published_at)
+                    VALUES (%s, %s, 1, %s, now());
+                    INSERT INTO t_point_processing_outputs
+                      (id, revision_id, output_key, entity_definition_id,
+                       data_type, unit, freshness_seconds)
+                    VALUES (%s, %s, 'source', 'pv.energy_total',
+                            'FLOAT', 'kWh', 5);
+                    INSERT INTO t_point_processing_plans
+                      (id, node_id, template_revision_id,
+                       entity_identity_installation_id, solution_installation_id,
+                       base_site_configuration_version, source_catalog_digest,
+                       status, items, blockers, digest, planned_by)
+                    VALUES (%s, %s, %s, %s, %s, 1, %s, 'applied', '[]', '[]',
+                            %s, 'user:seed');
+                    INSERT INTO t_installed_point_processings
+                      (id, node_id, revision_id, source_plan_id,
+                       solution_installation_id, site_configuration_version,
+                       installed_by, current)
+                    VALUES (%s, %s, %s, %s, %s, 1, 'user:seed', TRUE);
+                    INSERT INTO t_point_processing_output_bindings
+                      (installed_processing_id, output_id, entity_instance_id)
+                    VALUES (%s, %s, %s);
+                    END IF;
+                    END;
+                    $source_producer$;
+                    """,
+                    (
+                        install_source_producer,
+                        self.COUNTER_ID,
+                        self.COUNTER_ID,
+                        self.SOURCE_PP_TEMPLATE_ID,
+                        self.SOURCE_PP_REVISION_ID,
+                        self.SOURCE_PP_TEMPLATE_ID,
+                        "1" * 64,
+                        self.SOURCE_PP_OUTPUT_ID,
+                        self.SOURCE_PP_REVISION_ID,
+                        self.SOURCE_PP_PLAN_ID,
+                        self.SOURCE_NODE_ID,
+                        self.SOURCE_PP_REVISION_ID,
+                        self.IDENTITY_INSTALLATION_ID,
+                        self.BASE_INSTALLATION_ID,
+                        "2" * 64,
+                        "3" * 64,
+                        self.SOURCE_PP_INSTALLATION_ID,
+                        self.SOURCE_NODE_ID,
+                        self.SOURCE_PP_REVISION_ID,
+                        self.SOURCE_PP_PLAN_ID,
+                        self.BASE_INSTALLATION_ID,
+                        self.SOURCE_PP_INSTALLATION_ID,
+                        self.SOURCE_PP_OUTPUT_ID,
+                        self.COUNTER_ID,
+                    ),
+                )
+                cursor.execute(
                     "INSERT INTO t_business_metric_templates (id, template_key) VALUES (%s, %s)",
                     (self.TEMPLATE_ROW_ID, template.template_id),
                 )
@@ -413,7 +510,8 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     """
                     SELECT
                       (SELECT count(*) FROM t_installed_business_metrics),
-                      (SELECT count(*) FROM t_installed_point_processings),
+                      (SELECT count(*) FROM t_installed_point_processings
+                       WHERE processing_scope = 'business_metric'),
                       (SELECT count(*) FROM t_point_processing_applications),
                       (SELECT count(*) FROM t_business_metric_source_bindings),
                       (SELECT count(*) FROM t_entity_capability_contracts),
@@ -1280,6 +1378,7 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                     UPDATE t_business_metric_projections
                     SET watermark_at = %s, coverage = 0.75, quality = 192,
                         estimated = FALSE,
+                        last_commit_sequence = 5,
                         state = '{"lifecycle":"provisional","value":"2"}',
                         updated_at = %s
                     WHERE installed_metric_id = %s
@@ -1302,6 +1401,11 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                         "UPDATE t_business_metric_projections SET updated_at = %s "
                         "WHERE installed_metric_id = %s",
                         (first_updated, installed.id),
+                    ),
+                    (
+                        "UPDATE t_business_metric_projections "
+                        "SET last_commit_sequence = 4 WHERE installed_metric_id = %s",
+                        (installed.id,),
                     ),
                     (
                         "UPDATE t_business_metric_projections "
@@ -1355,12 +1459,60 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                         connection.rollback()
 
                 next_end = first_end + timedelta(days=1)
+                carried_payloads = (
+                    (0.25, 0, True, {"value": None}),
+                    (0.0, 192, True, {"value": None}),
+                    (0.0, 0, True, {"value": "2"}),
+                    (0.0, 0, True, {"sourceEventIds": [str(uuid4())]}),
+                    (0.0, 0, True, {"peakAt": first_end.isoformat()}),
+                    (0.0, 0, True, {"reason": "OLD_WINDOW"}),
+                    (0.0, 0, True, {"lifecycle": "invalid"}),
+                    (0.0, 0, True, {"unexpected": "payload"}),
+                )
+                for coverage, quality, estimated, payload in carried_payloads:
+                    state = {
+                        "lifecycle": "provisional",
+                        "windowStartedAt": first_end.isoformat(),
+                        "windowEndedAt": next_end.isoformat(),
+                        "value": None,
+                        "reason": None,
+                        "sourceEventIds": [],
+                        "sourceSummary": {},
+                        "peakAt": None,
+                        "peakEventId": None,
+                        **payload,
+                    }
+                    with self.subTest(payload=payload, coverage=coverage, quality=quality):
+                        with self.assertRaises(
+                            psycopg2.errors.ObjectNotInPrerequisiteState
+                        ):
+                            cursor.execute(
+                                """
+                                UPDATE t_business_metric_projections
+                                SET window_started_at = %s, window_ended_at = %s,
+                                    watermark_at = %s, coverage = %s, quality = %s,
+                                    estimated = %s, state = %s, updated_at = %s
+                                WHERE installed_metric_id = %s
+                                """,
+                                (
+                                    first_end,
+                                    next_end,
+                                    first_watermark + timedelta(hours=2),
+                                    coverage,
+                                    quality,
+                                    estimated,
+                                    json.dumps(state),
+                                    first_updated + timedelta(minutes=2),
+                                    installed.id,
+                                ),
+                            )
+                        connection.rollback()
                 cursor.execute(
                     """
                     UPDATE t_business_metric_projections
                     SET window_started_at = %s, window_ended_at = %s,
-                        watermark_at = %s, coverage = 0.25, quality = 64,
-                        estimated = TRUE,
+                        watermark_at = %s, coverage = 0, quality = 0,
+                        estimated = FALSE,
                         state = %s,
                         updated_at = %s
                     WHERE installed_metric_id = %s
@@ -1375,6 +1527,11 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                                 "windowStartedAt": first_end.isoformat(),
                                 "windowEndedAt": next_end.isoformat(),
                                 "value": None,
+                                "reason": None,
+                                "sourceEventIds": [],
+                                "sourceSummary": {},
+                                "peakAt": None,
+                                "peakEventId": None,
                             }
                         ),
                         first_updated + timedelta(minutes=2),
@@ -1392,7 +1549,7 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     cursor.fetchone(),
-                    (first_end, next_end, 0.25, 64, "provisional"),
+                    (first_end, next_end, 0.0, 0, "provisional"),
                 )
 
     def test_metric_lifecycle_and_recomputation_progress_by_appending_events(self) -> None:
@@ -1735,6 +1892,47 @@ class BusinessMetricPostgresTest(unittest.TestCase):
                             evidence["result_observed_at"],
                             installed.entity_instance_id,
                             "d" * 64,
+                        ),
+                    )
+
+    def test_window_result_effective_time_must_equal_referenced_l2_basis(self) -> None:
+        installed = self._delivery().apply(self._apply_command(self._preview()))
+        evidence = self._seed_window_evidence(installed)
+        wrong_effective = "2026-08-22T15:59:01Z"
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    cursor.execute(
+                        """
+                        INSERT INTO t_business_metric_window_results
+                          (installed_metric_id, window_started_at,
+                           window_ended_at, revision, lifecycle,
+                           calculation_method, quality, coverage, estimated,
+                           source_count, first_source_event_id,
+                           first_source_observed_at, first_source_effective_at,
+                           last_source_event_id, last_source_observed_at,
+                           last_source_effective_at, result_event_id,
+                           result_observed_at, result_entity_instance_id,
+                           content_digest, source_summary)
+                        VALUES (%s, %s, %s, 1, 'completed',
+                                'counter_delta', 192, 1, FALSE, 1,
+                                %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, '{}')
+                        """,
+                        (
+                            installed.id,
+                            evidence["window_started_at"],
+                            evidence["result_observed_at"],
+                            evidence["source_event_id"],
+                            evidence["source_observed_at"],
+                            wrong_effective,
+                            evidence["source_event_id"],
+                            evidence["source_observed_at"],
+                            wrong_effective,
+                            evidence["result_event_id"],
+                            evidence["result_observed_at"],
+                            installed.entity_instance_id,
+                            "9" * 64,
                         ),
                     )
 

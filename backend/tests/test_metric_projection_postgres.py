@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 import hashlib
 import os
 from threading import Event, Thread
@@ -138,7 +139,7 @@ class MetricProjectionPostgresTest(unittest.TestCase):
             },
             "capabilities": {"controlEligible": False},
         }
-        fixture._seed_site_and_template()
+        fixture._seed_site_and_template(install_source_producer=False)
         self.source_data_type = source_data_type
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -286,7 +287,7 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         *,
         event_id: UUID,
         observed_at: datetime,
-        value: float | None,
+        value: Decimal | float | int | None,
         quality: TrunkQuality = TrunkQuality.GOOD,
         received_at: datetime | None = None,
         entity_id: UUID | None = None,
@@ -301,11 +302,12 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                     """
                     INSERT INTO t_l2_observations
                       (observed_at, event_id, entity_instance_id, received_at,
-                       calculated_at, value_float, value_int, quality, reason,
+                       calculated_at, value_float, value_int, value_numeric,
+                       quality, reason,
                        processing_revision_id, site_configuration_version,
                        source_digest, source_order_key,
                        producing_runtime_instance_id, event_time_basis)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -315,7 +317,20 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                         received,
                         max(received, observed_at),
                         value if self.source_data_type == "FLOAT" else None,
-                        int(value) if value is not None and self.source_data_type == "INT" else None,
+                        (
+                            int(value)
+                            if value is not None
+                            and self.source_data_type == "INT"
+                            and -(1 << 63) <= int(value) <= (1 << 63) - 1
+                            else None
+                        ),
+                        (
+                            Decimal(value)
+                            if value is not None
+                            and self.source_data_type == "INT"
+                            and not (-(1 << 63) <= int(value) <= (1 << 63) - 1)
+                            else None
+                        ),
                         int(quality),
                         None if quality is TrunkQuality.GOOD else "SOURCE_BAD",
                         processing_revision_id or self.SOURCE_REVISION_ID,
@@ -406,7 +421,7 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                 )
                 lifecycle, value, coverage, quality, source_ids = cursor.fetchone()
         self.assertEqual(lifecycle, "provisional")
-        self.assertEqual(value, "15.0")
+        self.assertEqual(value, "15")
         self.assertEqual(coverage, 0.5)
         self.assertEqual(quality, int(TrunkQuality.GOOD))
         self.assertEqual(source_ids, [str(first), str(second)])
@@ -500,12 +515,82 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         source_bound_queries = [
             query
             for query in sql
-            if "FROM t_l2_observations" in query and "min(" in query
+            if "FROM t_l2_observations" in query and "commit_sequence >" in query
         ]
         self.assertEqual(len(latest_result_queries), 1)
         self.assertEqual(len(source_bound_queries), 1)
-        self.assertIn("received_at >", source_bound_queries[0])
-        self.assertIn("END >=", source_bound_queries[0])
+        self.assertIn("ORDER BY commit_sequence", source_bound_queries[0])
+
+    def test_commit_cursor_corrects_every_affected_rolling_window(self) -> None:
+        self._reset_and_install(window_kind="rolling")
+        anchor = self.DAY_START + timedelta(hours=7)
+        for sequence, minutes in enumerate((-90, -70, -50, -30, -10, 0), 1):
+            self._seed_source(
+                event_id=UUID(int=0x9200 + sequence),
+                observed_at=anchor + timedelta(minutes=minutes),
+                value=float(sequence * 10),
+            )
+        self._seed_source(
+            event_id=UUID(int=0x9210),
+            observed_at=anchor + timedelta(minutes=2),
+            value=60.0,
+        )
+        now = anchor + timedelta(minutes=3)
+
+        completed = self._runtime(now=now).advance(now=now)
+
+        self.assertEqual(completed.completed_count, 11)
+        late_events = (
+            (UUID(int=0x9211), anchor - timedelta(minutes=60), 25.0),
+            (UUID(int=0x9212), anchor - timedelta(minutes=5), 55.0),
+        )
+        for event_id, observed_at, value in late_events:
+            self._seed_source(
+                event_id=event_id,
+                observed_at=observed_at,
+                received_at=observed_at + timedelta(seconds=1),
+                value=value,
+            )
+
+        corrected = self._runtime(now=now + timedelta(seconds=1)).advance(
+            now=now + timedelta(seconds=1)
+        )
+        replay = self._runtime(now=now + timedelta(seconds=2)).advance(
+            now=now + timedelta(seconds=2)
+        )
+
+        self.assertEqual(corrected.corrected_count, 11)
+        self.assertEqual(replay.corrected_count, 0)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM (
+                      SELECT window_started_at, window_ended_at
+                      FROM t_business_metric_window_results
+                      WHERE installed_metric_id = %s AND revision = 2
+                        AND lifecycle = 'corrected'
+                      GROUP BY window_started_at, window_ended_at
+                    ) AS corrected_windows
+                    """,
+                    (self.installed.id,),
+                )
+                corrected_windows = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT projection.last_commit_sequence = max(source.commit_sequence)
+                    FROM t_business_metric_projections AS projection
+                    CROSS JOIN t_l2_observations AS source
+                    WHERE projection.installed_metric_id = %s
+                      AND source.entity_instance_id = %s
+                    GROUP BY projection.last_commit_sequence
+                    """,
+                    (self.installed.id, self.source_entity_id),
+                )
+                cursor_caught_up = cursor.fetchone()[0]
+        self.assertEqual(corrected_windows, 11)
+        self.assertTrue(cursor_caught_up)
 
     def test_first_completion_after_nine_day_stop_is_not_cut_by_correction_horizon(self) -> None:
         first = UUID("92000000-0000-0000-0000-000000000016")
@@ -518,6 +603,23 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         )
         now = self.DAY_START + timedelta(days=9)
 
+        waiting = self._runtime(now=now).advance(now=now)
+
+        self.assertEqual(waiting.completed_count, 0)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM t_business_metric_window_results"
+                )
+                self.assertEqual(cursor.fetchone()[0], 0)
+
+        heartbeat = UUID("92000000-0000-0000-0000-000000000029")
+        self._seed_source(
+            event_id=heartbeat,
+            observed_at=self.DAY_START + timedelta(days=1, minutes=1, seconds=1),
+            value=20.0,
+            received_at=self.DAY_START + timedelta(days=9, seconds=1),
+        )
         receipt = self._runtime(now=now).advance(now=now)
 
         self.assertEqual(receipt.completed_count, 1)
@@ -537,6 +639,78 @@ class MetricProjectionPostgresTest(unittest.TestCase):
             rows,
             [(self.DAY_START, self.DAY_START + timedelta(days=1), 1, "completed")],
         )
+
+    def test_commit_cursor_recovers_every_late_daily_window_in_one_batch(self) -> None:
+        day_one = self.DAY_START
+        day_two = self.DAY_START + timedelta(days=1)
+        seeds = (
+            (UUID("92000000-0000-0000-0000-000000000041"), day_one, 10.0),
+            (UUID("92000000-0000-0000-0000-000000000042"), day_one + timedelta(hours=12), 20.0),
+            (UUID("92000000-0000-0000-0000-000000000043"), day_two, 30.0),
+            (UUID("92000000-0000-0000-0000-000000000044"), day_two + timedelta(hours=12), 40.0),
+            (UUID("92000000-0000-0000-0000-000000000045"), day_two + timedelta(days=1, minutes=1, seconds=1), 40.0),
+        )
+        for event_id, observed_at, value in seeds:
+            self._seed_source(event_id=event_id, observed_at=observed_at, value=value)
+        now = self.DAY_START + timedelta(days=2, minutes=2)
+        first = self._runtime(now=now).advance(now=now)
+        self.assertEqual(first.completed_count, 2)
+
+        # Both commits are newer in PostgreSQL even though their received_at values
+        # precede the projection's wall-clock updated_at.  A received-time scan loses
+        # them, and collapsing to min(effective_at) loses one affected daily window.
+        late_one = UUID("92000000-0000-0000-0000-000000000046")
+        late_two = UUID("92000000-0000-0000-0000-000000000047")
+        self._seed_source(
+            event_id=late_one,
+            observed_at=day_one + timedelta(hours=6),
+            received_at=day_one + timedelta(hours=6, seconds=1),
+            value=50.0,
+        )
+        self._seed_source(
+            event_id=late_two,
+            observed_at=day_two + timedelta(hours=6),
+            received_at=day_two + timedelta(hours=6, seconds=1),
+            value=60.0,
+        )
+
+        corrected = self._runtime(now=now + timedelta(seconds=1)).advance(
+            now=now + timedelta(seconds=1)
+        )
+        replay = self._runtime(now=now + timedelta(seconds=2)).advance(
+            now=now + timedelta(seconds=2)
+        )
+
+        self.assertEqual(corrected.corrected_count, 2)
+        self.assertEqual(replay.corrected_count, 0)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT window_started_at, max(revision)
+                    FROM t_business_metric_window_results
+                    WHERE installed_metric_id = %s
+                    GROUP BY window_started_at
+                    ORDER BY window_started_at
+                    """,
+                    (self.installed.id,),
+                )
+                revisions = cursor.fetchall()
+                cursor.execute(
+                    """
+                    SELECT projection.last_commit_sequence,
+                           max(observation.commit_sequence)
+                    FROM t_business_metric_projections AS projection
+                    CROSS JOIN t_l2_observations AS observation
+                    WHERE projection.installed_metric_id = %s
+                      AND observation.entity_instance_id = %s
+                    GROUP BY projection.last_commit_sequence
+                    """,
+                    (self.installed.id, self.source_entity_id),
+                )
+                checkpoint = cursor.fetchone()
+        self.assertEqual(revisions[:2], [(day_one, 2), (day_two, 2)])
+        self.assertEqual(checkpoint[0], checkpoint[1])
 
     def test_frozen_producer_contract_ignores_mutable_entity_unit_and_freshness(self) -> None:
         event_id = UUID("92000000-0000-0000-0000-000000000013")
@@ -584,7 +758,7 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                     (self.installed.id,),
                 )
                 row = cursor.fetchone()
-        self.assertEqual(row, ("provisional", "15.0", int(TrunkQuality.GOOD)))
+        self.assertEqual(row, ("provisional", "15", int(TrunkQuality.GOOD)))
 
     def test_l2_processing_revision_mismatch_fails_closed_without_relabeling(self) -> None:
         event_id = UUID("92000000-0000-0000-0000-000000000014")
@@ -651,7 +825,7 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                     (self.installed.id,),
                 )
                 row = cursor.fetchone()
-        self.assertEqual(row, ("15.0", None, int(TrunkQuality.GOOD)))
+        self.assertEqual(row, ("15", None, int(TrunkQuality.GOOD)))
 
     def test_restart_replay_is_idempotent(self) -> None:
         self._seed_closable_day()
@@ -779,7 +953,9 @@ class MetricProjectionPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT result.revision, result.lifecycle, observation.value_float
+                    SELECT result.revision, result.lifecycle,
+                           COALESCE(observation.value_numeric,
+                                    observation.value_float::numeric)
                     FROM t_business_metric_window_results AS result
                     JOIN t_l2_observations AS observation
                       ON observation.event_id = result.result_event_id
@@ -790,7 +966,18 @@ class MetricProjectionPostgresTest(unittest.TestCase):
                     (self.installed.id,),
                 )
                 rows = cursor.fetchall()
+                cursor.execute(
+                    """
+                    SELECT source_order_key,
+                           COALESCE(value_numeric, value_float::numeric)
+                    FROM t_l2_latest WHERE entity_instance_id = %s
+                    """,
+                    (self.output_entity_id,),
+                )
+                latest = cursor.fetchone()
         self.assertEqual(rows, [(1, "completed", 15.0), (2, "corrected", 22.5)])
+        self.assertTrue(latest[0].endswith("0000000002"))
+        self.assertEqual(latest[1], Decimal("22.5"))
 
     def test_restart_scans_received_watermark_when_late_receive_precedes_last_tick(self) -> None:
         self._seed_closable_day()
@@ -811,6 +998,47 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         self.assertEqual(receipt.corrected_count, 1)
         self.assertEqual(receipt.error_count, 0)
         self.assertEqual(self._metric_counts(), (1, 2, 2, 5, 2))
+
+    def test_late_old_window_correction_never_replaces_newer_metric_latest(self) -> None:
+        day_two = self.DAY_START + timedelta(days=1)
+        events = (
+            (UUID("92000000-0000-0000-0000-000000000061"), self.DAY_START, 10.0),
+            (UUID("92000000-0000-0000-0000-000000000062"), self.DAY_START + timedelta(hours=12), 20.0),
+            (UUID("92000000-0000-0000-0000-000000000063"), day_two, 30.0),
+            (UUID("92000000-0000-0000-0000-000000000064"), day_two + timedelta(hours=12), 40.0),
+            (UUID("92000000-0000-0000-0000-000000000065"), day_two + timedelta(days=1, minutes=1, seconds=1), 40.0),
+        )
+        for event_id, observed_at, value in events:
+            self._seed_source(event_id=event_id, observed_at=observed_at, value=value)
+        now = self.DAY_START + timedelta(days=2, minutes=2)
+        first = self._runtime(now=now).advance(now=now)
+        self.assertEqual(first.completed_count, 2)
+
+        late = UUID("92000000-0000-0000-0000-000000000066")
+        self._seed_source(
+            event_id=late,
+            observed_at=self.DAY_START + timedelta(hours=6),
+            received_at=self.DAY_START + timedelta(hours=6, seconds=1),
+            value=50.0,
+        )
+        corrected = self._runtime(now=now + timedelta(seconds=1)).advance(
+            now=now + timedelta(seconds=1)
+        )
+
+        self.assertEqual(corrected.corrected_count, 1)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT observed_at, event_time_basis, source_order_key
+                    FROM t_l2_latest WHERE entity_instance_id = %s
+                    """,
+                    (self.output_entity_id,),
+                )
+                latest = cursor.fetchone()
+        self.assertEqual(latest[0], self.DAY_START + timedelta(days=2))
+        self.assertEqual(latest[1], "observed_at")
+        self.assertTrue(latest[2].endswith("0000000001"))
 
     def test_untrusted_observed_at_falls_back_to_received_at_and_records_basis(self) -> None:
         first = UUID("92000000-0000-0000-0000-000000000021")
@@ -950,6 +1178,82 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         self.assertEqual(row[3], [str(frozen)])
         self.assertNotIn(str(unrelated_event), row[3])
         self.assertEqual(self._metric_counts()[2], 0)
+
+    def test_uint64_counter_rollover_uses_exact_numeric_values(self) -> None:
+        maximum = Decimal("18446744073709551615")
+        self._reset_and_install(
+            method="counter_delta",
+            source_data_type="INT",
+            counter_contract={
+                "maximum": str(maximum),
+                "bitWidth": 64,
+                "resetOnDecrease": False,
+                "rolloverOnDecrease": True,
+            },
+        )
+        first = UUID("92000000-0000-0000-0000-000000000051")
+        last = UUID("92000000-0000-0000-0000-000000000052")
+        heartbeat = UUID("92000000-0000-0000-0000-000000000053")
+        self._seed_source(
+            event_id=first,
+            observed_at=self.DAY_START,
+            value=maximum - 2,
+        )
+        self._seed_source(
+            event_id=last,
+            observed_at=self.DAY_START + timedelta(hours=23),
+            value=Decimal("3"),
+        )
+        self._seed_source(
+            event_id=heartbeat,
+            observed_at=self.DAY_START + timedelta(days=1, minutes=1, seconds=1),
+            value=Decimal("3"),
+        )
+        now = self.DAY_START + timedelta(days=1, minutes=2)
+
+        receipt = self._runtime(now=now).advance(now=now)
+
+        self.assertEqual(receipt.completed_count, 1)
+        exact_maximum = UUID("92000000-0000-0000-0000-000000000054")
+        self._seed_source(
+            event_id=exact_maximum,
+            observed_at=self.DAY_START + timedelta(days=2),
+            value=maximum,
+        )
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value_numeric FROM t_l2_observations
+                    WHERE event_id = %s AND observed_at = %s
+                    """,
+                    (first, self.DAY_START),
+                )
+                persisted = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT value_numeric FROM t_l2_observations
+                    WHERE event_id = %s AND observed_at = %s
+                    """,
+                    (exact_maximum, self.DAY_START + timedelta(days=2)),
+                )
+                persisted_maximum = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT COALESCE(observation.value_numeric,
+                                    observation.value_float::numeric)
+                    FROM t_business_metric_window_results AS result
+                    JOIN t_l2_observations AS observation
+                      ON observation.event_id = result.result_event_id
+                     AND observation.observed_at = result.result_observed_at
+                    WHERE result.installed_metric_id = %s
+                    """,
+                    (self.installed.id,),
+                )
+                result = cursor.fetchone()[0]
+        self.assertEqual(persisted, maximum - 2)
+        self.assertEqual(persisted_maximum, maximum)
+        self.assertEqual(result, Decimal("6"))
 
     def test_frozen_counter_contracts_apply_16_32_64_bit_and_reset_rules(self) -> None:
         cases = (
@@ -1115,6 +1419,36 @@ class MetricProjectionPostgresTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn(rows[0][0], {self.installed.id, second.id})
         self.assertEqual(rows[0][1], 1)
+
+    def test_one_installation_compile_failure_does_not_block_the_second(self) -> None:
+        from app.services import metric_projection_postgres
+
+        self.fixture._seed_second_metric_template()
+        second_plan = self.fixture._preview_template("ems.pv-energy-yesterday")
+        self.fixture._delivery().apply(
+            self.fixture._apply_command(second_plan, key="metric-second-load")
+        )
+        self._seed_closable_day()
+        original = metric_projection_postgres.parse_business_metric_asset
+        calls = 0
+
+        def fail_first(content):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("malformed frozen revision")
+            return original(content)
+
+        now = self.DAY_START + timedelta(days=1, minutes=2)
+        with patch.object(
+            metric_projection_postgres,
+            "parse_business_metric_asset",
+            side_effect=fail_first,
+        ):
+            receipt = self._runtime(now=now).advance(now=now)
+
+        self.assertEqual(receipt.error_count, 1)
+        self.assertEqual(receipt.completed_count, 1)
 
 
 if __name__ == "__main__":

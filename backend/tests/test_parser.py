@@ -83,7 +83,7 @@ def test_parse_records_explicit_event_time_basis_without_time_comparison():
 
     assert explicit is not None
     assert explicit.timestamp_ms == 2524608000000
-    assert explicit.event_time_basis == "observed_at"
+    assert explicit.event_time_basis == "unknown"
     assert fallback is not None
     assert fallback.timestamp_ms == 1787572800000
     assert fallback.event_time_basis == "received_at"

@@ -308,6 +308,7 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
                 source_message_id="message-2",
                 source_sequence=2,
                 source_digest="2" * 64,
+                event_time_basis="observed_at",
             )
         )
         pipeline._buffer.append(
@@ -324,6 +325,7 @@ class TagMqttAlarmAdapterContractTest(unittest.TestCase):
                 source_message_id="message-1",
                 source_sequence=1,
                 source_digest="1" * 64,
+                event_time_basis="observed_at",
             )
         )
 

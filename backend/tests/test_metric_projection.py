@@ -65,6 +65,7 @@ class MetricProjectionTest(unittest.TestCase):
             source_observation_ids=(),
             source_digest=f"{event_number:064x}",
             source_order_key=source_order_key or f"S:{event_number:020d}",
+            event_time_basis="observed_at",
         )
 
     @staticmethod
@@ -110,6 +111,18 @@ class MetricProjectionTest(unittest.TestCase):
                     "method": method,
                     "entityDefinition": "site.active_power",
                     "priority": 1,
+                    **(
+                        {
+                            "counter": {
+                                "maximum": "4294967295",
+                                "bitWidth": 32,
+                                "resetOnDecrease": False,
+                                "rolloverOnDecrease": True,
+                            }
+                        }
+                        if method == "counter_delta"
+                        else {}
+                    ),
                 }
             ],
             "quality": {

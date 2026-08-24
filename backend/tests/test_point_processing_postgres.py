@@ -870,6 +870,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 source_message_id="task6-runtime-message",
                 source_sequence=index,
                 source_digest=chr(ord("a") + index) * 64,
+                event_time_basis="observed_at",
             )
             for index, (name, (value, unit)) in enumerate(values.items(), 1)
         )

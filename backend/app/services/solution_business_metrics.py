@@ -312,6 +312,8 @@ def _parse_sources(raw: Any) -> tuple[MetricSourceOption, ...]:
         counter_contract = _parse_counter_contract(item.get("counter"))
         if "counter" in item and method is not MetricAggregator.COUNTER_DELTA:
             raise _invalid("Business metric counter contract is misplaced")
+        if method is MetricAggregator.COUNTER_DELTA and counter_contract is None:
+            raise _invalid("Business metric counter contract is required")
         priorities.add(priority)
         parsed.append(
             MetricSourceOption(
@@ -457,11 +459,18 @@ def _counter_content(contract: MetricCounterContract | None) -> dict[str, Any] |
     if contract is None:
         return None
     return {
-        "maximum": str(contract.maximum),
+        "maximum": _decimal_text(contract.maximum),
         "bit_width": contract.bit_width,
         "reset_on_decrease": contract.reset_on_decrease,
         "rollover_on_decrease": contract.rollover_on_decrease,
     }
+
+
+def _decimal_text(value: Decimal) -> str:
+    decimal = Decimal(value)
+    if decimal.is_zero():
+        return "0"
+    return format(decimal.normalize(), "f")
 
 
 def _counter_from_content(raw: Any) -> MetricCounterContract | None:

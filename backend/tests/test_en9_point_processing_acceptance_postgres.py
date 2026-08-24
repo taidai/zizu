@@ -165,6 +165,7 @@ class EN9PointProcessingAcceptancePostgresTest(unittest.TestCase):
                     source_message_id="en9-acceptance-snapshot",
                     source_sequence=sequence,
                     source_digest=digest,
+                    event_time_basis="observed_at",
                 )
             )
         receipt = DataTrunk(

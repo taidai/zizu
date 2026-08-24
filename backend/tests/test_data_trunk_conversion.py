@@ -41,6 +41,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             source_message_id="msg-1",
             source_sequence=1,
             source_digest="a" * 64,
+            event_time_basis="observed_at",
         )
         installed = InstalledPointProcessing.numeric(
             installation_id=UUID("00000000-0000-0000-0000-000000000201"),
@@ -491,6 +492,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             source_observation_ids=(),
             source_digest=digest,
             source_order_key=f"L:{event_id}",
+            event_time_basis="observed_at",
         )
 
     def _boolean_set_fixture(self) -> dict[str, Any]:
@@ -517,6 +519,7 @@ class PcsNumericConversionTest(unittest.TestCase):
                 source_message_id="msg-en9",
                 source_sequence=index,
                 source_digest=f"{index:064x}",
+                event_time_basis="observed_at",
             )
             for index, reference in enumerate(references)
         }

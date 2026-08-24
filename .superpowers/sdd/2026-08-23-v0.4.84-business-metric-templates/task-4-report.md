@@ -164,3 +164,73 @@ Task 5 审批重算状态机仍不在修正范围内。
 - 最终无数据库联合门禁：152/152 PASS（5.081s）；parser：7/7 PASS（0.30s）。
 - 最终静态门禁：21 个改动 Python 文件 `py_compile` PASS，`git diff --check` PASS。
 - counter reset 与 rollover 同时启用的资产合同先新增 RED（1 个失败），领域校验与 Schema 043 互斥约束对齐后聚焦 2/2 GREEN；point-processing source 选源对可空 unit 严格读取冻结 output，不回退到可变 entity 元数据，相关 plan/runtime counter PG 聚焦 3/3 GREEN。
+
+## 第二轮独立复审修正（完成）
+
+第二轮复审判定仍为 SPEC/QUALITY FAIL。审计目标是把上一轮仍依赖逻辑时间或单一最早事件的恢复扫描改成数据库权威 commit cursor，并补齐封窗水位、uint64、可信时间来源、latest 顺序和证据精确绑定。Schema 043 尚未发布，因此继续在 043 内 expand-only 修正并同步 replay/fingerprint；不新增 044、不进入 Task 5 审批重算。
+
+本轮严格按 RED→GREEN 逐项记录以下 10 个边界：
+
+1. commit sequence/checkpoint cursor 与同批多个迟到窗口并集；
+2. source watermark 必须越过 `window.end + allowed_lateness` 才能首次封窗；
+3. projection 跨窗只能写中性 reset payload；
+4. ready plan 强制完整 counter contract 与 immutable producer digest；
+5. NUMERIC/Decimal uint64 精确持久化及 rollover；
+6. 冻结 timestamp-trust contract、unknown/received 保守升级和逐 L0 evidence basis；
+7. 正式 metric latest 使用 window-end event time，旧窗修正不得压过新窗；
+8. window/acceptance evidence 的 effective time 必须与被引用 L2 行精确相等；
+9. installation parse/compile/load 错误必须逐安装隔离；
+10. Decimal canonical digest 忽略无语义尾零并规范零值。
+
+### 第二轮 RED 证据（提交游标 / 水位线）
+
+- `test_first_completion_after_nine_day_stop_is_not_cut_by_correction_horizon`：RED，只有墙钟越过 deadline、没有冻结来源水位越线时错误地产生 `completed_count=1`（期望 0）。
+- `test_commit_cursor_recovers_every_late_daily_window_in_one_batch`：RED，同一提交批次含两个旧日窗、且 `received_at` 早于 checkpoint 时得到 `corrected_count=0`（期望 2）；证明 `received_at > updated_at` 不是可靠提交游标，且单一 `earliest_new` 不能表达全部受影响窗口。
+
+最小修复后两个聚焦用例 2/2 GREEN：Schema 043 的 L2 sequence/default 与 projection `last_commit_sequence` 形成权威游标；每次按 `commit_sequence > checkpoint` 读取全部新事件并枚举影响窗并集，cursor 与结果同事务推进。首次结果仅在 effective source watermark 严格越过 lateness deadline 时产生；无正式结果的恢复路径从最早冻结来源补算，不套 correction horizon。
+
+### 第二轮 RED→GREEN（guard / ready plan / load isolation）
+
+- 跨窗逐项携带 coverage、quality、value、source、peak、reason 的 6 个恶意 UPDATE 均先 RED（旧 trigger 全部接受）；加入冻结 estimated、BAD/0 coverage 和全空 state 的中性 reset 后 6 个拒绝与合法下一窗均 GREEN。runtime 在跨窗时先写中性 checkpoint、再以同窗更新 provisional payload。
+- 缺失 counter contract 的模板先 RED（parser 接受）；counter_delta 现在强制 16/32/64 bitWidth、对应 maximum、两个显式互斥 decrease flag。缺 immutable producer digest 的 preview 返回 `BUSINESS_METRIC_SOURCE_PRODUCER_CONTRACT_MISSING`；binding 列改为 NOT NULL，counter binding 不再接受全空合同。两个聚焦用例 2/2 GREEN。
+- 双安装中首次 frozen revision compile 故障先从 `_load_installations` 直接外抛；loader 改为只返回 raw row groups，逐安装 parse/compile/validate 纳入既有隔离边界后真实 PG 用例 1/1 GREEN，第二安装正常封窗。
+
+### 第二轮 RED→GREEN（NUMERIC / time trust / latest / evidence）
+
+- uint64 首个真实 PG 用例先因 `value_numeric` 不存在 RED；加入 Schema 043 `NUMERIC` typed slot 后又依次暴露 typed trigger 不接受 numeric、Decimal 不能直接进入 JSON canonical 两个 RED。最终 L2 history/latest、metric source loader、正式结果、outbox 与 source-summary 统一保持 Decimal，不经过 float/BIGINT。`18446744073709551613 -> 3` 按 modulus 手算得到 6，`2^64-1` 本身也能精确写入并读回；聚焦用例 1/1 GREEN。
+- parser 有设备时间时不再自行宣称可信，而输出 `unknown` candidate；`TagMetadata.timestamp_trusted` 为无默认的显式冻结合同，adapter 仅在 candidate 存在且合同为 true 时选择 `observed_at`，否则选择 `received_at`。旧 Schema 042 L2 在 043 升级后保守为 `received_at`；future trusted/untrusted 和旧行升级聚焦测试均 GREEN。
+- 多 L0 输入最初把聚合 L2 的 basis 复制给每条 source evidence；混合 future-untrusted/observed boolean-set RED 后，repository 从对应 `t_telemetry` 原始行逐条读取 basis，最终 evidence 为 `received_at` 与 `observed_at`，聚焦 1/1 GREEN。
+- 正式 metric L2 原先以 `calculated_at` 排 latest，晚到旧窗修正会压过 D+1 completed。正式事实现在 `observed_at=window.end`、basis=`observed_at`，同窗用 result revision source-order 决胜；D+1 后修 D 保持 D+1 latest，同窗 revision 2 在仍为最新窗时正确替换 revision 1，两个真实 PG 路径均 GREEN。
+- window-result/acceptance trigger 原先只检查 effective time 位于范围内；错误但仍在范围内的 evidence 先被接受而 RED。两个 trigger 现在精确 join 原始 `(event_id, observed_at)` L2，并验证 `observed_at/calculated_at/received_at/unknown(received)` CASE 的 effective time 相等，负向聚焦 1/1 GREEN。
+- Decimal canonical 统一去除无语义尾零并把所有 zero spelling 规范为 `0`；`65535` 与 `65535.0` 产生同一模板/plan/source digest，聚焦用例 GREEN。projection JSON 的预期值也固定为规范文本 `15` 而非 `15.0`。
+
+### 第二轮 RED→GREEN（cursor rolling / migration fail-closed）
+
+- daily 同批两个旧窗已由 commit cursor 修正 2 个 revision；补充 rolling 6h 真 PG 用例后，一批两个迟到 commit 修正 11 个正式 rolling windows，replay 修正 0 个，projection cursor 精确追平 source max sequence。
+- projection 跨日先执行 neutral reset、再写 current payload时，第二步误用 decision instant 作为 `updated_at`，被单调 guard 正确拒绝；runtime 改用当前 tick instant 后跨窗恢复 GREEN。
+- neutral reset guard 进一步要求 state 只有 lifecycle/window identity/value/reason/source/summary/peak 九个键，拒绝错误 lifecycle 和额外 payload；carry coverage/quality/value/source/peak/reason 的既有 6 个负向用例扩展为 8 个，合法下一窗继续 GREEN，函数 fingerprint 已同步。
+- Schema 043 replay 自检现在强绑定 commit sequence/default/index 及 L2/L2-latest NUMERIC typed constraints；删除 cursor index、删除 sequence default、删除 numeric typed constraint 三种 partial schema 均在 replay 时 fail closed。旧 042 L2 backfill、完整 replay 和三种损坏聚焦均 GREEN。
+
+### 第二轮阶段性验证
+
+- Task4 PostgreSQL 首次全量：25 项中 21 PASS；3 个 Decimal canonical 旧 literal 与 1 个跨窗 `updated_at` 单调错误均已修，4/4 聚焦复测 GREEN。
+- 新增 rolling 多窗 commit-cursor：1/1 PASS（11 completed、11 corrected、replay 0）。
+- DataTrunk PostgreSQL：23/23 PASS（87.520s），包含 mixed L0 basis、post-commit observer、freshness 与全部原子回滚。
+- 相关无数据库组合：125/125 PASS；扩大到 Task 1/2/3/DataTrunk 组合时 144 项中仅 1 个 fixture 缺 producer digest，补齐后 `tests.test_business_metrics` 11/11 PASS。
+- BusinessMetric PostgreSQL 首次全量 38 项的 9 个失败均为 fixture 新增 ordinary source producer 后旧 `_counts()` 把它算作 private metric processing；计数改为 `processing_scope='business_metric'` 后两个代表性用例 2/2 GREEN。产品事务本身未失败，完整复跑列入最终门禁。
+
+### 第二轮最终门禁与测试基础设施裁决
+
+- Task4 projection + DataTrunk PostgreSQL 联合门禁第一次 49 项中 48 PASS；唯一失败是前置 projection 模块注册 UUID adapter 后，DataTrunk source-evidence fixture 从字符串变为 `UUID` 对象。断言改为按数据库 UUID 类型规范化，顺序复现 2/2 GREEN。
+- 随后两次联合复跑都在不同用例的 `DROP SCHEMA public CASCADE` setup 中各出现一次 `DeadlockDetected`。第一次已按隔离裁决通知并由父任务重建 `zizu_metric_test`；重建后仍复现。容器 PostgreSQL 日志确认对端 PID 是 TimescaleDB `Telemetry Reporter [1]` background worker，不是 unittest/python、应用连接池或产品事务泄漏。
+- 为避免共享 schema-reset helper 与 Timescale reporter 的已证实竞争，先用 deterministic fake cursor 得到 1 个 RED；最小修复仅在 `cursor.connection.autocommit` 为真时捕获一次 `psycopg2.errors.DeadlockDetected` 并立即重试 `DROP SCHEMA`。非 autocommit 不重试、第二次 deadlock 与其他异常原样抛出；两个 fail-closed 用例 2/2 GREEN。生产 migration/runtime 未增加 retry，也没有 sleep 或宽泛异常吞噬。
+- 受限 reset 修复后的 Task4 projection + DataTrunk PostgreSQL 最终联合门禁：49/49 PASS（272.109s）。覆盖 authoritative commit cursor、daily/rolling 多迟到窗、restart/replay、watermark closure、uint64、显式 time trust、latest 不回退、双安装隔离、并发 advisory lock、五阶段结果事务故障与 DataTrunk post-commit observer。
+- 带新 reset 边界的 Task2 migration/business metric/point PostgreSQL 最终全量：79/79 PASS（339.861s）。
+- Task1–4、DataTrunk、parser/normalizer/pipeline、参考 EMS package、MQTT adapter 与 websocket 相关无数据库联合门禁：209 tests 执行成功（208 PASS + 1 个 PostgreSQL-only websocket 用例按环境正常 skip，37.960s）。Task1 archive 的旧 `counter_delta` fixture 首次被完整 counter 合同正确拒绝，补齐冻结 32-bit rollover 合同后聚焦 1/1 GREEN。
+- 最终静态门禁：29 个改动 Python 文件 `py_compile` PASS，`git diff --check` PASS，unmerged path 为 0；完整产品/migration/test/report 差异已审计。
+
+### 第二轮保留边界
+
+- `recompute()` 继续 fail closed 返回 `AUDITED_RECOMPUTE_REQUIRES_TASK_5`；未实现 Task5 审批重算状态机。
+- 100 个统计实体的一秒 tick p95 固定数据集量化仍按规格留给 Task8；本任务已用 query spy 锁定一次批量 latest-result 查询和 commit-cursor 后有界 source scan。
+- 未启用自动控制策略、未写设备、未新增依赖、未新增 044，也未修改 001–042 migration。

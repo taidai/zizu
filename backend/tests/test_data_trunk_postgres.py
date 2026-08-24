@@ -284,6 +284,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
             source_message_id=f"message-{sequence}",
             source_sequence=sequence,
             source_digest=digest_character * 64,
+            event_time_basis="observed_at",
         )
 
     @staticmethod
@@ -309,6 +310,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
             source_message_id=f"message-{sequence}",
             source_sequence=sequence,
             source_digest=digest_character * 64,
+            event_time_basis="observed_at",
         )
 
     @staticmethod
@@ -335,6 +337,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
             source_message_id=f"message-bool-{sequence}",
             source_sequence=sequence,
             source_digest=f"{sequence:064x}",
+            event_time_basis="observed_at",
         )
 
     @staticmethod
@@ -740,10 +743,21 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     (str(first.l2_event_ids[0]), str(ENTITY_ID)),
                 )
                 row = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT array_agg(event_time_basis ORDER BY source_sequence),
+                           (SELECT event_time_basis FROM t_telemetry_latest
+                            WHERE tag_id = %s)
+                    FROM t_telemetry WHERE tag_id = %s
+                    """,
+                    (str(TAG_ID), str(TAG_ID)),
+                )
+                l0_basis = cursor.fetchone()
         self.assertEqual(
             row,
             ("received_at", "observed_at", 20.0, "received_at"),
         )
+        self.assertEqual(l0_basis, (["received_at", "observed_at"], "observed_at"))
 
     def test_projection_wakeup_runs_after_commit_and_cannot_fail_ingest(self) -> None:
         observed_event_ids = []
@@ -1167,13 +1181,20 @@ class DataTrunkPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 self._seed_boolean_set_processing(cursor)
 
-        incomplete = self.trunk.ingest(
-            (self.raw_bool(
+        received = datetime(2026, 8, 17, tzinfo=UTC)
+        received_source = replace(
+            self.raw_bool(
                 tag_id=BOOLEAN_FAULT_A_TAG_ID,
                 source_key="EPO故障",
                 value=False,
                 sequence=4,
-            ),)
+            ),
+            source_timestamp=received.replace(year=2036),
+            received_at=received,
+            event_time_basis="received_at",
+        )
+        incomplete = self.trunk.ingest(
+            (received_source,)
         )
         with psycopg2.connect(**self.connection_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -1223,6 +1244,30 @@ class DataTrunkPostgresTest(unittest.TestCase):
                 self.assertEqual(
                     (["pcs.hardware.fan_failure"], 192, None),
                     cursor.fetchone(),
+                )
+                cursor.execute(
+                    """
+                    SELECT source.l0_observation_id,
+                           source.source_event_time_basis
+                    FROM t_l2_observation_sources AS source
+                    JOIN t_l2_latest AS latest
+                      ON latest.event_id = source.l2_event_id
+                     AND latest.observed_at = source.l2_observed_at
+                    WHERE latest.entity_instance_id = %s
+                    ORDER BY source.l0_observation_id
+                    """,
+                    (str(BOOLEAN_FAULT_ENTITY_ID),),
+                )
+                source_evidence = [
+                    (UUID(str(source_id)), time_basis)
+                    for source_id, time_basis in cursor.fetchall()
+                ]
+                self.assertEqual(
+                    source_evidence,
+                    [
+                        (received_source.observation_id, "received_at"),
+                        (UUID(int=0x305), "observed_at"),
+                    ],
                 )
 
     def test_fault_set_writes_on_change_or_sixty_second_heartbeat(self) -> None:

@@ -514,6 +514,7 @@ class PostgresEntityObservationOutboxTest(unittest.TestCase):
                     source_message_id="safe-source-digest",
                     source_sequence=1,
                     source_digest="c" * 64,
+                    event_time_basis="observed_at",
                 ),
             )
         )

@@ -280,8 +280,16 @@ BEGIN
     )) INTO schema_043_expected_columns, existing_contract_columns
     FROM (VALUES
       ('t_l2_observations', 'event_time_basis', 'text', TRUE),
+      ('t_l2_observations', 'commit_sequence', 'bigint', TRUE),
+      ('t_l2_observations', 'value_numeric', 'numeric', FALSE),
       ('t_l2_latest', 'event_time_basis', 'text', TRUE),
+      ('t_l2_latest', 'value_numeric', 'numeric', FALSE),
       ('t_l2_observation_sources', 'source_event_time_basis', 'text', TRUE),
+      ('t_tags', 'timestamp_trusted', 'boolean', TRUE),
+      ('t_telemetry', 'event_time_basis', 'text', TRUE),
+      ('t_telemetry', 'event_received_at', 'timestamp with time zone', TRUE),
+      ('t_telemetry_latest', 'event_time_basis', 'text', TRUE),
+      ('t_telemetry_latest', 'event_received_at', 'timestamp with time zone', TRUE),
       ('t_business_metric_templates', 'id', 'uuid', TRUE),
       ('t_business_metric_templates', 'template_key', 'text', TRUE),
       ('t_business_metric_revisions', 'id', 'uuid', TRUE),
@@ -320,7 +328,7 @@ BEGIN
       ('t_business_metric_source_bindings', 'unit', 'text', FALSE),
       ('t_business_metric_source_bindings', 'direction', 'text', TRUE),
       ('t_business_metric_source_bindings', 'maximum_sample_gap_seconds', 'integer', TRUE),
-      ('t_business_metric_source_bindings', 'producer_contract_digest', 'character', FALSE),
+      ('t_business_metric_source_bindings', 'producer_contract_digest', 'character', TRUE),
       ('t_business_metric_source_bindings', 'counter_maximum', 'numeric', FALSE),
       ('t_business_metric_source_bindings', 'counter_bit_width', 'smallint', FALSE),
       ('t_business_metric_source_bindings', 'counter_reset_on_decrease', 'boolean', FALSE),
@@ -331,6 +339,7 @@ BEGIN
       ('t_business_metric_projections', 'watermark_at', 'timestamp with time zone', FALSE),
       ('t_business_metric_projections', 'coverage', 'double precision', TRUE),
       ('t_business_metric_projections', 'quality', 'smallint', TRUE),
+      ('t_business_metric_projections', 'last_commit_sequence', 'bigint', TRUE),
       ('t_business_metric_projections', 'state', 'jsonb', TRUE),
       ('t_business_metric_window_results', 'installed_metric_id', 'uuid', TRUE),
       ('t_business_metric_window_results', 'window_started_at', 'timestamp with time zone', TRUE),
@@ -410,6 +419,8 @@ BEGIN
       ('t_installed_business_metrics', 'uq_business_metric_installation_idempotency', 'u'),
       ('t_business_metric_source_bindings', 'uq_business_metric_source_binding_entity', 'u'),
       ('t_business_metric_source_bindings', 'chk_business_metric_source_binding_counter', 'c'),
+      ('t_l2_observations', 'chk_l2_typed_value', 'c'),
+      ('t_l2_latest', 'chk_l2_latest_typed_value', 'c'),
       ('t_l2_observations', 'chk_l2_observation_event_time_basis', 'c'),
       ('t_l2_latest', 'chk_l2_latest_event_time_basis', 'c'),
       ('t_l2_observation_sources', 'chk_l2_source_event_time_basis', 'c'),
@@ -453,23 +464,33 @@ BEGIN
     FROM (VALUES
       (
         't_l2_observations',
+        'chk_l2_typed_value', 'c',
+        '(((quality = ANY (ARRAY[0, 1])) AND (num_nonnulls(value_float, value_int, value_numeric, value_bool, value_text, value_codes) = 0)) OR ((quality = ANY (ARRAY[64, 192])) AND (num_nonnulls(value_float, value_int, value_numeric, value_bool, value_text, value_codes) = 1)))'
+      ),
+      (
+        't_l2_latest',
+        'chk_l2_latest_typed_value', 'c',
+        '(((quality = ANY (ARRAY[0, 1])) AND (num_nonnulls(value_float, value_int, value_numeric, value_bool, value_text, value_codes) = 0)) OR ((quality = ANY (ARRAY[64, 192])) AND (num_nonnulls(value_float, value_int, value_numeric, value_bool, value_text, value_codes) = 1)))'
+      ),
+      (
+        't_l2_observations',
         'chk_l2_observation_event_time_basis', 'c',
-        '(event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+        '(event_time_basis = ANY (ARRAY[''unknown''::text, ''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
       ),
       (
         't_l2_latest',
         'chk_l2_latest_event_time_basis', 'c',
-        '(event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+        '(event_time_basis = ANY (ARRAY[''unknown''::text, ''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
       ),
       (
         't_l2_observation_sources',
         'chk_l2_source_event_time_basis', 'c',
-        '(source_event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+        '(source_event_time_basis = ANY (ARRAY[''unknown''::text, ''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
       ),
       (
         't_business_metric_source_bindings',
         'chk_business_metric_source_binding_counter', 'c',
-        '(((method <> ''counter_delta''::text) AND (counter_maximum IS NULL) AND (counter_bit_width IS NULL) AND (counter_reset_on_decrease IS NULL) AND (counter_rollover_on_decrease IS NULL)) OR ((method = ''counter_delta''::text) AND (((counter_maximum IS NULL) AND (counter_bit_width IS NULL) AND (counter_reset_on_decrease IS NULL) AND (counter_rollover_on_decrease IS NULL)) OR ((counter_maximum IS NOT NULL) AND (counter_maximum >= (0)::numeric) AND ((counter_bit_width IS NULL) OR (counter_bit_width = ANY (ARRAY[16, 32, 64]))) AND ((counter_bit_width IS NULL) OR (counter_maximum = CASE counter_bit_width WHEN 16 THEN (65535)::numeric WHEN 32 THEN (''4294967295''::bigint)::numeric WHEN 64 THEN ''18446744073709551615''::numeric ELSE NULL::numeric END)) AND (counter_reset_on_decrease IS NOT NULL) AND (counter_rollover_on_decrease IS NOT NULL) AND ((NOT counter_rollover_on_decrease) OR (counter_bit_width IS NOT NULL)) AND (NOT (counter_reset_on_decrease AND counter_rollover_on_decrease))))))'
+        '(((method <> ''counter_delta''::text) AND (counter_maximum IS NULL) AND (counter_bit_width IS NULL) AND (counter_reset_on_decrease IS NULL) AND (counter_rollover_on_decrease IS NULL)) OR ((method = ''counter_delta''::text) AND ((counter_maximum IS NOT NULL) AND (counter_maximum >= (0)::numeric) AND (counter_bit_width = ANY (ARRAY[16, 32, 64])) AND (counter_maximum = CASE counter_bit_width WHEN 16 THEN (65535)::numeric WHEN 32 THEN (''4294967295''::bigint)::numeric WHEN 64 THEN ''18446744073709551615''::numeric ELSE NULL::numeric END) AND (counter_reset_on_decrease IS NOT NULL) AND (counter_rollover_on_decrease IS NOT NULL) AND (NOT (counter_reset_on_decrease AND counter_rollover_on_decrease)))))'
       ),
       (
         't_business_metric_installation_plans',
@@ -628,15 +649,15 @@ BEGIN
       schema_043_function_contracts
     FROM (VALUES
       ('guard_business_metric_projection',
-       'd15d83ba1a8614729cc580109f79ada3'),
+       'a1a095a52b113800fe640f71cd30e7d4'),
       ('reject_data_trunk_append_only',
        '055c32ce480d817fe7a82c47d42214bf'),
       ('validate_business_metric_acceptance_runtime',
-       '54f689def118fdb94a24831f32f0a93e'),
+       '865b7220420db3a191c510ca317b0e15'),
       ('validate_business_metric_installation_lineage',
        '200dd4022c853d06e98348abbaea0739'),
       ('validate_business_metric_window_result_evidence',
-       'b0474802c8f50ca88229b7d937765965')
+       '86f6b3a86854d7b1dd7035661b5aca0b')
     ) AS required(function_name, definition_digest);
 
     IF existing_contract_columns <> schema_043_expected_columns
@@ -662,6 +683,23 @@ BEGIN
          SELECT 1 FROM pg_index
          WHERE indexrelid = to_regclass('public.uq_l2_event_observed_entity')
            AND indisunique
+       )
+       OR to_regclass('public.t_l2_observation_commit_sequence_seq') IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM pg_index
+         WHERE indexrelid = to_regclass('public.ix_l2_observation_commit_sequence')
+           AND NOT indisunique
+       )
+       OR NOT EXISTS (
+         SELECT 1
+         FROM pg_attrdef AS default_record
+         JOIN pg_attribute AS attribute
+           ON attribute.attrelid = default_record.adrelid
+          AND attribute.attnum = default_record.adnum
+         WHERE default_record.adrelid = to_regclass('public.t_l2_observations')
+           AND attribute.attname = 'commit_sequence'
+           AND pg_get_expr(default_record.adbin, default_record.adrelid)
+                 LIKE 'nextval(%t_l2_observation_commit_sequence_seq%'
        ) THEN
       RAISE EXCEPTION 'SCHEMA_043_PARTIAL_STRUCTURE: schema 043 is malformed'
         USING ERRCODE = '55000';
@@ -712,25 +750,127 @@ END;
 $$;
 
 ALTER TABLE public.t_l2_observations
-  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
+ALTER TABLE public.t_l2_observations
+  ADD COLUMN IF NOT EXISTS value_numeric NUMERIC;
+ALTER TABLE public.t_l2_observations
+  DROP CONSTRAINT IF EXISTS chk_l2_typed_value,
+  ADD CONSTRAINT chk_l2_typed_value CHECK (
+    (quality IN (0,1) AND num_nonnulls(
+      value_float, value_int, value_numeric, value_bool, value_text, value_codes
+    ) = 0)
+    OR
+    (quality IN (64,192) AND num_nonnulls(
+      value_float, value_int, value_numeric, value_bool, value_text, value_codes
+    ) = 1)
+  );
+CREATE SEQUENCE IF NOT EXISTS public.t_l2_observation_commit_sequence_seq AS BIGINT;
+ALTER TABLE public.t_l2_observations
+  ADD COLUMN IF NOT EXISTS commit_sequence BIGINT NOT NULL DEFAULT
+    nextval('public.t_l2_observation_commit_sequence_seq');
+SELECT setval(
+  'public.t_l2_observation_commit_sequence_seq',
+  GREATEST(COALESCE((SELECT max(commit_sequence) FROM public.t_l2_observations), 0), 1),
+  EXISTS (SELECT 1 FROM public.t_l2_observations)
+);
+ALTER SEQUENCE public.t_l2_observation_commit_sequence_seq
+  OWNED BY public.t_l2_observations.commit_sequence;
+ALTER TABLE public.t_l2_observations
+  ALTER COLUMN commit_sequence SET DEFAULT
+    nextval('public.t_l2_observation_commit_sequence_seq'),
+  ALTER COLUMN commit_sequence SET NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_l2_observation_commit_sequence
+  ON public.t_l2_observations(commit_sequence);
 ALTER TABLE public.t_l2_observations
   DROP CONSTRAINT IF EXISTS chk_l2_observation_event_time_basis,
   ADD CONSTRAINT chk_l2_observation_event_time_basis
-    CHECK (event_time_basis IN ('observed_at','received_at','calculated_at'));
+    CHECK (event_time_basis IN ('unknown','observed_at','received_at','calculated_at'));
 
 ALTER TABLE public.t_l2_latest
-  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
+ALTER TABLE public.t_l2_latest
+  ADD COLUMN IF NOT EXISTS value_numeric NUMERIC;
+ALTER TABLE public.t_l2_latest
+  DROP CONSTRAINT IF EXISTS chk_l2_latest_typed_value,
+  ADD CONSTRAINT chk_l2_latest_typed_value CHECK (
+    (quality IN (0,1) AND num_nonnulls(
+      value_float, value_int, value_numeric, value_bool, value_text, value_codes
+    ) = 0)
+    OR
+    (quality IN (64,192) AND num_nonnulls(
+      value_float, value_int, value_numeric, value_bool, value_text, value_codes
+    ) = 1)
+  );
+
+CREATE OR REPLACE FUNCTION public.validate_l2_typed_value_against_entity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  expected_type TEXT;
+  value_count INTEGER;
+  value_matches BOOLEAN;
+BEGIN
+  SELECT data_type INTO expected_type
+  FROM public.t_entity_instances
+  WHERE id = NEW.entity_instance_id;
+  IF expected_type IS NULL THEN
+    RETURN NEW;
+  END IF;
+  value_count := num_nonnulls(
+    NEW.value_float, NEW.value_int, NEW.value_numeric,
+    NEW.value_bool, NEW.value_text, NEW.value_codes
+  );
+  IF NEW.quality IN (0,1) THEN
+    value_matches := value_count = 0;
+  ELSE
+    value_matches := value_count = 1 AND CASE expected_type
+      WHEN 'FLOAT' THEN NEW.value_float IS NOT NULL OR NEW.value_numeric IS NOT NULL
+      WHEN 'INT' THEN NEW.value_int IS NOT NULL OR NEW.value_numeric IS NOT NULL
+      WHEN 'BOOL' THEN NEW.value_bool IS NOT NULL
+      WHEN 'STRING' THEN NEW.value_text IS NOT NULL
+      WHEN 'ENUM' THEN NEW.value_text IS NOT NULL
+      WHEN 'CODE_SET' THEN NEW.value_codes IS NOT NULL
+      ELSE FALSE
+    END;
+  END IF;
+  IF NOT value_matches THEN
+    RAISE EXCEPTION 'L2 typed value does not match entity data_type %', expected_type
+      USING ERRCODE = '23514', CONSTRAINT = 'chk_l2_entity_data_type';
+  END IF;
+  RETURN NEW;
+END;
+$$;
 ALTER TABLE public.t_l2_latest
   DROP CONSTRAINT IF EXISTS chk_l2_latest_event_time_basis,
   ADD CONSTRAINT chk_l2_latest_event_time_basis
-    CHECK (event_time_basis IN ('observed_at','received_at','calculated_at'));
+    CHECK (event_time_basis IN ('unknown','observed_at','received_at','calculated_at'));
 
 ALTER TABLE public.t_l2_observation_sources
-  ADD COLUMN IF NOT EXISTS source_event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+  ADD COLUMN IF NOT EXISTS source_event_time_basis TEXT NOT NULL DEFAULT 'received_at';
 ALTER TABLE public.t_l2_observation_sources
   DROP CONSTRAINT IF EXISTS chk_l2_source_event_time_basis,
   ADD CONSTRAINT chk_l2_source_event_time_basis
-    CHECK (source_event_time_basis IN ('observed_at','received_at','calculated_at'));
+    CHECK (source_event_time_basis IN ('unknown','observed_at','received_at','calculated_at'));
+
+ALTER TABLE public.t_tags
+  ADD COLUMN IF NOT EXISTS timestamp_trusted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE public.t_telemetry
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
+ALTER TABLE public.t_telemetry
+  ADD COLUMN IF NOT EXISTS event_received_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE public.t_telemetry_latest
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
+ALTER TABLE public.t_telemetry_latest
+  ADD COLUMN IF NOT EXISTS event_received_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE public.t_telemetry
+  DROP CONSTRAINT IF EXISTS chk_l0_event_time_basis,
+  ADD CONSTRAINT chk_l0_event_time_basis
+    CHECK (event_time_basis IN ('unknown','observed_at','received_at'));
+ALTER TABLE public.t_telemetry_latest
+  DROP CONSTRAINT IF EXISTS chk_l0_latest_event_time_basis,
+  ADD CONSTRAINT chk_l0_latest_event_time_basis
+    CHECK (event_time_basis IN ('unknown','observed_at','received_at'));
 
 CREATE TABLE IF NOT EXISTS t_business_metric_templates (
   id UUID PRIMARY KEY,
@@ -886,8 +1026,8 @@ CREATE TABLE IF NOT EXISTS t_business_metric_source_bindings (
   estimated BOOLEAN NOT NULL,
   maximum_sample_gap_seconds INTEGER NOT NULL
     CHECK (maximum_sample_gap_seconds > 0),
-  producer_contract_digest CHAR(64)
-    CHECK (producer_contract_digest IS NULL OR producer_contract_digest ~ '^[0-9a-f]{64}$'),
+  producer_contract_digest CHAR(64) NOT NULL
+    CHECK (producer_contract_digest ~ '^[0-9a-f]{64}$'),
   counter_maximum NUMERIC,
   counter_bit_width SMALLINT,
   counter_reset_on_decrease BOOLEAN,
@@ -907,29 +1047,17 @@ CREATE TABLE IF NOT EXISTS t_business_metric_source_bindings (
     OR (
       method = 'counter_delta'
       AND (
-        (
-          counter_maximum IS NULL
-          AND counter_bit_width IS NULL
-          AND counter_reset_on_decrease IS NULL
-          AND counter_rollover_on_decrease IS NULL
-        )
-        OR (
           counter_maximum IS NOT NULL
           AND counter_maximum >= 0
-          AND (counter_bit_width IS NULL OR counter_bit_width IN (16,32,64))
-          AND (
-            counter_bit_width IS NULL
-            OR counter_maximum = CASE counter_bit_width
+          AND counter_bit_width IN (16,32,64)
+          AND counter_maximum = CASE counter_bit_width
               WHEN 16 THEN 65535::NUMERIC
               WHEN 32 THEN 4294967295::NUMERIC
               WHEN 64 THEN 18446744073709551615::NUMERIC
             END
-          )
           AND counter_reset_on_decrease IS NOT NULL
           AND counter_rollover_on_decrease IS NOT NULL
-          AND (NOT counter_rollover_on_decrease OR counter_bit_width IS NOT NULL)
           AND NOT (counter_reset_on_decrease AND counter_rollover_on_decrease)
-        )
       )
     )
   )
@@ -943,6 +1071,7 @@ CREATE TABLE IF NOT EXISTS t_business_metric_projections (
   coverage DOUBLE PRECISION NOT NULL CHECK (coverage >= 0 AND coverage <= 1),
   quality SMALLINT NOT NULL CHECK (quality IN (0,64,192)),
   estimated BOOLEAN NOT NULL,
+  last_commit_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_commit_sequence >= 0),
   state JSONB NOT NULL CHECK (jsonb_typeof(state) = 'object'),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -1098,6 +1227,12 @@ BEGIN
           AND binding.entity_instance_id = observation.entity_instance_id
          WHERE observation.event_id = NEW.first_source_event_id
            AND observation.observed_at = NEW.first_source_observed_at
+           AND NEW.first_source_effective_at IS NOT DISTINCT FROM CASE
+                 observation.event_time_basis
+                 WHEN 'observed_at' THEN observation.observed_at
+                 WHEN 'calculated_at' THEN observation.calculated_at
+                 ELSE observation.received_at
+               END
        )
        OR NOT EXISTS (
          SELECT 1
@@ -1107,6 +1242,12 @@ BEGIN
           AND binding.entity_instance_id = observation.entity_instance_id
          WHERE observation.event_id = NEW.last_source_event_id
            AND observation.observed_at = NEW.last_source_observed_at
+           AND NEW.last_source_effective_at IS NOT DISTINCT FROM CASE
+                 observation.event_time_basis
+                 WHEN 'observed_at' THEN observation.observed_at
+                 WHEN 'calculated_at' THEN observation.calculated_at
+                 ELSE observation.received_at
+               END
        ) THEN
       RAISE EXCEPTION 'window result source events are not frozen sources'
         USING ERRCODE = '23514';
@@ -1307,6 +1448,12 @@ BEGIN
         AND binding.entity_instance_id = observation.entity_instance_id
        WHERE observation.event_id = window_result.first_source_event_id
          AND observation.observed_at = window_result.first_source_observed_at
+         AND window_result.first_source_effective_at IS NOT DISTINCT FROM CASE
+               observation.event_time_basis
+               WHEN 'observed_at' THEN observation.observed_at
+               WHEN 'calculated_at' THEN observation.calculated_at
+               ELSE observation.received_at
+             END
      )
      OR NOT EXISTS (
        SELECT 1
@@ -1316,6 +1463,12 @@ BEGIN
         AND binding.entity_instance_id = observation.entity_instance_id
        WHERE observation.event_id = window_result.last_source_event_id
          AND observation.observed_at = window_result.last_source_observed_at
+         AND window_result.last_source_effective_at IS NOT DISTINCT FROM CASE
+               observation.event_time_basis
+               WHEN 'observed_at' THEN observation.observed_at
+               WHEN 'calculated_at' THEN observation.calculated_at
+               ELSE observation.received_at
+             END
      ) THEN
     RAISE EXCEPTION 'acceptance result does not match frozen sources'
       USING ERRCODE = '23514';
@@ -1363,18 +1516,23 @@ DECLARE
   duration_seconds BIGINT;
   expected_start TIMESTAMPTZ;
   expected_end TIMESTAMPTZ;
+  frozen_estimated BOOLEAN;
 BEGIN
   IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'business metric projection rows cannot be deleted or truncated'
       USING ERRCODE = '55000';
   END IF;
 
-  SELECT installed.frozen_timezone, revision.content -> 'window'
-  INTO frozen_timezone, window_contract
+  SELECT installed.frozen_timezone, revision.content -> 'window',
+         bool_or(binding.estimated)
+  INTO frozen_timezone, window_contract, frozen_estimated
   FROM public.t_installed_business_metrics AS installed
   JOIN public.t_business_metric_revisions AS revision
     ON revision.id = installed.template_revision_id
-  WHERE installed.id = NEW.installed_metric_id;
+  JOIN public.t_business_metric_source_bindings AS binding
+    ON binding.installed_metric_id = installed.id
+  WHERE installed.id = NEW.installed_metric_id
+  GROUP BY installed.frozen_timezone, revision.content;
   IF NOT FOUND OR frozen_timezone IS NULL OR window_contract IS NULL THEN
     RAISE EXCEPTION 'business metric projection has no frozen window contract'
       USING ERRCODE = '55000';
@@ -1431,7 +1589,8 @@ BEGIN
   END IF;
   IF (OLD.watermark_at IS NOT NULL AND (
         NEW.watermark_at IS NULL OR NEW.watermark_at < OLD.watermark_at
-      )) OR NEW.updated_at < OLD.updated_at THEN
+      )) OR NEW.updated_at < OLD.updated_at
+      OR NEW.last_commit_sequence < OLD.last_commit_sequence THEN
     RAISE EXCEPTION 'business metric projection recovery clocks cannot move backwards'
       USING ERRCODE = '55000';
   END IF;
@@ -1447,6 +1606,23 @@ BEGIN
      OR (NEW.state ->> 'windowEndedAt')::TIMESTAMPTZ
           IS DISTINCT FROM NEW.window_ended_at THEN
     RAISE EXCEPTION 'business metric projection recovery state must reset for next window'
+      USING ERRCODE = '55000';
+  END IF;
+  IF NEW.coverage <> 0
+     OR NEW.quality <> 0
+     OR NEW.estimated IS DISTINCT FROM frozen_estimated
+     OR NEW.state - ARRAY[
+          'lifecycle', 'windowStartedAt', 'windowEndedAt', 'value', 'reason',
+          'sourceEventIds', 'sourceSummary', 'peakAt', 'peakEventId'
+        ]::TEXT[] <> '{}'::JSONB
+     OR NEW.state ->> 'lifecycle' IS DISTINCT FROM 'provisional'
+     OR NEW.state -> 'value' IS DISTINCT FROM 'null'::JSONB
+     OR NEW.state -> 'reason' IS DISTINCT FROM 'null'::JSONB
+     OR NEW.state -> 'sourceEventIds' IS DISTINCT FROM '[]'::JSONB
+     OR NEW.state -> 'sourceSummary' IS DISTINCT FROM '{}'::JSONB
+     OR NEW.state -> 'peakAt' IS DISTINCT FROM 'null'::JSONB
+     OR NEW.state -> 'peakEventId' IS DISTINCT FROM 'null'::JSONB THEN
+    RAISE EXCEPTION 'business metric projection next window must use neutral recovery state'
       USING ERRCODE = '55000';
   END IF;
   IF window_kind = 'aligned_daily'

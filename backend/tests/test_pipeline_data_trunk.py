@@ -41,6 +41,7 @@ def _observation(sequence: int) -> RawObservation:
         source_message_id=f"message-{sequence}",
         source_sequence=sequence,
         source_digest=f"{sequence:064x}",
+        event_time_basis="observed_at",
     )
 
 
@@ -122,6 +123,7 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
             node_name="PCS-A",
             group="read",
             timestamp_ms=1786932000000,
+            event_time_basis="unknown",
             tags={"activePower": 12345, "unsupported": [1, 2]},
         )
         adapter = RawObservationAdapter()
@@ -132,6 +134,7 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
                 stable_source_key="pcs-01/read/activePower",
                 data_type="FLOAT",
                 unit="W",
+                timestamp_trusted=False,
             )
         }
 
@@ -155,6 +158,25 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("W", first[0].raw_unit)
         self.assertEqual(first[0].observation_id, second[0].observation_id)
         self.assertEqual(first[0].source_digest, second[0].source_digest)
+        self.assertEqual(first[0].event_time_basis, "received_at")
+
+        trusted = adapter.from_parsed(
+            parsed,
+            {
+                "activePower": TagMetadata(
+                    node_id=NODE_ID,
+                    tag_id=TAG_ID,
+                    stable_source_key="pcs-01/read/activePower",
+                    data_type="FLOAT",
+                    unit="W",
+                    timestamp_trusted=True,
+                )
+            },
+            received_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+            source_message_id="safe-message-digest",
+            source_sequence=7,
+        )
+        self.assertEqual(trusted[0].event_time_basis, "observed_at")
 
     async def test_on_message_buffers_canonical_raw_not_normalized_telemetry(self) -> None:
         trunk = _FailOnceDataTrunk()

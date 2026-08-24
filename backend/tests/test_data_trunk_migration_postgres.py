@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import psycopg2
 from psycopg2 import sql
@@ -64,7 +65,12 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
 
     @staticmethod
     def _reset_through_037(cursor) -> None:
-        cursor.execute("DROP SCHEMA public CASCADE")
+        try:
+            cursor.execute("DROP SCHEMA public CASCADE")
+        except psycopg2.errors.DeadlockDetected:
+            if not cursor.connection.autocommit:
+                raise
+            cursor.execute("DROP SCHEMA public CASCADE")
         cursor.execute("CREATE SCHEMA public")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
         for migration in MIGRATIONS_THROUGH_037:
@@ -105,6 +111,62 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
         cls._apply_039(cursor)
         cls._apply_040(cursor)
         cls._apply_041(cursor)
+
+    def test_schema_reset_retries_one_timescale_reporter_deadlock(self) -> None:
+        class FakeConnection:
+            autocommit = True
+
+        class FakeCursor:
+            connection = FakeConnection()
+
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+                self.drop_attempts = 0
+
+            def execute(self, statement: str) -> None:
+                self.statements.append(statement)
+                if statement == "DROP SCHEMA public CASCADE":
+                    self.drop_attempts += 1
+                    if self.drop_attempts == 1:
+                        raise psycopg2.errors.DeadlockDetected(
+                            "Timescale telemetry reporter raced with schema reset"
+                        )
+
+        cursor = FakeCursor()
+        with patch.object(
+            __import__(__name__, fromlist=["MIGRATIONS_THROUGH_037"]),
+            "MIGRATIONS_THROUGH_037",
+            (),
+        ):
+            self._reset_through_037(cursor)
+
+        self.assertEqual(cursor.drop_attempts, 2)
+        self.assertEqual(
+            cursor.statements[-2:],
+            ["CREATE SCHEMA public", "CREATE EXTENSION IF NOT EXISTS timescaledb"],
+        )
+
+    def test_schema_reset_deadlock_retry_is_autocommit_only_and_bounded(self) -> None:
+        class FakeConnection:
+            def __init__(self, *, autocommit: bool) -> None:
+                self.autocommit = autocommit
+
+        class FakeCursor:
+            def __init__(self, *, autocommit: bool) -> None:
+                self.connection = FakeConnection(autocommit=autocommit)
+                self.drop_attempts = 0
+
+            def execute(self, statement: str) -> None:
+                if statement == "DROP SCHEMA public CASCADE":
+                    self.drop_attempts += 1
+                    raise psycopg2.errors.DeadlockDetected("still deadlocked")
+
+        for autocommit, expected_attempts in ((False, 1), (True, 2)):
+            with self.subTest(autocommit=autocommit):
+                cursor = FakeCursor(autocommit=autocommit)
+                with self.assertRaises(psycopg2.errors.DeadlockDetected):
+                    self._reset_through_037(cursor)
+                self.assertEqual(cursor.drop_attempts, expected_attempts)
 
     def test_043_adds_all_business_metric_tables_and_replays(self) -> None:
         expected = (
@@ -168,6 +230,88 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     self._apply_043(cursor)
                 cursor.execute("SELECT to_regclass('t_business_metric_revisions')")
                 self.assertEqual(cursor.fetchone(), (None,))
+
+    def test_043_backfills_existing_042_l2_with_conservative_received_basis(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                installation_id, _ = (
+                    _PostgresAlarmConfigurationTestBase._insert_installed_site(cursor)
+                )
+                entity_id, _ = _PostgresAlarmConfigurationTestBase._insert_entities(
+                    cursor,
+                    installation_id,
+                )
+                revision_id = "20000000-0000-0000-0000-000000000082"
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_templates
+                      (id, asset_id, device_category, brand, model,
+                       display_name, status)
+                    VALUES
+                      ('20000000-0000-0000-0000-000000000081',
+                       'legacy-042', 'pcs', 'Test', 'Legacy',
+                       'Legacy 042 producer', 'active');
+                    INSERT INTO t_point_processing_revisions
+                      (id, template_id, revision, content_digest, published_at)
+                    VALUES
+                      (%s, '20000000-0000-0000-0000-000000000081',
+                       1, %s, '2026-08-17T00:00:00Z');
+                    INSERT INTO t_l2_observations
+                      (observed_at, event_id, entity_instance_id, received_at,
+                       calculated_at, value_float, quality,
+                       processing_revision_id, site_configuration_version,
+                       source_digest, source_order_key)
+                    VALUES
+                      ('2036-08-17T00:00:00Z',
+                       '20000000-0000-0000-0000-000000000083', %s,
+                       '2026-08-17T00:00:01Z',
+                       '2026-08-17T00:00:02Z', 12.345, 192, %s, 1, %s,
+                       'S:00000000000000000001:legacy');
+                    INSERT INTO t_l2_latest
+                      (entity_instance_id, event_id, observed_at, received_at,
+                       calculated_at, value_float, quality,
+                       processing_revision_id, site_configuration_version,
+                       source_digest, source_order_key)
+                    VALUES
+                      (%s, '20000000-0000-0000-0000-000000000083',
+                       '2036-08-17T00:00:00Z',
+                       '2026-08-17T00:00:01Z',
+                       '2026-08-17T00:00:02Z', 12.345, 192, %s, 1, %s,
+                       'S:00000000000000000001:legacy');
+                    """,
+                    (
+                        revision_id,
+                        "8" * 64,
+                        entity_id,
+                        revision_id,
+                        "9" * 64,
+                        entity_id,
+                        revision_id,
+                        "9" * 64,
+                    ),
+                )
+
+                self._apply_043(cursor)
+
+                cursor.execute(
+                    """
+                    SELECT event_time_basis, commit_sequence > 0, value_numeric
+                    FROM t_l2_observations
+                    WHERE event_id = '20000000-0000-0000-0000-000000000083'
+                    """
+                )
+                self.assertEqual(cursor.fetchone(), ("received_at", True, None))
+                cursor.execute(
+                    """
+                    SELECT event_time_basis, value_numeric
+                    FROM t_l2_latest WHERE entity_instance_id = %s
+                    """,
+                    (entity_id,),
+                )
+                self.assertEqual(cursor.fetchone(), ("received_at", None))
 
     def test_043_rejects_schema_041_without_schema_042(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
@@ -248,6 +392,31 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 ) as raised:
                     self._apply_043(cursor)
                 self.assertIn("SCHEMA_043_PARTIAL_STRUCTURE", str(raised.exception))
+
+    def test_043_replay_rejects_damaged_commit_cursor_or_numeric_contract(self) -> None:
+        sabotages = (
+            "DROP INDEX ix_l2_observation_commit_sequence",
+            "ALTER TABLE t_l2_observations ALTER COLUMN commit_sequence DROP DEFAULT",
+            "ALTER TABLE t_l2_observations DROP CONSTRAINT chk_l2_typed_value",
+        )
+        for sabotage in sabotages:
+            with self.subTest(sabotage=sabotage):
+                with psycopg2.connect(**self.connection_kwargs) as connection:
+                    connection.autocommit = True
+                    with connection.cursor() as cursor:
+                        self._reset_through_041(cursor)
+                        self._apply_042(cursor)
+                        self._apply_043(cursor)
+                        cursor.execute(sabotage)
+
+                        with self.assertRaises(
+                            psycopg2.errors.ObjectNotInPrerequisiteState
+                        ) as raised:
+                            self._apply_043(cursor)
+                        self.assertIn(
+                            "SCHEMA_043_PARTIAL_STRUCTURE",
+                            str(raised.exception),
+                        )
 
     def test_043_replay_rejects_missing_evidence_constraint_as_malformed(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

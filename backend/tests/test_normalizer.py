@@ -14,7 +14,12 @@ from app.services.normalizer import (
 
 
 def _parsed(tags: dict) -> ParsedMessage:
-    return ParsedMessage(node_name="INV_01", timestamp_ms=1721223400000, tags=tags)
+    return ParsedMessage(
+        node_name="INV_01",
+        timestamp_ms=1721223400000,
+        event_time_basis="unknown",
+        tags=tags,
+    )
 
 
 def test_scale_offset_formula():
