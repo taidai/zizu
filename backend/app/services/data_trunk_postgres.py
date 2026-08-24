@@ -96,6 +96,7 @@ class _FreshnessCandidate:
     observation: L2Observation
     source_event_id: UUID
     source_observed_at: datetime
+    source_event_time_basis: str
     source_digest: str
 
 
@@ -488,9 +489,10 @@ class PostgresDataTrunkRepository:
                    latest.value_text, latest.value_codes,
                    latest.quality, latest.reason, latest.observed_at,
                    latest.received_at, latest.calculated_at,
-                   latest.processing_revision_id,
-                   latest.site_configuration_version,
-                   latest.source_digest, latest.source_order_key
+                    latest.processing_revision_id,
+                    latest.site_configuration_version,
+                    latest.source_digest, latest.source_order_key,
+                    latest.event_time_basis
             FROM t_l2_latest AS latest
             JOIN t_entity_instances AS entity
               ON entity.id = latest.entity_instance_id
@@ -531,6 +533,7 @@ class PostgresDataTrunkRepository:
                 source_observation_ids=(),
                 source_digest=row[17].strip(),
                 source_order_key=row[18],
+                event_time_basis=row[19],
             )
         return result
 
@@ -685,7 +688,7 @@ class PostgresDataTrunkRepository:
             "ordered_timestamp_count": int(ordered_timestamp_count),
         }
 
-    def mark_expired_outputs_stale(self, now: datetime) -> int:
+    def mark_expired_outputs_stale(self, now: datetime) -> tuple[UUID, ...]:
         try:
             with self._connection() as connection:
                 try:
@@ -720,7 +723,7 @@ class PostgresDataTrunkRepository:
                 "DATA_TRUNK_UNAVAILABLE",
                 "DATA_TRUNK_UNAVAILABLE",
             ) from exc
-        return len(advanced)
+        return tuple(item.event_id for item in advanced)
     @staticmethod
     def _load_expired_outputs(
         cursor,
@@ -733,12 +736,17 @@ class PostgresDataTrunkRepository:
               latest.event_id,
               latest.observed_at,
               latest.source_digest,
+              latest.event_time_basis,
               latest.processing_revision_id,
               latest.site_configuration_version,
               output.entity_definition_id,
               output.data_type,
               output.unit,
-              latest.observed_at
+              CASE latest.event_time_basis
+                WHEN 'observed_at' THEN latest.observed_at
+                WHEN 'received_at' THEN latest.received_at
+                ELSE latest.calculated_at
+              END
                 + output.freshness_seconds * INTERVAL '1 second'
                 AS freshness_deadline
             FROM t_l2_latest AS latest
@@ -750,7 +758,11 @@ class PostgresDataTrunkRepository:
             JOIN t_point_processing_outputs AS output
               ON output.id = output_binding.output_id
             WHERE latest.quality <> %s
-              AND latest.observed_at
+              AND CASE latest.event_time_basis
+                    WHEN 'observed_at' THEN latest.observed_at
+                    WHEN 'received_at' THEN latest.received_at
+                    ELSE latest.calculated_at
+                  END
                 + output.freshness_seconds * INTERVAL '1 second' <= %s
             ORDER BY latest.entity_instance_id
             FOR UPDATE OF latest SKIP LOCKED
@@ -764,6 +776,7 @@ class PostgresDataTrunkRepository:
                 source_event_id,
                 source_observed_at,
                 source_digest,
+                source_event_time_basis,
                 revision_id,
                 site_configuration_version,
                 definition_id,
@@ -800,12 +813,14 @@ class PostgresDataTrunkRepository:
                 source_observation_ids=(),
                 source_digest=freshness_digest,
                 source_order_key=f"A:{deadline.isoformat()}:{freshness_digest}",
+                event_time_basis="calculated_at",
             )
             candidates.append(
                 _FreshnessCandidate(
                     observation=observation,
                     source_event_id=UUID(str(source_event_id)),
                     source_observed_at=source_observed_at,
+                    source_event_time_basis=source_event_time_basis,
                     source_digest=source_digest,
                 )
             )
@@ -821,8 +836,9 @@ class PostgresDataTrunkRepository:
                 """
                 INSERT INTO t_l2_observation_sources
                   (l2_event_id, l2_observed_at, source_kind,
-                   source_l2_event_id, source_l2_observed_at, source_digest)
-                VALUES (%s, %s, 'freshness', %s, %s, %s)
+                   source_l2_event_id, source_l2_observed_at, source_digest,
+                   source_event_time_basis)
+                VALUES (%s, %s, 'freshness', %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
                 (
@@ -831,6 +847,7 @@ class PostgresDataTrunkRepository:
                     str(candidate.source_event_id),
                     candidate.source_observed_at,
                     candidate.source_digest,
+                    candidate.source_event_time_basis,
                 ),
             )
 
@@ -1458,14 +1475,14 @@ class PostgresDataTrunkRepository:
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
-                   source_digest, source_order_key,
-                   producing_runtime_instance_id)
+                    source_digest, source_order_key,
+                    producing_runtime_instance_id, event_time_basis)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s
+                  %s, %s, %s, %s
                 )
                 ON CONFLICT (event_id, observed_at) DO NOTHING
                 """,
@@ -1483,6 +1500,7 @@ class PostgresDataTrunkRepository:
                     observation.source_digest,
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
+                    observation.event_time_basis,
                 ),
             )
 
@@ -1501,14 +1519,14 @@ class PostgresDataTrunkRepository:
                    received_at, calculated_at, value_float, value_int,
                    value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, site_configuration_version,
-                   source_digest, source_order_key,
-                   producing_runtime_instance_id)
+                    source_digest, source_order_key,
+                    producing_runtime_instance_id, event_time_basis)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s
+                  %s, %s, %s, %s
                 )
                 ON CONFLICT (entity_instance_id) DO UPDATE SET
                   event_id = EXCLUDED.event_id,
@@ -1527,11 +1545,30 @@ class PostgresDataTrunkRepository:
                   source_digest = EXCLUDED.source_digest,
                   source_order_key = EXCLUDED.source_order_key,
                   producing_runtime_instance_id =
-                    EXCLUDED.producing_runtime_instance_id
+                    EXCLUDED.producing_runtime_instance_id,
+                  event_time_basis = EXCLUDED.event_time_basis
                 WHERE
-                  EXCLUDED.observed_at > t_l2_latest.observed_at
+                  CASE EXCLUDED.event_time_basis
+                    WHEN 'observed_at' THEN EXCLUDED.observed_at
+                    WHEN 'received_at' THEN EXCLUDED.received_at
+                    ELSE EXCLUDED.calculated_at
+                  END
+                    > CASE t_l2_latest.event_time_basis
+                        WHEN 'observed_at' THEN t_l2_latest.observed_at
+                        WHEN 'received_at' THEN t_l2_latest.received_at
+                        ELSE t_l2_latest.calculated_at
+                      END
                   OR (
-                    EXCLUDED.observed_at = t_l2_latest.observed_at
+                    CASE EXCLUDED.event_time_basis
+                      WHEN 'observed_at' THEN EXCLUDED.observed_at
+                      WHEN 'received_at' THEN EXCLUDED.received_at
+                      ELSE EXCLUDED.calculated_at
+                    END
+                      = CASE t_l2_latest.event_time_basis
+                          WHEN 'observed_at' THEN t_l2_latest.observed_at
+                          WHEN 'received_at' THEN t_l2_latest.received_at
+                          ELSE t_l2_latest.calculated_at
+                        END
                     AND EXCLUDED.source_order_key > t_l2_latest.source_order_key
                   )
                 RETURNING event_id
@@ -1550,6 +1587,7 @@ class PostgresDataTrunkRepository:
                     observation.source_digest,
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
+                    observation.event_time_basis,
                 ),
             )
             if cursor.fetchone() is not None:
@@ -1578,21 +1616,26 @@ class PostgresDataTrunkRepository:
                 source_id for source_id in observation.source_observation_ids
                 if source_id not in l0_sources
             )
-            l2_sources: dict[UUID, tuple[datetime, str]] = {}
+            l2_sources: dict[UUID, tuple[datetime, str, str]] = {}
             if unresolved:
                 cursor.execute(
                     """
-                    SELECT event_id, observed_at, source_digest
+                    SELECT event_id, observed_at, source_digest, event_time_basis
                     FROM t_l2_observations
                     WHERE event_id = ANY(%s::uuid[])
                     ORDER BY event_id, observed_at DESC
                     """,
                     ([str(item) for item in unresolved],),
                 )
-                for source_id, observed_at, source_digest in cursor.fetchall():
+                for (
+                    source_id,
+                    observed_at,
+                    source_digest,
+                    event_time_basis,
+                ) in cursor.fetchall():
                     l2_sources.setdefault(
                         UUID(str(source_id)),
-                        (observed_at, source_digest.strip()),
+                        (observed_at, source_digest.strip(), event_time_basis),
                     )
             if len(l0_sources) + len(l2_sources) != len(
                 observation.source_observation_ids
@@ -1604,10 +1647,11 @@ class PostgresDataTrunkRepository:
             for source_id, (source_digest,) in l0_sources.items():
                 cursor.execute(
                     """
-                    INSERT INTO t_l2_observation_sources
-                      (l2_event_id, l2_observed_at, source_kind,
-                       l0_observation_id, source_digest)
-                    VALUES (%s, %s, 'l0', %s, %s)
+                INSERT INTO t_l2_observation_sources
+                  (l2_event_id, l2_observed_at, source_kind,
+                       l0_observation_id, source_digest,
+                       source_event_time_basis)
+                    VALUES (%s, %s, 'l0', %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
@@ -1615,16 +1659,21 @@ class PostgresDataTrunkRepository:
                         observation.observed_at,
                         str(source_id),
                         source_digest,
+                        observation.event_time_basis,
                     ),
                 )
-            for source_id, (source_observed_at, source_digest) in l2_sources.items():
+            for source_id, (
+                source_observed_at,
+                source_digest,
+                source_event_time_basis,
+            ) in l2_sources.items():
                 cursor.execute(
                     """
                     INSERT INTO t_l2_observation_sources
                       (l2_event_id, l2_observed_at, source_kind,
                        source_l2_event_id, source_l2_observed_at,
-                       source_digest)
-                    VALUES (%s, %s, 'l2', %s, %s, %s)
+                       source_digest, source_event_time_basis)
+                    VALUES (%s, %s, 'l2', %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
@@ -1633,6 +1682,7 @@ class PostgresDataTrunkRepository:
                         str(source_id),
                         source_observed_at,
                         source_digest,
+                        source_event_time_basis,
                     ),
                 )
 
@@ -1654,6 +1704,7 @@ class PostgresDataTrunkRepository:
                 "observed_at": observation.observed_at.isoformat(),
                 "received_at": observation.received_at.isoformat(),
                 "calculated_at": observation.calculated_at.isoformat(),
+                "event_time_basis": observation.event_time_basis,
                 "processing_revision_id": str(
                     observation.processing_revision_id
                 ),

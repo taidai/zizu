@@ -69,6 +69,22 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             source.index("verify_data_trunk_contract_gate"),
         )
 
+    def test_metric_projection_loop_starts_only_inside_lifespan_and_stops_safely(self) -> None:
+        from app import main
+
+        source = inspect.getsource(main.lifespan)
+        self.assertEqual(main._data_trunk_tasks, [])
+        self.assertIsNone(main._data_trunk_stop)
+        self.assertIn('name="business_metric_projection"', source)
+        self.assertIn("metric_projection.advance", source)
+        metric_loop = source[
+            source.index("async def _metric_projection_loop"):
+            source.index("async def _runtime_health_loop")
+        ]
+        self.assertNotIn("datetime.now", metric_loop)
+        self.assertLess(source.index("_data_trunk_stop = asyncio.Event()"), source.index('name="business_metric_projection"'))
+        self.assertLess(source.index("_data_trunk_stop.set()"), source.index("await asyncio.gather(*_data_trunk_tasks"))
+
 
 if __name__ == "__main__":
     unittest.main()

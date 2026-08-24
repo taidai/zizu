@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from uuid import UUID
 
 from app.services.solution_business_metrics import (
@@ -94,6 +95,52 @@ class SolutionBusinessMetricTest(unittest.TestCase):
                     "BUSINESS_METRIC_ASSET_INVALID",
                 ):
                     parse_business_metric_asset(raw)
+
+    def test_counter_source_freezes_exact_decrease_contract(self) -> None:
+        raw = self.pv_energy_today()
+        raw["sources"][0]["counter"] = {
+            "maximum": "65535",
+            "bitWidth": 16,
+            "resetOnDecrease": False,
+            "rolloverOnDecrease": True,
+        }
+
+        template = parse_business_metric_asset(raw)
+
+        contract = template.sources[0].counter_contract
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract.maximum, Decimal("65535"))
+        self.assertEqual(contract.bit_width, 16)
+        self.assertFalse(contract.reset_on_decrease)
+        self.assertTrue(contract.rollover_on_decrease)
+
+        invalid = self.pv_energy_today()
+        invalid["sources"][0]["counter"] = {
+            "maximum": "999",
+            "bitWidth": 16,
+            "resetOnDecrease": False,
+            "rolloverOnDecrease": True,
+        }
+        with self.assertRaisesRegex(
+            BusinessMetricAssetError,
+            "BUSINESS_METRIC_ASSET_INVALID",
+        ):
+            parse_business_metric_asset(invalid)
+
+    def test_counter_source_rejects_ambiguous_reset_and_rollover_rules(self) -> None:
+        raw = self.pv_energy_today()
+        raw["sources"][0]["counter"] = {
+            "maximum": "65535",
+            "bitWidth": 16,
+            "resetOnDecrease": True,
+            "rolloverOnDecrease": True,
+        }
+
+        with self.assertRaisesRegex(
+            BusinessMetricAssetError,
+            "BUSINESS_METRIC_ASSET_INVALID",
+        ):
+            parse_business_metric_asset(raw)
 
     def test_compilation_rejects_mutable_source_resolution(self) -> None:
         template = parse_business_metric_asset(self.pv_energy_today())

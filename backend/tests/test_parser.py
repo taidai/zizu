@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from app.models.schemas import RawMessage
 from app.services.parser import parse_neuron_json
@@ -57,3 +58,32 @@ def test_parse_timestamp_seconds_to_ms():
     )
     assert msg is not None
     assert msg.timestamp_ms == 1721223400000
+
+
+def test_parse_records_explicit_event_time_basis_without_time_comparison():
+    received_at = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    explicit = parse_neuron_json(
+        RawMessage(
+            topic="telemetry/X",
+            payload=json.dumps(
+                {"node_name": "X", "timestamp": 2524608000000, "tags": {"p": 1}}
+            ).encode("utf-8"),
+            timestamp_recv=received_at,
+        )
+    )
+    fallback = parse_neuron_json(
+        RawMessage(
+            topic="telemetry/X",
+            payload=json.dumps({"node_name": "X", "tags": {"p": 1}}).encode(
+                "utf-8"
+            ),
+            timestamp_recv=received_at,
+        )
+    )
+
+    assert explicit is not None
+    assert explicit.timestamp_ms == 2524608000000
+    assert explicit.event_time_basis == "observed_at"
+    assert fallback is not None
+    assert fallback.timestamp_ms == 1787572800000
+    assert fallback.event_time_basis == "received_at"

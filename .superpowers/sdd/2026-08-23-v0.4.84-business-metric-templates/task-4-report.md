@@ -61,7 +61,7 @@ Task 3 五轮后留下的真实 load-bearing finding 是累计量事件过滤和
 
 ### Task 4 GREEN 覆盖
 
-`backend/tests/test_metric_projection_postgres.py` 当前包含 9 个真实 PostgreSQL 行为测试：
+`backend/tests/test_metric_projection_postgres.py` 首轮包含以下 9 个真实 PostgreSQL 行为测试；独立复审修正后已扩展到 21 个，新增边界见后文：
 
 1. provisional projection 不产生 L2 history；
 2. 重启与重复 tick 幂等；
@@ -110,6 +110,57 @@ Task 3 五轮后留下的真实 load-bearing finding 是累计量事件过滤和
 
 ## 风险与后续
 
-- Schema 043 冻结 binding 尚未持久化 counter 位宽、明确 reset/rollover 契约；本任务用存储类型上界和“下降即歧义”的 fail-closed 规则，安全但可能把现场合法复位判为 invalid。完整工业 counter 契约应在后续 schema/安装计划中冻结。
-- `maximum_sample_gap_seconds` 当前从 source entity freshness 读取，而 freshness 尚未复制进 metric binding；来源定义被不当修改时可能改变运行质量判断。后续应把它冻结进安装配置。
-- 当前恢复模型按安装扫描来源，正确性优先；100 个统计实体的一秒 p95 性能由 Task 8 固定数据集门禁最终确认。
+- 首轮报告中的 counter 契约与 freshness 未冻结风险已在本轮关闭：Schema 043 binding 现在冻结 producer digest、maximum sample gap、16/32/64-bit maximum 与 reset/rollover 规则，运行时不再猜测。
+- 当前查询结构已从全历史/逐窗口 result 查询改为 checkpoint 后有效时间有界的来源扫描和一次批量 latest-result 查询；100 个统计实体的一秒 p95 数值门禁仍按计划留给 Task 8 固定数据集。
+- 超出 rolling 6h / daily 7d 自动范围的迟到事实继续保留给 Task 5 审批式审计重算；本任务不会静默修正超范围结果。
+
+## 首轮独立复审修正（进行中）
+
+首轮独立复审判定 SPEC/QUALITY FAIL。确认的共同根因是 Schema 043 尚未把运行计算所需事实全部冻结：projection guard 只保护 installation ID，source binding 缺 producer/freshness/counter 契约，L2 缺显式 event-time basis；运行时因而读取可变 entity 元数据、猜测 counter 上界、全历史扫描并逐窗口读取 latest result，也没有使用 projection checkpoint 推导恢复范围。
+
+本轮按 RED→GREEN 修正以下边界：
+
+- projection 同窗恢复和合法下一窗滚动的数据库 fail-closed guard；
+- producer output/freshness/counter 契约安装冻结与每事件精确复核；
+- L2 显式 `event_time_basis`、原始 FK 身份与 effective event time 证据；
+- checkpoint 驱动的首次结果补算、rolling 有界读取和批量 latest result；
+- `observe_committed` 只排队 hint，不同步扫描所有安装；
+- empty/current provisional、逐安装错误隔离、freshness post-commit 通知；
+- canonical source summary 与 latest rollback 的直接断言。
+
+Task 5 审批重算状态机仍不在修正范围内。
+
+### 复审修正阶段性 RED/GREEN
+
+- projection guard 恶意逐字段/回退/跨窗跳跃测试先出现 5 个失败，证明旧 guard 允许任意 checkpoint 改写；专用 trigger 校验同窗单调恢复、冻结 daily/rolling 合法边界及恰好下一窗后，聚焦测试 1/1 通过。
+- counter source 强类型契约测试先因 parser 拒绝 `counter` 字段而 RED；新增 16/32/64 位上界、reset/rollover 互斥语义与 canonical digest 后聚焦 1/1 通过。
+- 安装 preview 冻结 producer freshness/digest/counter 测试先因 candidate 不接受 producer contract 而 RED；扩展强类型 plan 后聚焦 1/1 通过。
+- 显式 received-time basis 对“未来 observed timestamp”测试先因 `RawObservation` 无该字段而 RED；L0→L2 转换显式传播 basis、聚合输出 fail-closed 回退 received 后聚焦 1/1 通过，不再以时间大小猜可信性。
+
+### 复审修正已闭环行为
+
+1. **Projection guard**：Schema 043 trigger 现在校验安装冻结的 daily/rolling window contract；同窗只允许受表约束的恢复字段更新且 watermark/updated 不回退；跨窗只允许 daily 紧邻下一日或 rolling 恰好下一分钟，并要求携带与新窗口一致的重置 state。identity、delete、truncate、回退、任意跳窗和 carry-over state 全部 fail closed，函数 fingerprint 已同步。
+2. **冻结 producer/counter/freshness**：模板和安装计划冻结 producer output/revision digest、source definition/data type/unit、maximum sample gap 以及 counter maximum/bit width/reset/rollover。每条 L2 通过 processing revision、output binding 和 entity identity 精确定位不可变 producer output；多输出 revision 不再误取排序首项。失配事件按其真实 producer metadata 记录并以 `SOURCE_CONTRACT_MISMATCH` fail closed。
+3. **Checkpoint 恢复**：首次没有 checkpoint 时从最早冻结来源事件开始，daily 每 tick 最多 64 窗、rolling 最多 360 个一分钟推进窗；首次正式结果不受自动修正 horizon 截断。已有结果才应用 rolling 6h / daily 7d 修正 horizon。9 天停机后的首个日结果和重复重启均由真实 PG 测试锁定。
+4. **显式时间可信性**：Schema 043 为 L2/latest/source evidence 增加 time basis；DataTrunk 从 parser 明确的 timestamp presence 传播 observed/received basis，freshness deadline 使用 effective event time。window result 同时保存原始 `(event_id, observed_at)` FK 与 first/last effective time，排序和范围约束只使用 effective time；未来原始 observed 配 received fallback 不再导致封窗回滚。
+5. **Rolling 查询结构**：checkpoint 后 source bounds 查询限制为当前受影响有效时间或新接收事件；事件读取按最早受影响窗到最新窗有界；所有待处理窗口的 latest results 用单个 `DISTINCT ON` 查询批量读取。query spy 证明少量 rolling tick 只发一次 result 查询，不存在每窗 362 次查询。
+6. **Current lifecycle**：没有任何相关冻结来源事件时不创建 projection；有来源的活动窗无论 GOOD/UNCERTAIN/BAD 都序列化为 `provisional`，原因和质量独立表达；`invalid` 只存在于已封闭 window-result ledger。
+7. **故障隔离**：每 installation 独立 advisory-xact-lock/transaction；领域或单安装数据错误回滚该安装、增加 receipt error 并继续下一安装，连接级 `OperationalError/InterfaceError` 继续上抛。双安装首个故障、第二个完成以及并发双 tick 的真实 PG 测试均通过。
+8. **Canonical source summary**：摘要保存有序冻结 source entity list、eventCount、首尾原始/有效时间、逐事件 timeBasis、事件身份/时间/value/quality/source digest/producer mismatch 的内容摘要；runtime instance identity 不进入 result content digest，重启不会制造 correction。
+9. **Freshness observer 与主循环**：freshness repository 返回已提交 event IDs，和 ingest/formula 共用同一 post-commit observer seam，observer 失败隔离。主循环只在 lifespan 内创建任务，stop event 后 gather，import 不启动线程；`MetricProjection.advance()` 默认使用可注入 clock，循环保持一秒周期。
+
+### 新增 RED→GREEN 证据
+
+- carry-state 精确下一窗最初被旧 guard 接受；新增 window identity state 与跨窗 reset 校验后 GREEN。
+- rolling 后续 tick 的 source-bounds SQL 最初没有有效时间下界；增加 checkpoint 下界或新接收事件条件后 query-count 测试 GREEN。
+- 多输出 producer revision 最初按 output key 误取 decoy，产生 `SOURCE_CONTRACT_MISMATCH`；改为 processing revision + immutable output binding + entity identity 精确 join 后 GREEN。
+- `t_l2_observation_sources` 最初没有 source time basis，freshness 对未来 untrusted observed 也按原始时间计算 deadline；Schema 043 扩展和 effective-time 读取后两个 PG 用例 GREEN。
+- window evidence trigger 最初仍按原始 observed 排序，未来 untrusted observed 使合法 effective 顺序封窗回滚；trigger/acceptance 强绑定切换到 effective 范围后 GREEN。
+- 主循环最初直接调用 `datetime.now()`，绕过 runtime 注入 clock；`advance(now=None)` 使用构造器 clock 且 main 不再自行取时后 GREEN。
+- 16/32/64-bit rollover、reset、并发 tick、双安装隔离、`t_l2_latest=0` 故障回滚均新增真实 PG 锁定。
+- Task 2 PostgreSQL 首次复跑暴露 5 个兼容问题（3 个旧 acceptance fixture 未填写 effective source time、1 个 point runtime fixture 未应用 043、1 个 revision-upgrade source plan 错判为 update）。修复后原 5 项以及 4 个补强的 window evidence 负向用例聚焦 9/9 GREEN；source plan loader 现在从上一安装读取完整 freshness/producer/counter 冻结合同，未变化合同恢复为 `preserve`，而不是放宽断言。
+- Task 2 migration/business metric/point PostgreSQL 最终全量门禁：74/74 PASS（389.270s）。
+- Task 4 projection + DataTrunk PostgreSQL 最终全量门禁：44/44 PASS（927.922s）；五阶段故障注入首测运行异常偏慢但持续推进，无 deadlock、OID 或数据库重建事件。
+- 最终无数据库联合门禁：152/152 PASS（5.081s）；parser：7/7 PASS（0.30s）。
+- 最终静态门禁：21 个改动 Python 文件 `py_compile` PASS，`git diff --check` PASS。
+- counter reset 与 rollover 同时启用的资产合同先新增 RED（1 个失败），领域校验与 Schema 043 互斥约束对齐后聚焦 2/2 GREEN；point-processing source 选源对可空 unit 严格读取冻结 output，不回退到可变 entity 元数据，相关 plan/runtime counter PG 聚焦 3/3 GREEN。

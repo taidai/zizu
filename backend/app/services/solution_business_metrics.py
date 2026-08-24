@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -16,6 +17,7 @@ from app.services.business_metric_contracts import (
     CompiledMetricRevision,
     FlowDirection,
     MetricAggregator,
+    MetricCounterContract,
     MetricLifecycle,
     MetricQualityContract,
     MetricSourceOption,
@@ -143,6 +145,9 @@ def compile_business_metric(
                     "unit": item.unit,
                     "estimated": item.estimated,
                     "direction": item.direction,
+                    "maximumSampleGapSeconds": item.maximum_sample_gap_seconds,
+                    "producerContractDigest": item.producer_contract_digest,
+                    "counterContract": _counter_content(item.counter_contract),
                 }
                 for item in sources
             ],
@@ -285,7 +290,10 @@ def _parse_sources(raw: Any) -> tuple[MetricSourceOption, ...]:
     parsed = []
     priorities: set[int] = set()
     for item in raw:
-        if not isinstance(item, Mapping) or set(item) != {"method", "entityDefinition", "priority"}:
+        if not isinstance(item, Mapping) or set(item) not in (
+            {"method", "entityDefinition", "priority"},
+            {"method", "entityDefinition", "priority", "counter"},
+        ):
             raise _invalid("Business metric source fields are invalid")
         try:
             method = MetricAggregator(item.get("method"))
@@ -301,9 +309,43 @@ def _parse_sources(raw: Any) -> tuple[MetricSourceOption, ...]:
             or priority in priorities
         ):
             raise _invalid("Business metric source contract is invalid")
+        counter_contract = _parse_counter_contract(item.get("counter"))
+        if "counter" in item and method is not MetricAggregator.COUNTER_DELTA:
+            raise _invalid("Business metric counter contract is misplaced")
         priorities.add(priority)
-        parsed.append(MetricSourceOption(method, item["entityDefinition"], priority))
+        parsed.append(
+            MetricSourceOption(
+                method,
+                item["entityDefinition"],
+                priority,
+                counter_contract,
+            )
+        )
     return tuple(sorted(parsed, key=lambda item: item.priority))
+
+
+def _parse_counter_contract(raw: Any) -> MetricCounterContract | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "maximum",
+        "bitWidth",
+        "resetOnDecrease",
+        "rolloverOnDecrease",
+    }:
+        raise _invalid("Business metric counter contract fields are invalid")
+    maximum_raw = raw.get("maximum")
+    if isinstance(maximum_raw, bool) or not isinstance(maximum_raw, (int, str)):
+        raise _invalid("Business metric counter maximum is invalid")
+    try:
+        return MetricCounterContract(
+            maximum=Decimal(str(maximum_raw)),
+            bit_width=raw.get("bitWidth"),
+            reset_on_decrease=raw.get("resetOnDecrease"),
+            rollover_on_decrease=raw.get("rolloverOnDecrease"),
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise _invalid("Business metric counter contract is invalid") from exc
 
 
 def _parse_quality(raw: Any) -> MetricQualityContract:
@@ -385,9 +427,52 @@ def _validate_resolution(template: BusinessMetricTemplate, resolution: MetricSou
             or not isinstance(source.unit, (str, type(None)))
             or not isinstance(source.estimated, bool)
             or source.direction not in {"R", "RW"}
+            or (
+                source.maximum_sample_gap_seconds is not None
+                and (
+                    not isinstance(source.maximum_sample_gap_seconds, int)
+                    or isinstance(source.maximum_sample_gap_seconds, bool)
+                    or source.maximum_sample_gap_seconds <= 0
+                )
+            )
+            or (
+                source.producer_contract_digest is not None
+                and (
+                    not isinstance(source.producer_contract_digest, str)
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}", source.producer_contract_digest
+                    )
+                )
+            )
+            or (
+                source.counter_contract is not None
+                and method is not MetricAggregator.COUNTER_DELTA
+            )
         ):
             raise _invalid("Business metric resolved source contract is invalid")
         identifiers.add(source.entity_instance_id)
+
+
+def _counter_content(contract: MetricCounterContract | None) -> dict[str, Any] | None:
+    if contract is None:
+        return None
+    return {
+        "maximum": str(contract.maximum),
+        "bit_width": contract.bit_width,
+        "reset_on_decrease": contract.reset_on_decrease,
+        "rollover_on_decrease": contract.rollover_on_decrease,
+    }
+
+
+def _counter_from_content(raw: Any) -> MetricCounterContract | None:
+    if raw is None:
+        return None
+    return MetricCounterContract(
+        maximum=Decimal(raw["maximum"]),
+        bit_width=raw["bit_width"],
+        reset_on_decrease=raw["reset_on_decrease"],
+        rollover_on_decrease=raw["rollover_on_decrease"],
+    )
 
 
 def _template_dict(template: BusinessMetricTemplate) -> dict[str, Any]:
@@ -403,7 +488,12 @@ def _template_dict(template: BusinessMetricTemplate) -> dict[str, Any]:
         "window_kind": template.window_kind.value,
         "rolling_window_seconds": template.rolling_window_seconds,
         "sources": [
-            {"method": item.method.value, "entity_definition_id": item.entity_definition_id, "priority": item.priority}
+            {
+                "method": item.method.value,
+                "entity_definition_id": item.entity_definition_id,
+                "priority": item.priority,
+                "counter_contract": _counter_content(item.counter_contract),
+            }
             for item in template.sources
         ],
         "good_coverage": template.quality.good_coverage,
@@ -434,6 +524,7 @@ def _template_from_dict(raw: Mapping[str, Any]) -> BusinessMetricTemplate:
                 MetricAggregator(item["method"]),
                 item["entity_definition_id"],
                 item["priority"],
+                _counter_from_content(item.get("counter_contract")),
             )
             for item in raw["sources"]
         ),
@@ -490,6 +581,7 @@ def _template_content_digest(
                     "method": source.method.value,
                     "entityDefinition": source.entity_definition_id,
                     "priority": source.priority,
+                    "counter": _counter_content(source.counter_contract),
                 }
                 for source in sources
             ],
@@ -530,6 +622,7 @@ __all__ = [
     "CompiledMetricRevision",
     "FlowDirection",
     "MetricAggregator",
+    "MetricCounterContract",
     "MetricLifecycle",
     "MetricQualityContract",
     "MetricSourceOption",

@@ -819,6 +819,11 @@ class PointProcessingPostgresTest(unittest.TestCase):
         from app.services.entity_instance_registry import EntityInstanceRegistry
         from app.services.entity_instance_runtime import EntityInstanceRuntime
 
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                migration_test.DataTrunkMigrationPostgresTest._apply_043(cursor)
+
         delivery, plan, node_id = self._plan_reference_solution()
         delivery.apply_install(
             plan.id,

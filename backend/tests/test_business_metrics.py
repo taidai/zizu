@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from app.services.solution_business_metrics import parse_business_metric_asset
@@ -102,6 +103,58 @@ class BusinessMetricDeliveryTest(unittest.TestCase):
         self.assertFalse(plan.blockers)
         self.assertEqual(self.repository.plan_count(), 0)
         self.assertEqual(self.repository.installation_count(), 0)
+
+    def test_preview_freezes_producer_freshness_and_counter_contract(self) -> None:
+        from dataclasses import replace
+
+        from app.services.business_metric_contracts import MetricCounterContract
+        from app.services.business_metrics import (
+            BusinessMetricDelivery,
+            InMemoryBusinessMetricCatalog,
+            MetricNode,
+            MetricSourceCandidate,
+        )
+
+        counter_contract = MetricCounterContract(
+            maximum=Decimal("65535"),
+            bit_width=16,
+            reset_on_decrease=False,
+            rollover_on_decrease=True,
+        )
+        template = replace(
+            self.template,
+            sources=(
+                replace(self.template.sources[0], counter_contract=counter_contract),
+                self.template.sources[1],
+            ),
+        )
+        catalog = InMemoryBusinessMetricCatalog(
+            templates=(template,),
+            nodes=(
+                MetricNode(self.site_id, "SITE", None, "Asia/Shanghai", 30),
+                MetricNode(self.child_id, "INVERTER", self.site_id, None),
+            ),
+            sources=(
+                MetricSourceCandidate(
+                    self.counter_id,
+                    self.child_id,
+                    "pv.energy_total",
+                    "INT",
+                    "kWh",
+                    maximum_sample_gap_seconds=17,
+                    producer_contract_digest="a" * 64,
+                ),
+            ),
+        )
+
+        plan = BusinessMetricDelivery(catalog, self.repository).preview(
+            self._preview_request()
+        )
+
+        source = plan.sources[0]
+        self.assertEqual(source.maximum_sample_gap_seconds, 17)
+        self.assertEqual(source.producer_contract_digest, "a" * 64)
+        self.assertEqual(source.counter_contract, counter_contract)
 
     def test_preview_uses_power_integral_only_when_counter_is_absent(self) -> None:
         from app.services.business_metrics import MetricSourceCandidate

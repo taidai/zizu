@@ -64,6 +64,8 @@ class DataTrunkRepository(Protocol):
         evaluator: ConversionEvaluator,
     ) -> tuple[UUID, ...]: ...
 
+    def mark_expired_outputs_stale(self, now: datetime) -> tuple[UUID, ...]: ...
+
 
 class ProjectionObserver(Protocol):
     def observe_committed(self, event_ids: tuple[UUID, ...]) -> object: ...
@@ -127,6 +129,12 @@ class DataTrunk:
     def evaluate_due_formulas(self) -> tuple[UUID, ...]:
         """Evaluate installed typed formulas that reached their configured cadence."""
         event_ids = self._repository.evaluate_due_formulas(evaluate_processing)
+        self._notify_projection(event_ids)
+        return event_ids
+
+    def advance_freshness(self, now: datetime) -> tuple[UUID, ...]:
+        """Commit due STALE events, then route their IDs through one observer seam."""
+        event_ids = self._repository.mark_expired_outputs_stale(now)
         self._notify_projection(event_ids)
         return event_ids
 
@@ -385,6 +393,7 @@ class RawObservationAdapter:
                     source_message_id=source_message_id,
                     source_sequence=source_sequence,
                     source_digest=digest,
+                    event_time_basis=parsed.event_time_basis,
                 )
             )
         return tuple(observations)
@@ -433,7 +442,7 @@ def _raw_source_digest(
 
 
 class _FreshnessRepository(Protocol):
-    def mark_expired_outputs_stale(self, now: datetime) -> int: ...
+    def mark_expired_outputs_stale(self, now: datetime) -> tuple[UUID, ...]: ...
 
 
 class _FreshnessScheduler:
@@ -448,4 +457,4 @@ class _FreshnessScheduler:
         self._clock = clock
 
     def run_once(self, now: datetime | None = None) -> int:
-        return self._repository.mark_expired_outputs_stale(now or self._clock())
+        return len(self._repository.mark_expired_outputs_stale(now or self._clock()))

@@ -243,7 +243,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             while not _data_trunk_stop.is_set():
                 try:
                     await asyncio.to_thread(
-                        freshness_repository.mark_expired_outputs_stale,
+                        formula_trunk.advance_freshness,
                         datetime.now(timezone.utc),
                     )
                 except Exception as error:
@@ -274,7 +274,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 try:
                     await asyncio.to_thread(
                         metric_projection.advance,
-                        now=datetime.now(timezone.utc),
                     )
                 except Exception as error:
                     logger.warning(

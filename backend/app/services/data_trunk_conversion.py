@@ -176,6 +176,7 @@ def _evaluate_output(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+        event_time_basis=source.event_time_basis,
     )
 
 
@@ -272,6 +273,7 @@ def _evaluate_formula_output(
     observed_at = max((source.observed_at for source in sources), default=calculated_at)
     received_at = max((source.received_at for source in sources), default=calculated_at)
     source_order_key = f"F:{len(sources):04d}:{source_digest}"
+    event_time_basis = _l2_event_time_basis(sources)
 
     if failure_reason is not None:
         return _observation(
@@ -286,6 +288,7 @@ def _evaluate_formula_output(
             source_observation_ids=source_ids,
             source_digest=source_digest,
             source_order_key=source_order_key,
+            event_time_basis=event_time_basis,
         )
 
     try:
@@ -303,6 +306,7 @@ def _evaluate_formula_output(
             source_observation_ids=source_ids,
             source_digest=source_digest,
             source_order_key=source_order_key,
+            event_time_basis=event_time_basis,
         )
 
     quality = min(
@@ -332,6 +336,7 @@ def _evaluate_formula_output(
         source_observation_ids=source_ids,
         source_digest=source_digest,
         source_order_key=source_order_key,
+        event_time_basis=event_time_basis,
     )
 
 
@@ -442,6 +447,7 @@ def _boolean_set_observation(
         source_observation_ids=tuple(source.observation_id for source in sources),
         source_digest=aggregate_digest,
         source_order_key=f"B:{len(sources):04d}:{aggregate_digest}",
+        event_time_basis=_raw_event_time_basis(sources),
     )
 
 
@@ -550,6 +556,7 @@ def _fault_code_observation(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+        event_time_basis=source.event_time_basis,
     )
 
 
@@ -599,6 +606,7 @@ def _evaluate_enum_output(
             source_observation_ids=(source.observation_id,),
             source_digest=source.source_digest,
             source_order_key=_raw_order_key(source),
+            event_time_basis=source.event_time_basis,
         )
     mapped = transform.entries.get(str(source.value.value))
     if mapped is None:
@@ -614,6 +622,7 @@ def _evaluate_enum_output(
             source_observation_ids=(source.observation_id,),
             source_digest=source.source_digest,
             source_order_key=_raw_order_key(source),
+            event_time_basis=source.event_time_basis,
         )
     quality = source.quality
     return _observation(
@@ -630,6 +639,7 @@ def _evaluate_enum_output(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+        event_time_basis=source.event_time_basis,
     )
 
 
@@ -652,6 +662,7 @@ def _runtime_failure_from_source(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+        event_time_basis=source.event_time_basis,
     )
 
 
@@ -673,6 +684,7 @@ def _runtime_failure(
         source_observation_ids=(),
         source_digest=hashlib.sha256(b"").hexdigest(),
         source_order_key=f"{calculated_at.isoformat()}||",
+        event_time_basis="calculated_at",
     )
 
 
@@ -699,6 +711,7 @@ def _observation(
     source_observation_ids: tuple[UUID, ...],
     source_digest: str,
     source_order_key: str,
+    event_time_basis: str,
 ) -> L2Observation:
     event_material = json.dumps(
         {
@@ -730,6 +743,7 @@ def _observation(
         source_observation_ids=tuple(sorted(source_observation_ids, key=str)),
         source_digest=source_digest,
         source_order_key=source_order_key,
+        event_time_basis=event_time_basis,
     )
 
 
@@ -737,3 +751,15 @@ def _raw_order_key(source: RawObservation) -> str:
     if source.source_sequence is None:
         return f"D:{source.source_digest}"
     return f"S:{source.source_sequence:020d}:{source.source_digest}"
+
+
+def _raw_event_time_basis(sources: list[RawObservation]) -> str:
+    if sources and all(source.event_time_basis == "observed_at" for source in sources):
+        return "observed_at"
+    return "received_at"
+
+
+def _l2_event_time_basis(sources: list[L2Observation]) -> str:
+    if sources and all(source.event_time_basis == "observed_at" for source in sources):
+        return "observed_at"
+    return "received_at"

@@ -68,6 +68,11 @@ class RawObservation:
     source_message_id: str | None
     source_sequence: int | None
     source_digest: str
+    event_time_basis: str = "observed_at"
+
+    def __post_init__(self) -> None:
+        if self.event_time_basis not in {"observed_at", "received_at"}:
+            raise ValueError("raw observation event time basis is invalid")
 
 
 @dataclass(frozen=True)
@@ -321,6 +326,15 @@ class L2Observation:
     source_observation_ids: tuple[UUID, ...]
     source_digest: str
     source_order_key: str
+    event_time_basis: str = "observed_at"
+
+    def __post_init__(self) -> None:
+        if self.event_time_basis not in {
+            "observed_at",
+            "received_at",
+            "calculated_at",
+        }:
+            raise ValueError("L2 observation event time basis is invalid")
 
 
 @dataclass(frozen=True)

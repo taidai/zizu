@@ -8,16 +8,18 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import hashlib
 import json
-import math
 from threading import Lock
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg2.extras import Json
+from psycopg2 import InterfaceError, OperationalError
+from loguru import logger
 
 from app.services.business_metric_contracts import (
     CompiledMetricRevision,
     MetricAggregator,
+    MetricCounterContract,
     MetricLifecycle,
     MetricSourceResolution,
     ResolvedMetricSource,
@@ -44,6 +46,7 @@ from app.services.solution_business_metrics import (
     compile_business_metric,
     parse_business_metric_asset,
 )
+from app.services.business_metrics import _producer_contract_digest
 
 
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
@@ -56,6 +59,7 @@ class ProjectionReceipt:
     completed_count: int = 0
     corrected_count: int = 0
     invalid_count: int = 0
+    error_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,12 +93,27 @@ class _PersistedEvent:
     persisted_observed_at: datetime
     effective_observed_at: datetime
     time_basis: str
+    contract_error: str | None = None
 
 
 @dataclass(frozen=True)
 class _WindowResult:
     revision: int
     content_digest: str
+
+
+@dataclass(frozen=True)
+class _ProjectionCheckpoint:
+    window: MetricWindow
+    watermark_at: datetime | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class _SourceBounds:
+    earliest: datetime
+    latest: datetime
+    earliest_new: datetime | None
 
 
 class MetricProjection:
@@ -114,6 +133,8 @@ class MetricProjection:
         self._connection = connection_factory
         self._clock = clock or (lambda: datetime.now(UTC))
         self._fault_hook = fault_hook or (lambda _stage: None)
+        self._hint_lock = Lock()
+        self._pending_event_ids: set[UUID] = set()
 
     def observe_committed(
         self,
@@ -126,19 +147,41 @@ class MetricProjection:
             raise TypeError("committed metric event IDs must be a tuple of UUIDs")
         if not event_ids:
             return ProjectionReceipt()
-        return self.advance(now=self._clock())
+        with self._hint_lock:
+            self._pending_event_ids.update(event_ids)
+        return ProjectionReceipt()
 
-    def advance(self, *, now: datetime) -> ProjectionReceipt:
-        instant = _utc(now, "metric projection tick")
+    def advance(self, *, now: datetime | None = None) -> ProjectionReceipt:
+        instant = _utc(
+            self._clock() if now is None else now,
+            "metric projection tick",
+        )
+        with self._hint_lock:
+            self._pending_event_ids.clear()
         installations = self._load_installations()
         total = ProjectionReceipt()
         for installation in installations:
-            receipt = self._advance_installation(installation, instant)
+            try:
+                receipt = self._advance_installation(installation, instant)
+            except (InterfaceError, OperationalError):
+                raise
+            except Exception as exc:
+                # A malformed source contract or one installation's failed write
+                # must not prevent other advisory-lock domains from advancing.
+                # Connection-factory/global availability failures occur before
+                # this boundary and remain visible to the caller.
+                logger.error(
+                    "metric projection installation {} failed: {}",
+                    installation.installation_id,
+                    type(exc).__name__,
+                )
+                receipt = ProjectionReceipt(error_count=1)
             total = ProjectionReceipt(
                 projection_count=total.projection_count + receipt.projection_count,
                 completed_count=total.completed_count + receipt.completed_count,
                 corrected_count=total.corrected_count + receipt.corrected_count,
                 invalid_count=total.invalid_count + receipt.invalid_count,
+                error_count=total.error_count + receipt.error_count,
             )
         return total
 
@@ -162,7 +205,12 @@ class MetricProjection:
                            binding.entity_instance_id,
                            binding.entity_definition_id, binding.method,
                            binding.data_type, binding.unit, binding.estimated,
-                           binding.direction, source.freshness_seconds
+                           binding.direction,
+                           binding.maximum_sample_gap_seconds,
+                           binding.producer_contract_digest,
+                           binding.counter_maximum, binding.counter_bit_width,
+                           binding.counter_reset_on_decrease,
+                           binding.counter_rollover_on_decrease
                     FROM t_installed_business_metrics AS installed
                     JOIN t_business_metric_revisions AS revision
                       ON revision.id = installed.template_revision_id
@@ -172,8 +220,6 @@ class MetricProjection:
                       ON output.id = installed.entity_instance_id
                     JOIN t_business_metric_source_bindings AS binding
                       ON binding.installed_metric_id = installed.id
-                    JOIN t_entity_instances AS source
-                      ON source.id = binding.entity_instance_id
                     LEFT JOIN LATERAL (
                       SELECT audit.resulting_state
                       FROM t_business_metric_audit AS audit
@@ -216,6 +262,18 @@ class MetricProjection:
                     unit=row[13],
                     estimated=bool(row[14]),
                     direction=row[15],
+                    maximum_sample_gap_seconds=int(row[16]),
+                    producer_contract_digest=(row[17].strip() if row[17] else None),
+                    counter_contract=(
+                        None
+                        if row[18] is None
+                        else MetricCounterContract(
+                            maximum=Decimal(row[18]),
+                            bit_width=row[19],
+                            reset_on_decrease=bool(row[20]),
+                            rollover_on_decrease=bool(row[21]),
+                        )
+                    ),
                 )
                 for row in source_rows
             )
@@ -229,9 +287,10 @@ class MetricProjection:
             if len(resolved_sources) != 1:
                 raise RuntimeError("business metric runtime requires one frozen source")
             method = resolved_sources[0].method
-            counter_contract = _counter_contract(resolved_sources[0].data_type, method)
-            freshness = first[16]
-            maximum_gap = max(1, int(math.ceil(float(freshness))))
+            counter_contract = _counter_contract(resolved_sources[0])
+            maximum_gap = resolved_sources[0].maximum_sample_gap_seconds
+            if maximum_gap is None:
+                raise RuntimeError("business metric source freshness is not frozen")
             installations.append(
                 _InstalledMetric(
                     installation_id=installation_id,
@@ -267,25 +326,53 @@ class MetricProjection:
                         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                         (str(installation.installation_id),),
                     )
-                    events = self._load_events(cursor, installation)
-                    observations = tuple(item.observation for item in events)
-                    watermark = max(
-                        (item.effective_observed_at for item in events),
-                        default=None,
+                    checkpoint = self._load_projection_checkpoint(
+                        cursor, installation
                     )
-                    projection_now = _projection_instant(installation, now)
-                    current = project_metric(
-                        _projection_state(installation),
-                        observations,
-                        projection_now,
+                    bounds = self._load_source_bounds(
+                        cursor,
+                        installation,
+                        checkpoint,
+                    )
+                    if bounds is None:
+                        connection.commit()
+                        return ProjectionReceipt()
+                    windows = _recovery_windows(
+                        installation,
+                        now,
+                        bounds,
+                        checkpoint,
+                    )
+                    if not windows:
+                        connection.commit()
+                        return ProjectionReceipt()
+                    query_start = min(window.start for window in windows)
+                    if installation.method is MetricAggregator.COUNTER_DELTA:
+                        query_start -= max(
+                            (window.end - window.start for window in windows),
+                            default=timedelta(0),
+                        )
+                    query_end = max(window.end for window in windows)
+                    events = self._load_events(
+                        cursor,
+                        installation,
+                        query_start,
+                        query_end,
+                    )
+                    observations = tuple(item.observation for item in events)
+                    watermark = bounds.latest
+                    latest_results = self._latest_results(
+                        cursor,
+                        installation,
+                        windows,
                     )
                     completed = corrected = invalid = 0
-                    for window in _candidate_windows(installation, now):
-                        if watermark is None or watermark <= window.end + timedelta(
+                    for window in windows:
+                        if now <= window.end + timedelta(
                             seconds=installation.allowed_lateness_seconds
                         ):
                             continue
-                        latest = self._latest_result(cursor, installation, window)
+                        latest = latest_results.get((window.start, window.end))
                         if latest is None and not any(
                             window.contains(item.effective_observed_at)
                             for item in events
@@ -336,13 +423,29 @@ class MetricProjection:
                         else:
                             invalid += 1
 
-                    projection_changed = self._upsert_projection(
-                        cursor,
+                    projection_changed = False
+                    target = max(windows, key=lambda item: (item.start, item.end))
+                    for projection_window in _projection_roll_path(
                         installation,
-                        current,
-                        events,
-                        watermark,
-                    )
+                        checkpoint,
+                        target,
+                    ):
+                        current = project_metric(
+                            _projection_state(installation),
+                            observations,
+                            _decision_instant(installation, projection_window),
+                        )
+                        projection_changed = self._upsert_projection(
+                            cursor,
+                            installation,
+                            current,
+                            events,
+                            (
+                                watermark
+                                if checkpoint is None or checkpoint.watermark_at is None
+                                else max(watermark, checkpoint.watermark_at)
+                            ),
+                        ) or projection_changed
                     self._fault_hook("checkpoint")
                     connection.commit()
                 return ProjectionReceipt(
@@ -356,9 +459,138 @@ class MetricProjection:
                 raise
 
     @staticmethod
+    def _load_projection_checkpoint(
+        cursor: Any,
+        installation: _InstalledMetric,
+    ) -> _ProjectionCheckpoint | None:
+        cursor.execute(
+            """
+            SELECT window_started_at, window_ended_at, watermark_at, updated_at
+            FROM t_business_metric_projections
+            WHERE installed_metric_id = %s
+            """,
+            (installation.installation_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return _ProjectionCheckpoint(
+            window=MetricWindow(
+                row[0],
+                row[1],
+                include_start=installation.window_kind is WindowKind.ALIGNED_DAILY,
+                include_end=installation.window_kind is WindowKind.ROLLING,
+            ),
+            watermark_at=(None if row[2] is None else _utc(row[2], "watermark")),
+            updated_at=_utc(row[3], "projection updated_at"),
+        )
+
+    @staticmethod
+    def _load_source_bounds(
+        cursor: Any,
+        installation: _InstalledMetric,
+        checkpoint: _ProjectionCheckpoint | None,
+    ) -> _SourceBounds | None:
+        source = installation.revision.sources[0]
+        if checkpoint is None:
+            cursor.execute(
+                """
+                SELECT min(
+                         CASE event_time_basis
+                           WHEN 'observed_at' THEN observed_at
+                           WHEN 'received_at' THEN received_at
+                           ELSE calculated_at
+                         END
+                       ),
+                       max(
+                         CASE event_time_basis
+                           WHEN 'observed_at' THEN observed_at
+                           WHEN 'received_at' THEN received_at
+                           ELSE calculated_at
+                         END
+                       ),
+                       NULL::timestamptz
+                FROM t_l2_observations
+                WHERE entity_instance_id = %s
+                """,
+                (source.entity_instance_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            return _SourceBounds(
+                earliest=_utc(row[0], "earliest source event"),
+                latest=_utc(row[1], "latest source event"),
+                earliest_new=None,
+            )
+
+        cursor.execute(
+            """
+            SELECT min(
+                     CASE event_time_basis
+                       WHEN 'observed_at' THEN observed_at
+                       WHEN 'received_at' THEN received_at
+                       ELSE calculated_at
+                     END
+                   ),
+                   max(
+                     CASE event_time_basis
+                       WHEN 'observed_at' THEN observed_at
+                       WHEN 'received_at' THEN received_at
+                       ELSE calculated_at
+                     END
+                   ),
+                   min(
+                     CASE event_time_basis
+                       WHEN 'observed_at' THEN observed_at
+                       WHEN 'received_at' THEN received_at
+                       ELSE calculated_at
+                     END
+                   ) FILTER (WHERE %s IS NOT NULL AND received_at > %s)
+            FROM t_l2_observations
+            WHERE entity_instance_id = %s
+              AND (
+                CASE event_time_basis
+                  WHEN 'observed_at' THEN observed_at
+                  WHEN 'received_at' THEN received_at
+                  ELSE calculated_at
+                END >= %s
+                OR received_at > %s
+              )
+            """,
+            (
+                checkpoint.updated_at,
+                checkpoint.updated_at,
+                source.entity_instance_id,
+                checkpoint.window.start,
+                checkpoint.updated_at,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] is None:
+            fallback = checkpoint.watermark_at or checkpoint.window.start
+            return _SourceBounds(
+                earliest=checkpoint.window.start,
+                latest=fallback,
+                earliest_new=None,
+            )
+        latest = _utc(row[1], "latest source event")
+        if checkpoint.watermark_at is not None:
+            latest = max(latest, checkpoint.watermark_at)
+        return _SourceBounds(
+            earliest=_utc(row[0], "earliest source event"),
+            latest=latest,
+            earliest_new=(
+                None if row[2] is None else _utc(row[2], "new source event")
+            ),
+        )
+
+    @staticmethod
     def _load_events(
         cursor: Any,
         installation: _InstalledMetric,
+        started_at: datetime,
+        ended_at: datetime,
     ) -> tuple[_PersistedEvent, ...]:
         source = installation.revision.sources[0]
         cursor.execute(
@@ -369,37 +601,97 @@ class MetricProjection:
                    observation.quality, observation.reason,
                    observation.processing_revision_id,
                    observation.site_configuration_version,
-                   observation.source_digest, observation.source_order_key
+                   observation.source_digest, observation.source_order_key,
+                   observation.event_time_basis,
+                   producer.output_id, producer.entity_definition_id,
+                   producer.data_type, producer.unit,
+                   producer.freshness_seconds,
+                   producer.revision_content_digest
             FROM t_l2_observations AS observation
+            LEFT JOIN LATERAL (
+              SELECT output.id AS output_id, output.entity_definition_id,
+                     output.data_type, output.unit, output.freshness_seconds,
+                     revision.content_digest AS revision_content_digest
+              FROM t_point_processing_output_bindings AS output_binding
+              JOIN t_installed_point_processings AS installed
+                ON installed.id = output_binding.installed_processing_id
+               AND installed.revision_id = observation.processing_revision_id
+              JOIN t_point_processing_outputs AS output
+                ON output.id = output_binding.output_id
+               AND output.revision_id = installed.revision_id
+              JOIN t_point_processing_revisions AS revision
+                ON revision.id = output.revision_id
+              WHERE output_binding.entity_instance_id = observation.entity_instance_id
+              ORDER BY installed.installed_at DESC, installed.id DESC,
+                       output.output_key, output.id
+              LIMIT 1
+            ) AS producer ON TRUE
             WHERE observation.entity_instance_id = %s
+              AND CASE observation.event_time_basis
+                    WHEN 'observed_at' THEN observation.observed_at
+                    WHEN 'received_at' THEN observation.received_at
+                    ELSE observation.calculated_at
+                  END >= %s
+              AND CASE observation.event_time_basis
+                    WHEN 'observed_at' THEN observation.observed_at
+                    WHEN 'received_at' THEN observation.received_at
+                    ELSE observation.calculated_at
+                  END <= %s
             ORDER BY observation.observed_at, observation.source_order_key,
                      observation.event_id
             """,
-            (source.entity_instance_id,),
+            (source.entity_instance_id, started_at, ended_at),
         )
         loaded: list[_PersistedEvent] = []
         for row in cursor.fetchall():
             persisted_observed_at = _utc(row[1], "source observed_at")
             received_at = _utc(row[2], "source received_at")
-            observed_is_trusted = persisted_observed_at < received_at
-            effective_observed_at = (
-                persisted_observed_at if observed_is_trusted else received_at
+            event_time_basis = row[12]
+            effective_observed_at = {
+                "observed_at": persisted_observed_at,
+                "received_at": received_at,
+                "calculated_at": _utc(row[3], "source calculated_at"),
+            }[event_time_basis]
+            producer_digest = None
+            if row[13] is not None:
+                producer_digest = _producer_contract_digest(
+                    processing_revision_id=UUID(str(row[8])),
+                    output_id=UUID(str(row[13])),
+                    revision_content_digest=row[18].strip(),
+                    entity_definition_id=row[14],
+                    data_type=row[15],
+                    unit=row[16],
+                    freshness_seconds=row[17],
+                )
+            contract_error = (
+                None
+                if source.producer_contract_digest is not None
+                and producer_digest == source.producer_contract_digest
+                and row[14] == source.entity_definition_id
+                and row[15] == source.data_type
+                and row[16] == source.unit
+                else "SOURCE_CONTRACT_MISMATCH"
             )
-            quality = TrunkQuality(int(row[6]))
-            raw_value = row[4] if source.data_type == "FLOAT" else row[5]
+            quality = (
+                TrunkQuality(int(row[6]))
+                if contract_error is None
+                else TrunkQuality.BAD
+            )
+            actual_data_type = row[15] if row[15] in {"FLOAT", "INT"} else source.data_type
+            raw_value = row[4] if actual_data_type == "FLOAT" else row[5]
             value = (
                 TypedValue.float(None if raw_value is None else float(raw_value))
-                if source.data_type == "FLOAT"
+                if actual_data_type == "FLOAT"
                 else TypedValue.integer(None if raw_value is None else int(raw_value))
             )
             observation = L2Observation(
                 event_id=UUID(str(row[0])),
                 entity_instance_id=source.entity_instance_id,
-                definition_id=source.entity_definition_id,
+                definition_id=row[14] or "producer-contract-missing",
                 value=value,
-                unit=source.unit,
+                unit=row[16],
                 quality=quality,
-                reason=row[7],
+                reason=contract_error or row[7],
                 observed_at=effective_observed_at,
                 received_at=received_at,
                 calculated_at=_utc(row[3], "source calculated_at"),
@@ -408,36 +700,55 @@ class MetricProjection:
                 source_observation_ids=(),
                 source_digest=row[10].strip(),
                 source_order_key=row[11],
+                event_time_basis=event_time_basis,
             )
             loaded.append(
                 _PersistedEvent(
                     observation=observation,
                     persisted_observed_at=persisted_observed_at,
                     effective_observed_at=effective_observed_at,
-                    time_basis=("observed_at" if observed_is_trusted else "received_at"),
+                    time_basis=event_time_basis,
+                    contract_error=contract_error,
                 )
             )
-        return tuple(loaded)
+        return tuple(
+            sorted(
+                loaded,
+                key=lambda item: (
+                    item.effective_observed_at,
+                    item.observation.source_order_key,
+                    item.observation.event_id,
+                ),
+            )
+        )
 
     @staticmethod
-    def _latest_result(
+    def _latest_results(
         cursor: Any,
         installation: _InstalledMetric,
-        window: MetricWindow,
-    ) -> _WindowResult | None:
+        windows: tuple[MetricWindow, ...],
+    ) -> dict[tuple[datetime, datetime], _WindowResult]:
+        if not windows:
+            return {}
+        earliest = min(window.start for window in windows)
+        latest = max(window.end for window in windows)
         cursor.execute(
             """
-            SELECT revision, content_digest
+            SELECT DISTINCT ON (window_started_at, window_ended_at)
+                   window_started_at, window_ended_at, revision, content_digest
             FROM t_business_metric_window_results
             WHERE installed_metric_id = %s
-              AND window_started_at = %s
-              AND window_ended_at = %s
-            ORDER BY revision DESC LIMIT 1
+              AND window_started_at >= %s
+              AND window_ended_at <= %s
+            ORDER BY window_started_at, window_ended_at, revision DESC
             """,
-            (installation.installation_id, window.start, window.end),
+            (installation.installation_id, earliest, latest),
         )
-        row = cursor.fetchone()
-        return _WindowResult(int(row[0]), row[1].strip()) if row else None
+        return {
+            (_utc(row[0], "result window start"), _utc(row[1], "result window end")):
+                _WindowResult(int(row[2]), row[3].strip())
+            for row in cursor.fetchall()
+        }
 
     def _persist_result(
         self,
@@ -478,6 +789,7 @@ class MetricProjection:
                 source_order_key=(
                     f"M:{decision.window.end.isoformat()}:{revision:010d}"
                 ),
+                event_time_basis="calculated_at",
             )
             PostgresDataTrunkRepository._ensure_runtime(cursor)
             PostgresDataTrunkRepository._insert_l2(cursor, (result_event,))
@@ -497,11 +809,12 @@ class MetricProjection:
               (installed_metric_id, window_started_at, window_ended_at,
                revision, lifecycle, calculation_method, quality, coverage,
                estimated, source_count, first_source_event_id,
-               first_source_observed_at, last_source_event_id,
-               last_source_observed_at, result_event_id, result_observed_at,
+               first_source_observed_at, first_source_effective_at,
+               last_source_event_id, last_source_observed_at,
+               last_source_effective_at, result_event_id, result_observed_at,
                result_entity_instance_id, content_digest, source_summary)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 installation.installation_id,
@@ -516,8 +829,10 @@ class MetricProjection:
                 len(source_rows),
                 None if first is None else first.observation.event_id,
                 None if first is None else first.persisted_observed_at,
+                None if first is None else first.effective_observed_at,
                 None if last is None else last.observation.event_id,
                 None if last is None else last.persisted_observed_at,
+                None if last is None else last.effective_observed_at,
                 result_event_id,
                 None if result_event is None else result_event.observed_at,
                 None if result_event is None else installation.output_entity_id,
@@ -537,9 +852,19 @@ class MetricProjection:
     ) -> bool:
         source_summary = _source_summary(installation, decision, events)
         state = {
-            "lifecycle": decision.lifecycle.value,
+            "lifecycle": MetricLifecycle.PROVISIONAL.value,
+            "windowStartedAt": decision.window.start.isoformat(),
+            "windowEndedAt": decision.window.end.isoformat(),
             "value": None if decision.value is None else str(decision.value),
-            "reason": decision.reason,
+            "reason": next(
+                (
+                    item.contract_error
+                    for item in events
+                    if item.contract_error is not None
+                    and item.observation.event_id in decision.source_event_ids
+                ),
+                decision.reason,
+            ),
             "sourceEventIds": [str(item) for item in decision.source_event_ids],
             "sourceSummary": source_summary,
             "peakAt": None if decision.peak_at is None else decision.peak_at.isoformat(),
@@ -605,15 +930,19 @@ def _projection_state(installation: _InstalledMetric) -> MetricProjectionState:
 
 
 def _counter_contract(
-    data_type: str,
-    method: MetricAggregator,
+    source: ResolvedMetricSource,
 ) -> CounterContract | None:
-    if method is not MetricAggregator.COUNTER_DELTA:
+    if source.method is not MetricAggregator.COUNTER_DELTA:
         return None
-    # Schema 043 does not yet persist reset/rollover policy.  Use only the
-    # storage type's upper bound and classify every decrease as ambiguous.
-    maximum = Decimal((1 << 63) - 1) if data_type == "INT" else Decimal("1e308")
-    return CounterContract(maximum=maximum)
+    contract = source.counter_contract
+    if contract is None:
+        return None
+    return CounterContract(
+        maximum=contract.maximum,
+        bit_width=contract.bit_width,
+        reset_on_decrease=contract.reset_on_decrease,
+        rollover_on_decrease=contract.rollover_on_decrease,
+    )
 
 
 def _projection_instant(installation: _InstalledMetric, now: datetime) -> datetime:
@@ -631,36 +960,124 @@ def _decision_instant(
     return window.end
 
 
-def _candidate_windows(
+def _recovery_windows(
     installation: _InstalledMetric,
     now: datetime,
+    bounds: _SourceBounds,
+    checkpoint: _ProjectionCheckpoint | None,
 ) -> tuple[MetricWindow, ...]:
-    horizon = installation.correction_horizon_seconds
-    if installation.window_kind is WindowKind.ALIGNED_DAILY:
-        count = max(1, math.ceil(horizon / 86400) + 1)
-        unique = {
-            (
-                window.start,
-                window.end,
-            ): window
-            for offset in range(count + 1)
-            for window in (
-                aligned_daily_window(
-                    now - timedelta(days=offset),
-                    installation.revision.timezone,
-                ),
+    current = _window_for_instant(installation, now)
+    if checkpoint is None:
+        first = _window_for_instant(installation, bounds.earliest)
+    else:
+        first = checkpoint.window
+    advancement_limit = 64 if installation.window_kind is WindowKind.ALIGNED_DAILY else 360
+    advancement = _window_sequence(
+        installation,
+        first,
+        current,
+        limit=advancement_limit,
+    )
+    affected: dict[tuple[datetime, datetime], MetricWindow] = {
+        (window.start, window.end): window for window in advancement
+    }
+    if checkpoint is not None and bounds.earliest_new is not None:
+        horizon_start = now - timedelta(
+            seconds=installation.correction_horizon_seconds
+        )
+        if installation.window_kind is WindowKind.ALIGNED_DAILY:
+            late_window = aligned_daily_window(
+                bounds.earliest_new,
+                installation.revision.timezone,
             )
-        }
-        return tuple(unique[key] for key in sorted(unique))
+            if late_window.end >= horizon_start:
+                affected[(late_window.start, late_window.end)] = late_window
+        else:
+            seconds = installation.rolling_window_seconds
+            if seconds is None:
+                raise RuntimeError("rolling metric has no frozen duration")
+            first_end = bounds.earliest_new.replace(second=0, microsecond=0)
+            if first_end < bounds.earliest_new:
+                first_end += timedelta(minutes=1)
+            last_end = min(
+                current.end,
+                bounds.earliest_new + timedelta(seconds=seconds),
+            )
+            candidate = rolling_window(first_end, seconds)
+            for _ in range(361):
+                if candidate.end > last_end:
+                    break
+                if candidate.end >= horizon_start:
+                    affected[(candidate.start, candidate.end)] = candidate
+                candidate = _next_window(installation, candidate)
+    return tuple(affected[key] for key in sorted(affected))
 
+
+def _window_for_instant(
+    installation: _InstalledMetric,
+    instant: datetime,
+) -> MetricWindow:
+    if installation.window_kind is WindowKind.ALIGNED_DAILY:
+        return aligned_daily_window(instant, installation.revision.timezone)
     seconds = installation.rolling_window_seconds
     if seconds is None:
         raise RuntimeError("rolling metric has no frozen duration")
-    latest_end = now.replace(second=0, microsecond=0)
-    minutes = max(1, math.ceil(horizon / 60) + 1)
-    return tuple(
-        rolling_window(latest_end - timedelta(minutes=offset), seconds)
-        for offset in range(minutes, -1, -1)
+    end = instant.replace(second=0, microsecond=0)
+    if end < instant:
+        end += timedelta(minutes=1)
+    return rolling_window(end, seconds)
+
+
+def _next_window(
+    installation: _InstalledMetric,
+    window: MetricWindow,
+) -> MetricWindow:
+    if installation.window_kind is WindowKind.ALIGNED_DAILY:
+        return aligned_daily_window(
+            window.end + timedelta(microseconds=1),
+            installation.revision.timezone,
+        )
+    seconds = installation.rolling_window_seconds
+    if seconds is None:
+        raise RuntimeError("rolling metric has no frozen duration")
+    return rolling_window(window.end + timedelta(minutes=1), seconds)
+
+
+def _window_sequence(
+    installation: _InstalledMetric,
+    first: MetricWindow,
+    last: MetricWindow,
+    *,
+    limit: int,
+) -> tuple[MetricWindow, ...]:
+    if first.start > last.start:
+        return (last,)
+    windows: list[MetricWindow] = []
+    current = first
+    for _ in range(limit):
+        windows.append(current)
+        if current.start == last.start and current.end == last.end:
+            break
+        current = _next_window(installation, current)
+        if current.start > last.start:
+            break
+    return tuple(windows)
+
+
+def _projection_roll_path(
+    installation: _InstalledMetric,
+    checkpoint: _ProjectionCheckpoint | None,
+    target: MetricWindow,
+) -> tuple[MetricWindow, ...]:
+    if checkpoint is None:
+        return (target,)
+    if target.start <= checkpoint.window.start:
+        return (checkpoint.window,)
+    return _window_sequence(
+        installation,
+        _next_window(installation, checkpoint.window),
+        target,
+        limit=360,
     )
 
 
@@ -675,18 +1092,68 @@ def _source_summary(
         for event_id in decision.source_event_ids
         if event_id in by_id
     )
+    ordered = tuple(
+        sorted(
+            selected,
+            key=lambda item: (
+                item.effective_observed_at,
+                item.observation.source_order_key,
+                item.observation.event_id,
+            ),
+        )
+    )
+    event_content = [
+        {
+            "eventId": str(item.observation.event_id),
+            "observedAt": item.persisted_observed_at.isoformat(),
+            "effectiveObservedAt": item.effective_observed_at.isoformat(),
+            "timeBasis": item.time_basis,
+            "value": item.observation.value.value,
+            "quality": int(item.observation.quality),
+            "sourceDigest": item.observation.source_digest,
+            "producerContractError": item.contract_error,
+        }
+        for item in ordered
+    ]
+    event_content_digest = hashlib.sha256(
+        json.dumps(
+            event_content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    first = ordered[0] if ordered else None
+    last = ordered[-1] if ordered else None
     return {
         "method": installation.method.value,
         "templateDigest": installation.revision.template_digest,
-        "sourceDigest": installation.revision.source_digest,
+        "bindingDigest": installation.revision.source_digest,
+        "sourceEntityInstanceIds": [
+            str(item.entity_instance_id) for item in installation.revision.sources
+        ],
         "runtimeInstanceId": str(RUNTIME_INSTANCE_ID),
-        "sourceEventIds": [str(item.observation.event_id) for item in selected],
+        "eventCount": len(ordered),
+        "sourceEventIds": [str(item.observation.event_id) for item in ordered],
+        "firstObservedAt": (
+            None if first is None else first.persisted_observed_at.isoformat()
+        ),
+        "lastObservedAt": (
+            None if last is None else last.persisted_observed_at.isoformat()
+        ),
+        "firstEffectiveObservedAt": (
+            None if first is None else first.effective_observed_at.isoformat()
+        ),
+        "lastEffectiveObservedAt": (
+            None if last is None else last.effective_observed_at.isoformat()
+        ),
+        "eventContentDigest": event_content_digest,
         "timeBasis": {
-            str(item.observation.event_id): item.time_basis for item in selected
+            str(item.observation.event_id): item.time_basis for item in ordered
         },
         "effectiveObservedAt": {
             str(item.observation.event_id): item.effective_observed_at.isoformat()
-            for item in selected
+            for item in ordered
         },
     }
 
@@ -730,7 +1197,8 @@ def _source_rows(
         sorted(
             (item for item in events if item.observation.event_id in selected_ids),
             key=lambda item: (
-                item.persisted_observed_at,
+                item.effective_observed_at,
+                item.observation.source_order_key,
                 item.observation.event_id,
             ),
         )

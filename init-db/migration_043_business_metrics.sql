@@ -144,8 +144,8 @@ BEGIN
     ('t_cross_node_processing_acceptance_reports', 'id', 'uuid', TRUE),
     ('t_l2_observations', 'event_id', 'uuid', TRUE),
     ('t_l2_observations', 'observed_at', 'timestamp with time zone', TRUE),
-    ('t_l2_observations', 'entity_instance_id', 'uuid', TRUE),
-    ('t_l2_observations', 'producing_runtime_instance_id', 'uuid', FALSE),
+      ('t_l2_observations', 'entity_instance_id', 'uuid', TRUE),
+      ('t_l2_observations', 'producing_runtime_instance_id', 'uuid', FALSE),
     ('t_runtime_instances', 'id', 'uuid', TRUE),
     ('t_site_configuration_state', 'current_version', 'bigint', TRUE)
   ) AS required(table_name, column_name, type_name, required_not_null)
@@ -279,6 +279,9 @@ BEGIN
         AND attribute.attnotnull = required.required_not_null
     )) INTO schema_043_expected_columns, existing_contract_columns
     FROM (VALUES
+      ('t_l2_observations', 'event_time_basis', 'text', TRUE),
+      ('t_l2_latest', 'event_time_basis', 'text', TRUE),
+      ('t_l2_observation_sources', 'source_event_time_basis', 'text', TRUE),
       ('t_business_metric_templates', 'id', 'uuid', TRUE),
       ('t_business_metric_templates', 'template_key', 'text', TRUE),
       ('t_business_metric_revisions', 'id', 'uuid', TRUE),
@@ -316,6 +319,12 @@ BEGIN
       ('t_business_metric_source_bindings', 'data_type', 'text', TRUE),
       ('t_business_metric_source_bindings', 'unit', 'text', FALSE),
       ('t_business_metric_source_bindings', 'direction', 'text', TRUE),
+      ('t_business_metric_source_bindings', 'maximum_sample_gap_seconds', 'integer', TRUE),
+      ('t_business_metric_source_bindings', 'producer_contract_digest', 'character', FALSE),
+      ('t_business_metric_source_bindings', 'counter_maximum', 'numeric', FALSE),
+      ('t_business_metric_source_bindings', 'counter_bit_width', 'smallint', FALSE),
+      ('t_business_metric_source_bindings', 'counter_reset_on_decrease', 'boolean', FALSE),
+      ('t_business_metric_source_bindings', 'counter_rollover_on_decrease', 'boolean', FALSE),
       ('t_business_metric_projections', 'installed_metric_id', 'uuid', TRUE),
       ('t_business_metric_projections', 'window_started_at', 'timestamp with time zone', TRUE),
       ('t_business_metric_projections', 'window_ended_at', 'timestamp with time zone', TRUE),
@@ -332,8 +341,10 @@ BEGIN
       ('t_business_metric_window_results', 'source_count', 'integer', TRUE),
       ('t_business_metric_window_results', 'first_source_event_id', 'uuid', FALSE),
       ('t_business_metric_window_results', 'first_source_observed_at', 'timestamp with time zone', FALSE),
+      ('t_business_metric_window_results', 'first_source_effective_at', 'timestamp with time zone', FALSE),
       ('t_business_metric_window_results', 'last_source_event_id', 'uuid', FALSE),
       ('t_business_metric_window_results', 'last_source_observed_at', 'timestamp with time zone', FALSE),
+      ('t_business_metric_window_results', 'last_source_effective_at', 'timestamp with time zone', FALSE),
       ('t_business_metric_window_results', 'result_event_id', 'uuid', FALSE),
       ('t_business_metric_window_results', 'result_observed_at', 'timestamp with time zone', FALSE),
       ('t_business_metric_window_results', 'result_entity_instance_id', 'uuid', FALSE),
@@ -398,6 +409,10 @@ BEGIN
       ('t_installed_business_metrics', 'uq_business_metric_installation_plan', 'u'),
       ('t_installed_business_metrics', 'uq_business_metric_installation_idempotency', 'u'),
       ('t_business_metric_source_bindings', 'uq_business_metric_source_binding_entity', 'u'),
+      ('t_business_metric_source_bindings', 'chk_business_metric_source_binding_counter', 'c'),
+      ('t_l2_observations', 'chk_l2_observation_event_time_basis', 'c'),
+      ('t_l2_latest', 'chk_l2_latest_event_time_basis', 'c'),
+      ('t_l2_observation_sources', 'chk_l2_source_event_time_basis', 'c'),
       ('t_business_metric_window_results', 'chk_business_metric_window_method', 'c'),
       ('t_business_metric_window_results', 'chk_business_metric_window_source_count', 'c'),
       ('t_business_metric_window_results', 'chk_business_metric_window_formal_sources', 'c'),
@@ -424,16 +439,38 @@ BEGIN
             )
         AND constraint_record.conname = required.constraint_name
         AND constraint_record.contype = required.constraint_type::"char"
-        AND CASE
-          WHEN required.constraint_type = 'c' THEN
-            pg_get_expr(constraint_record.conbin, constraint_record.conrelid)
-              = required.definition
-          ELSE pg_get_constraintdef(constraint_record.oid) = required.definition
-        END
+        AND regexp_replace(
+              CASE
+                WHEN required.constraint_type = 'c' THEN
+                  pg_get_expr(constraint_record.conbin, constraint_record.conrelid)
+                ELSE pg_get_constraintdef(constraint_record.oid)
+              END,
+              '[[:space:]]+', ' ', 'g'
+            ) = required.definition
     )) INTO
       schema_043_expected_constraint_definitions,
       schema_043_constraint_definitions
     FROM (VALUES
+      (
+        't_l2_observations',
+        'chk_l2_observation_event_time_basis', 'c',
+        '(event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+      ),
+      (
+        't_l2_latest',
+        'chk_l2_latest_event_time_basis', 'c',
+        '(event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+      ),
+      (
+        't_l2_observation_sources',
+        'chk_l2_source_event_time_basis', 'c',
+        '(source_event_time_basis = ANY (ARRAY[''observed_at''::text, ''received_at''::text, ''calculated_at''::text]))'
+      ),
+      (
+        't_business_metric_source_bindings',
+        'chk_business_metric_source_binding_counter', 'c',
+        '(((method <> ''counter_delta''::text) AND (counter_maximum IS NULL) AND (counter_bit_width IS NULL) AND (counter_reset_on_decrease IS NULL) AND (counter_rollover_on_decrease IS NULL)) OR ((method = ''counter_delta''::text) AND (((counter_maximum IS NULL) AND (counter_bit_width IS NULL) AND (counter_reset_on_decrease IS NULL) AND (counter_rollover_on_decrease IS NULL)) OR ((counter_maximum IS NOT NULL) AND (counter_maximum >= (0)::numeric) AND ((counter_bit_width IS NULL) OR (counter_bit_width = ANY (ARRAY[16, 32, 64]))) AND ((counter_bit_width IS NULL) OR (counter_maximum = CASE counter_bit_width WHEN 16 THEN (65535)::numeric WHEN 32 THEN (''4294967295''::bigint)::numeric WHEN 64 THEN ''18446744073709551615''::numeric ELSE NULL::numeric END)) AND (counter_reset_on_decrease IS NOT NULL) AND (counter_rollover_on_decrease IS NOT NULL) AND ((NOT counter_rollover_on_decrease) OR (counter_bit_width IS NOT NULL)) AND (NOT (counter_reset_on_decrease AND counter_rollover_on_decrease))))))'
+      ),
       (
         't_business_metric_installation_plans',
         'fk_business_metric_plan_previous_installation', 'f',
@@ -452,7 +489,7 @@ BEGIN
       (
         't_business_metric_window_results',
         'chk_business_metric_window_source_count', 'c',
-        '(((source_count = 0) AND (first_source_event_id IS NULL) AND (first_source_observed_at IS NULL) AND (last_source_event_id IS NULL) AND (last_source_observed_at IS NULL)) OR ((source_count > 0) AND (first_source_event_id IS NOT NULL) AND (first_source_observed_at IS NOT NULL) AND (last_source_event_id IS NOT NULL) AND (last_source_observed_at IS NOT NULL)))'
+        '(((source_count = 0) AND (first_source_event_id IS NULL) AND (first_source_observed_at IS NULL) AND (first_source_effective_at IS NULL) AND (last_source_event_id IS NULL) AND (last_source_observed_at IS NULL) AND (last_source_effective_at IS NULL)) OR ((source_count > 0) AND (first_source_event_id IS NOT NULL) AND (first_source_observed_at IS NOT NULL) AND (first_source_effective_at IS NOT NULL) AND (last_source_event_id IS NOT NULL) AND (last_source_observed_at IS NOT NULL) AND (last_source_effective_at IS NOT NULL)))'
       ),
       (
         't_business_metric_window_results',
@@ -462,12 +499,12 @@ BEGIN
       (
         't_business_metric_window_results',
         'chk_business_metric_window_source_order', 'c',
-        '((source_count = 0) OR ((source_count = 1) AND (NOT (first_source_event_id IS DISTINCT FROM last_source_event_id)) AND (NOT (first_source_observed_at IS DISTINCT FROM last_source_observed_at))) OR ((source_count > 1) AND (ROW(first_source_observed_at, first_source_event_id) < ROW(last_source_observed_at, last_source_event_id))))'
+        '((source_count = 0) OR ((source_count = 1) AND (NOT (first_source_event_id IS DISTINCT FROM last_source_event_id)) AND (NOT (first_source_effective_at IS DISTINCT FROM last_source_effective_at))) OR ((source_count > 1) AND (ROW(first_source_effective_at, first_source_event_id) < ROW(last_source_effective_at, last_source_event_id))))'
       ),
       (
         't_business_metric_window_results',
         'chk_business_metric_window_source_range', 'c',
-        '((source_count = 0) OR ((last_source_observed_at >= window_started_at) AND (last_source_observed_at <= window_ended_at) AND (first_source_observed_at <= window_ended_at) AND (((calculation_method = ''counter_delta''::text) AND (first_source_observed_at >= (window_started_at - (window_ended_at - window_started_at)))) OR ((calculation_method <> ''counter_delta''::text) AND (first_source_observed_at >= window_started_at)))))'
+        '((source_count = 0) OR ((last_source_effective_at >= window_started_at) AND (last_source_effective_at <= window_ended_at) AND (first_source_effective_at <= window_ended_at) AND (((calculation_method = ''counter_delta''::text) AND (first_source_effective_at >= (window_started_at - (window_ended_at - window_started_at)))) OR ((calculation_method <> ''counter_delta''::text) AND (first_source_effective_at >= window_started_at)))))'
       ),
       (
         't_business_metric_window_results',
@@ -551,7 +588,7 @@ BEGIN
        'validate_business_metric_installation_lineage()', 7),
       ('t_business_metric_projections',
        'trg_business_metric_projection_guard',
-       'guard_business_metric_projection()', 27),
+       'guard_business_metric_projection()', 31),
       ('t_business_metric_projections',
        'trg_business_metric_projection_no_truncate',
        'guard_business_metric_projection()', 34),
@@ -591,15 +628,15 @@ BEGIN
       schema_043_function_contracts
     FROM (VALUES
       ('guard_business_metric_projection',
-       '772e456d6b8c31c69b6cddf3aa849e99'),
+       'd15d83ba1a8614729cc580109f79ada3'),
       ('reject_data_trunk_append_only',
        '055c32ce480d817fe7a82c47d42214bf'),
       ('validate_business_metric_acceptance_runtime',
-       '03c067975cb3851f4ddc676b1af4887b'),
+       '54f689def118fdb94a24831f32f0a93e'),
       ('validate_business_metric_installation_lineage',
        '200dd4022c853d06e98348abbaea0739'),
       ('validate_business_metric_window_result_evidence',
-       '3d2ab258069d03b397ac434c37165737')
+       'b0474802c8f50ca88229b7d937765965')
     ) AS required(function_name, definition_digest);
 
     IF existing_contract_columns <> schema_043_expected_columns
@@ -673,6 +710,27 @@ BEGIN
   END IF;
 END;
 $$;
+
+ALTER TABLE public.t_l2_observations
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+ALTER TABLE public.t_l2_observations
+  DROP CONSTRAINT IF EXISTS chk_l2_observation_event_time_basis,
+  ADD CONSTRAINT chk_l2_observation_event_time_basis
+    CHECK (event_time_basis IN ('observed_at','received_at','calculated_at'));
+
+ALTER TABLE public.t_l2_latest
+  ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+ALTER TABLE public.t_l2_latest
+  DROP CONSTRAINT IF EXISTS chk_l2_latest_event_time_basis,
+  ADD CONSTRAINT chk_l2_latest_event_time_basis
+    CHECK (event_time_basis IN ('observed_at','received_at','calculated_at'));
+
+ALTER TABLE public.t_l2_observation_sources
+  ADD COLUMN IF NOT EXISTS source_event_time_basis TEXT NOT NULL DEFAULT 'observed_at';
+ALTER TABLE public.t_l2_observation_sources
+  DROP CONSTRAINT IF EXISTS chk_l2_source_event_time_basis,
+  ADD CONSTRAINT chk_l2_source_event_time_basis
+    CHECK (source_event_time_basis IN ('observed_at','received_at','calculated_at'));
 
 CREATE TABLE IF NOT EXISTS t_business_metric_templates (
   id UUID PRIMARY KEY,
@@ -826,10 +884,55 @@ CREATE TABLE IF NOT EXISTS t_business_metric_source_bindings (
   unit TEXT,
   direction TEXT NOT NULL CHECK (direction IN ('R','RW')),
   estimated BOOLEAN NOT NULL,
+  maximum_sample_gap_seconds INTEGER NOT NULL
+    CHECK (maximum_sample_gap_seconds > 0),
+  producer_contract_digest CHAR(64)
+    CHECK (producer_contract_digest IS NULL OR producer_contract_digest ~ '^[0-9a-f]{64}$'),
+  counter_maximum NUMERIC,
+  counter_bit_width SMALLINT,
+  counter_reset_on_decrease BOOLEAN,
+  counter_rollover_on_decrease BOOLEAN,
   source_digest CHAR(64) NOT NULL CHECK (source_digest ~ '^[0-9a-f]{64}$'),
   PRIMARY KEY(installed_metric_id, ordinal),
   CONSTRAINT uq_business_metric_source_binding_entity
-    UNIQUE(installed_metric_id, entity_instance_id)
+    UNIQUE(installed_metric_id, entity_instance_id),
+  CONSTRAINT chk_business_metric_source_binding_counter CHECK (
+    (
+      method <> 'counter_delta'
+      AND counter_maximum IS NULL
+      AND counter_bit_width IS NULL
+      AND counter_reset_on_decrease IS NULL
+      AND counter_rollover_on_decrease IS NULL
+    )
+    OR (
+      method = 'counter_delta'
+      AND (
+        (
+          counter_maximum IS NULL
+          AND counter_bit_width IS NULL
+          AND counter_reset_on_decrease IS NULL
+          AND counter_rollover_on_decrease IS NULL
+        )
+        OR (
+          counter_maximum IS NOT NULL
+          AND counter_maximum >= 0
+          AND (counter_bit_width IS NULL OR counter_bit_width IN (16,32,64))
+          AND (
+            counter_bit_width IS NULL
+            OR counter_maximum = CASE counter_bit_width
+              WHEN 16 THEN 65535::NUMERIC
+              WHEN 32 THEN 4294967295::NUMERIC
+              WHEN 64 THEN 18446744073709551615::NUMERIC
+            END
+          )
+          AND counter_reset_on_decrease IS NOT NULL
+          AND counter_rollover_on_decrease IS NOT NULL
+          AND (NOT counter_rollover_on_decrease OR counter_bit_width IS NOT NULL)
+          AND NOT (counter_reset_on_decrease AND counter_rollover_on_decrease)
+        )
+      )
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS t_business_metric_projections (
@@ -862,8 +965,10 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
   source_count INTEGER NOT NULL CHECK (source_count >= 0),
   first_source_event_id UUID,
   first_source_observed_at TIMESTAMPTZ,
+  first_source_effective_at TIMESTAMPTZ,
   last_source_event_id UUID,
   last_source_observed_at TIMESTAMPTZ,
+  last_source_effective_at TIMESTAMPTZ,
   result_event_id UUID,
   result_observed_at TIMESTAMPTZ,
   result_entity_instance_id UUID,
@@ -883,16 +988,26 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
   CONSTRAINT fk_business_metric_window_result_installation
     FOREIGN KEY(installed_metric_id, result_entity_instance_id)
     REFERENCES t_installed_business_metrics(id, entity_instance_id),
-  CHECK ((first_source_event_id IS NULL) = (first_source_observed_at IS NULL)),
-  CHECK ((last_source_event_id IS NULL) = (last_source_observed_at IS NULL)),
+  CHECK (
+    (first_source_event_id IS NULL)
+      = (first_source_observed_at IS NULL AND first_source_effective_at IS NULL)
+  ),
+  CHECK (
+    (last_source_event_id IS NULL)
+      = (last_source_observed_at IS NULL AND last_source_effective_at IS NULL)
+  ),
   CONSTRAINT chk_business_metric_window_source_count CHECK (
     (source_count = 0
       AND first_source_event_id IS NULL AND first_source_observed_at IS NULL
-      AND last_source_event_id IS NULL AND last_source_observed_at IS NULL)
+      AND first_source_effective_at IS NULL
+      AND last_source_event_id IS NULL AND last_source_observed_at IS NULL
+      AND last_source_effective_at IS NULL)
     OR
     (source_count > 0
       AND first_source_event_id IS NOT NULL AND first_source_observed_at IS NOT NULL
-      AND last_source_event_id IS NOT NULL AND last_source_observed_at IS NOT NULL)
+      AND first_source_effective_at IS NOT NULL
+      AND last_source_event_id IS NOT NULL AND last_source_observed_at IS NOT NULL
+      AND last_source_effective_at IS NOT NULL)
   ),
   CONSTRAINT chk_business_metric_window_formal_sources CHECK (
     lifecycle = 'invalid' OR source_count > 0
@@ -902,12 +1017,12 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
     OR (
       source_count = 1
       AND first_source_event_id IS NOT DISTINCT FROM last_source_event_id
-      AND first_source_observed_at IS NOT DISTINCT FROM last_source_observed_at
+      AND first_source_effective_at IS NOT DISTINCT FROM last_source_effective_at
     )
     OR (
       source_count > 1
-      AND ROW(first_source_observed_at, first_source_event_id)
-          < ROW(last_source_observed_at, last_source_event_id)
+      AND ROW(first_source_effective_at, first_source_event_id)
+          < ROW(last_source_effective_at, last_source_event_id)
     )
   ),
   -- Counter delta may use one baseline event before the aligned window.  Bound
@@ -916,18 +1031,18 @@ CREATE TABLE IF NOT EXISTS t_business_metric_window_results (
   CONSTRAINT chk_business_metric_window_source_range CHECK (
     source_count = 0
     OR (
-      last_source_observed_at >= window_started_at
-      AND last_source_observed_at <= window_ended_at
-      AND first_source_observed_at <= window_ended_at
+      last_source_effective_at >= window_started_at
+      AND last_source_effective_at <= window_ended_at
+      AND first_source_effective_at <= window_ended_at
       AND (
         (
           calculation_method = 'counter_delta'
-          AND first_source_observed_at
+          AND first_source_effective_at
               >= window_started_at - (window_ended_at - window_started_at)
         )
         OR (
           calculation_method <> 'counter_delta'
-          AND first_source_observed_at >= window_started_at
+          AND first_source_effective_at >= window_started_at
         )
       )
     )
@@ -964,12 +1079,12 @@ BEGIN
   END IF;
 
   IF NEW.source_count > 0 THEN
-    IF NEW.first_source_observed_at > NEW.last_source_observed_at
+    IF NEW.first_source_effective_at > NEW.last_source_effective_at
        OR (
          NEW.source_count = 1
          AND (
            NEW.first_source_event_id <> NEW.last_source_event_id
-           OR NEW.first_source_observed_at <> NEW.last_source_observed_at
+           OR NEW.first_source_effective_at <> NEW.last_source_effective_at
          )
        ) THEN
       RAISE EXCEPTION 'window result source event range is inconsistent'
@@ -1125,8 +1240,10 @@ BEGIN
      OR window_result.source_count <= 0
      OR window_result.first_source_event_id IS NULL
      OR window_result.first_source_observed_at IS NULL
+     OR window_result.first_source_effective_at IS NULL
      OR window_result.last_source_event_id IS NULL
      OR window_result.last_source_observed_at IS NULL
+     OR window_result.last_source_effective_at IS NULL
      OR window_result.result_event_id IS NULL
      OR window_result.result_observed_at IS NULL
      OR window_result.result_entity_instance_id IS NULL
@@ -1135,35 +1252,35 @@ BEGIN
        AND (
          window_result.first_source_event_id
            IS DISTINCT FROM window_result.last_source_event_id
-         OR window_result.first_source_observed_at
-           IS DISTINCT FROM window_result.last_source_observed_at
+         OR window_result.first_source_effective_at
+           IS DISTINCT FROM window_result.last_source_effective_at
        )
      )
      OR (
        window_result.source_count > 1
        AND NOT (
-         ROW(window_result.first_source_observed_at,
+         ROW(window_result.first_source_effective_at,
              window_result.first_source_event_id)
-         < ROW(window_result.last_source_observed_at,
+         < ROW(window_result.last_source_effective_at,
                window_result.last_source_event_id)
        )
      )
-     OR window_result.last_source_observed_at
+     OR window_result.last_source_effective_at
           < window_result.window_started_at
-     OR window_result.last_source_observed_at
+     OR window_result.last_source_effective_at
           > window_result.window_ended_at
-     OR window_result.first_source_observed_at
+     OR window_result.first_source_effective_at
           > window_result.window_ended_at
      OR (
        window_result.calculation_method = 'counter_delta'
-       AND window_result.first_source_observed_at
+       AND window_result.first_source_effective_at
              < window_result.window_started_at
                - (window_result.window_ended_at
                   - window_result.window_started_at)
      )
      OR (
        window_result.calculation_method <> 'counter_delta'
-       AND window_result.first_source_observed_at
+       AND window_result.first_source_effective_at
              < window_result.window_started_at
      ) THEN
     RAISE EXCEPTION 'acceptance result source evidence is invalid'
@@ -1237,15 +1354,111 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
+DECLARE
+  frozen_timezone TEXT;
+  window_contract JSONB;
+  window_kind TEXT;
+  duration_text TEXT;
+  duration_count BIGINT;
+  duration_seconds BIGINT;
+  expected_start TIMESTAMPTZ;
+  expected_end TIMESTAMPTZ;
 BEGIN
-  IF TG_OP = 'UPDATE' THEN
-    IF NEW.installed_metric_id IS DISTINCT FROM OLD.installed_metric_id THEN
-      RAISE EXCEPTION 'business metric projection installation is immutable'
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'business metric projection rows cannot be deleted or truncated'
+      USING ERRCODE = '55000';
+  END IF;
+
+  SELECT installed.frozen_timezone, revision.content -> 'window'
+  INTO frozen_timezone, window_contract
+  FROM public.t_installed_business_metrics AS installed
+  JOIN public.t_business_metric_revisions AS revision
+    ON revision.id = installed.template_revision_id
+  WHERE installed.id = NEW.installed_metric_id;
+  IF NOT FOUND OR frozen_timezone IS NULL OR window_contract IS NULL THEN
+    RAISE EXCEPTION 'business metric projection has no frozen window contract'
+      USING ERRCODE = '55000';
+  END IF;
+  window_kind := window_contract ->> 'kind';
+
+  IF NEW.state ->> 'lifecycle' IS DISTINCT FROM 'provisional' THEN
+    RAISE EXCEPTION 'business metric current projection must be provisional'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF window_kind = 'aligned_daily' THEN
+    expected_start := (
+      (NEW.window_started_at AT TIME ZONE frozen_timezone)::date::timestamp
+      AT TIME ZONE frozen_timezone
+    );
+    expected_end := (
+      ((NEW.window_started_at AT TIME ZONE frozen_timezone)::date + 1)::timestamp
+      AT TIME ZONE frozen_timezone
+    );
+    IF NEW.window_started_at <> expected_start
+       OR NEW.window_ended_at <> expected_end THEN
+      RAISE EXCEPTION 'business metric daily projection window is invalid'
         USING ERRCODE = '55000';
     END IF;
+  ELSIF window_kind = 'rolling' THEN
+    duration_text := window_contract ->> 'duration';
+    IF duration_text IS NULL OR duration_text !~ '^[0-9]+[smhd]$' THEN
+      RAISE EXCEPTION 'business metric rolling duration is invalid'
+        USING ERRCODE = '55000';
+    END IF;
+    duration_count := substring(duration_text FROM '^[0-9]+')::BIGINT;
+    duration_seconds := duration_count * CASE right(duration_text, 1)
+      WHEN 's' THEN 1 WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400
+    END;
+    IF NEW.window_ended_at - NEW.window_started_at
+         <> make_interval(secs => duration_seconds)
+       OR date_trunc('minute', NEW.window_ended_at) <> NEW.window_ended_at THEN
+      RAISE EXCEPTION 'business metric rolling projection window is invalid'
+        USING ERRCODE = '55000';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'business metric projection window kind is invalid'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
     RETURN NEW;
   END IF;
-  RAISE EXCEPTION 'business metric projection rows cannot be deleted or truncated'
+
+  IF NEW.installed_metric_id IS DISTINCT FROM OLD.installed_metric_id THEN
+    RAISE EXCEPTION 'business metric projection installation is immutable'
+      USING ERRCODE = '55000';
+  END IF;
+  IF (OLD.watermark_at IS NOT NULL AND (
+        NEW.watermark_at IS NULL OR NEW.watermark_at < OLD.watermark_at
+      )) OR NEW.updated_at < OLD.updated_at THEN
+    RAISE EXCEPTION 'business metric projection recovery clocks cannot move backwards'
+      USING ERRCODE = '55000';
+  END IF;
+  IF NEW.window_started_at = OLD.window_started_at
+     AND NEW.window_ended_at = OLD.window_ended_at THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.state IS NOT DISTINCT FROM OLD.state
+     OR NEW.state ->> 'windowStartedAt' IS NULL
+     OR NEW.state ->> 'windowEndedAt' IS NULL
+     OR (NEW.state ->> 'windowStartedAt')::TIMESTAMPTZ
+          IS DISTINCT FROM NEW.window_started_at
+     OR (NEW.state ->> 'windowEndedAt')::TIMESTAMPTZ
+          IS DISTINCT FROM NEW.window_ended_at THEN
+    RAISE EXCEPTION 'business metric projection recovery state must reset for next window'
+      USING ERRCODE = '55000';
+  END IF;
+  IF window_kind = 'aligned_daily'
+     AND NEW.window_started_at = OLD.window_ended_at THEN
+    RETURN NEW;
+  END IF;
+  IF window_kind = 'rolling'
+     AND NEW.window_started_at = OLD.window_started_at + interval '1 minute'
+     AND NEW.window_ended_at = OLD.window_ended_at + interval '1 minute' THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'business metric projection window can only advance once'
     USING ERRCODE = '55000';
 END;
 $$;
@@ -1253,7 +1466,7 @@ $$;
 DROP TRIGGER IF EXISTS trg_business_metric_projection_guard
   ON public.t_business_metric_projections;
 CREATE TRIGGER trg_business_metric_projection_guard
-BEFORE UPDATE OR DELETE ON public.t_business_metric_projections
+BEFORE INSERT OR UPDATE OR DELETE ON public.t_business_metric_projections
 FOR EACH ROW EXECUTE FUNCTION public.guard_business_metric_projection();
 
 DROP TRIGGER IF EXISTS trg_business_metric_projection_no_truncate

@@ -6,6 +6,7 @@ calculation, recomputation, and REST delivery are separate concerns.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
 import json
 from typing import Any, Protocol
@@ -49,6 +50,8 @@ class MetricSourceCandidate:
     data_type: str
     unit: str | None
     direction: str = "R"
+    maximum_sample_gap_seconds: int = 1
+    producer_contract_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -505,6 +508,9 @@ def _resolve_source(
                     candidate.unit,
                     option.method is MetricAggregator.POWER_INTEGRAL,
                     candidate.direction,
+                    candidate.maximum_sample_gap_seconds,
+                    candidate.producer_contract_digest,
+                    option.counter_contract,
                 ),
                 None,
             )
@@ -553,7 +559,43 @@ def _source_content(source: ResolvedMetricSource) -> dict[str, Any]:
         "unit": source.unit,
         "estimated": source.estimated,
         "direction": source.direction,
+        "maximum_sample_gap_seconds": source.maximum_sample_gap_seconds,
+        "producer_contract_digest": source.producer_contract_digest,
+        "counter_contract": (
+            None
+            if source.counter_contract is None
+            else {
+                "maximum": str(source.counter_contract.maximum),
+                "bit_width": source.counter_contract.bit_width,
+                "reset_on_decrease": source.counter_contract.reset_on_decrease,
+                "rollover_on_decrease": source.counter_contract.rollover_on_decrease,
+            }
+        ),
     }
+
+
+def _producer_contract_digest(
+    *,
+    processing_revision_id: UUID,
+    output_id: UUID,
+    revision_content_digest: str,
+    entity_definition_id: str,
+    data_type: str,
+    unit: str | None,
+    freshness_seconds: Decimal | float | int | str,
+) -> str:
+    freshness = format(Decimal(str(freshness_seconds)).normalize(), "f")
+    return _digest(
+        {
+            "processing_revision_id": str(processing_revision_id),
+            "output_id": str(output_id),
+            "revision_content_digest": revision_content_digest,
+            "entity_definition_id": entity_definition_id,
+            "data_type": data_type,
+            "unit": unit,
+            "freshness_seconds": freshness,
+        }
+    )
 
 
 def _digest(value: Any) -> str:

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections.abc import Mapping
+from decimal import Decimal
 import hashlib
 import json
+import math
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -24,11 +26,13 @@ from app.services.business_metrics import (
     MetricSourceCandidate,
     _compile_plan_from_state,
     _digest,
+    _producer_contract_digest,
     _source_content,
 )
 from app.services.business_metric_contracts import (
     BusinessMetricTemplate,
     MetricAggregator,
+    MetricCounterContract,
     MetricSourceResolution,
     ResolvedMetricSource,
 )
@@ -292,11 +296,48 @@ class PostgresBusinessMetricCatalog:
               JOIN subtree ON child.parent_id = subtree.id
               WHERE child.enabled = TRUE
             )
-            SELECT entity.id, device.node_id, entity.definition_id,
-                   entity.data_type, entity.unit, entity.direction
+            SELECT entity.id, device.node_id,
+                   CASE WHEN producer.processing_revision_id IS NULL
+                     THEN entity.definition_id
+                     ELSE producer.entity_definition_id
+                   END,
+                   CASE WHEN producer.processing_revision_id IS NULL
+                     THEN entity.data_type
+                     ELSE producer.data_type
+                   END,
+                   CASE WHEN producer.processing_revision_id IS NULL
+                     THEN entity.unit
+                     ELSE producer.unit
+                   END,
+                   entity.direction,
+                   CASE WHEN producer.processing_revision_id IS NULL
+                     THEN COALESCE(entity.freshness_seconds, 1)
+                     ELSE producer.freshness_seconds
+                   END,
+                   producer.processing_revision_id, producer.output_id,
+                   producer.revision_content_digest
             FROM t_entity_instances AS entity
             JOIN t_device_instances AS device ON device.id = entity.device_instance_id
             JOIN subtree ON subtree.id = device.node_id
+            LEFT JOIN LATERAL (
+              SELECT installed.revision_id AS processing_revision_id,
+                     output.id AS output_id,
+                     revision.content_digest AS revision_content_digest,
+                     output.entity_definition_id, output.data_type, output.unit,
+                     output.freshness_seconds
+              FROM t_point_processing_output_bindings AS output_binding
+              JOIN t_installed_point_processings AS installed
+                ON installed.id = output_binding.installed_processing_id
+               AND installed.current = TRUE
+              JOIN t_point_processing_outputs AS output
+                ON output.id = output_binding.output_id
+               AND output.revision_id = installed.revision_id
+              JOIN t_point_processing_revisions AS revision
+                ON revision.id = installed.revision_id
+              WHERE output_binding.entity_instance_id = entity.id
+              ORDER BY installed.installed_at DESC, installed.id DESC
+              LIMIT 1
+            ) AS producer ON TRUE
             WHERE entity.active = TRUE AND device.active = TRUE
               AND (
                 EXISTS (
@@ -322,7 +363,32 @@ class PostgresBusinessMetricCatalog:
             """,
             (root_node_id,),
         )
-        return tuple(MetricSourceCandidate(*row) for row in cursor.fetchall())
+        candidates: list[MetricSourceCandidate] = []
+        for row in cursor.fetchall():
+            producer_digest = None
+            if row[7] is not None:
+                producer_digest = _producer_contract_digest(
+                    processing_revision_id=UUID(str(row[7])),
+                    output_id=UUID(str(row[8])),
+                    revision_content_digest=row[9].strip(),
+                    entity_definition_id=row[2],
+                    data_type=row[3],
+                    unit=row[4],
+                    freshness_seconds=row[6],
+                )
+            candidates.append(
+                MetricSourceCandidate(
+                    entity_instance_id=UUID(str(row[0])),
+                    node_id=UUID(str(row[1])),
+                    entity_definition_id=row[2],
+                    data_type=row[3],
+                    unit=row[4],
+                    direction=row[5],
+                    maximum_sample_gap_seconds=max(1, int(math.ceil(float(row[6])))),
+                    producer_contract_digest=producer_digest,
+                )
+            )
+        return tuple(candidates)
 
 
 class _CursorBusinessMetricCatalog:
@@ -467,7 +533,13 @@ class PostgresBusinessMetricRepository:
                         SELECT binding.ordinal, binding.entity_instance_id,
                                binding.entity_definition_id, binding.method,
                                binding.data_type, binding.unit,
-                               binding.estimated, binding.direction
+                               binding.estimated, binding.direction,
+                               binding.maximum_sample_gap_seconds,
+                               binding.producer_contract_digest,
+                               binding.counter_maximum,
+                               binding.counter_bit_width,
+                               binding.counter_reset_on_decrease,
+                               binding.counter_rollover_on_decrease
                         FROM t_business_metric_source_bindings AS binding
                         JOIN t_entity_instances AS entity
                           ON entity.id = binding.entity_instance_id
@@ -485,6 +557,18 @@ class PostgresBusinessMetricRepository:
                             "unit": row[5],
                             "estimated": row[6],
                             "direction": row[7],
+                            "maximum_sample_gap_seconds": int(row[8]),
+                            "producer_contract_digest": row[9],
+                            "counter_contract": (
+                                None
+                                if row[10] is None
+                                else {
+                                    "maximum": str(row[10]),
+                                    "bit_width": row[11],
+                                    "reset_on_decrease": row[12],
+                                    "rollover_on_decrease": row[13],
+                                }
+                            ),
                         }
                         for row in cursor.fetchall()
                     }
@@ -946,8 +1030,12 @@ class PostgresBusinessMetricRepository:
                         INSERT INTO t_business_metric_source_bindings
                           (installed_metric_id, ordinal, entity_instance_id,
                            entity_definition_id, method, data_type, unit,
-                           direction, estimated, source_digest)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            direction, estimated, maximum_sample_gap_seconds,
+                            producer_contract_digest, counter_maximum,
+                            counter_bit_width, counter_reset_on_decrease,
+                            counter_rollover_on_decrease, source_digest)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                 %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             installation_id,
@@ -957,9 +1045,31 @@ class PostgresBusinessMetricRepository:
                             source.method.value,
                             source.data_type,
                             source.unit,
-                            source.direction,
-                            source.estimated,
-                            _digest(_source_content(source)),
+                             source.direction,
+                             source.estimated,
+                             source.maximum_sample_gap_seconds,
+                             source.producer_contract_digest,
+                             (
+                                 None
+                                 if source.counter_contract is None
+                                 else source.counter_contract.maximum
+                             ),
+                             (
+                                 None
+                                 if source.counter_contract is None
+                                 else source.counter_contract.bit_width
+                             ),
+                             (
+                                 None
+                                 if source.counter_contract is None
+                                 else source.counter_contract.reset_on_decrease
+                             ),
+                             (
+                                 None
+                                 if source.counter_contract is None
+                                 else source.counter_contract.rollover_on_decrease
+                             ),
+                             _digest(_source_content(source)),
                         ),
                     )
                 capability = _capability_content(template, plan)
@@ -1175,6 +1285,26 @@ class PostgresBusinessMetricRepository:
                         after.get("unit"),
                         bool(estimated),
                         after.get("direction", "R"),
+                        int(after["maximum_sample_gap_seconds"]),
+                        after.get("producer_contract_digest"),
+                        (
+                            None
+                            if after.get("counter_contract") is None
+                            else MetricCounterContract(
+                                maximum=Decimal(
+                                    after["counter_contract"]["maximum"]
+                                ),
+                                bit_width=after["counter_contract"].get(
+                                    "bit_width"
+                                ),
+                                reset_on_decrease=after["counter_contract"].get(
+                                    "reset_on_decrease", False
+                                ),
+                                rollover_on_decrease=after["counter_contract"].get(
+                                    "rollover_on_decrease", False
+                                ),
+                            )
+                        ),
                     )
                 )
             elif kind == "output":

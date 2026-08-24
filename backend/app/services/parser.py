@@ -57,7 +57,7 @@ def parse_neuron_json(raw: RawMessage) -> ParsedMessage | None:
     group = _extract_field(body, _GROUP_KEYS)
 
     # ---- 提取 timestamp ----
-    ts_ms = _extract_timestamp(body)
+    ts_ms, event_time_basis = _extract_timestamp(body, raw.timestamp_recv)
 
     # ---- 提取 tags ----
     tags = _extract_tags(body)
@@ -69,6 +69,7 @@ def parse_neuron_json(raw: RawMessage) -> ParsedMessage | None:
         node_name=node_name,
         group=group,
         timestamp_ms=ts_ms,
+        event_time_basis=event_time_basis,
         tags=tags,
     )
 
@@ -82,7 +83,7 @@ def _extract_field(data: dict, candidates: list[str]) -> str | None:
     return None
 
 
-def _extract_timestamp(data: dict) -> int:
+def _extract_timestamp(data: dict, received_at) -> tuple[int, str]:
     """
     提取时间戳，统一为毫秒 epoch。
 
@@ -98,21 +99,19 @@ def _extract_timestamp(data: dict) -> int:
         if isinstance(val, (int, float)):
             # 判断是秒还是毫秒: > 10位数字 → 毫秒
             if val > 1e12:
-                return int(val)
-            return int(val * 1000)
+                return int(val), "observed_at"
+            return int(val * 1000), "observed_at"
         if isinstance(val, str):
             from datetime import datetime as dt
 
             try:
                 parsed = dt.fromisoformat(val.replace("Z", "+00:00"))
-                return int(parsed.timestamp() * 1000)
+                return int(parsed.timestamp() * 1000), "observed_at"
             except (ValueError, OSError):
                 continue
 
     # 无 timestamp 字段 → 使用接收时间
-    from time import time
-
-    return int(time() * 1000)
+    return int(received_at.timestamp() * 1000), "received_at"
 
 
 def _extract_tags(data: dict) -> dict:

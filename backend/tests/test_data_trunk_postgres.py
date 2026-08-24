@@ -72,6 +72,7 @@ class DataTrunkPostgresTest(unittest.TestCase):
                 migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_041(cursor)
                 migration_support.DataTrunkMigrationPostgresTest._apply_042(cursor)
+                migration_support.DataTrunkMigrationPostgresTest._apply_043(cursor)
                 self._seed_installed_numeric_conversion(cursor)
         self.repository = PostgresDataTrunkRepository(
             connection_factory=self._connection,
@@ -698,6 +699,50 @@ class DataTrunkPostgresTest(unittest.TestCase):
             l2_latest=1,
             sources=1,
             outbox=1,
+        )
+
+    def test_explicit_event_time_basis_persists_and_orders_latest_by_effective_time(self) -> None:
+        received = datetime(2026, 8, 17, tzinfo=UTC)
+        future_fallback = replace(
+            self.raw_power(10_000.0, sequence=1),
+            source_timestamp=datetime(2036, 8, 17, tzinfo=UTC),
+            received_at=received,
+            event_time_basis="received_at",
+        )
+        next_observed = replace(
+            self.raw_power(
+                20_000.0,
+                sequence=2,
+                observed_at=received + timedelta(seconds=2),
+            ),
+            received_at=received + timedelta(seconds=3),
+            event_time_basis="observed_at",
+        )
+
+        first = self.trunk.ingest((future_fallback,))
+        second = self.trunk.ingest((next_observed,))
+
+        self.assertEqual(len(second.l2_event_ids), 1)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT observation.event_time_basis, latest.event_time_basis,
+                           latest.value_float, source.source_event_time_basis
+                    FROM t_l2_observations AS observation
+                    CROSS JOIN t_l2_latest AS latest
+                    JOIN t_l2_observation_sources AS source
+                      ON source.l2_event_id = observation.event_id
+                     AND source.l2_observed_at = observation.observed_at
+                    WHERE observation.event_id = %s
+                      AND latest.entity_instance_id = %s
+                    """,
+                    (str(first.l2_event_ids[0]), str(ENTITY_ID)),
+                )
+                row = cursor.fetchone()
+        self.assertEqual(
+            row,
+            ("received_at", "observed_at", 20.0, "received_at"),
         )
 
     def test_projection_wakeup_runs_after_commit_and_cannot_fail_ingest(self) -> None:
@@ -1367,6 +1412,74 @@ class DataTrunkPostgresTest(unittest.TestCase):
                     cursor.fetchall(),
                     [("freshness",), ("l0",)],
                 )
+
+    def test_freshness_deadline_uses_explicit_effective_event_time(self) -> None:
+        received = datetime(2026, 8, 17, tzinfo=UTC)
+        future_fallback = replace(
+            self.raw_power(10_000.0, sequence=1),
+            source_timestamp=datetime(2036, 8, 17, tzinfo=UTC),
+            received_at=received,
+            event_time_basis="received_at",
+        )
+        self.trunk.ingest((future_fallback,))
+
+        event_ids = self.trunk.advance_freshness(received + timedelta(seconds=31))
+
+        self.assertEqual(len(event_ids), 1)
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT latest.observed_at, latest.event_time_basis,
+                           source.source_event_time_basis
+                    FROM t_l2_latest AS latest
+                    JOIN t_l2_observation_sources AS source
+                      ON source.l2_event_id = latest.event_id
+                     AND source.l2_observed_at = latest.observed_at
+                    WHERE latest.entity_instance_id = %s
+                      AND source.source_kind = 'freshness'
+                    """,
+                    (str(ENTITY_ID),),
+                )
+                row = cursor.fetchone()
+        self.assertEqual(
+            row,
+            (
+                received + timedelta(seconds=30),
+                "calculated_at",
+                "received_at",
+            ),
+        )
+
+    def test_freshness_commit_uses_the_same_post_commit_projection_observer(self) -> None:
+        raw = self.raw_power(20_000.0, sequence=1)
+        self.trunk.ingest((raw,))
+        observed_ids = []
+        test_case = self
+
+        class ProjectionObserver:
+            def observe_committed(self, event_ids):
+                with psycopg2.connect(**test_case.connection_kwargs) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT count(*) FROM t_l2_observations "
+                            "WHERE event_id = ANY(%s::uuid[])",
+                            ([str(item) for item in event_ids],),
+                        )
+                        test_case.assertEqual(cursor.fetchone()[0], len(event_ids))
+                observed_ids.extend(event_ids)
+
+        trunk = DataTrunk(
+            self.repository,
+            projection_observer=ProjectionObserver(),
+        )
+
+        event_ids = trunk.advance_freshness(
+            raw.source_timestamp + timedelta(seconds=31)
+        )
+
+        self.assertEqual(tuple(observed_ids), event_ids)
+        self.assertEqual(len(event_ids), 1)
 
     def test_freshness_source_or_outbox_failure_rolls_back_stale_state(self) -> None:
         raw = self.raw_power(20000.0, sequence=1)

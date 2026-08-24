@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -96,6 +96,7 @@ class ParsedMessage(BaseModel):
     node_name: str  # Neuron 节点名 (对应 t_nodes.name 或 source_path)
     group: str | None = None  # Neuron 采集组名 (MQTT payload 中常见)
     timestamp_ms: int  # Neuron 上报时间戳 (毫秒 epoch)
+    event_time_basis: Literal["observed_at", "received_at"] = "observed_at"
     # 原始键值对；允许 list/dict，由 normalizer 决定是否跳过
     tags: dict[str, Any]
 
