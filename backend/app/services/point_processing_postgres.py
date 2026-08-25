@@ -34,12 +34,14 @@ from app.services.point_processing_selectors import (
     Selector,
     freeze_selector,
 )
-from app.services.solution_delivery_contracts import DeliveryError, PackageImport
-from app.services.solution_point_processings import (
-    PointProcessingAsset,
+from app.services.point_processing_templates import (
+    PointProcessingTemplate,
+    PointProcessingTemplateError,
     PointProcessingInput,
     PointProcessingOutput,
-    point_processing_assets,
+    RegisteredPointProcessingTemplate,
+    canonical_point_processing_content,
+    parse_point_processing_template,
     point_processing_revision_id,
     point_processing_template_id,
 )
@@ -117,342 +119,358 @@ def lock_point_processing_authoritative_catalog(cursor: Any) -> None:
     )
 
 
-def persist_point_processing_assets(
+def persist_point_processing_template(
     cursor: Any,
-    package: PackageImport,
+    asset: PointProcessingTemplate,
     actor: str,
-) -> None:
-    """Persist the validated L1 catalog inside the package transaction."""
+) -> RegisteredPointProcessingTemplate:
+    """Persist one standalone immutable L1 template in the caller transaction."""
     if not actor.strip():
-        raise DeliveryError(
-            "PACKAGE_IMPORT_ACTOR_INVALID",
-            "Package import actor is required",
+        raise PointProcessingTemplateError(
+            "POINT_PROCESSING_ACTOR_INVALID",
+            "Template import actor is required",
         )
     try:
-        for asset in point_processing_assets(package):
-            template_id = point_processing_template_id(asset)
+        template_id = point_processing_template_id(asset)
+        cursor.execute(
+            """
+            INSERT INTO t_point_processing_templates
+              (id, asset_id, device_category, brand, model,
+               display_name, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (asset_id, brand, model) DO NOTHING
+            """,
+            (
+                template_id,
+                asset.asset_id,
+                asset.device_category,
+                asset.brand,
+                asset.model,
+                asset.display_name,
+                asset.status,
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT id, device_category, display_name, status
+            FROM t_point_processing_templates
+            WHERE asset_id = %s AND brand = %s AND model = %s
+            FOR UPDATE
+            """,
+            (asset.asset_id, asset.brand, asset.model),
+        )
+        template_row = cursor.fetchone()
+        if template_row is None:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_CATALOG_UNAVAILABLE",
+                "Point processing template row disappeared",
+            )
+        template_id = template_row[0]
+        if (
+            template_row[1] != asset.device_category
+            or template_row[2] != asset.display_name
+        ):
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_TEMPLATE_CONFLICT",
+                "Point processing template identity conflicts with stored content",
+            )
+        if template_row[3] != asset.status:
             cursor.execute(
                 """
-                INSERT INTO t_point_processing_templates
-                  (id, asset_id, device_category, brand, model,
-                   display_name, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (asset_id, brand, model) DO NOTHING
+                UPDATE t_point_processing_templates
+                SET status = %s
+                WHERE id = %s
+                """,
+                (asset.status, template_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_audit_events
+                  (id, event, outcome, actor, target, details)
+                VALUES (%s, 'point_processing.template_status', 'allowed',
+                        %s, %s, %s)
                 """,
                 (
-                    template_id,
-                    asset.asset_id,
-                    asset.device_category,
-                    asset.brand,
-                    asset.model,
-                    asset.display_name,
-                    asset.status,
-                ),
-            )
-            cursor.execute(
-                """
-                SELECT id, device_category, display_name, status
-                FROM t_point_processing_templates
-                WHERE asset_id = %s AND brand = %s AND model = %s
-                FOR UPDATE
-                """,
-                (asset.asset_id, asset.brand, asset.model),
-            )
-            template_row = cursor.fetchone()
-            if template_row is None:
-                raise DeliveryError(
-                    "POINT_PROCESSING_CATALOG_UNAVAILABLE",
-                    "Point processing template row disappeared",
-                )
-            template_id = template_row[0]
-            if (
-                template_row[1] != asset.device_category
-                or template_row[2] != asset.display_name
-            ):
-                raise DeliveryError(
-                    "POINT_PROCESSING_TEMPLATE_CONFLICT",
-                    "Point processing template identity conflicts with stored content",
-                )
-            if template_row[3] != asset.status:
-                cursor.execute(
-                    """
-                    UPDATE t_point_processing_templates
-                    SET status = %s
-                    WHERE id = %s
-                    """,
-                    (asset.status, template_id),
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO t_audit_events
-                      (id, event, outcome, actor, target, details)
-                    VALUES (%s, 'point_processing.template_status', 'allowed',
-                            %s, %s, %s)
-                    """,
-                    (
-                        uuid4(),
-                        actor,
-                        f"point-processing-template:{template_id}",
-                        Json(
-                            {
-                                "asset_id": asset.asset_id,
-                                "before": template_row[3],
-                                "after": asset.status,
-                                "package_record_id": str(package.id),
-                            }
-                        ),
+                    uuid4(),
+                    actor,
+                    f"point-processing-template:{template_id}",
+                    Json(
+                        {
+                            "asset_id": asset.asset_id,
+                            "before": template_row[3],
+                            "after": asset.status,
+                        }
                     ),
-                )
-
-            revision_id = uuid5(
-                NAMESPACE_URL,
-                f"zizu/point-processing-revision/{template_id}/{asset.revision}",
-            )
-            cursor.execute(
-                """
-                INSERT INTO t_point_processing_revisions
-                  (id, template_id, revision, content_digest, published_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (template_id, revision) DO NOTHING
-                """,
-                (
-                    revision_id,
-                    template_id,
-                    asset.revision,
-                    asset.content_digest,
-                    datetime.now(timezone.utc),
                 ),
             )
-            cursor.execute(
-                """
-                SELECT id, content_digest
-                FROM t_point_processing_revisions
-                WHERE template_id = %s AND revision = %s
-                """,
-                (template_id, asset.revision),
-            )
-            revision_row = cursor.fetchone()
-            if revision_row is None or revision_row[1].strip() != asset.content_digest:
-                raise DeliveryError(
-                    "POINT_PROCESSING_REVISION_CONFLICT",
-                    "Immutable point processing revision has different content",
-                )
-            revision_id = revision_row[0]
-            cursor.execute(
-                """
-                INSERT INTO t_solution_point_processing_assets
-                  (package_record_id, template_revision_id, asset_id)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (package_record_id, asset_id) DO NOTHING
-                """,
-                (package.id, revision_id, asset.asset_id),
-            )
-            cursor.execute(
-                """
-                SELECT template_revision_id
-                FROM t_solution_point_processing_assets
-                WHERE package_record_id = %s AND asset_id = %s
-                """,
-                (package.id, asset.asset_id),
-            )
-            relation = cursor.fetchone()
-            if relation is None or relation[0] != revision_id:
-                raise DeliveryError(
-                    "POINT_PROCESSING_REVISION_CONFLICT",
-                    "Package point processing relation conflicts with stored content",
-                )
 
-            input_ids: dict[str, UUID] = {}
-            for item in asset.inputs:
-                input_id = _input_id(revision_id, item.input_id)
-                input_ids[item.input_id] = input_id
+        revision_id = uuid5(
+            NAMESPACE_URL,
+            f"zizu/point-processing-revision/{template_id}/{asset.revision}",
+        )
+        cursor.execute(
+            """
+            INSERT INTO t_point_processing_revisions
+              (id, template_id, revision, content_digest, content, published_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (template_id, revision) DO NOTHING
+            """,
+            (
+                revision_id,
+                template_id,
+                asset.revision,
+                asset.content_digest,
+                Json(canonical_point_processing_content(asset)),
+                datetime.now(timezone.utc),
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT id, content_digest, content
+            FROM t_point_processing_revisions
+            WHERE template_id = %s AND revision = %s
+            """,
+            (template_id, asset.revision),
+        )
+        revision_row = cursor.fetchone()
+        if revision_row is None or revision_row[1].strip() != asset.content_digest:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_REVISION_IMMUTABLE",
+                "Immutable point processing revision has different content",
+            )
+        revision_id = revision_row[0]
+
+        input_ids: dict[str, UUID] = {}
+        for item in asset.inputs:
+            input_id = _input_id(revision_id, item.input_id)
+            input_ids[item.input_id] = input_id
+            cursor.execute(
+                """
+                INSERT INTO t_point_processing_inputs
+                  (id, revision_id, input_key, source_kind, data_type, unit,
+                   required, stable_source_key, aliases, expected_group,
+                   expected_address, expected_wire_data_type,
+                   expected_decimal, expected_read_only)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s)
+                ON CONFLICT (revision_id, input_key) DO NOTHING
+                """,
+                (
+                    input_id,
+                    revision_id,
+                    item.input_id,
+                    item.source_kind,
+                    item.data_type,
+                    item.unit,
+                    item.required,
+                    item.source_key,
+                    list(item.aliases),
+                    item.source_contract.get("group") if item.source_contract else None,
+                    item.source_contract.get("address") if item.source_contract else None,
+                    item.source_contract.get("wireDataType") if item.source_contract else None,
+                    item.source_contract.get("decimal") if item.source_contract else None,
+                    item.source_contract.get("readOnly") if item.source_contract else None,
+                ),
+            )
+            if item.selector is not None:
                 cursor.execute(
                     """
-                    INSERT INTO t_point_processing_inputs
-                      (id, revision_id, input_key, source_kind, data_type, unit,
-                       required, stable_source_key, aliases, expected_group,
-                       expected_address, expected_wire_data_type,
-                       expected_decimal, expected_read_only)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s)
-                    ON CONFLICT (revision_id, input_key) DO NOTHING
+                    INSERT INTO t_point_processing_selectors
+                      (input_id, scope, node_type, entity_definition_id,
+                       cardinality, default_value)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (input_id) DO NOTHING
                     """,
                     (
                         input_id,
-                        revision_id,
-                        item.input_id,
-                        item.source_kind,
-                        item.data_type,
-                        item.unit,
-                        item.required,
-                        item.source_key,
-                        list(item.aliases),
-                        item.source_contract.get("group") if item.source_contract else None,
-                        item.source_contract.get("address") if item.source_contract else None,
-                        item.source_contract.get("wireDataType") if item.source_contract else None,
-                        item.source_contract.get("decimal") if item.source_contract else None,
-                        item.source_contract.get("readOnly") if item.source_contract else None,
+                        item.selector["scope"],
+                        item.selector["nodeType"],
+                        item.selector["entityDefinition"],
+                        item.cardinality,
+                        Json(item.default_value)
+                        if item.default_value is not None
+                        else None,
                     ),
                 )
-                if item.selector is not None:
-                    cursor.execute(
-                        """
-                        INSERT INTO t_point_processing_selectors
-                          (input_id, scope, node_type, entity_definition_id,
-                           cardinality, default_value)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (input_id) DO NOTHING
-                        """,
-                        (
-                            input_id,
-                            item.selector["scope"],
-                            item.selector["nodeType"],
-                            item.selector["entityDefinition"],
-                            item.cardinality,
-                            Json(item.default_value)
-                            if item.default_value is not None
-                            else None,
-                        ),
-                    )
 
-            for output in asset.outputs:
-                output_id = _output_id(revision_id, output.output_id)
+        for output in asset.outputs:
+            output_id = _output_id(revision_id, output.output_id)
+            cursor.execute(
+                """
+                INSERT INTO t_point_processing_outputs
+                  (id, revision_id, output_key, entity_definition_id,
+                   data_type, unit, freshness_seconds)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (revision_id, output_key) DO NOTHING
+                """,
+                (
+                    output_id,
+                    revision_id,
+                    output.output_id,
+                    output.entity_definition_id,
+                    output.data_type,
+                    output.unit,
+                    output.freshness_seconds,
+                ),
+            )
+            transform = output.transform
+            if transform["kind"] == "numeric":
+                transform_input_id = input_ids[str(transform["input"])]
                 cursor.execute(
                     """
-                    INSERT INTO t_point_processing_outputs
-                      (id, revision_id, output_key, entity_definition_id,
-                       data_type, unit, freshness_seconds)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (revision_id, output_key) DO NOTHING
+                    INSERT INTO t_numeric_transform_rules
+                      (output_id, input_id, scale, "offset", minimum, maximum)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (output_id) DO NOTHING
                     """,
                     (
                         output_id,
-                        revision_id,
-                        output.output_id,
-                        output.entity_definition_id,
-                        output.data_type,
-                        output.unit,
-                        output.freshness_seconds,
+                        transform_input_id,
+                        transform["scale"],
+                        transform["offset"],
+                        transform["minimum"],
+                        transform["maximum"],
                     ),
                 )
-                transform = output.transform
-                if transform["kind"] == "numeric":
-                    transform_input_id = input_ids[str(transform["input"])]
+            elif transform["kind"] == "enum":
+                transform_input_id = input_ids[str(transform["input"])]
+                cursor.execute(
+                    """
+                    INSERT INTO t_enum_transform_rules (output_id, input_id)
+                    VALUES (%s, %s) ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (output_id, transform_input_id),
+                )
+                for raw_value, canonical_value in transform["entries"].items():
                     cursor.execute(
                         """
-                        INSERT INTO t_numeric_transform_rules
-                          (output_id, input_id, scale, "offset", minimum, maximum)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (output_id) DO NOTHING
-                        """,
-                        (
-                            output_id,
-                            transform_input_id,
-                            transform["scale"],
-                            transform["offset"],
-                            transform["minimum"],
-                            transform["maximum"],
-                        ),
-                    )
-                elif transform["kind"] == "enum":
-                    transform_input_id = input_ids[str(transform["input"])]
-                    cursor.execute(
-                        """
-                        INSERT INTO t_enum_transform_rules (output_id, input_id)
-                        VALUES (%s, %s) ON CONFLICT (output_id) DO NOTHING
-                        """,
-                        (output_id, transform_input_id),
-                    )
-                    for raw_value, canonical_value in transform["entries"].items():
-                        cursor.execute(
-                            """
-                            INSERT INTO t_enum_mapping_entries
-                              (output_id, raw_value, canonical_value)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (output_id, raw_value) DO NOTHING
-                            """,
-                            (output_id, raw_value, canonical_value),
-                        )
-                elif transform["kind"] == "fault_codes":
-                    transform_input_id = input_ids[str(transform["input"])]
-                    cursor.execute(
-                        """
-                        INSERT INTO t_fault_code_transform_rules
-                          (output_id, input_id, delimiter)
+                        INSERT INTO t_enum_mapping_entries
+                          (output_id, raw_value, canonical_value)
                         VALUES (%s, %s, %s)
-                        ON CONFLICT (output_id) DO NOTHING
+                        ON CONFLICT (output_id, raw_value) DO NOTHING
                         """,
-                        (output_id, transform_input_id, transform["delimiter"]),
+                        (output_id, raw_value, canonical_value),
                     )
-                    for raw_code, entry in transform["entries"].items():
-                        cursor.execute(
-                            """
-                            INSERT INTO t_fault_code_mapping_entries
-                              (output_id, raw_code, canonical_code,
-                               display_name)
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (output_id, raw_code) DO NOTHING
-                            """,
-                            (
-                                output_id,
-                                raw_code,
-                                entry["code"],
-                                entry["name"],
-                            ),
-                        )
-                elif transform["kind"] == "boolean_set":
+            elif transform["kind"] == "fault_codes":
+                transform_input_id = input_ids[str(transform["input"])]
+                cursor.execute(
+                    """
+                    INSERT INTO t_fault_code_transform_rules
+                      (output_id, input_id, delimiter)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (output_id, transform_input_id, transform["delimiter"]),
+                )
+                for raw_code, entry in transform["entries"].items():
                     cursor.execute(
                         """
-                        INSERT INTO t_boolean_set_transform_rules (output_id)
-                        VALUES (%s) ON CONFLICT (output_id) DO NOTHING
-                        """,
-                        (output_id,),
-                    )
-                    for entry in transform["entries"]:
-                        cursor.execute(
-                            """
-                            INSERT INTO t_boolean_set_mapping_entries
-                              (output_id, input_id, canonical_code,
-                               display_name, fault_category)
-                            VALUES (%s, %s, %s, %s, %s)
-                            ON CONFLICT (output_id, input_id) DO NOTHING
-                            """,
-                            (
-                                output_id,
-                                input_ids[entry["input"]],
-                                entry["code"],
-                                entry["name"],
-                                entry["category"],
-                            ),
-                        )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO t_point_processing_expressions
-                          (output_id, dsl_text, canonical_ast, ast_digest,
-                           result_data_type, result_unit, schedule_seconds,
-                           control_eligible)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (output_id) DO NOTHING
+                        INSERT INTO t_fault_code_mapping_entries
+                          (output_id, raw_code, canonical_code,
+                           display_name)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (output_id, raw_code) DO NOTHING
                         """,
                         (
                             output_id,
-                            transform["expression"],
-                            Json(_plain(transform["canonicalAst"])),
-                            transform["astDigest"],
-                            output.data_type,
-                            output.unit,
-                            transform["scheduleSeconds"],
-                            transform["controlEligible"],
+                            raw_code,
+                            entry["code"],
+                            entry["name"],
                         ),
                     )
-    except DeliveryError:
+            elif transform["kind"] == "boolean_set":
+                cursor.execute(
+                    """
+                    INSERT INTO t_boolean_set_transform_rules (output_id)
+                    VALUES (%s) ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (output_id,),
+                )
+                for entry in transform["entries"]:
+                    cursor.execute(
+                        """
+                        INSERT INTO t_boolean_set_mapping_entries
+                          (output_id, input_id, canonical_code,
+                           display_name, fault_category)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (output_id, input_id) DO NOTHING
+                        """,
+                        (
+                            output_id,
+                            input_ids[entry["input"]],
+                            entry["code"],
+                            entry["name"],
+                            entry["category"],
+                        ),
+                    )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_expressions
+                      (output_id, dsl_text, canonical_ast, ast_digest,
+                       result_data_type, result_unit, schedule_seconds,
+                       control_eligible)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (
+                        output_id,
+                        transform["expression"],
+                        Json(_plain(transform["canonicalAst"])),
+                        transform["astDigest"],
+                        output.data_type,
+                        output.unit,
+                        transform["scheduleSeconds"],
+                        transform["controlEligible"],
+                    ),
+                )
+        return RegisteredPointProcessingTemplate(revision_id, asset)
+    except PointProcessingTemplateError:
         raise
     except psycopg2.Error as exc:
-        raise DeliveryError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_CATALOG_UNAVAILABLE",
             "Point processing catalog could not be persisted",
         ) from exc
+
+
+class PostgresPointProcessingTemplates:
+    """Standalone import/export boundary; importing does not publish configuration."""
+
+    @staticmethod
+    @contextmanager
+    def _connection():
+        from app.services.telemetry_store import get_connection
+
+        with get_connection() as connection:
+            yield connection
+
+    def import_template(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        template = parse_point_processing_template(raw)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                registered = persist_point_processing_template(cursor, template, actor)
+            connection.commit()
+        return registered
+
+    def export_template(self, revision_id: UUID) -> dict[str, Any]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                template = PostgresPointProcessingCatalog._load_template(
+                    cursor,
+                    revision_id,
+                )
+        if template is None:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_TEMPLATE_NOT_FOUND",
+                "Point-processing template revision was not found",
+            )
+        return canonical_point_processing_content(template)
 
 
 class PostgresPointProcessingCatalog:
@@ -464,10 +482,10 @@ class PostgresPointProcessingCatalog:
         with get_connection() as connection:
             yield connection
 
-    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None:
+    def get_template(self, revision_id: UUID) -> PointProcessingTemplate | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                return self._load_asset(cursor, revision_id)
+                return self._load_template(cursor, revision_id)
 
     def list_templates(
         self,
@@ -492,7 +510,7 @@ class PostgresPointProcessingCatalog:
                 return tuple(
                     PointProcessingTemplateSummary(revision_id, asset)
                     for revision_id in revision_ids
-                    if (asset := self._load_asset(cursor, revision_id)) is not None
+                    if (asset := self._load_template(cursor, revision_id)) is not None
                 )
 
     def node_source_key(self, node_id: UUID) -> str | None:
@@ -641,12 +659,12 @@ class PostgresPointProcessingCatalog:
         return tuple(PointProcessingSource(*row) for row in cursor.fetchall())
 
     @staticmethod
-    def _load_asset(
+    def _load_template(
         cursor: Any,
         revision_id: UUID,
         *,
         include_internal: bool = False,
-    ) -> PointProcessingAsset | None:
+    ) -> PointProcessingTemplate | None:
         if _supports_internal_revision_kind(cursor):
             cursor.execute(
                 """
@@ -663,7 +681,8 @@ class PostgresPointProcessingCatalog:
             """
             SELECT template.asset_id, template.display_name,
                    template.device_category, template.brand, template.model,
-                   revision.revision, template.status, revision.content_digest
+                   revision.revision, template.status, revision.content_digest,
+                   revision.content
             FROM t_point_processing_revisions AS revision
             JOIN t_point_processing_templates AS template
               ON template.id = revision.template_id
@@ -754,7 +773,7 @@ class PostgresPointProcessingCatalog:
             )
             for output_row in cursor.fetchall()
         )
-        return PointProcessingAsset(
+        return PointProcessingTemplate(
             asset_id=row[0],
             display_name=row[1],
             device_category=row[2],
@@ -765,6 +784,7 @@ class PostgresPointProcessingCatalog:
             content_digest=row[7].strip(),
             inputs=inputs,
             outputs=outputs,
+            content=None if row[8] is None else MappingProxyType(row[8]),
         )
 
     @staticmethod
@@ -1312,7 +1332,7 @@ class PostgresPointProcessingRepository:
                             "POINT_PROCESSING_INTERNAL_REVISION",
                             "Internal point-processing revisions require their owning delivery transaction",
                         )
-                    template = PostgresPointProcessingCatalog._load_asset(
+                    template = PostgresPointProcessingCatalog._load_template(
                         cursor,
                         plan.template_revision_id,
                         include_internal=trusted_internal_apply,

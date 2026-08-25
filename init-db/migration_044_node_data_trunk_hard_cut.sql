@@ -192,6 +192,8 @@ BEGIN
   ALTER TABLE public.t_point_processing_revisions
     DROP CONSTRAINT IF EXISTS chk_point_processing_revision_internal_kind,
     DROP COLUMN IF EXISTS internal_kind;
+  ALTER TABLE public.t_point_processing_revisions
+    ADD COLUMN content JSONB;
   DROP INDEX IF EXISTS public.uq_installed_point_processing_current;
   CREATE UNIQUE INDEX uq_installed_point_processing_current
     ON public.t_installed_point_processings(node_id)

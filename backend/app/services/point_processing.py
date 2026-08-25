@@ -23,7 +23,7 @@ from app.services.data_trunk_contracts import (
     NumericTransform,
     ValueKind,
 )
-from app.services.solution_point_processings import PointProcessingAsset
+from app.services.point_processing_templates import PointProcessingTemplate
 from app.services.point_processing_dag import (
     PointProcessingDagError,
     validate_processing_dag,
@@ -182,7 +182,7 @@ class PointProcessingApplication:
 @dataclass(frozen=True)
 class PointProcessingTemplateSummary:
     revision_id: UUID
-    asset: PointProcessingAsset
+    asset: PointProcessingTemplate
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -241,7 +241,7 @@ class NodeDataTrunkView:
 
 
 class PointProcessingCatalog(Protocol):
-    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None: ...
+    def get_template(self, revision_id: UUID) -> PointProcessingTemplate | None: ...
 
     def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]: ...
 
@@ -603,7 +603,7 @@ class InMemoryPointProcessingCatalog:
     def __init__(
         self,
         *,
-        templates: Mapping[UUID, PointProcessingAsset],
+        templates: Mapping[UUID, PointProcessingTemplate],
         sources: tuple[PointProcessingSource, ...] = (),
         node_source_keys: Mapping[UUID, str] | None = None,
         selector_members: Mapping[tuple[UUID, str, str], tuple[UUID, ...]] | None = None,
@@ -615,7 +615,7 @@ class InMemoryPointProcessingCatalog:
         self._selector_members = dict(selector_members or {})
         self._dependency_edges = set(dependency_edges)
 
-    def get_template(self, revision_id: UUID) -> PointProcessingAsset | None:
+    def get_template(self, revision_id: UUID) -> PointProcessingTemplate | None:
         return self._templates.get(revision_id)
 
     def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]:
@@ -1400,7 +1400,7 @@ def compile_point_processing_plan(
 
 def _scan_plan_inputs(
     node_id: UUID,
-    template: PointProcessingAsset,
+    template: PointProcessingTemplate,
     scan: ScannedPointCatalog,
     existing_sources: tuple[PointProcessingSource, ...],
 ) -> tuple[
@@ -1591,7 +1591,7 @@ def _source_catalog_digest(sources: tuple[PointProcessingSource, ...]) -> str:
 
 
 def _template_source_catalog_digest(
-    template: PointProcessingAsset,
+    template: PointProcessingTemplate,
     sources: tuple[PointProcessingSource, ...],
     node_id: UUID,
 ) -> str:
@@ -1606,7 +1606,7 @@ def _template_source_catalog_digest(
 
 
 def _effective_source_catalog_digest(
-    template: PointProcessingAsset,
+    template: PointProcessingTemplate,
     catalog: PointProcessingCatalog,
     node_id: UUID,
     site_configuration_version: int,

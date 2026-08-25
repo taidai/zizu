@@ -1,9 +1,7 @@
 """Authenticated public HTTP seam for point-processing planning and apply."""
 from __future__ import annotations
 
-import importlib.util
 import os
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 from uuid import UUID
@@ -32,16 +30,7 @@ from app.services.point_processing import (
     PointProcessingDelivery,
     PointProcessingSource,
 )
-from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
-from app.services.solution_point_processings import point_processing_assets
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "build_reference_delivery.py"
-SPEC = importlib.util.spec_from_file_location("build_reference_delivery", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-builder = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(builder)
+from app.services.point_processing_templates import InMemoryPointProcessingTemplates
 
 NODE_ID = UUID("84000000-0000-0000-0000-000000000001")
 ENTITY_IDENTITY_INSTALLATION_ID = UUID("84000000-0000-0000-0000-000000000002")
@@ -63,13 +52,9 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def build_app(self) -> tuple[FastAPI, InMemoryIdentityRepository, InMemoryPointProcessingRepository]:
-        from tests.test_point_processing import _site_formula_asset
+        from tests.test_point_processing import _assets, _site_formula_asset
 
-        package = SolutionDelivery(
-            InMemoryDeliveryRepository(),
-            platform_version="0.4.77",
-        ).import_package(builder.build_archive(), "user:test-engineer")
-        assets = {item.asset_id: item for item in point_processing_assets(package)}
+        assets = _assets()
         repository = InMemoryPointProcessingRepository()
         service = PointProcessingDelivery(
             repository,
@@ -123,12 +108,19 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         app.include_router(auth_router, prefix="/api/v1")
         try:
-            from app.api.point_processings import get_point_processings, router
+            from app.api.point_processings import (
+                get_point_processing_templates,
+                get_point_processings,
+                router,
+            )
         except ImportError:
             pass
         else:
             app.include_router(router, prefix="/api/v1")
             app.dependency_overrides[get_point_processings] = lambda: service
+            templates = InMemoryPointProcessingTemplates(configuration_revision=0)
+            app.dependency_overrides[get_point_processing_templates] = lambda: templates
+            app.state.point_processing_templates = templates
         app.dependency_overrides[get_identity] = lambda: Identity(identity_repository)
         return app, identity_repository, repository
 
@@ -180,6 +172,48 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, response.json()["member_count"])
         self.assertEqual(2, response.json()["dag_summary"]["edge_count"])
         self.assertEqual(1, repository.application_count())
+
+    async def test_standalone_json_import_export_is_immutable(self) -> None:
+        from tests.test_point_processing_templates import template_json
+
+        app, _, _ = self.build_app()
+        registry = app.state.point_processing_templates
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            engineer_headers = await self.login(client, "engineer")
+            created = await client.post(
+                "/api/v1/point-processing-templates/import",
+                headers=engineer_headers,
+                json=template_json(),
+            )
+            changed = template_json()
+            changed["displayName"] = "篡改名称"
+            conflict = await client.post(
+                "/api/v1/point-processing-templates/import",
+                headers=engineer_headers,
+                json=changed,
+            )
+            exported = await client.get(
+                f"/api/v1/point-processing-templates/{created.json()['revision_id']}/export",
+                headers=engineer_headers,
+            )
+
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual(0, registry.configuration_revision)
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        self.assertEqual(
+            "POINT_PROCESSING_REVISION_IMMUTABLE",
+            conflict.json()["detail"]["code"],
+        )
+        self.assertEqual(200, exported.status_code, exported.text)
+        self.assertEqual(template_json(), exported.json())
+        self.assertEqual(
+            f'"{created.json()["content_digest"]}"',
+            exported.headers["etag"],
+        )
 
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
         app, identity_repository, repository = self.build_app()

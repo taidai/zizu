@@ -1,24 +1,15 @@
 """Deterministic planning and application of L1 point processing."""
 from __future__ import annotations
 
-import importlib.util
+import json
 from pathlib import Path
 import unittest
 from uuid import UUID
 
-from app.services.solution_delivery import InMemoryDeliveryRepository, SolutionDelivery
-from app.services.solution_point_processings import (
-    parse_point_processing_asset,
-    point_processing_assets,
-)
+from app.services.point_processing_templates import parse_point_processing_template
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "build_reference_delivery.py"
-SPEC = importlib.util.spec_from_file_location("build_reference_delivery", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-builder = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(builder)
+REFERENCE_DIR = Path(__file__).resolve().parents[2] / "reference-point-processings"
 
 NODE_ID = UUID("81000000-0000-0000-0000-000000000001")
 ENTITY_IDENTITY_INSTALLATION_ID = UUID("81000000-0000-0000-0000-000000000002")
@@ -33,7 +24,7 @@ GRID_POWER = UUID("85000000-0000-0000-0000-000000000003")
 
 
 def _site_formula_asset():
-    return parse_point_processing_asset(
+    return parse_point_processing_template(
         {
             "schemaVersion": "zizu.point-processing/v1alpha1",
             "id": "site.total-pcs-power",
@@ -133,15 +124,15 @@ def _site_mixed_formula_asset():
             }
         ],
     }
-    return parse_point_processing_asset(payload)
+    return parse_point_processing_template(payload)
 
 
 def _assets():
-    package = SolutionDelivery(
-        InMemoryDeliveryRepository(),
-        platform_version="0.4.77",
-    ).import_package(builder.build_archive(), "user:test-engineer")
-    return {item.asset_id: item for item in point_processing_assets(package)}
+    assets = (
+        parse_point_processing_template(json.loads(path.read_text(encoding="utf-8")))
+        for path in REFERENCE_DIR.glob("*.zizu-point-processing.json")
+    )
+    return {item.asset_id: item for item in assets}
 
 
 class PointProcessingTest(unittest.TestCase):

@@ -1,0 +1,2122 @@
+{
+  "schemaVersion": "zizu.point-processing/v1alpha1",
+  "id": "pcs.en9",
+  "kind": "point_processing_template",
+  "displayName": "恩玖 EN9 PCS",
+  "deviceCategory": "PCS",
+  "brand": "EN9",
+  "model": "EN9-PCS",
+  "revision": 1,
+  "status": "active",
+  "inputs": [
+    {
+      "id": "active_power_raw",
+      "sourceKind": "l0",
+      "sourceKey": "交流输出总有功功率",
+      "aliases": [
+        "1!424634",
+        "交流输出总有功功\n率"
+      ],
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!424634",
+        "wireDataType": "INT16",
+        "decimal": 0.1,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "operating_state_raw",
+      "sourceKind": "l0",
+      "sourceKey": "并网/离网状态",
+      "aliases": [
+        "1!424669"
+      ],
+      "dataType": "INT",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!424669",
+        "wireDataType": "UINT16",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405889_00",
+      "sourceKind": "l0",
+      "sourceKey": "EPO 故障",
+      "aliases": [
+        "1!405889.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405889.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405889_01",
+      "sourceKind": "l0",
+      "sourceKey": "IGBT OCP 故障",
+      "aliases": [
+        "1!405889.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405889.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405889_02",
+      "sourceKind": "l0",
+      "sourceKey": "母线硬件过压故障",
+      "aliases": [
+        "1!405889.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405889.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405889_04",
+      "sourceKind": "l0",
+      "sourceKey": "功率模块逐波限流故障",
+      "aliases": [
+        "1!405889.4"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405889.4",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405889_05",
+      "sourceKind": "l0",
+      "sourceKey": "平衡模块逐波限流故障",
+      "aliases": [
+        "1!405889.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405889.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_00",
+      "sourceKind": "l0",
+      "sourceKey": "24V 电源故障",
+      "aliases": [
+        "1!405890.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_01",
+      "sourceKind": "l0",
+      "sourceKey": "风扇故障",
+      "aliases": [
+        "1!405890.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_02",
+      "sourceKind": "l0",
+      "sourceKey": "连接故障",
+      "aliases": [
+        "1!405890.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_06",
+      "sourceKind": "l0",
+      "sourceKey": "外部输入干接点 3 故障",
+      "aliases": [
+        "1!405890.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_07",
+      "sourceKind": "l0",
+      "sourceKey": "电感过温故障标志",
+      "aliases": [
+        "1!405890.7"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.7",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_08",
+      "sourceKind": "l0",
+      "sourceKey": "功率模块过温故障",
+      "aliases": [
+        "1!405890.8"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.8",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_09",
+      "sourceKind": "l0",
+      "sourceKey": "平衡模块过温故障",
+      "aliases": [
+        "1!405890.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_10",
+      "sourceKind": "l0",
+      "sourceKey": "15V 电源故障",
+      "aliases": [
+        "1!405890.10"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.10",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_11",
+      "sourceKind": "l0",
+      "sourceKey": "系统火警故障",
+      "aliases": [
+        "1!405890.11"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.11",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_12",
+      "sourceKind": "l0",
+      "sourceKey": "外部输入干接点 1 故障",
+      "aliases": [
+        "1!405890.12"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.12",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_13",
+      "sourceKind": "l0",
+      "sourceKey": "外部输入干接点2 故障",
+      "aliases": [
+        "1!405890.13"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.13",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_14",
+      "sourceKind": "l0",
+      "sourceKey": "环境温度过温故障",
+      "aliases": [
+        "1!405890.14"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.14",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405890_15",
+      "sourceKind": "l0",
+      "sourceKey": "干接点过温故障",
+      "aliases": [
+        "1!405890.15"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405890.15",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_00",
+      "sourceKind": "l0",
+      "sourceKey": "电网A 相过压故障",
+      "aliases": [
+        "1!405891.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_01",
+      "sourceKind": "l0",
+      "sourceKey": "电网B 相过压故障",
+      "aliases": [
+        "1!405891.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_02",
+      "sourceKind": "l0",
+      "sourceKey": "电网C 相过压故障",
+      "aliases": [
+        "1!405891.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_03",
+      "sourceKind": "l0",
+      "sourceKey": "电网A 相欠压故障",
+      "aliases": [
+        "1!405891.3"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.3",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_04",
+      "sourceKind": "l0",
+      "sourceKey": "电网B 相欠压故障",
+      "aliases": [
+        "1!405891.4"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.4",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_05",
+      "sourceKind": "l0",
+      "sourceKey": "电网C 相欠压故障",
+      "aliases": [
+        "1!405891.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_06",
+      "sourceKind": "l0",
+      "sourceKey": "电网过频故障",
+      "aliases": [
+        "1!405891.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_07",
+      "sourceKind": "l0",
+      "sourceKey": "电网欠频故障",
+      "aliases": [
+        "1!405891.7"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.7",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_08",
+      "sourceKind": "l0",
+      "sourceKey": "电网相序错误故障",
+      "aliases": [
+        "1!405891.8"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.8",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_09",
+      "sourceKind": "l0",
+      "sourceKey": "A 相软件过流故障",
+      "aliases": [
+        "1!405891.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_10",
+      "sourceKind": "l0",
+      "sourceKey": "B 相软件过流故障",
+      "aliases": [
+        "1!405891.10"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.10",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_11",
+      "sourceKind": "l0",
+      "sourceKey": "C 相软件过流故障",
+      "aliases": [
+        "1!405891.11"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.11",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_12",
+      "sourceKind": "l0",
+      "sourceKey": "电网电压不平衡故障",
+      "aliases": [
+        "1!405891.12"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.12",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_13",
+      "sourceKind": "l0",
+      "sourceKey": "电网电流不平衡故障",
+      "aliases": [
+        "1!405891.13"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.13",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_14",
+      "sourceKind": "l0",
+      "sourceKey": "电网缺相故障",
+      "aliases": [
+        "1!405891.14"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.14",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405891_15",
+      "sourceKind": "l0",
+      "sourceKey": "N 线过流故障",
+      "aliases": [
+        "1!405891.15"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405891.15",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_00",
+      "sourceKind": "l0",
+      "sourceKey": "预充母线过压故障",
+      "aliases": [
+        "1!405892.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_01",
+      "sourceKind": "l0",
+      "sourceKey": "预充母线欠压故障",
+      "aliases": [
+        "1!405892.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_04",
+      "sourceKind": "l0",
+      "sourceKey": "运行母线过压故障",
+      "aliases": [
+        "1!405892.4"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.4",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_05",
+      "sourceKind": "l0",
+      "sourceKey": "运行母线欠压故障",
+      "aliases": [
+        "1!405892.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_06",
+      "sourceKind": "l0",
+      "sourceKey": "正负母线不平衡故障",
+      "aliases": [
+        "1!405892.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_07",
+      "sourceKind": "l0",
+      "sourceKey": "电池欠压故障",
+      "aliases": [
+        "1!405892.7"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.7",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_09",
+      "sourceKind": "l0",
+      "sourceKey": "电池过压故障",
+      "aliases": [
+        "1!405892.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_10",
+      "sourceKind": "l0",
+      "sourceKey": "直流预充电过流故障",
+      "aliases": [
+        "1!405892.10"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.10",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_11",
+      "sourceKind": "l0",
+      "sourceKey": "直流过流故障",
+      "aliases": [
+        "1!405892.11"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.11",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_12",
+      "sourceKind": "l0",
+      "sourceKey": "平衡模块软件过流故障",
+      "aliases": [
+        "1!405892.12"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.12",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405892_15",
+      "sourceKind": "l0",
+      "sourceKey": "电池反接故障",
+      "aliases": [
+        "1!405892.15"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405892.15",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405893_00",
+      "sourceKind": "l0",
+      "sourceKey": "预充电超时故障",
+      "aliases": [
+        "1!405893.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405893.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405893_01",
+      "sourceKind": "l0",
+      "sourceKey": "预充电 A 相过流故障",
+      "aliases": [
+        "1!405893.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405893.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405893_02",
+      "sourceKind": "l0",
+      "sourceKey": "预充电 B 相过流故障",
+      "aliases": [
+        "1!405893.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405893.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405893_03",
+      "sourceKind": "l0",
+      "sourceKey": "预充电 C 相过流故障",
+      "aliases": [
+        "1!405893.3"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405893.3",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405893_06",
+      "sourceKind": "l0",
+      "sourceKey": "漏电流过流故障",
+      "aliases": [
+        "1!405893.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405893.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_00",
+      "sourceKind": "l0",
+      "sourceKey": "控制板 RAM 故障",
+      "aliases": [
+        "1!405894.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_01",
+      "sourceKind": "l0",
+      "sourceKey": "控制板 EEPROM 故障",
+      "aliases": [
+        "1!405894.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_02",
+      "sourceKind": "l0",
+      "sourceKey": "AD 零漂过大故障",
+      "aliases": [
+        "1!405894.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_03",
+      "sourceKind": "l0",
+      "sourceKey": "后台通信协议故障",
+      "aliases": [
+        "1!405894.3"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.3",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_04",
+      "sourceKind": "l0",
+      "sourceKey": "CAN 通信协议故障",
+      "aliases": [
+        "1!405894.4"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.4",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_05",
+      "sourceKind": "l0",
+      "sourceKey": "CPLD 通信协议故障",
+      "aliases": [
+        "1!405894.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_06",
+      "sourceKind": "l0",
+      "sourceKey": "DataLog 数据故障",
+      "aliases": [
+        "1!405894.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_08",
+      "sourceKind": "l0",
+      "sourceKey": "绝缘检测故障",
+      "aliases": [
+        "1!405894.8"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.8",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_09",
+      "sourceKind": "l0",
+      "sourceKey": "软件固件不匹配故障",
+      "aliases": [
+        "1!405894.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_11",
+      "sourceKind": "l0",
+      "sourceKey": "BMS 电池状态故障",
+      "aliases": [
+        "1!405894.11"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.11",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_12",
+      "sourceKind": "l0",
+      "sourceKey": "STS 通信故障",
+      "aliases": [
+        "1!405894.12"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.12",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_13",
+      "sourceKind": "l0",
+      "sourceKey": "BMS 通信故障",
+      "aliases": [
+        "1!405894.13"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.13",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_14",
+      "sourceKind": "l0",
+      "sourceKey": "并机系统从机CAN 通信故障",
+      "aliases": [
+        "1!405894.14"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.14",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405894_15",
+      "sourceKind": "l0",
+      "sourceKey": "EMS 通信故障",
+      "aliases": [
+        "1!405894.15"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405894.15",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_00",
+      "sourceKind": "l0",
+      "sourceKey": "预充电继电器闭合故障",
+      "aliases": [
+        "1!405895.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_01",
+      "sourceKind": "l0",
+      "sourceKey": "预充电继电器断开故障",
+      "aliases": [
+        "1!405895.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_02",
+      "sourceKind": "l0",
+      "sourceKey": "预充电继电器闭合状态故障",
+      "aliases": [
+        "1!405895.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_03",
+      "sourceKind": "l0",
+      "sourceKey": "预充电继电器断开状态故障",
+      "aliases": [
+        "1!405895.3"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.3",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_04",
+      "sourceKind": "l0",
+      "sourceKey": "主继电器闭合故障",
+      "aliases": [
+        "1!405895.4"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.4",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_05",
+      "sourceKind": "l0",
+      "sourceKey": "主继电器断开故障",
+      "aliases": [
+        "1!405895.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_06",
+      "sourceKind": "l0",
+      "sourceKey": "主继电器闭合状态故障",
+      "aliases": [
+        "1!405895.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_07",
+      "sourceKind": "l0",
+      "sourceKey": "主继电器断开状态故障",
+      "aliases": [
+        "1!405895.7"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.7",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_08",
+      "sourceKind": "l0",
+      "sourceKey": "交流主继电器粘连故障",
+      "aliases": [
+        "1!405895.8"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.8",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_09",
+      "sourceKind": "l0",
+      "sourceKey": "直流继电器开路故障",
+      "aliases": [
+        "1!405895.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405895_10",
+      "sourceKind": "l0",
+      "sourceKey": "交流主继电器开路故障",
+      "aliases": [
+        "1!405895.10"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405895.10",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_00",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 A 相过压故障",
+      "aliases": [
+        "1!405896.0"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.0",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_01",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 B 相过压故障",
+      "aliases": [
+        "1!405896.1"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.1",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_02",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 C 相过压故障",
+      "aliases": [
+        "1!405896.2"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.2",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_03",
+      "sourceKind": "l0",
+      "sourceKey": "电网孤岛故障",
+      "aliases": [
+        "1!405896.3"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.3",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_05",
+      "sourceKind": "l0",
+      "sourceKey": "系统谐振故障",
+      "aliases": [
+        "1!405896.5"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.5",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_06",
+      "sourceKind": "l0",
+      "sourceKey": "软件过压过流故障",
+      "aliases": [
+        "1!405896.6"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.6",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_08",
+      "sourceKind": "l0",
+      "sourceKey": "高电压穿越超时故障",
+      "aliases": [
+        "1!405896.8"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.8",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_09",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 A 相欠压故障",
+      "aliases": [
+        "1!405896.9"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.9",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_10",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 B 相欠压故障",
+      "aliases": [
+        "1!405896.10"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.10",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_11",
+      "sourceKind": "l0",
+      "sourceKey": "逆变电压 C 相欠压故障",
+      "aliases": [
+        "1!405896.11"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.11",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_12",
+      "sourceKind": "l0",
+      "sourceKey": "离网无同步信号故障",
+      "aliases": [
+        "1!405896.12"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.12",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_14",
+      "sourceKind": "l0",
+      "sourceKey": "离网输出短路故障",
+      "aliases": [
+        "1!405896.14"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.14",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    },
+    {
+      "id": "fault_405896_15",
+      "sourceKind": "l0",
+      "sourceKey": "低电压穿越超时故障",
+      "aliases": [
+        "1!405896.15"
+      ],
+      "dataType": "BOOL",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!405896.15",
+        "wireDataType": "BIT",
+        "decimal": null,
+        "readOnly": true
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "id": "active_power",
+      "entityDefinition": "pcs.active_power",
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "freshness": "30s",
+      "transform": {
+        "kind": "numeric",
+        "input": "active_power_raw",
+        "scale": 1.0,
+        "offset": 0,
+        "minimum": -500,
+        "maximum": 500
+      }
+    },
+    {
+      "id": "operating_state",
+      "entityDefinition": "pcs.operating_state",
+      "dataType": "ENUM",
+      "unit": null,
+      "freshness": "30s",
+      "transform": {
+        "kind": "enum",
+        "input": "operating_state_raw",
+        "entries": {
+          "0": "STOPPED",
+          "1": "STARTING",
+          "2": "STANDBY",
+          "3": "RUNNING_OFF_GRID",
+          "4": "RUNNING_GRID_CONNECTED",
+          "5": "FAULT",
+          "6": "COMMISSIONING"
+        }
+      }
+    },
+    {
+      "id": "fault_codes",
+      "entityDefinition": "pcs.fault_codes",
+      "dataType": "CODE_SET",
+      "unit": null,
+      "freshness": "30s",
+      "transform": {
+        "kind": "boolean_set",
+        "entries": [
+          {
+            "input": "fault_405889_00",
+            "code": "pcs.hardware.epo",
+            "name": "EPO 故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405889_01",
+            "code": "pcs.hardware.igbt_ocp",
+            "name": "IGBT OCP 故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405889_02",
+            "code": "pcs.hardware.dc_bus_overvoltage",
+            "name": "母线硬件过压故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405889_04",
+            "code": "pcs.hardware.power_module_cycle_current_limit",
+            "name": "功率模块逐波限流故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405889_05",
+            "code": "pcs.hardware.balance_module_cycle_current_limit",
+            "name": "平衡模块逐波限流故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_00",
+            "code": "pcs.hardware.power_supply_24v",
+            "name": "24V 电源故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_01",
+            "code": "pcs.hardware.fan_failure",
+            "name": "风扇故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_02",
+            "code": "pcs.hardware.connector_failure",
+            "name": "连接故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_06",
+            "code": "pcs.hardware.dry_contact_input_3",
+            "name": "外部输入干接点 3 故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_07",
+            "code": "pcs.hardware.inductor_overtemperature",
+            "name": "电感过温故障标志",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_08",
+            "code": "pcs.hardware.power_module_overtemperature",
+            "name": "功率模块过温故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_09",
+            "code": "pcs.hardware.balance_module_overtemperature",
+            "name": "平衡模块过温故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_10",
+            "code": "pcs.hardware.power_supply_15v",
+            "name": "15V 电源故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_11",
+            "code": "pcs.hardware.fire_alarm",
+            "name": "系统火警故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_12",
+            "code": "pcs.hardware.dry_contact_input_1",
+            "name": "外部输入干接点 1 故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_13",
+            "code": "pcs.hardware.dry_contact_input_2",
+            "name": "外部输入干接点2 故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_14",
+            "code": "pcs.hardware.ambient_overtemperature",
+            "name": "环境温度过温故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405890_15",
+            "code": "pcs.hardware.dry_contact_overtemperature",
+            "name": "干接点过温故障",
+            "category": "HARDWARE"
+          },
+          {
+            "input": "fault_405891_00",
+            "code": "pcs.grid.phase_a_overvoltage",
+            "name": "电网A 相过压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_01",
+            "code": "pcs.grid.phase_b_overvoltage",
+            "name": "电网B 相过压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_02",
+            "code": "pcs.grid.phase_c_overvoltage",
+            "name": "电网C 相过压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_03",
+            "code": "pcs.grid.phase_a_undervoltage",
+            "name": "电网A 相欠压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_04",
+            "code": "pcs.grid.phase_b_undervoltage",
+            "name": "电网B 相欠压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_05",
+            "code": "pcs.grid.phase_c_undervoltage",
+            "name": "电网C 相欠压故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_06",
+            "code": "pcs.grid.overfrequency",
+            "name": "电网过频故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_07",
+            "code": "pcs.grid.underfrequency",
+            "name": "电网欠频故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_08",
+            "code": "pcs.grid.phase_sequence_error",
+            "name": "电网相序错误故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_09",
+            "code": "pcs.grid.phase_a_overcurrent",
+            "name": "A 相软件过流故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_10",
+            "code": "pcs.grid.phase_b_overcurrent",
+            "name": "B 相软件过流故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_11",
+            "code": "pcs.grid.phase_c_overcurrent",
+            "name": "C 相软件过流故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_12",
+            "code": "pcs.grid.voltage_imbalance",
+            "name": "电网电压不平衡故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_13",
+            "code": "pcs.grid.current_imbalance",
+            "name": "电网电流不平衡故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_14",
+            "code": "pcs.grid.phase_loss",
+            "name": "电网缺相故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405891_15",
+            "code": "pcs.grid.neutral_overcurrent",
+            "name": "N 线过流故障",
+            "category": "GRID"
+          },
+          {
+            "input": "fault_405892_00",
+            "code": "pcs.dc.precharge_bus_overvoltage",
+            "name": "预充母线过压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_01",
+            "code": "pcs.dc.precharge_bus_undervoltage",
+            "name": "预充母线欠压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_04",
+            "code": "pcs.dc.running_bus_overvoltage",
+            "name": "运行母线过压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_05",
+            "code": "pcs.dc.running_bus_undervoltage",
+            "name": "运行母线欠压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_06",
+            "code": "pcs.dc.bus_imbalance",
+            "name": "正负母线不平衡故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_07",
+            "code": "pcs.dc.battery_undervoltage",
+            "name": "电池欠压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_09",
+            "code": "pcs.dc.battery_overvoltage",
+            "name": "电池过压故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_10",
+            "code": "pcs.dc.precharge_overcurrent",
+            "name": "直流预充电过流故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_11",
+            "code": "pcs.dc.overcurrent",
+            "name": "直流过流故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_12",
+            "code": "pcs.dc.balance_module_overcurrent",
+            "name": "平衡模块软件过流故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405892_15",
+            "code": "pcs.dc.battery_reverse_polarity",
+            "name": "电池反接故障",
+            "category": "DC_BUS"
+          },
+          {
+            "input": "fault_405893_00",
+            "code": "pcs.ac_precharge.timeout",
+            "name": "预充电超时故障",
+            "category": "AC_PRECHARGE"
+          },
+          {
+            "input": "fault_405893_01",
+            "code": "pcs.ac_precharge.phase_a_overcurrent",
+            "name": "预充电 A 相过流故障",
+            "category": "AC_PRECHARGE"
+          },
+          {
+            "input": "fault_405893_02",
+            "code": "pcs.ac_precharge.phase_b_overcurrent",
+            "name": "预充电 B 相过流故障",
+            "category": "AC_PRECHARGE"
+          },
+          {
+            "input": "fault_405893_03",
+            "code": "pcs.ac_precharge.phase_c_overcurrent",
+            "name": "预充电 C 相过流故障",
+            "category": "AC_PRECHARGE"
+          },
+          {
+            "input": "fault_405893_06",
+            "code": "pcs.ac_precharge.leakage_overcurrent",
+            "name": "漏电流过流故障",
+            "category": "AC_PRECHARGE"
+          },
+          {
+            "input": "fault_405894_00",
+            "code": "pcs.controller.ram_failure",
+            "name": "控制板 RAM 故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_01",
+            "code": "pcs.controller.eeprom_failure",
+            "name": "控制板 EEPROM 故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_02",
+            "code": "pcs.controller.ad_zero_drift",
+            "name": "AD 零漂过大故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_03",
+            "code": "pcs.communication.backend_protocol_failure",
+            "name": "后台通信协议故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_04",
+            "code": "pcs.communication.can_protocol_failure",
+            "name": "CAN 通信协议故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_05",
+            "code": "pcs.communication.cpld_failure",
+            "name": "CPLD 通信协议故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_06",
+            "code": "pcs.datalog.data_failure",
+            "name": "DataLog 数据故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_08",
+            "code": "pcs.insulation.detection_failure",
+            "name": "绝缘检测故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_09",
+            "code": "pcs.software.firmware_mismatch",
+            "name": "软件固件不匹配故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_11",
+            "code": "pcs.battery.state_failure",
+            "name": "BMS 电池状态故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_12",
+            "code": "pcs.communication.sts_failure",
+            "name": "STS 通信故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_13",
+            "code": "pcs.communication.bms_failure",
+            "name": "BMS 通信故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_14",
+            "code": "pcs.communication.parallel_slave_can_failure",
+            "name": "并机系统从机CAN 通信故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405894_15",
+            "code": "pcs.communication.ems_failure",
+            "name": "EMS 通信故障",
+            "category": "SYSTEM"
+          },
+          {
+            "input": "fault_405895_00",
+            "code": "pcs.switch.precharge_relay_close_failure",
+            "name": "预充电继电器闭合故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_01",
+            "code": "pcs.switch.precharge_relay_open_failure",
+            "name": "预充电继电器断开故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_02",
+            "code": "pcs.switch.precharge_relay_closed_state_failure",
+            "name": "预充电继电器闭合状态故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_03",
+            "code": "pcs.switch.precharge_relay_open_state_failure",
+            "name": "预充电继电器断开状态故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_04",
+            "code": "pcs.switch.main_relay_close_failure",
+            "name": "主继电器闭合故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_05",
+            "code": "pcs.switch.main_relay_open_failure",
+            "name": "主继电器断开故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_06",
+            "code": "pcs.switch.main_relay_closed_state_failure",
+            "name": "主继电器闭合状态故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_07",
+            "code": "pcs.switch.main_relay_open_state_failure",
+            "name": "主继电器断开状态故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_08",
+            "code": "pcs.switch.ac_main_relay_welded",
+            "name": "交流主继电器粘连故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_09",
+            "code": "pcs.switch.dc_relay_open_circuit",
+            "name": "直流继电器开路故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405895_10",
+            "code": "pcs.switch.ac_main_relay_open_circuit",
+            "name": "交流主继电器开路故障",
+            "category": "SWITCH"
+          },
+          {
+            "input": "fault_405896_00",
+            "code": "pcs.inverter.phase_a_overvoltage",
+            "name": "逆变电压 A 相过压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_01",
+            "code": "pcs.inverter.phase_b_overvoltage",
+            "name": "逆变电压 B 相过压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_02",
+            "code": "pcs.inverter.phase_c_overvoltage",
+            "name": "逆变电压 C 相过压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_03",
+            "code": "pcs.grid.islanding",
+            "name": "电网孤岛故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_05",
+            "code": "pcs.system.resonance",
+            "name": "系统谐振故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_06",
+            "code": "pcs.software.overvoltage_overcurrent",
+            "name": "软件过压过流故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_08",
+            "code": "pcs.grid.high_voltage_ride_through_timeout",
+            "name": "高电压穿越超时故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_09",
+            "code": "pcs.inverter.phase_a_undervoltage",
+            "name": "逆变电压 A 相欠压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_10",
+            "code": "pcs.inverter.phase_b_undervoltage",
+            "name": "逆变电压 B 相欠压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_11",
+            "code": "pcs.inverter.phase_c_undervoltage",
+            "name": "逆变电压 C 相欠压故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_12",
+            "code": "pcs.off_grid.sync_signal_missing",
+            "name": "离网无同步信号故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_14",
+            "code": "pcs.off_grid.output_short_circuit",
+            "name": "离网输出短路故障",
+            "category": "OTHER"
+          },
+          {
+            "input": "fault_405896_15",
+            "code": "pcs.grid.low_voltage_ride_through_timeout",
+            "name": "低电压穿越超时故障",
+            "category": "OTHER"
+          }
+        ]
+      }
+    }
+  ]
+}

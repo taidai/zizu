@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "zizu.point-processing/v1alpha1",
+  "id": "site.total-pcs-power",
+  "kind": "point_processing_template",
+  "displayName": "全站 PCS 总有功功率",
+  "deviceCategory": "SITE",
+  "brand": "ZiZu",
+  "model": "SITE-POWER",
+  "revision": 1,
+  "status": "active",
+  "inputs": [
+    {
+      "id": "pcs_power",
+      "sourceKind": "l2",
+      "sourceKey": "pcs.active_power",
+      "aliases": [],
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "required": true,
+      "cardinality": "many",
+      "selector": {
+        "scope": "descendants",
+        "nodeType": "PCS",
+        "entityDefinition": "pcs.active_power"
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "id": "total_power",
+      "entityDefinition": "site.total_pcs_power",
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "freshness": "5s",
+      "transform": {
+        "kind": "formula",
+        "expression": "sum(pcs_power)",
+        "scheduleSeconds": 1,
+        "controlEligible": false
+      }
+    }
+  ]
+}

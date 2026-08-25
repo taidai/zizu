@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import NoReturn
+import hashlib
+import json
+from typing import Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
@@ -23,10 +26,12 @@ from app.services.point_processing import (
     PointProcessingDelivery,
     PointProcessingError,
 )
+from app.services.point_processing_templates import PointProcessingTemplateError
 
 
 router = APIRouter()
 _point_processings: PointProcessingDelivery | None = None
+_point_processing_templates: Any | None = None
 
 
 def get_point_processings() -> PointProcessingDelivery:
@@ -36,6 +41,17 @@ def get_point_processings() -> PointProcessingDelivery:
 
         _point_processings = build_postgres_point_processing()
     return _point_processings
+
+
+def get_point_processing_templates() -> Any:
+    global _point_processing_templates
+    if _point_processing_templates is None:
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingTemplates,
+        )
+
+        _point_processing_templates = PostgresPointProcessingTemplates()
+    return _point_processing_templates
 
 
 class PointProcessingPlanRequest(BaseModel):
@@ -85,6 +101,69 @@ def _raise_point_processing_http(exc: PointProcessingError) -> NoReturn:
         ),
         detail={"code": exc.code, "message": str(exc)},
     ) from exc
+
+
+def _raise_template_http(exc: PointProcessingTemplateError) -> NoReturn:
+    status_by_code = {
+        "POINT_PROCESSING_TEMPLATE_NOT_FOUND": status.HTTP_404_NOT_FOUND,
+        "POINT_PROCESSING_REVISION_IMMUTABLE": status.HTTP_409_CONFLICT,
+        "POINT_PROCESSING_CATALOG_UNAVAILABLE": status.HTTP_503_SERVICE_UNAVAILABLE,
+    }
+    raise HTTPException(
+        status_code=status_by_code.get(
+            exc.code,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ),
+        detail={"code": exc.code, "message": str(exc)},
+    ) from exc
+
+
+@router.post(
+    "/point-processing-templates/import",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def import_point_processing_template(
+    body: dict[str, Any],
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    templates: Any = Depends(get_point_processing_templates),
+) -> dict[str, Any]:
+    try:
+        return templates.import_template(body, actor=principal.actor).public_dict()
+    except PointProcessingTemplateError as exc:
+        _raise_template_http(exc)
+
+
+@router.get(
+    "/point-processing-templates/{revision_id}/export",
+    openapi_extra=capability_metadata(CONFIGURATION_READ),
+)
+async def export_point_processing_template(
+    revision_id: UUID,
+    templates: Any = Depends(get_point_processing_templates),
+) -> JSONResponse:
+    try:
+        content = templates.export_template(revision_id)
+    except PointProcessingTemplateError as exc:
+        _raise_template_http(exc)
+    key = str(content["id"]).replace('"', "")
+    digest = hashlib.sha256(
+        json.dumps(
+            content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return JSONResponse(
+        content=content,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{key}.zizu-point-processing.json"'
+            ),
+            "ETag": f'"{digest}"',
+        },
+    )
 
 
 @router.get(

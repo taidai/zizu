@@ -1,4 +1,4 @@
-"""Versioned solution-package assets for L1 point processing."""
+"""Standalone immutable JSON templates for L1 point processing."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -8,17 +8,11 @@ import json
 import math
 import re
 from types import MappingProxyType
-from typing import Any, TYPE_CHECKING
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import FormulaSource, ValueKind
 from app.services.point_processing_formula import FormulaCompileError, compile_formula
-from app.services.solution_delivery_contracts import DeliveryError
-
-if TYPE_CHECKING:
-    from app.services.solution_delivery_contracts import PackageImport
-
-
 _SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
 _DEVICE_CATEGORIES = {"SITE", "ENERGY", "ESS", "PV", "GRID", "EVSE", "PCS"}
@@ -57,7 +51,7 @@ class PointProcessingOutput:
 
 
 @dataclass(frozen=True)
-class PointProcessingAsset:
+class PointProcessingTemplate:
     asset_id: str
     display_name: str
     device_category: str
@@ -68,15 +62,68 @@ class PointProcessingAsset:
     content_digest: str
     inputs: tuple[PointProcessingInput, ...]
     outputs: tuple[PointProcessingOutput, ...]
+    content: Mapping[str, Any] | None = None
 
 
-class PointProcessingAssetError(ValueError):
+class PointProcessingTemplateError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-def point_processing_template_id(asset: PointProcessingAsset) -> UUID:
+@dataclass(frozen=True)
+class RegisteredPointProcessingTemplate:
+    revision_id: UUID
+    template: PointProcessingTemplate
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "revision_id": str(self.revision_id),
+            "content_digest": self.template.content_digest,
+            "content": canonical_point_processing_content(self.template),
+        }
+
+
+class InMemoryPointProcessingTemplates:
+    """Small test/reference registry with the same immutability rule as PostgreSQL."""
+
+    def __init__(self, *, configuration_revision: int = 0) -> None:
+        self.configuration_revision = configuration_revision
+        self._by_revision: dict[UUID, PointProcessingTemplate] = {}
+
+    def import_template(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        if not actor.strip():
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_ACTOR_INVALID",
+                "Template import actor is required",
+            )
+        template = parse_point_processing_template(raw)
+        revision_id = point_processing_revision_id(template)
+        existing = self._by_revision.get(revision_id)
+        if existing is not None and existing.content_digest != template.content_digest:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_REVISION_IMMUTABLE",
+                "Immutable point-processing revision has different content",
+            )
+        self._by_revision.setdefault(revision_id, template)
+        return RegisteredPointProcessingTemplate(revision_id, self._by_revision[revision_id])
+
+    def export_template(self, revision_id: UUID) -> dict[str, Any]:
+        template = self._by_revision.get(revision_id)
+        if template is None:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_TEMPLATE_NOT_FOUND",
+                "Point-processing template revision was not found",
+            )
+        return canonical_point_processing_content(template)
+
+
+def point_processing_template_id(asset: PointProcessingTemplate) -> UUID:
     return uuid5(
         NAMESPACE_URL,
         (
@@ -86,18 +133,76 @@ def point_processing_template_id(asset: PointProcessingAsset) -> UUID:
     )
 
 
-def point_processing_revision_id(asset: PointProcessingAsset) -> UUID:
+def point_processing_revision_id(asset: PointProcessingTemplate) -> UUID:
     return uuid5(
         NAMESPACE_URL,
         f"zizu/point-processing-revision/{point_processing_template_id(asset)}/{asset.revision}",
     )
 
 
-def parse_point_processing_asset(
+def canonical_point_processing_content(
+    template: PointProcessingTemplate,
+) -> dict[str, Any]:
+    if template.content is not None:
+        return _plain(template.content)
+
+    inputs: list[dict[str, Any]] = []
+    for item in template.inputs:
+        raw_input: dict[str, Any] = {
+            "id": item.input_id,
+            "sourceKind": item.source_kind,
+            "sourceKey": item.source_key,
+            "aliases": list(item.aliases),
+            "dataType": item.data_type,
+            "unit": item.unit,
+            "required": item.required,
+        }
+        if item.source_contract is not None:
+            raw_input["sourceContract"] = _plain(item.source_contract)
+        if item.cardinality != "one":
+            raw_input["cardinality"] = item.cardinality
+        if item.selector is not None:
+            raw_input["selector"] = _plain(item.selector)
+        if item.default_value is not None:
+            raw_input["defaultValue"] = item.default_value
+        inputs.append(raw_input)
+
+    outputs: list[dict[str, Any]] = []
+    for item in template.outputs:
+        transform = _plain(item.transform)
+        if transform.get("kind") == "formula":
+            transform.pop("canonicalAst", None)
+            transform.pop("astDigest", None)
+        outputs.append(
+            {
+                "id": item.output_id,
+                "entityDefinition": item.entity_definition_id,
+                "dataType": item.data_type,
+                "unit": item.unit,
+                "freshness": f"{int(item.freshness_seconds)}s",
+                "transform": transform,
+            }
+        )
+    return {
+        "schemaVersion": _SCHEMA_VERSION,
+        "id": template.asset_id,
+        "kind": "point_processing_template",
+        "displayName": template.display_name,
+        "deviceCategory": template.device_category,
+        "brand": template.brand,
+        "model": template.model,
+        "revision": template.revision,
+        "status": template.status,
+        "inputs": inputs,
+        "outputs": outputs,
+    }
+
+
+def parse_point_processing_template(
     raw: Mapping[str, Any],
     *,
     entity_definitions: Mapping[str, Mapping[str, Any]] | None = None,
-) -> PointProcessingAsset:
+) -> PointProcessingTemplate:
     fields = {
         "schemaVersion",
         "id",
@@ -112,23 +217,23 @@ def parse_point_processing_asset(
         "outputs",
     }
     if set(raw) != fields or raw.get("schemaVersion") != _SCHEMA_VERSION:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_ASSET_INVALID",
             "Point processing asset schema is invalid",
         )
     if raw.get("kind") != "point_processing_template":
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_ASSET_INVALID",
             "Point processing asset kind is invalid",
         )
     for field in ("id", "displayName", "deviceCategory", "brand", "model"):
         if not isinstance(raw.get(field), str) or not raw[field].strip():
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_ASSET_INVALID",
                 "Point processing asset identity is invalid",
             )
     if raw["deviceCategory"] not in _DEVICE_CATEGORIES:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_DEVICE_CATEGORY_UNSUPPORTED",
             "Point processing device category is unsupported",
         )
@@ -138,7 +243,7 @@ def parse_point_processing_asset(
         or raw["revision"] < 1
         or raw.get("status") not in {"active", "retired"}
     ):
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_ASSET_INVALID",
             "Point processing revision or status is invalid",
         )
@@ -156,7 +261,7 @@ def parse_point_processing_asset(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return PointProcessingAsset(
+    return PointProcessingTemplate(
         asset_id=raw["id"],
         display_name=raw["displayName"],
         device_category=raw["deviceCategory"],
@@ -167,59 +272,13 @@ def parse_point_processing_asset(
         content_digest=hashlib.sha256(canonical).hexdigest(),
         inputs=inputs,
         outputs=outputs,
-    )
-
-
-def validate_point_processing_assets(
-    manifest: Mapping[str, Any],
-    assets: Mapping[str, bytes],
-    load_mapping,
-) -> tuple[dict[str, Any], ...]:
-    declarations = tuple(manifest.get("assets", ()))
-    definitions: dict[str, Mapping[str, Any]] = {}
-    for declaration in declarations:
-        if declaration.get("kind") != "entity_definition":
-            continue
-        definition = load_mapping(
-            assets.get(declaration["path"]),
-            "ASSET_REFERENCE_INVALID",
-        )
-        definitions[declaration["id"]] = definition
-
-    normalized = []
-    for declaration in declarations:
-        if declaration.get("kind") != "point_processing_template":
-            continue
-        raw = load_mapping(
-            assets.get(declaration["path"]),
-            "ASSET_REFERENCE_INVALID",
-        )
-        if raw.get("id") != declaration["id"]:
-            raise DeliveryError(
-                "ASSET_REFERENCE_INVALID",
-                "Point processing asset identity does not match its declaration",
-            )
-        try:
-            parsed = parse_point_processing_asset(
-                raw,
-                entity_definitions=definitions,
-            )
-        except PointProcessingAssetError as exc:
-            raise DeliveryError(exc.code, f"{exc.code}: {exc}") from exc
-        normalized.append(_asset_dict(parsed))
-    return tuple(sorted(normalized, key=lambda item: (item["asset_id"], item["revision"])))
-
-
-def point_processing_assets(package: "PackageImport") -> tuple[PointProcessingAsset, ...]:
-    return tuple(
-        _asset_from_dict(raw)
-        for raw in package.manifest.get("_point_processing_assets", ())
+        content=_freeze(_plain(raw)),
     )
 
 
 def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
     if not isinstance(raw_inputs, list) or not raw_inputs:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_INPUT_INVALID",
             "Point processing inputs must be a non-empty list",
         )
@@ -227,14 +286,14 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
     seen: set[str] = set()
     for raw in raw_inputs:
         if not isinstance(raw, Mapping):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input is invalid",
             )
         required_fields = {"id", "sourceKind", "sourceKey", "aliases", "dataType", "required"}
         optional_fields = {"unit", "sourceContract", "cardinality", "selector", "defaultValue"}
         if set(raw) - (required_fields | optional_fields) or not required_fields.issubset(raw):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input fields are invalid",
             )
@@ -263,7 +322,7 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             )
             or source_contract.get("readOnly") is not True
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing source contract is invalid",
             )
@@ -282,7 +341,7 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             or not isinstance(raw.get("unit"), (str, type(None)))
             or cardinality not in {"one", "many"}
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input contract is invalid",
             )
@@ -296,7 +355,7 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             or not isinstance(selector.get("entityDefinition"), str)
             or selector.get("entityDefinition") != raw["sourceKey"]
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_SELECTOR_INVALID",
                 "Point processing selector contract is invalid",
             )
@@ -306,7 +365,7 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             or (selector is not None and source_contract is not None)
             or (default_value is not None and (raw["required"] or cardinality != "one"))
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing input source mode is invalid",
             )
@@ -326,12 +385,12 @@ def _parse_inputs(raw_inputs: Any) -> tuple[PointProcessingInput, ...]:
             else:
                 valid_default = False
             if not valid_default:
-                raise PointProcessingAssetError(
+                raise PointProcessingTemplateError(
                     "POINT_PROCESSING_INPUT_INVALID",
                     "Point processing input default is invalid",
                 )
         if cardinality == "many" and raw["dataType"] not in {"FLOAT", "INT", "BOOL"}:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_INPUT_INVALID",
                 "Point processing collection input data type is invalid",
             )
@@ -363,7 +422,7 @@ def _parse_outputs(
     device_category: str,
 ) -> tuple[PointProcessingOutput, ...]:
     if not isinstance(raw_outputs, list) or not raw_outputs:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_OUTPUT_INVALID",
             "Point processing outputs must be a non-empty list",
         )
@@ -374,7 +433,7 @@ def _parse_outputs(
         if not isinstance(raw, Mapping) or set(raw) != {
             "id", "entityDefinition", "dataType", "unit", "freshness", "transform"
         }:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
                 "Point processing output fields are invalid",
             )
@@ -391,7 +450,7 @@ def _parse_outputs(
             or data_type not in _DATA_TYPES
             or not isinstance(unit, (str, type(None)))
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
                 "Point processing output contract is invalid",
             )
@@ -404,7 +463,7 @@ def _parse_outputs(
         )
         expected_type = _OUTPUT_TYPES[transform["kind"]]
         if expected_type is not None and expected_type != data_type:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
                 "Transform kind and output data type do not match",
             )
@@ -416,12 +475,12 @@ def _parse_outputs(
             != device_category.casefold()
             or definition.get("direction") not in {"R", "RW"}
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INCOMPATIBLE",
                 "Point processing output does not match its entity definition",
             )
         if entity_definitions and definition is None:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INCOMPATIBLE",
                 "Point processing output entity definition is missing",
             )
@@ -447,7 +506,7 @@ def _parse_transform(
     output_unit: str | None,
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or raw.get("kind") not in _OUTPUT_TYPES:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_RULE_INVALID",
             "Point processing transform kind is invalid",
         )
@@ -460,13 +519,13 @@ def _parse_transform(
         ) or isinstance(raw.get("scheduleSeconds"), bool) or not (
             1 <= raw["scheduleSeconds"] <= 3600
         ) or not isinstance(raw.get("controlEligible"), bool):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_FORMULA_INVALID",
                 "Point processing formula fields are invalid",
             )
         source_kinds = {item.source_kind for item in inputs.values()}
         if "l2" in source_kinds and source_kinds != {"l2"}:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_FORMULA_INVALID",
                 "Cross-node formulas can only read standardized L2 inputs",
             )
@@ -489,7 +548,7 @@ def _parse_transform(
             )
         except (FormulaCompileError, ValueError) as exc:
             code = getattr(exc, "code", "POINT_PROCESSING_FORMULA_INVALID")
-            raise PointProcessingAssetError(code, str(exc)) from exc
+            raise PointProcessingTemplateError(code, str(exc)) from exc
         return {
             "kind": "formula",
             "expression": compiled.text,
@@ -500,13 +559,13 @@ def _parse_transform(
         }
     if kind == "boolean_set":
         if set(raw) != {"kind", "entries"}:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Boolean-set transform fields are invalid",
             )
         entries = raw.get("entries")
         if not isinstance(entries, list) or not entries:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Boolean-set transform entries are invalid",
             )
@@ -517,7 +576,7 @@ def _parse_transform(
             if not isinstance(entry, Mapping) or set(entry) != {
                 "input", "code", "name", "category"
             }:
-                raise PointProcessingAssetError(
+                raise PointProcessingTemplateError(
                     "POINT_PROCESSING_RULE_INVALID",
                     "Boolean-set transform entry fields are invalid",
                 )
@@ -537,7 +596,7 @@ def _parse_transform(
                 or not isinstance(entry.get("category"), str)
                 or not entry["category"].strip()
             ):
-                raise PointProcessingAssetError(
+                raise PointProcessingTemplateError(
                     "POINT_PROCESSING_RULE_INVALID",
                     "Boolean-set transform entry is invalid",
                 )
@@ -551,13 +610,13 @@ def _parse_transform(
 
     input_id = raw.get("input")
     if not isinstance(input_id, str) or input_id not in inputs:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_RULE_INVALID",
             "Point processing transform input is invalid",
         )
     if kind == "numeric":
         if set(raw) != {"kind", "input", "scale", "offset", "minimum", "maximum"}:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Numeric transform fields are invalid",
             )
@@ -570,14 +629,14 @@ def _parse_transform(
         ) or inputs[input_id].data_type not in {"FLOAT", "INT"} or (
             float(raw["minimum"]) > float(raw["maximum"])
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Numeric transform values are invalid",
             )
         return {**raw, **{field: float(raw[field]) for field in ("scale", "offset", "minimum", "maximum")}}
     if kind == "enum":
         if set(raw) != {"kind", "input", "entries"}:
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Enum transform fields are invalid",
             )
@@ -593,7 +652,7 @@ def _parse_transform(
                 for key, value in entries.items()
             )
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Enum transform entries are invalid",
             )
@@ -602,13 +661,13 @@ def _parse_transform(
     if set(raw) != {"kind", "input", "delimiter", "entries"} or raw.get("delimiter") not in {
         "semicolon", "comma", "pipe", "whitespace"
     }:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_RULE_INVALID",
             "Fault-code transform fields are invalid",
         )
     entries = raw.get("entries")
     if not isinstance(entries, Mapping) or not entries:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_RULE_INVALID",
             "Fault-code transform entries are invalid",
         )
@@ -626,7 +685,7 @@ def _parse_transform(
             or not isinstance(value.get("name"), str)
             or not value["name"].strip()
         ):
-            raise PointProcessingAssetError(
+            raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",
                 "Fault-code transform entry is invalid",
             )
@@ -645,7 +704,7 @@ def _parse_transform(
 def _duration_seconds(value: Any) -> float:
     match = re.fullmatch(r"([1-9]\d*)s", value) if isinstance(value, str) else None
     if match is None:
-        raise PointProcessingAssetError(
+        raise PointProcessingTemplateError(
             "POINT_PROCESSING_OUTPUT_INVALID",
             "Point processing freshness is invalid",
         )
@@ -668,7 +727,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _asset_dict(asset: PointProcessingAsset) -> dict[str, Any]:
+def _template_record(asset: PointProcessingTemplate) -> dict[str, Any]:
     return {
         "asset_id": asset.asset_id,
         "display_name": asset.display_name,
@@ -708,8 +767,8 @@ def _asset_dict(asset: PointProcessingAsset) -> dict[str, Any]:
     }
 
 
-def _asset_from_dict(raw: Mapping[str, Any]) -> PointProcessingAsset:
-    return PointProcessingAsset(
+def _template_from_record(raw: Mapping[str, Any]) -> PointProcessingTemplate:
+    return PointProcessingTemplate(
         asset_id=raw["asset_id"],
         display_name=raw["display_name"],
         device_category=raw["device_category"],

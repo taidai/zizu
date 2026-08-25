@@ -138,6 +138,13 @@ class NodeDataTrunkHardCutMigrationPostgresTest(unittest.TestCase):
                     "AND column_name='device_instance_id'"
                 )
                 self.assertEqual(cursor.fetchone()[0], 0)
+                cursor.execute(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema='public' "
+                    "AND table_name='t_point_processing_revisions' "
+                    "AND column_name='content'"
+                )
+                self.assertEqual(cursor.fetchone()[0], 1)
 
     def test_044_replay_keeps_the_same_configuration_revision(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:

@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "zizu.point-processing/v1alpha1",
+  "id": "pcs.brand-b",
+  "kind": "point_processing_template",
+  "displayName": "PCS 通用品牌 B",
+  "deviceCategory": "PCS",
+  "brand": "GENERIC_B",
+  "model": "PCS-B",
+  "revision": 1,
+  "status": "active",
+  "inputs": [
+    {
+      "id": "active_power_raw",
+      "sourceKind": "l0",
+      "sourceKey": "PActKw",
+      "aliases": [
+        "ActivePwrKw"
+      ],
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "required": true
+    },
+    {
+      "id": "operating_state_raw",
+      "sourceKind": "l0",
+      "sourceKey": "ModeCode",
+      "aliases": [
+        "OperatingMode"
+      ],
+      "dataType": "STRING",
+      "required": true
+    },
+    {
+      "id": "fault_codes_raw",
+      "sourceKind": "l0",
+      "sourceKey": "AlarmList",
+      "aliases": [
+        "ActiveAlarms"
+      ],
+      "dataType": "STRING",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "id": "active_power",
+      "entityDefinition": "pcs.active_power",
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "freshness": "30s",
+      "transform": {
+        "kind": "numeric",
+        "input": "active_power_raw",
+        "scale": 1,
+        "offset": 0,
+        "minimum": -500,
+        "maximum": 500
+      }
+    },
+    {
+      "id": "operating_state",
+      "entityDefinition": "pcs.operating_state",
+      "dataType": "ENUM",
+      "unit": null,
+      "freshness": "30s",
+      "transform": {
+        "kind": "enum",
+        "input": "operating_state_raw",
+        "entries": {
+          "S": "STOPPED",
+          "W": "STANDBY",
+          "R": "RUNNING",
+          "F": "FAULTED"
+        }
+      }
+    },
+    {
+      "id": "fault_codes",
+      "entityDefinition": "pcs.fault_codes",
+      "dataType": "CODE_SET",
+      "unit": null,
+      "freshness": "30s",
+      "transform": {
+        "kind": "fault_codes",
+        "input": "fault_codes_raw",
+        "delimiter": "comma",
+        "entries": {
+          "D11": {
+            "code": "DC_OVERVOLTAGE",
+            "name": "直流过压"
+          },
+          "C30": {
+            "code": "COMPRESSOR_FAULT",
+            "name": "压缩机故障"
+          }
+        }
+      }
+    }
+  ]
+}
