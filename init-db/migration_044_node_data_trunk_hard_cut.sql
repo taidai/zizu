@@ -161,7 +161,6 @@ BEGIN
   DROP TABLE IF EXISTS public.t_cross_node_processing_acceptance_reports CASCADE;
   DROP TABLE IF EXISTS public.t_en9_acceptance_ws_receipts CASCADE;
   DROP TABLE IF EXISTS public.t_en9_acceptance_reports CASCADE;
-  DROP TABLE IF EXISTS public.t_runtime_instances CASCADE;
 
   DROP TABLE IF EXISTS public.t_business_metric_acceptance_reports CASCADE;
   DROP TABLE IF EXISTS public.t_business_metric_audit CASCADE;
@@ -203,6 +202,33 @@ BEGIN
   DROP TABLE IF EXISTS public.t_entity_failover_policies CASCADE;
   DROP TABLE IF EXISTS public.t_entity_instance_bindings CASCADE;
   DROP TABLE IF EXISTS public.t_entity_binding_confirmations CASCADE;
+
+  CREATE OR REPLACE FUNCTION public.assert_entity_instance_single_source(target_id UUID)
+  RETURNS void LANGUAGE plpgsql AS $function$
+  DECLARE
+    kind TEXT;
+    active_outputs INTEGER;
+  BEGIN
+    SELECT source_kind INTO kind
+    FROM public.t_entity_instances
+    WHERE id = target_id;
+    IF kind IS NULL THEN
+      RETURN;
+    END IF;
+    SELECT count(*) INTO active_outputs
+    FROM public.t_point_processing_output_bindings AS binding
+    JOIN public.t_installed_point_processings AS installed
+      ON installed.id = binding.installed_processing_id
+    WHERE binding.entity_instance_id = target_id
+      AND installed.current = TRUE;
+    IF kind = 'point_processing' AND active_outputs <> 1 THEN
+      RAISE EXCEPTION
+        'point processing entity must have exactly one current processing source'
+        USING ERRCODE = '23514';
+    END IF;
+  END;
+  $function$;
+
   DROP TABLE IF EXISTS public.t_solution_point_processing_assets CASCADE;
   DROP TABLE IF EXISTS public.t_ems_policy_activations CASCADE;
   DROP TABLE IF EXISTS public.t_release_locks CASCADE;

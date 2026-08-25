@@ -1,57 +1,40 @@
+"""Real PostgreSQL L0 -> L1 -> L2 transaction evidence on Schema 044."""
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+import json
 import os
+from pathlib import Path
 import unittest
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
+from datetime import UTC, datetime
 
 import psycopg2
-from psycopg2.extras import Json
 
-from app.services.data_trunk import DataTrunk, _FreshnessScheduler
-from app.services.data_trunk_contracts import (
-    DataTrunkError,
-    RawObservation,
-    TrunkQuality,
-    TypedValue,
-    ValueKind,
+os.environ.setdefault("NEURON_PASSWORD", "test-neuron-secret")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "test-nanomq-secret")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-value-that-is-long-enough")
+
+from tests import test_node_data_trunk_hard_cut_migration_postgres as migration
+
+
+REFERENCE = (
+    Path(__file__).resolve().parents[2]
+    / "reference-point-processings"
+    / "pcs-brand-a.zizu-point-processing.json"
 )
-from app.services.data_trunk_postgres import PostgresDataTrunkRepository
-from tests.test_alarm_configuration_postgres import (
-    _PostgresAlarmConfigurationTestBase,
-)
-from tests import test_data_trunk_migration_postgres as migration_support
-
-
-NODE_ID = UUID("00000000-0000-0000-0000-000000000001")
-TAG_ID = UUID("00000000-0000-0000-0000-000000000011")
-CONVERSION_ID = UUID("00000000-0000-0000-0000-000000000201")
-REVISION_ID = UUID("00000000-0000-0000-0000-000000000202")
-ENTITY_ID = UUID("00000000-0000-0000-0000-000000000301")
-STATE_TAG_ID = UUID("00000000-0000-0000-0000-000000000012")
-FAULT_TAG_ID = UUID("00000000-0000-0000-0000-000000000013")
-BOOLEAN_FAULT_A_TAG_ID = UUID("00000000-0000-0000-0000-000000000014")
-BOOLEAN_FAULT_B_TAG_ID = UUID("00000000-0000-0000-0000-000000000015")
-STATE_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000303")
-FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000304")
-BOOLEAN_FAULT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000305")
-FORMULA_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000306")
-FORMULA_INSTALLATION_ID = UUID("00000000-0000-0000-0000-000000000401")
-EXPECTED_EVENT_ID = UUID("c5320566-2b3d-50c5-b320-bf082d7533f3")
+NODE_ID = UUID("93000000-0000-0000-0000-000000000001")
 
 
 @unittest.skipUnless(
     os.environ.get("ZIZU_POSTGRES_TEST") == "1",
-    "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL integration tests",
+    "set ZIZU_POSTGRES_TEST=1 to run PostgreSQL data-trunk tests",
 )
 class DataTrunkPostgresTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.db_name = os.environ.get("DB_NAME", "")
         if not cls.db_name.endswith("_test"):
-            raise RuntimeError("Data trunk tests require a *_test database")
+            raise RuntimeError("Data-trunk tests require a *_test database")
         cls.connection_kwargs = {
             "host": os.environ["DB_HOST"],
             "port": int(os.environ["DB_PORT"]),
@@ -64,1555 +47,138 @@ class DataTrunkPostgresTest(unittest.TestCase):
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                migration_support.DataTrunkMigrationPostgresTest._reset_through_037(
+                migration.NodeDataTrunkHardCutMigrationPostgresTest._reset_through_043(
                     cursor
                 )
-                migration_support.DataTrunkMigrationPostgresTest._apply_038(cursor)
-                migration_support.DataTrunkMigrationPostgresTest._apply_039(cursor)
-                migration_support.DataTrunkMigrationPostgresTest._apply_040(cursor)
-                migration_support.DataTrunkMigrationPostgresTest._apply_041(cursor)
-                migration_support.DataTrunkMigrationPostgresTest._apply_042(cursor)
-                migration_support.DataTrunkMigrationPostgresTest._apply_043(cursor)
-                self._seed_installed_numeric_conversion(cursor)
-        self.repository = PostgresDataTrunkRepository(
-            connection_factory=self._connection,
-            clock=lambda: datetime(2026, 8, 17, 1, tzinfo=UTC),
-        )
-        self.trunk = DataTrunk(self.repository)
+                migration.NodeDataTrunkHardCutMigrationPostgresTest._apply_044(cursor)
+        from app.services.telemetry_store import init_db_pool
 
-    @contextmanager
-    def _connection(self):
-        connection = psycopg2.connect(**self.connection_kwargs)
-        try:
-            yield connection
-        finally:
-            connection.close()
+        init_db_pool(1, 4)
+        self.tag_ids = self._publish_brand_a()
 
-    @staticmethod
-    def _seed_installed_numeric_conversion(cursor) -> None:
-        installation_id, _ = (
-            _PostgresAlarmConfigurationTestBase._insert_installed_site(cursor)
+    def tearDown(self) -> None:
+        from app.services.telemetry_store import close_db_pool
+
+        close_db_pool()
+
+    def _publish_brand_a(self) -> dict[str, UUID]:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PreviewPointProcessing,
         )
-        cursor.execute(
-            """
-            INSERT INTO t_nodes (id, name, source_catalog_key)
-            VALUES (%s, 'PCS-01', 'PCS-01');
-            INSERT INTO t_tags
-              (id, node_id, name, data_type, unit, read_write, enabled)
-            VALUES (%s, %s, 'ActivePowerRaw', 'FLOAT', 'W', 'R', TRUE);
-            INSERT INTO t_device_instances
-              (id, identity_installation_id, slot_id, instance_key,
-               device_category, display_name, node_id)
-            VALUES (
-              '00000000-0000-0000-0000-000000000302',
-              %s,
-              'pcs.primary',
-              'PCS-01',
-              'pcs',
-              'PCS 01',
-              %s
-            );
-            INSERT INTO t_entity_instances
-              (id, device_instance_id, definition_id, display_name,
-               data_type, unit, direction, freshness_seconds, source_kind)
-            VALUES (
-              %s,
-              '00000000-0000-0000-0000-000000000302',
-              'pcs.active_power',
-              'PCS 01 有功功率',
-              'FLOAT',
-              'kW',
-              'R',
-              30,
-              'point_processing'
-            );
-            INSERT INTO t_point_processing_templates
-              (id, asset_id, device_category, brand, model,
-               display_name, status)
-            VALUES (
-              '00000000-0000-0000-0000-000000000205',
-              'pcs.brand-a',
-              'pcs',
-              'Brand A',
-              'PCS-A',
-              'Brand A PCS',
-              'active'
-            );
-            INSERT INTO t_point_processing_revisions
-              (id, template_id, revision, content_digest, published_at)
-            VALUES (
-              %s,
-              '00000000-0000-0000-0000-000000000205',
-              1,
-              %s,
-              '2026-08-17T00:00:00Z'
-            );
-            INSERT INTO t_point_processing_inputs
-              (id, revision_id, input_key, source_kind, data_type, unit,
-               required, stable_source_key, aliases)
-            VALUES (
-              '00000000-0000-0000-0000-000000000207',
-              %s,
-              'active_power_raw',
-              'l0',
-              'FLOAT',
-              'W',
-              TRUE,
-              'ActivePowerRaw',
-              ARRAY['ActivePower']
-            );
-            INSERT INTO t_point_processing_outputs
-              (id, revision_id, output_key, entity_definition_id,
-               data_type, unit, freshness_seconds)
-            VALUES (
-              '00000000-0000-0000-0000-000000000208',
-              %s,
-              'active_power',
-              'pcs.active_power',
-              'FLOAT',
-              'kW',
-              30
-            );
-            INSERT INTO t_numeric_transform_rules
-              (output_id, input_id, scale, "offset", minimum, maximum)
-            VALUES (
-              '00000000-0000-0000-0000-000000000208',
-              '00000000-0000-0000-0000-000000000207',
-              0.001,
-              0,
-              -500,
-              500
-            );
-            INSERT INTO t_point_processing_plans
-              (id, node_id, template_revision_id,
-               entity_identity_installation_id, solution_installation_id,
-               base_site_configuration_version, source_catalog_digest,
-               status, items, blockers, digest, planned_by)
-            VALUES (
-              '00000000-0000-0000-0000-000000000206',
-              %s,
-              %s,
-              %s,
-              %s,
-              0,
-              %s,
-              'applied',
-              '[]',
-              '[]',
-              %s,
-              'user:installer'
-            );
-            INSERT INTO t_installed_point_processings
-              (id, node_id, revision_id, source_plan_id,
-               solution_installation_id, site_configuration_version,
-               installed_by, current)
-            VALUES (
-              %s,
-              %s,
-              %s,
-              '00000000-0000-0000-0000-000000000206',
-              %s,
-              1,
-              'user:installer',
-              TRUE
-            );
-            INSERT INTO t_point_processing_input_bindings
-              (installed_processing_id, input_id, source_kind, l0_tag_id,
-               confirmed_by)
-            VALUES (
-              %s,
-              '00000000-0000-0000-0000-000000000207',
-              'l0',
-              %s,
-              'user:installer'
-            );
-            INSERT INTO t_point_processing_output_bindings
-              (installed_processing_id, output_id, entity_instance_id)
-            VALUES (
-              %s,
-              '00000000-0000-0000-0000-000000000208',
-              %s
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingTemplates,
+            build_postgres_point_processing,
+        )
+        from app.services.telemetry_store import get_connection
+
+        raw = json.loads(REFERENCE.read_text(encoding="utf-8"))
+        tags: dict[str, UUID] = {}
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO t_nodes(id,name,node_type,enabled) "
+                    "VALUES(%s,'PCS-TEST','PCS',TRUE)",
+                    (NODE_ID,),
+                )
+                for item in raw["inputs"]:
+                    tag_id = uuid5(
+                        NAMESPACE_URL,
+                        f"test/tag/{NODE_ID}/{item['sourceKey']}",
+                    )
+                    tags[item["sourceKey"]] = tag_id
+                    cursor.execute(
+                        """
+                        INSERT INTO t_tags
+                          (id,node_id,name,data_type,unit,read_write,enabled,
+                           timestamp_trusted)
+                        VALUES(%s,%s,%s,%s,%s,'R',TRUE,FALSE)
+                        """,
+                        (
+                            tag_id,
+                            NODE_ID,
+                            item["sourceKey"],
+                            item["dataType"],
+                            item.get("unit"),
+                        ),
+                    )
+            connection.commit()
+        registered = PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor="test:engineer",
+        )
+        service = build_postgres_point_processing()
+        plan = service.preview(
+            PreviewPointProcessing(
+                NODE_ID,
+                registered.revision_id,
+                {},
+                "test:engineer",
             )
-            """,
-            (
-                str(NODE_ID),
-                str(TAG_ID),
-                str(NODE_ID),
-                installation_id,
-                str(NODE_ID),
-                str(ENTITY_ID),
-                str(REVISION_ID),
-                "c" * 64,
-                str(REVISION_ID),
-                str(REVISION_ID),
-                str(NODE_ID),
-                str(REVISION_ID),
-                installation_id,
-                installation_id,
-                "d" * 64,
-                "e" * 64,
-                str(CONVERSION_ID),
-                str(NODE_ID),
-                str(REVISION_ID),
-                installation_id,
-                str(CONVERSION_ID),
-                str(TAG_ID),
-                str(CONVERSION_ID),
-                str(ENTITY_ID),
-            ),
         )
+        service.apply(
+            ApplyPointProcessingPlan(plan.id, plan.digest, "publish", "test:engineer")
+        )
+        return tags
 
-    @staticmethod
-    def raw_power(
-        value: float,
-        *,
-        sequence: int,
-        observed_at: datetime | None = None,
-    ) -> RawObservation:
-        observed_at = observed_at or datetime(2026, 8, 17, tzinfo=UTC)
-        digest_character = chr(ord("a") + sequence - 1)
-        return RawObservation(
-            observation_id=UUID(int=0x100 + sequence),
+    def test_raw_fact_commits_l2_value_history_latest_source_and_outbox(self) -> None:
+        from app.services.data_trunk import DataTrunk
+        from app.services.data_trunk_contracts import (
+            RawObservation,
+            TrunkQuality,
+            TypedValue,
+            ValueKind,
+        )
+        from app.services.data_trunk_postgres import PostgresDataTrunkRepository
+        from app.services.telemetry_store import get_connection
+
+        observed_at = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+        tag_id = self.tag_ids["ActivePowerRaw"]
+        raw = RawObservation(
+            observation_id=uuid5(NAMESPACE_URL, "test/l0/active-power/1"),
             node_id=NODE_ID,
-            tag_id=TAG_ID,
+            tag_id=tag_id,
             source_key="ActivePowerRaw",
-            value=TypedValue.float(value),
+            value=TypedValue(ValueKind.FLOAT, 1000.0),
             raw_unit="W",
             quality=TrunkQuality.GOOD,
             source_timestamp=observed_at,
-            received_at=observed_at + timedelta(seconds=1),
-            source_message_id=f"message-{sequence}",
-            source_sequence=sequence,
-            source_digest=digest_character * 64,
+            received_at=observed_at,
+            source_message_id="test-message-1",
+            source_sequence=1,
+            source_digest="a" * 64,
             event_time_basis="observed_at",
         )
 
-    @staticmethod
-    def raw_text(
-        *,
-        tag_id: UUID,
-        source_key: str,
-        value: str,
-        sequence: int,
-    ) -> RawObservation:
-        observed_at = datetime(2026, 8, 17, tzinfo=UTC)
-        digest_character = chr(ord("a") + sequence - 1)
-        return RawObservation(
-            observation_id=UUID(int=0x200 + sequence),
-            node_id=NODE_ID,
-            tag_id=tag_id,
-            source_key=source_key,
-            value=TypedValue(ValueKind.STRING, value),
-            raw_unit=None,
-            quality=TrunkQuality.GOOD,
-            source_timestamp=observed_at,
-            received_at=observed_at + timedelta(seconds=1),
-            source_message_id=f"message-{sequence}",
-            source_sequence=sequence,
-            source_digest=digest_character * 64,
-            event_time_basis="observed_at",
-        )
+        receipt = DataTrunk(
+            PostgresDataTrunkRepository(clock=lambda: observed_at)
+        ).ingest((raw,))
 
-    @staticmethod
-    def raw_bool(
-        *,
-        tag_id: UUID,
-        source_key: str,
-        value: bool,
-        sequence: int,
-        quality: TrunkQuality = TrunkQuality.GOOD,
-        observed_at: datetime | None = None,
-    ) -> RawObservation:
-        observed_at = observed_at or datetime(2026, 8, 17, tzinfo=UTC)
-        return RawObservation(
-            observation_id=UUID(int=0x300 + sequence),
-            node_id=NODE_ID,
-            tag_id=tag_id,
-            source_key=source_key,
-            value=TypedValue(ValueKind.BOOL, value),
-            raw_unit=None,
-            quality=quality,
-            source_timestamp=observed_at,
-            received_at=observed_at + timedelta(seconds=1),
-            source_message_id=f"message-bool-{sequence}",
-            source_sequence=sequence,
-            source_digest=f"{sequence:064x}",
-            event_time_basis="observed_at",
-        )
-
-    @staticmethod
-    def _seed_boolean_set_processing(cursor) -> None:
-        cursor.execute(
-            """
-            INSERT INTO t_tags
-              (id, node_id, name, data_type, unit, read_write, enabled)
-            VALUES
-              (%s, %s, 'EPO故障', 'BOOL', NULL, 'R', TRUE),
-              (%s, %s, '风扇故障', 'BOOL', NULL, 'R', TRUE);
-            INSERT INTO t_entity_instances
-              (id, device_instance_id, definition_id, display_name,
-               data_type, unit, direction, freshness_seconds, source_kind)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000302',
-              'pcs.fault_codes', 'PCS 01 布尔故障集合',
-              'CODE_SET', NULL, 'R', 30, 'point_processing'
-            );
-            INSERT INTO t_point_processing_inputs
-              (id, revision_id, input_key, source_kind, data_type, unit,
-               required, stable_source_key, aliases)
-            VALUES
-              ('00000000-0000-0000-0000-000000000213', %s,
-               'fault_405889_00', 'l0', 'BOOL', NULL, TRUE,
-               'EPO故障', '{}'),
-              ('00000000-0000-0000-0000-000000000214', %s,
-               'fault_405890_01', 'l0', 'BOOL', NULL, TRUE,
-               '风扇故障', '{}');
-            INSERT INTO t_point_processing_outputs
-              (id, revision_id, output_key, entity_definition_id,
-               data_type, unit, freshness_seconds)
-            VALUES (
-              '00000000-0000-0000-0000-000000000215', %s,
-              'boolean_fault_codes', 'pcs.fault_codes',
-              'CODE_SET', NULL, 30
-            );
-            INSERT INTO t_boolean_set_transform_rules (output_id)
-            VALUES ('00000000-0000-0000-0000-000000000215');
-            INSERT INTO t_boolean_set_mapping_entries
-              (output_id, input_id, canonical_code, display_name,
-               fault_category)
-            VALUES
-              ('00000000-0000-0000-0000-000000000215',
-               '00000000-0000-0000-0000-000000000213',
-               'pcs.hardware.epo', 'EPO故障', 'HARDWARE'),
-              ('00000000-0000-0000-0000-000000000215',
-               '00000000-0000-0000-0000-000000000214',
-               'pcs.hardware.fan_failure', '风扇故障', 'HARDWARE');
-            INSERT INTO t_point_processing_input_bindings
-              (installed_processing_id, input_id, source_kind, l0_tag_id,
-               confirmed_by)
-            VALUES
-              (%s, '00000000-0000-0000-0000-000000000213', 'l0', %s,
-               'user:installer'),
-              (%s, '00000000-0000-0000-0000-000000000214', 'l0', %s,
-               'user:installer');
-            INSERT INTO t_point_processing_output_bindings
-              (installed_processing_id, output_id, entity_instance_id)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000215', %s
-            );
-            """,
-            (
-                str(BOOLEAN_FAULT_A_TAG_ID), str(NODE_ID),
-                str(BOOLEAN_FAULT_B_TAG_ID), str(NODE_ID),
-                str(BOOLEAN_FAULT_ENTITY_ID),
-                str(REVISION_ID), str(REVISION_ID), str(REVISION_ID),
-                str(CONVERSION_ID), str(BOOLEAN_FAULT_A_TAG_ID),
-                str(CONVERSION_ID), str(BOOLEAN_FAULT_B_TAG_ID),
-                str(CONVERSION_ID), str(BOOLEAN_FAULT_ENTITY_ID),
-            ),
-        )
-
-    @staticmethod
-    def _seed_formula_processing(cursor) -> None:
-        from app.services.data_trunk_contracts import FormulaSource
-        from app.services.point_processing_formula import compile_formula
-
-        compiled = compile_formula(
-            "sum(pcs_power)",
-            sources=(
-                FormulaSource(
-                    "pcs_power",
-                    ValueKind.FLOAT,
-                    "kW",
-                    "many",
-                    True,
-                    None,
-                ),
-            ),
-            result_type=ValueKind.FLOAT,
-            result_unit="kW",
-        )
-        cursor.execute(
-            "SELECT identity_installation_id FROM t_device_instances WHERE node_id = %s",
-            (str(NODE_ID),),
-        )
-        identity_id = cursor.fetchone()[0]
-        cursor.execute(
-            "SELECT solution_installation_id FROM t_installed_point_processings WHERE id = %s",
-            (str(CONVERSION_ID),),
-        )
-        solution_id = cursor.fetchone()[0]
-        cursor.execute(
-            """
-            INSERT INTO t_nodes (id, name, node_type)
-            VALUES ('00000000-0000-0000-0000-000000000400', 'SITE-01', 'SITE');
-            UPDATE t_nodes
-            SET parent_id = '00000000-0000-0000-0000-000000000400',
-                node_type = 'PCS'
-            WHERE id = %s;
-            INSERT INTO t_device_instances
-              (id, identity_installation_id, slot_id, instance_key,
-               device_category, display_name, node_id)
-            VALUES (
-              '00000000-0000-0000-0000-000000000402', %s,
-              'site.primary', 'SITE-01', 'SITE', 'SITE 01',
-              '00000000-0000-0000-0000-000000000400'
-            );
-            INSERT INTO t_entity_instances
-              (id, device_instance_id, definition_id, display_name,
-               data_type, unit, direction, freshness_seconds, source_kind)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000402',
-              'site.total_pcs_power', 'PCS 总功率',
-              'FLOAT', 'kW', 'R', 5, 'point_processing'
-            );
-            INSERT INTO t_point_processing_templates
-              (id, asset_id, device_category, brand, model,
-               display_name, status)
-            VALUES (
-              '00000000-0000-0000-0000-000000000403',
-              'site.total-pcs-power', 'SITE', 'ZiZu', 'SITE-POWER',
-              '站级 PCS 总功率', 'active'
-            );
-            INSERT INTO t_point_processing_revisions
-              (id, template_id, revision, content_digest, published_at)
-            VALUES (
-              '00000000-0000-0000-0000-000000000404',
-              '00000000-0000-0000-0000-000000000403',
-              1, %s, '2026-08-17T00:00:00Z'
-            );
-            INSERT INTO t_point_processing_inputs
-              (id, revision_id, input_key, source_kind, data_type, unit,
-               required, stable_source_key, aliases)
-            VALUES (
-              '00000000-0000-0000-0000-000000000405',
-              '00000000-0000-0000-0000-000000000404',
-              'pcs_power', 'l2', 'FLOAT', 'kW', TRUE,
-              'pcs.active_power', '{}'
-            );
-            INSERT INTO t_point_processing_selectors
-              (input_id, scope, node_type, entity_definition_id, cardinality)
-            VALUES (
-              '00000000-0000-0000-0000-000000000405',
-              'descendants', 'PCS', 'pcs.active_power', 'many'
-            );
-            INSERT INTO t_point_processing_outputs
-              (id, revision_id, output_key, entity_definition_id,
-               data_type, unit, freshness_seconds)
-            VALUES (
-              '00000000-0000-0000-0000-000000000406',
-              '00000000-0000-0000-0000-000000000404',
-              'total_power', 'site.total_pcs_power', 'FLOAT', 'kW', 5
-            );
-            INSERT INTO t_point_processing_expressions
-              (output_id, dsl_text, canonical_ast, ast_digest,
-               result_data_type, result_unit, schedule_seconds, control_eligible)
-            VALUES (
-              '00000000-0000-0000-0000-000000000406',
-              'sum(pcs_power)', %s, %s, 'FLOAT', 'kW', 1, FALSE
-            );
-            INSERT INTO t_point_processing_plans
-              (id, node_id, template_revision_id,
-               entity_identity_installation_id, solution_installation_id,
-               base_site_configuration_version, source_catalog_digest,
-               status, items, blockers, digest, planned_by)
-            VALUES (
-              '00000000-0000-0000-0000-000000000407',
-              '00000000-0000-0000-0000-000000000400',
-              '00000000-0000-0000-0000-000000000404',
-              %s, %s, 1, %s, 'applied', '[]', '[]', %s, 'user:installer'
-            );
-            INSERT INTO t_installed_point_processings
-              (id, node_id, revision_id, source_plan_id,
-               solution_installation_id, site_configuration_version,
-               installed_by, current)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000400',
-              '00000000-0000-0000-0000-000000000404',
-              '00000000-0000-0000-0000-000000000407',
-              %s, 1, 'user:installer', TRUE
-            );
-            INSERT INTO t_point_processing_selector_members
-              (installed_processing_id, input_id, ordinal,
-               entity_instance_id, selector_digest)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000405',
-              0, %s, %s
-            );
-            INSERT INTO t_point_processing_output_bindings
-              (installed_processing_id, output_id, entity_instance_id)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000406', %s
-            );
-            INSERT INTO t_point_processing_dependencies
-              (installed_processing_id, input_id, output_id,
-               source_entity_instance_id, target_entity_instance_id)
-            VALUES (
-              %s, '00000000-0000-0000-0000-000000000405',
-              '00000000-0000-0000-0000-000000000406', %s, %s
-            )
-            """,
-            (
-                str(NODE_ID), identity_id, str(FORMULA_ENTITY_ID), "f" * 64,
-                Json(dict(compiled.ast)), compiled.digest,
-                identity_id, solution_id, "a" * 64, "b" * 64,
-                str(FORMULA_INSTALLATION_ID), solution_id,
-                str(FORMULA_INSTALLATION_ID), str(ENTITY_ID), "c" * 64,
-                str(FORMULA_INSTALLATION_ID), str(FORMULA_ENTITY_ID),
-                str(FORMULA_INSTALLATION_ID), str(ENTITY_ID),
-                str(FORMULA_ENTITY_ID),
-            ),
-        )
-
-    @staticmethod
-    def _seed_enum_and_fault_conversions(cursor) -> None:
-        cursor.execute(
-            """
-            INSERT INTO t_tags
-              (id, node_id, name, data_type, unit, read_write, enabled)
-            VALUES
-              (%s, %s, 'OperatingStateRaw', 'STRING', NULL, 'R', TRUE),
-              (%s, %s, 'FaultCodesRaw', 'STRING', NULL, 'R', TRUE);
-            INSERT INTO t_entity_instances
-              (id, device_instance_id, definition_id, display_name,
-               data_type, unit, direction, freshness_seconds, source_kind)
-            VALUES
-              (%s, '00000000-0000-0000-0000-000000000302',
-               'pcs.operating_state', 'PCS 01 运行状态',
-               'ENUM', NULL, 'R', 30, 'point_processing'),
-              (%s, '00000000-0000-0000-0000-000000000302',
-               'pcs.fault_codes', 'PCS 01 故障码',
-               'CODE_SET', NULL, 'R', 30, 'point_processing');
-            INSERT INTO t_point_processing_inputs
-              (id, revision_id, input_key, source_kind, data_type, unit,
-               required, stable_source_key, aliases)
-            VALUES
-              ('00000000-0000-0000-0000-000000000209', %s,
-               'operating_state_raw', 'l0', 'STRING', NULL, TRUE,
-               'OperatingStateRaw', '{}'),
-              ('00000000-0000-0000-0000-000000000210', %s,
-               'fault_codes_raw', 'l0', 'STRING', NULL, TRUE,
-               'FaultCodesRaw', '{}');
-            INSERT INTO t_point_processing_outputs
-              (id, revision_id, output_key, entity_definition_id,
-               data_type, unit, freshness_seconds)
-            VALUES
-              ('00000000-0000-0000-0000-000000000211', %s,
-               'operating_state', 'pcs.operating_state',
-               'ENUM', NULL, 30),
-              ('00000000-0000-0000-0000-000000000212', %s,
-               'fault_codes', 'pcs.fault_codes',
-               'CODE_SET', NULL, 30);
-            INSERT INTO t_enum_transform_rules (output_id, input_id)
-            VALUES (
-              '00000000-0000-0000-0000-000000000211',
-              '00000000-0000-0000-0000-000000000209'
-            );
-            INSERT INTO t_fault_code_transform_rules
-              (output_id, input_id, delimiter)
-            VALUES (
-              '00000000-0000-0000-0000-000000000212',
-              '00000000-0000-0000-0000-000000000210',
-              'semicolon'
-            );
-            INSERT INTO t_enum_mapping_entries
-              (output_id, raw_value, canonical_value)
-            VALUES
-              ('00000000-0000-0000-0000-000000000211', '0', 'STOPPED'),
-              ('00000000-0000-0000-0000-000000000211', '2', 'RUNNING');
-            INSERT INTO t_fault_code_mapping_entries
-              (output_id, raw_code, canonical_code, display_name)
-            VALUES
-              ('00000000-0000-0000-0000-000000000212', 'E30',
-               'COMPRESSOR_FAULT', '压缩机故障'),
-              ('00000000-0000-0000-0000-000000000212', 'E11',
-               'DC_OVERVOLTAGE', '直流过压');
-            INSERT INTO t_point_processing_input_bindings
-              (installed_processing_id, input_id, source_kind, l0_tag_id,
-               confirmed_by)
-            VALUES
-              (%s, '00000000-0000-0000-0000-000000000209', 'l0', %s,
-               'user:installer'),
-              (%s, '00000000-0000-0000-0000-000000000210', 'l0', %s,
-               'user:installer');
-            INSERT INTO t_point_processing_output_bindings
-              (installed_processing_id, output_id, entity_instance_id)
-            VALUES
-              (%s, '00000000-0000-0000-0000-000000000211', %s),
-              (%s, '00000000-0000-0000-0000-000000000212', %s);
-            """,
-            (
-                str(STATE_TAG_ID),
-                str(NODE_ID),
-                str(FAULT_TAG_ID),
-                str(NODE_ID),
-                str(STATE_ENTITY_ID),
-                str(FAULT_ENTITY_ID),
-                str(REVISION_ID),
-                str(REVISION_ID),
-                str(REVISION_ID),
-                str(REVISION_ID),
-                str(CONVERSION_ID),
-                str(STATE_TAG_ID),
-                str(CONVERSION_ID),
-                str(FAULT_TAG_ID),
-                str(CONVERSION_ID),
-                str(STATE_ENTITY_ID),
-                str(CONVERSION_ID),
-                str(FAULT_ENTITY_ID),
-            ),
-        )
-
-    def assert_counts(
-        self,
-        *,
-        l0: int,
-        l0_latest: int,
-        l2: int,
-        l2_latest: int,
-        sources: int,
-        outbox: int,
-    ) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                actual = []
-                for table in (
-                    "t_telemetry",
-                    "t_telemetry_latest",
-                    "t_l2_observations",
-                    "t_l2_latest",
-                    "t_l2_observation_sources",
-                    "t_l2_stream_outbox",
-                ):
-                    cursor.execute(f"SELECT count(*) FROM {table}")
-                    actual.append(cursor.fetchone()[0])
-        self.assertEqual(actual, [l0, l0_latest, l2, l2_latest, sources, outbox])
-
-    def test_numeric_ingest_commits_all_facts_together(self) -> None:
-        receipt = self.trunk.ingest((self.raw_power(12345.0, sequence=1),))
-
-        self.assertEqual(receipt.accepted_l0_count, 1)
-        self.assertEqual(receipt.duplicate_l0_count, 0)
-        self.assertEqual((UUID(int=0x101),), receipt.accepted_l0_observation_ids)
-        self.assertEqual(receipt.l2_event_ids, (EXPECTED_EVENT_ID,))
-        self.assert_counts(
-            l0=1,
-            l0_latest=1,
-            l2=1,
-            l2_latest=1,
-            sources=1,
-            outbox=1,
-        )
-
-    def test_explicit_event_time_basis_persists_and_orders_latest_by_effective_time(self) -> None:
-        received = datetime(2026, 8, 17, tzinfo=UTC)
-        future_fallback = replace(
-            self.raw_power(10_000.0, sequence=1),
-            source_timestamp=datetime(2036, 8, 17, tzinfo=UTC),
-            received_at=received,
-            event_time_basis="received_at",
-        )
-        next_observed = replace(
-            self.raw_power(
-                20_000.0,
-                sequence=2,
-                observed_at=received + timedelta(seconds=2),
-            ),
-            received_at=received + timedelta(seconds=3),
-            event_time_basis="observed_at",
-        )
-
-        first = self.trunk.ingest((future_fallback,))
-        second = self.trunk.ingest((next_observed,))
-
-        self.assertEqual(len(second.l2_event_ids), 1)
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT observation.event_time_basis, latest.event_time_basis,
-                           latest.value_float, source.source_event_time_basis
-                    FROM t_l2_observations AS observation
-                    CROSS JOIN t_l2_latest AS latest
-                    JOIN t_l2_observation_sources AS source
-                      ON source.l2_event_id = observation.event_id
-                     AND source.l2_observed_at = observation.observed_at
-                    WHERE observation.event_id = %s
-                      AND latest.entity_instance_id = %s
-                    """,
-                    (str(first.l2_event_ids[0]), str(ENTITY_ID)),
-                )
-                row = cursor.fetchone()
-                cursor.execute(
-                    """
-                    SELECT array_agg(event_time_basis ORDER BY source_sequence),
-                           (SELECT event_time_basis FROM t_telemetry_latest
-                            WHERE tag_id = %s)
-                    FROM t_telemetry WHERE tag_id = %s
-                    """,
-                    (str(TAG_ID), str(TAG_ID)),
-                )
-                l0_basis = cursor.fetchone()
-        self.assertEqual(
-            row,
-            ("received_at", "observed_at", 20.0, "received_at"),
-        )
-        self.assertEqual(l0_basis, (["received_at", "observed_at"], "observed_at"))
-
-    def test_projection_wakeup_runs_after_commit_and_cannot_fail_ingest(self) -> None:
-        observed_event_ids = []
-        test_case = self
-
-        class FailingProjectionObserver:
-            def observe_committed(self, event_ids):
-                with psycopg2.connect(**test_case.connection_kwargs) as connection:
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT count(*) FROM t_l2_observations "
-                            "WHERE event_id = ANY(%s::uuid[])",
-                            ([str(item) for item in event_ids],),
-                        )
-                        test_case.assertEqual(cursor.fetchone()[0], len(event_ids))
-                observed_event_ids.extend(event_ids)
-                raise RuntimeError("injected post-commit wake-up failure")
-
-        trunk = DataTrunk(
-            self.repository,
-            projection_observer=FailingProjectionObserver(),
-        )
-
-        receipt = trunk.ingest((self.raw_power(12345.0, sequence=1),))
-
-        self.assertEqual(receipt.l2_event_ids, (EXPECTED_EVENT_ID,))
-        self.assertEqual(observed_event_ids, [EXPECTED_EVENT_ID])
-        self.assert_counts(
-            l0=1,
-            l0_latest=1,
-            l2=1,
-            l2_latest=1,
-            sources=1,
-            outbox=1,
-        )
-
-    def test_due_formula_reads_frozen_l2_members_and_commits_history(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_formula_processing(cursor)
-        self.trunk.ingest((self.raw_power(12345.0, sequence=1),))
-
-        event_ids = self.trunk.evaluate_due_formulas()
-
-        self.assertEqual(1, len(event_ids))
-        self.assertEqual((), self.trunk.evaluate_due_formulas())
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT latest.value_float, latest.quality, source.source_kind,
-                           source.source_l2_event_id
-                    FROM t_l2_latest AS latest
-                    JOIN t_l2_observation_sources AS source
-                      ON source.l2_event_id = latest.event_id
-                     AND source.l2_observed_at = latest.observed_at
-                    WHERE latest.entity_instance_id = %s
-                    """,
-                    (str(FORMULA_ENTITY_ID),),
-                )
-                value, quality, source_kind, source_event_id = cursor.fetchone()
-                self.assertEqual(12.345, value)
-                self.assertEqual(int(TrunkQuality.GOOD), quality)
-                self.assertEqual("l2", source_kind)
-                self.assertEqual(EXPECTED_EVENT_ID, UUID(str(source_event_id)))
-
-    def test_expired_numeric_input_is_stale_before_transform(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id = %s",
-                    (str(TAG_ID),),
-                )
-
-        self.trunk.ingest((self.raw_power(12345.0, sequence=1),))
-
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_float, quality, reason
-                    FROM t_l2_latest WHERE entity_instance_id = %s
-                    """,
-                    (str(ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (None, int(TrunkQuality.STALE), "INPUT_STALE"),
-                    cursor.fetchone(),
-                )
-
-    def test_injected_source_or_outbox_failure_rolls_back_every_write(self) -> None:
-        for failed_stage in ("source", "outbox"):
-            with self.subTest(failed_stage=failed_stage):
-                repository = PostgresDataTrunkRepository(
-                    connection_factory=self._connection,
-                    clock=lambda: datetime(2026, 8, 17, 1, tzinfo=UTC),
-                    fault_hook=lambda stage: (
-                        (_ for _ in ()).throw(
-                            RuntimeError(f"injected {failed_stage} failure")
-                        )
-                        if stage == failed_stage
-                        else None
-                    ),
-                )
-
-                with self.assertRaises(DataTrunkError) as raised:
-                    DataTrunk(repository).ingest(
-                        (self.raw_power(12345.0, sequence=1),)
-                    )
-
-                self.assertEqual(raised.exception.code, "DATA_TRUNK_UNAVAILABLE")
-                self.assert_counts(
-                    l0=0,
-                    l0_latest=0,
-                    l2=0,
-                    l2_latest=0,
-                    sources=0,
-                    outbox=0,
-                )
-
-    def test_terminal_ingestion_failure_records_only_a_safe_idempotent_reference(
-        self,
-    ) -> None:
-        raw = self.raw_power(12345.0, sequence=1)
-
-        first = self.trunk.record_failure(
-            (raw,),
-            attempts=5,
-            error_code="DATA_TRUNK_UNAVAILABLE",
-        )
-        second = self.trunk.record_failure(
-            (raw,),
-            attempts=5,
-            error_code="DATA_TRUNK_UNAVAILABLE",
-        )
-
-        self.assertEqual(first, second)
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, source_digest, stage, safe_summary, attempts
-                    FROM t_ingestion_failures
-                    """
-                )
-                rows = cursor.fetchall()
-        self.assertEqual(1, len(rows))
-        self.assertEqual(str(first), str(rows[0][0]))
-        self.assertEqual("l0", rows[0][2])
-        self.assertEqual(
-            {"code": "DATA_TRUNK_UNAVAILABLE", "observation_count": 1},
-            rows[0][3],
-        )
-        self.assertEqual(5, rows[0][4])
-        self.assertNotIn("12345", str(rows[0]))
-
-    def test_duplicate_source_digest_is_idempotent(self) -> None:
-        raw = self.raw_power(12345.0, sequence=1)
-
-        first = self.trunk.ingest((raw,))
-        second = self.trunk.ingest((raw,))
-
-        self.assertEqual(first.accepted_l0_count, 1)
-        self.assertEqual(second.accepted_l0_count, 0)
-        self.assertEqual(second.duplicate_l0_count, 1)
-        self.assertEqual(second.l2_event_ids, ())
-        self.assert_counts(
-            l0=1,
-            l0_latest=1,
-            l2=1,
-            l2_latest=1,
-            sources=1,
-            outbox=1,
-        )
-
-    def test_late_observation_adds_history_without_moving_latest_or_outbox(self) -> None:
-        newer = self.raw_power(
-            13000.0,
-            sequence=2,
-            observed_at=datetime(2026, 8, 17, 0, 0, 10, tzinfo=UTC),
-        )
-        late = self.raw_power(
-            12000.0,
-            sequence=1,
-            observed_at=datetime(2026, 8, 17, 0, 0, 5, tzinfo=UTC),
-        )
-
-        self.trunk.ingest((newer,))
-        receipt = self.trunk.ingest((late,))
-
-        self.assertEqual(receipt.late_observation_count, 1)
-        self.assert_counts(
-            l0=2,
-            l0_latest=1,
-            l2=2,
-            l2_latest=1,
-            sources=2,
-            outbox=1,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT raw_value_float FROM t_telemetry_latest WHERE tag_id = %s",
-                    (str(TAG_ID),),
-                )
-                self.assertEqual(cursor.fetchone(), (13000.0,))
-                cursor.execute(
-                    "SELECT value_float FROM t_l2_latest WHERE entity_instance_id = %s",
-                    (str(ENTITY_ID),),
-                )
-                self.assertEqual(cursor.fetchone(), (13.0,))
-
-    def test_batch_preserves_every_l2_history_observation(self) -> None:
-        first = self.raw_power(
-            10000.0,
-            sequence=1,
-            observed_at=datetime(2026, 8, 17, 0, 0, 1, tzinfo=UTC),
-        )
-        second = self.raw_power(
-            20000.0,
-            sequence=2,
-            observed_at=datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
-        )
-
-        receipt = self.trunk.ingest((first, second))
-
-        self.assertEqual(receipt.accepted_l0_count, 2)
-        self.assertEqual(len(receipt.l2_event_ids), 2)
-        self.assert_counts(
-            l0=2,
-            l0_latest=1,
-            l2=2,
-            l2_latest=1,
-            sources=2,
-            outbox=2,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_float
-                    FROM t_l2_observations
-                    ORDER BY observed_at
-                    """
-                )
-                self.assertEqual(cursor.fetchall(), [(10.0,), (20.0,)])
-
-    def test_same_timestamp_uses_source_order_key_as_tie_breaker(self) -> None:
-        observed_at = datetime(2026, 8, 17, tzinfo=UTC)
-        later_sequence = self.raw_power(
-            20000.0,
-            sequence=2,
-            observed_at=observed_at,
-        )
-        earlier_sequence = self.raw_power(
-            10000.0,
-            sequence=1,
-            observed_at=observed_at,
-        )
-
-        self.trunk.ingest((later_sequence,))
-        receipt = self.trunk.ingest((earlier_sequence,))
-
-        self.assertEqual(receipt.late_observation_count, 1)
-        self.assert_counts(
-            l0=2,
-            l0_latest=1,
-            l2=2,
-            l2_latest=1,
-            sources=2,
-            outbox=1,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT raw_value_float, source_order_key
-                    FROM t_telemetry_latest
-                    WHERE tag_id = %s
-                    """,
-                    (str(TAG_ID),),
-                )
-                self.assertEqual(
-                    cursor.fetchone(),
-                    (20000.0, f"S:00000000000000000002:{'b' * 64}"),
-                )
-
-    def test_runtime_type_mismatch_keeps_l0_and_writes_bad_l2(self) -> None:
-        raw = replace(
-            self.raw_power(12345.0, sequence=1),
-            value=TypedValue(ValueKind.STRING, "not-a-number"),
-        )
-
-        receipt = self.trunk.ingest((raw,))
-
-        self.assertEqual(receipt.accepted_l0_count, 1)
-        self.assert_counts(
-            l0=1,
-            l0_latest=1,
-            l2=1,
-            l2_latest=1,
-            sources=1,
-            outbox=1,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT raw_value_text FROM t_telemetry WHERE tag_id = %s",
-                    (str(TAG_ID),),
-                )
-                self.assertEqual(cursor.fetchone(), ("not-a-number",))
-                cursor.execute(
-                    """
-                    SELECT value_float, quality, reason
-                    FROM t_l2_latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(ENTITY_ID),),
-                )
-                self.assertEqual(
-                    cursor.fetchone(),
-                    (None, int(TrunkQuality.BAD), "TYPE_MISMATCH"),
-                )
-
-    def test_relational_enum_and_fault_rules_produce_typed_l2(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_enum_and_fault_conversions(cursor)
-
-        receipt = self.trunk.ingest(
-            (
-                self.raw_text(
-                    tag_id=STATE_TAG_ID,
-                    source_key="OperatingStateRaw",
-                    value="2",
-                    sequence=2,
-                ),
-                self.raw_text(
-                    tag_id=FAULT_TAG_ID,
-                    source_key="FaultCodesRaw",
-                    value="E30; e11;E30;X99",
-                    sequence=3,
-                ),
-            )
-        )
-
-        self.assertEqual(receipt.accepted_l0_count, 2)
-        self.assertEqual(len(receipt.l2_event_ids), 2)
-        self.assert_counts(
-            l0=2,
-            l0_latest=2,
-            l2=2,
-            l2_latest=2,
-            sources=2,
-            outbox=2,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT entity_instance_id, value_text, value_codes,
-                           quality, reason
-                    FROM t_l2_latest
-                    ORDER BY entity_instance_id
-                    """
-                )
-                rows = [
-                    (str(row[0]), *row[1:])
-                    for row in cursor.fetchall()
-                ]
-                self.assertEqual(
-                    rows,
-                    [
-                        (str(STATE_ENTITY_ID), "RUNNING", None, 192, None),
-                        (
-                            str(FAULT_ENTITY_ID),
-                            None,
-                            [
-                                "COMPRESSOR_FAULT",
-                                "DC_OVERVOLTAGE",
-                                "X99",
-                            ],
-                            64,
-                            "UNMAPPED_FAULT_CODE",
-                        ),
-                    ],
-                )
-
-    def test_expired_enum_input_is_stale_before_transform(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_enum_and_fault_conversions(cursor)
-                cursor.execute(
-                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id = %s",
-                    (str(STATE_TAG_ID),),
-                )
-
-        self.trunk.ingest((self.raw_text(
-            tag_id=STATE_TAG_ID,
-            source_key="OperatingStateRaw",
-            value="2",
-            sequence=2,
-        ),))
-
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_text, quality, reason
-                    FROM t_l2_latest WHERE entity_instance_id = %s
-                    """,
-                    (str(STATE_ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (None, int(TrunkQuality.STALE), "INPUT_STALE"),
-                    cursor.fetchone(),
-                )
-
-    def test_boolean_set_uses_all_current_inputs_and_persists_source_evidence(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_boolean_set_processing(cursor)
-
-        received = datetime(2026, 8, 17, tzinfo=UTC)
-        received_source = replace(
-            self.raw_bool(
-                tag_id=BOOLEAN_FAULT_A_TAG_ID,
-                source_key="EPO故障",
-                value=False,
-                sequence=4,
-            ),
-            source_timestamp=received.replace(year=2036),
-            received_at=received,
-            event_time_basis="received_at",
-        )
-        incomplete = self.trunk.ingest(
-            (received_source,)
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_codes, quality, reason
-                    FROM t_l2_latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (None, int(TrunkQuality.BAD), "REQUIRED_INPUT_MISSING"),
-                    cursor.fetchone(),
-                )
-        receipt = self.trunk.ingest(
-            (self.raw_bool(
-                tag_id=BOOLEAN_FAULT_B_TAG_ID,
-                source_key="风扇故障",
-                value=True,
-                sequence=5,
-            ),)
-        )
-
-        self.assertEqual(1, incomplete.accepted_l0_count)
-        self.assertEqual(1, len(incomplete.l2_event_ids))
         self.assertEqual(1, receipt.accepted_l0_count)
         self.assertEqual(1, len(receipt.l2_event_ids))
-        self.assert_counts(
-            l0=2,
-            l0_latest=2,
-            l2=2,
-            l2_latest=1,
-            sources=3,
-            outbox=2,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
+        with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT value_codes, quality, reason
-                    FROM t_l2_latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (["pcs.hardware.fan_failure"], 192, None),
-                    cursor.fetchone(),
-                )
-                cursor.execute(
-                    """
-                    SELECT source.l0_observation_id,
-                           source.source_event_time_basis
-                    FROM t_l2_observation_sources AS source
-                    JOIN t_l2_latest AS latest
-                      ON latest.event_id = source.l2_event_id
-                     AND latest.observed_at = source.l2_observed_at
-                    WHERE latest.entity_instance_id = %s
-                    ORDER BY source.l0_observation_id
-                    """,
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                source_evidence = [
-                    (UUID(str(source_id)), time_basis)
-                    for source_id, time_basis in cursor.fetchall()
-                ]
-                self.assertEqual(
-                    source_evidence,
-                    [
-                        (received_source.observation_id, "received_at"),
-                        (UUID(int=0x305), "observed_at"),
-                    ],
-                )
-
-    def test_fault_set_writes_on_change_or_sixty_second_heartbeat(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_boolean_set_processing(cursor)
-        started = datetime(2026, 8, 17, tzinfo=UTC)
-        first = self.trunk.ingest(
-            (
-                self.raw_bool(
-                    tag_id=BOOLEAN_FAULT_A_TAG_ID,
-                    source_key="EPO故障",
-                    value=True,
-                    sequence=10,
-                    observed_at=started,
-                ),
-                self.raw_bool(
-                    tag_id=BOOLEAN_FAULT_B_TAG_ID,
-                    source_key="风扇故障",
-                    value=False,
-                    sequence=11,
-                    observed_at=started,
-                ),
-            )
-        )
-        duplicate = self.trunk.ingest(
-            (self.raw_bool(
-                tag_id=BOOLEAN_FAULT_A_TAG_ID,
-                source_key="EPO故障",
-                value=True,
-                sequence=12,
-                observed_at=started + timedelta(seconds=10),
-            ),)
-        )
-        heartbeat = self.trunk.ingest(
-            (self.raw_bool(
-                tag_id=BOOLEAN_FAULT_A_TAG_ID,
-                source_key="EPO故障",
-                value=True,
-                sequence=13,
-                observed_at=started + timedelta(seconds=60),
-            ),)
-        )
-
-        self.assertEqual((1, 0, 1), tuple(
-            len(receipt.l2_event_ids)
-            for receipt in (first, duplicate, heartbeat)
-        ))
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT count(*), max(observed_at)
-                    FROM t_l2_observations
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (2, started + timedelta(seconds=60)),
-                    cursor.fetchone(),
-                )
-
-    def test_fault_set_becomes_stale_when_one_required_input_stops(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_boolean_set_processing(cursor)
-                cursor.execute(
-                    "UPDATE t_tags SET freshness_seconds = 5 WHERE id IN (%s, %s)",
-                    (str(BOOLEAN_FAULT_A_TAG_ID), str(BOOLEAN_FAULT_B_TAG_ID)),
-                )
-        started = datetime(2026, 8, 17, tzinfo=UTC)
-        current_time = [started + timedelta(seconds=1)]
-        trunk = DataTrunk(PostgresDataTrunkRepository(
-            connection_factory=self._connection,
-            clock=lambda: current_time[0],
-        ))
-        trunk.ingest((
-            self.raw_bool(tag_id=BOOLEAN_FAULT_A_TAG_ID, source_key="EPO故障", value=False, sequence=20, observed_at=started),
-            self.raw_bool(tag_id=BOOLEAN_FAULT_B_TAG_ID, source_key="风扇故障", value=False, sequence=21, observed_at=started),
-        ))
-        current_time[0] = started + timedelta(seconds=10)
-        receipt = trunk.ingest((self.raw_bool(
-            tag_id=BOOLEAN_FAULT_A_TAG_ID,
-            source_key="EPO故障",
-            value=True,
-            sequence=22,
-            observed_at=started + timedelta(seconds=10),
-        ),))
-
-        self.assertEqual(1, len(receipt.l2_event_ids))
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_codes, quality, reason,
-                           (SELECT count(*) FROM t_l2_observation_sources source
-                            WHERE source.l2_event_id = latest.event_id
-                              AND source.l2_observed_at = latest.observed_at)
-                    FROM t_l2_latest latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                self.assertEqual(
-                    (None, int(TrunkQuality.STALE), "INPUT_STALE", 2),
-                    cursor.fetchone(),
-                )
-
-    def test_late_boolean_input_cannot_rewrite_current_fault_set(self) -> None:
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                self._seed_boolean_set_processing(cursor)
-        started = datetime(2026, 8, 17, tzinfo=UTC)
-        self.trunk.ingest((
-            self.raw_bool(tag_id=BOOLEAN_FAULT_A_TAG_ID, source_key="EPO故障", value=True, sequence=30, observed_at=started + timedelta(seconds=20)),
-            self.raw_bool(tag_id=BOOLEAN_FAULT_B_TAG_ID, source_key="风扇故障", value=False, sequence=31, observed_at=started + timedelta(seconds=20)),
-        ))
-        late = self.trunk.ingest((self.raw_bool(
-            tag_id=BOOLEAN_FAULT_A_TAG_ID,
-            source_key="EPO故障",
-            value=False,
-            sequence=32,
-            observed_at=started + timedelta(seconds=10),
-        ),))
-
-        self.assertEqual(0, len(late.l2_event_ids))
-        self.assertEqual(1, late.late_observation_count)
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT value_codes FROM t_l2_latest WHERE entity_instance_id = %s",
-                    (str(BOOLEAN_FAULT_ENTITY_ID),),
-                )
-                self.assertEqual((["pcs.hardware.epo"],), cursor.fetchone())
-
-    def test_freshness_scheduler_writes_stale_state_atomically_and_idempotently(
-        self,
-    ) -> None:
-        raw = self.raw_power(20000.0, sequence=1)
-        self.trunk.ingest((raw,))
-        scheduler = _FreshnessScheduler(
-            self.repository,
-            clock=lambda: raw.source_timestamp + timedelta(seconds=31),
-        )
-
-        first = scheduler.run_once()
-        second = scheduler.run_once()
-
-        self.assertEqual((first, second), (1, 0))
-        self.assert_counts(
-            l0=1,
-            l0_latest=1,
-            l2=2,
-            l2_latest=1,
-            sources=2,
-            outbox=2,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT value_float, quality, reason, observed_at
-                    FROM t_l2_latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(ENTITY_ID),),
-                )
-                value, quality, reason, observed_at = cursor.fetchone()
-                self.assertIsNone(value)
-                self.assertEqual(
-                    (quality, reason),
-                    (int(TrunkQuality.STALE), "FRESHNESS_EXPIRED"),
-                )
-                self.assertEqual(
-                    observed_at,
-                    raw.source_timestamp + timedelta(seconds=30),
-                )
-                cursor.execute(
-                    """
-                    SELECT source_kind
-                    FROM t_l2_observation_sources
-                    ORDER BY source_kind
-                    """
-                )
-                self.assertEqual(
-                    cursor.fetchall(),
-                    [("freshness",), ("l0",)],
-                )
-
-    def test_freshness_deadline_uses_explicit_effective_event_time(self) -> None:
-        received = datetime(2026, 8, 17, tzinfo=UTC)
-        future_fallback = replace(
-            self.raw_power(10_000.0, sequence=1),
-            source_timestamp=datetime(2036, 8, 17, tzinfo=UTC),
-            received_at=received,
-            event_time_basis="received_at",
-        )
-        self.trunk.ingest((future_fallback,))
-
-        event_ids = self.trunk.advance_freshness(received + timedelta(seconds=31))
-
-        self.assertEqual(len(event_ids), 1)
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT latest.observed_at, latest.event_time_basis,
-                           source.source_event_time_basis
+                    SELECT entity.definition_id, latest.value_float,
+                           latest.quality, latest.configuration_revision
                     FROM t_l2_latest AS latest
-                    JOIN t_l2_observation_sources AS source
-                      ON source.l2_event_id = latest.event_id
-                     AND source.l2_observed_at = latest.observed_at
-                    WHERE latest.entity_instance_id = %s
-                      AND source.source_kind = 'freshness'
-                    """,
-                    (str(ENTITY_ID),),
-                )
-                row = cursor.fetchone()
-        self.assertEqual(
-            row,
-            (
-                received + timedelta(seconds=30),
-                "calculated_at",
-                "received_at",
-            ),
-        )
-
-    def test_freshness_commit_uses_the_same_post_commit_projection_observer(self) -> None:
-        raw = self.raw_power(20_000.0, sequence=1)
-        self.trunk.ingest((raw,))
-        observed_ids = []
-        test_case = self
-
-        class ProjectionObserver:
-            def observe_committed(self, event_ids):
-                with psycopg2.connect(**test_case.connection_kwargs) as connection:
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT count(*) FROM t_l2_observations "
-                            "WHERE event_id = ANY(%s::uuid[])",
-                            ([str(item) for item in event_ids],),
-                        )
-                        test_case.assertEqual(cursor.fetchone()[0], len(event_ids))
-                observed_ids.extend(event_ids)
-
-        trunk = DataTrunk(
-            self.repository,
-            projection_observer=ProjectionObserver(),
-        )
-
-        event_ids = trunk.advance_freshness(
-            raw.source_timestamp + timedelta(seconds=31)
-        )
-
-        self.assertEqual(tuple(observed_ids), event_ids)
-        self.assertEqual(len(event_ids), 1)
-
-    def test_freshness_source_or_outbox_failure_rolls_back_stale_state(self) -> None:
-        raw = self.raw_power(20000.0, sequence=1)
-        self.trunk.ingest((raw,))
-
-        for failed_stage in ("source", "outbox"):
-            with self.subTest(failed_stage=failed_stage):
-                repository = PostgresDataTrunkRepository(
-                    connection_factory=self._connection,
-                    clock=lambda: datetime(2026, 8, 17, 1, tzinfo=UTC),
-                    fault_hook=lambda stage: (
-                        (_ for _ in ()).throw(
-                            RuntimeError(f"injected {failed_stage} failure")
-                        )
-                        if stage == failed_stage
-                        else None
-                    ),
-                )
-                scheduler = _FreshnessScheduler(
-                    repository,
-                    clock=lambda: raw.source_timestamp + timedelta(seconds=31),
-                )
-
-                with self.assertRaises(DataTrunkError) as raised:
-                    scheduler.run_once()
-
-                self.assertEqual(raised.exception.code, "DATA_TRUNK_UNAVAILABLE")
-                self.assert_counts(
-                    l0=1,
-                    l0_latest=1,
-                    l2=1,
-                    l2_latest=1,
-                    sources=1,
-                    outbox=1,
-                )
-                with psycopg2.connect(**self.connection_kwargs) as connection:
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            """
-                            SELECT quality
-                            FROM t_l2_latest
-                            WHERE entity_instance_id = %s
-                            """,
-                            (str(ENTITY_ID),),
-                        )
-                        self.assertEqual(
-                            cursor.fetchone(),
-                            (int(TrunkQuality.GOOD),),
-                        )
-
-    def test_real_observation_without_sequence_wins_at_freshness_deadline(self) -> None:
-        first = self.raw_power(20000.0, sequence=1)
-        self.trunk.ingest((first,))
-        deadline = first.source_timestamp + timedelta(seconds=30)
-        _FreshnessScheduler(
-            self.repository,
-            clock=lambda: deadline,
-        ).run_once()
-        real_at_deadline = replace(
-            self.raw_power(21000.0, sequence=2, observed_at=deadline),
-            source_sequence=None,
-            source_digest="0" * 64,
-        )
-
-        self.trunk.ingest((real_at_deadline,))
-
-        self.assert_counts(
-            l0=2,
-            l0_latest=1,
-            l2=3,
-            l2_latest=1,
-            sources=3,
-            outbox=3,
-        )
-        with psycopg2.connect(**self.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
+                    JOIN t_entity_instances AS entity
+                      ON entity.id=latest.entity_instance_id
+                    WHERE entity.definition_id='pcs.active_power'
                     """
-                    SELECT value_float, quality, source_order_key
-                    FROM t_l2_latest
-                    WHERE entity_instance_id = %s
-                    """,
-                    (str(ENTITY_ID),),
                 )
                 self.assertEqual(
+                    ("pcs.active_power", 1.0, int(TrunkQuality.GOOD), 1),
                     cursor.fetchone(),
-                    (21.0, int(TrunkQuality.GOOD), f"D:{'0' * 64}"),
                 )
+                cursor.execute(
+                    "SELECT count(*) FROM t_l2_observation_sources "
+                    "WHERE source_kind='l0'"
+                )
+                self.assertEqual(1, cursor.fetchone()[0])
+                cursor.execute("SELECT count(*) FROM t_l2_stream_outbox")
+                self.assertEqual(1, cursor.fetchone()[0])
 
 
 if __name__ == "__main__":

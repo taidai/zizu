@@ -59,7 +59,7 @@ class PcsNumericConversionTest(unittest.TestCase):
         return {
             "installed": (installed,),
             "current_inputs": {InputReference.l0(raw.tag_id): raw},
-            "site_configuration_version": 4,
+            "configuration_revision": 4,
             "calculated_at": datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
         }
 
@@ -72,7 +72,7 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(result[0].unit, "kW")
         self.assertEqual(result[0].quality, TrunkQuality.GOOD)
         self.assertEqual(result[0].source_observation_ids, (raw.observation_id,))
-        self.assertEqual(result[0].site_configuration_version, 4)
+        self.assertEqual(result[0].configuration_revision, 4)
         self.assertEqual(
             result[0].source_order_key,
             f"S:00000000000000000001:{'a' * 64}",
@@ -457,7 +457,7 @@ class PcsNumericConversionTest(unittest.TestCase):
         output = evaluate_processing(
             installed=(installed,),
             current_inputs=current,
-            site_configuration_version=5,
+            configuration_revision=5,
             calculated_at=datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
         )[0]
 
@@ -488,7 +488,7 @@ class PcsNumericConversionTest(unittest.TestCase):
             processing_revision_id=UUID(
                 "00000000-0000-0000-0000-000000000601"
             ),
-            site_configuration_version=4,
+            configuration_revision=4,
             source_observation_ids=(),
             source_digest=digest,
             source_order_key=f"L:{event_id}",
@@ -545,7 +545,7 @@ class PcsNumericConversionTest(unittest.TestCase):
                 ),
             ),
             "current_inputs": observations,
-            "site_configuration_version": 4,
+            "configuration_revision": 4,
             "calculated_at": datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
         }
 

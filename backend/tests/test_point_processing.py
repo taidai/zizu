@@ -142,7 +142,7 @@ class PointProcessingTest(unittest.TestCase):
             ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingSource,
             PreviewPointProcessing,
         )
@@ -165,7 +165,7 @@ class PointProcessingTest(unittest.TestCase):
                 (NODE_ID, "PCS", "pcs.active_power"): (PCS_POWER_1, PCS_POWER_2),
             },
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
 
         plan = service.preview(
             PreviewPointProcessing(
@@ -173,8 +173,6 @@ class PointProcessingTest(unittest.TestCase):
                 template_revision_id=SITE_FORMULA_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
 
@@ -193,7 +191,7 @@ class PointProcessingTest(unittest.TestCase):
             ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PreviewPointProcessing,
         )
 
@@ -204,7 +202,7 @@ class PointProcessingTest(unittest.TestCase):
                 (NODE_ID, "PCS", "pcs.active_power"): (PCS_POWER_2, PCS_POWER_1),
             },
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
 
         plan = service.preview(
             PreviewPointProcessing(
@@ -212,8 +210,6 @@ class PointProcessingTest(unittest.TestCase):
                 template_revision_id=SITE_FORMULA_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
 
@@ -223,11 +219,21 @@ class PointProcessingTest(unittest.TestCase):
         self.assertEqual(selector_item["action"], "add")
         self.assertEqual(dag_item["max_depth"], 2)
         self.assertEqual(plan.status, "ready")
+        payload = plan.public_dict()
+        self.assertEqual(0, payload["base_configuration_revision"])
+        for removed in (
+            "solution_installation_id",
+            "entity_identity_installation_id",
+            "package_digest",
+            "base_site_configuration_version",
+        ):
+            self.assertNotIn(removed, payload)
 
         application = service.apply(
             ApplyPointProcessingPlan(plan.id, plan.digest, "site-formula", "user:engineer")
         )
         installed = repository.installed_processings(catalog)
+        self.assertEqual(1, application.configuration_revision)
         self.assertEqual(installed[0].installation_id, application.installed_processing_id)
         self.assertIsInstance(installed[0].transform, FormulaTransform)
         self.assertEqual(
@@ -240,7 +246,7 @@ class PointProcessingTest(unittest.TestCase):
             ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingError,
             PreviewPointProcessing,
         )
@@ -252,15 +258,13 @@ class PointProcessingTest(unittest.TestCase):
                 (NODE_ID, "PCS", "pcs.active_power"): (PCS_POWER_1, PCS_POWER_2),
             },
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
         plan = service.preview(
             PreviewPointProcessing(
                 node_id=NODE_ID,
                 template_revision_id=SITE_FORMULA_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
         catalog.replace_selector_members(
@@ -280,7 +284,7 @@ class PointProcessingTest(unittest.TestCase):
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
             PreviewPointProcessing,
-            PointProcessingDelivery,
+            PointProcessingService,
         )
         from tests.test_neuron_point_processing_catalog import FakeNeuron
 
@@ -291,7 +295,7 @@ class PointProcessingTest(unittest.TestCase):
             templates={EN9_REVISION_ID: assets["pcs.en9"]},
             node_source_keys={NODE_ID: "EN9-PCS"},
         )
-        service = PointProcessingDelivery(
+        service = PointProcessingService(
             repository,
             catalog,
             point_scanner=NeuronPointCatalog(neuron),
@@ -303,8 +307,6 @@ class PointProcessingTest(unittest.TestCase):
                 template_revision_id=EN9_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
 
@@ -367,7 +369,7 @@ class PointProcessingTest(unittest.TestCase):
             ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingError,
             PreviewPointProcessing,
         )
@@ -376,7 +378,7 @@ class PointProcessingTest(unittest.TestCase):
         assets = _assets()
         repository = InMemoryPointProcessingRepository()
         neuron = FakeNeuron()
-        service = PointProcessingDelivery(
+        service = PointProcessingService(
             repository,
             InMemoryPointProcessingCatalog(
                 templates={EN9_REVISION_ID: assets["pcs.en9"]},
@@ -390,8 +392,6 @@ class PointProcessingTest(unittest.TestCase):
                 template_revision_id=EN9_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
         neuron.tags[0]["decimal"] = 1.0
@@ -413,14 +413,14 @@ class PointProcessingTest(unittest.TestCase):
         from app.services.point_processing import (
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PreviewPointProcessing,
         )
         from tests.test_neuron_point_processing_catalog import FakeNeuron
 
         neuron = FakeNeuron()
         neuron.tags[0]["decimal"] = 1.0
-        service = PointProcessingDelivery(
+        service = PointProcessingService(
             InMemoryPointProcessingRepository(),
             InMemoryPointProcessingCatalog(
                 templates={EN9_REVISION_ID: _assets()["pcs.en9"]},
@@ -434,8 +434,6 @@ class PointProcessingTest(unittest.TestCase):
             template_revision_id=EN9_REVISION_ID,
             input_selections={},
             actor="user:engineer",
-            entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-            solution_installation_id=SOLUTION_INSTALLATION_ID,
         ))
 
         self.assertEqual("blocked", plan.status)
@@ -449,7 +447,7 @@ class PointProcessingTest(unittest.TestCase):
         from app.services.point_processing import (
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingDelivery,
+            PointProcessingService,
             PreviewPointProcessing,
         )
         from tests.test_neuron_point_processing_catalog import FakeNeuron
@@ -469,7 +467,7 @@ class PointProcessingTest(unittest.TestCase):
                 command["attribute"] = 2
                 return [command]
 
-        service = PointProcessingDelivery(
+        service = PointProcessingService(
             InMemoryPointProcessingRepository(),
             InMemoryPointProcessingCatalog(
                 templates={EN9_REVISION_ID: _assets()["pcs.en9"]},
@@ -483,8 +481,6 @@ class PointProcessingTest(unittest.TestCase):
             template_revision_id=EN9_REVISION_ID,
             input_selections={},
             actor="user:engineer",
-            entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-            solution_installation_id=SOLUTION_INSTALLATION_ID,
         ))
 
         self.assertEqual("ready", plan.status)
@@ -502,7 +498,7 @@ class PointProcessingTest(unittest.TestCase):
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
             PreviewPointProcessing,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingSource,
         )
 
@@ -521,15 +517,13 @@ class PointProcessingTest(unittest.TestCase):
                 PointProcessingSource(source_ids["fault_codes_raw"], "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
             ),
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
         plan = service.preview(
             PreviewPointProcessing(
                 node_id=NODE_ID,
                 template_revision_id=BRAND_A_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
         application = service.apply(
@@ -583,7 +577,7 @@ class PointProcessingTest(unittest.TestCase):
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
             PreviewPointProcessing,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingSource,
         )
 
@@ -621,7 +615,7 @@ class PointProcessingTest(unittest.TestCase):
                 ),
             ),
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
 
         plan = service.preview(
             PreviewPointProcessing(
@@ -629,8 +623,6 @@ class PointProcessingTest(unittest.TestCase):
                 template_revision_id=BRAND_A_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
 
@@ -650,7 +642,7 @@ class PointProcessingTest(unittest.TestCase):
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
             PreviewPointProcessing,
-            PointProcessingDelivery,
+            PointProcessingService,
             PointProcessingSource,
         )
 
@@ -667,15 +659,13 @@ class PointProcessingTest(unittest.TestCase):
                 PointProcessingSource(UUID("83000000-0000-0000-0000-000000000003"), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
             ),
         )
-        service = PointProcessingDelivery(repository, catalog)
+        service = PointProcessingService(repository, catalog)
         first_plan = service.preview(
             PreviewPointProcessing(
                 node_id=NODE_ID,
                 template_revision_id=BRAND_A_REVISION_ID,
                 input_selections={},
                 actor="user:engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
         first_command = ApplyPointProcessingPlan(

@@ -32,7 +32,7 @@ class ConversionEvaluator(Protocol):
         *,
         installed: tuple[InstalledPointProcessing, ...],
         current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-        site_configuration_version: int,
+        configuration_revision: int,
         calculated_at: datetime,
     ) -> tuple[L2Observation, ...]: ...
 
@@ -51,13 +51,6 @@ class DataTrunkRepository(Protocol):
         attempts: int,
         error_code: str,
     ) -> UUID: ...
-
-    def acceptance_evidence(
-        self,
-        *,
-        solution_installation_id: UUID,
-        entity_definition_ids: tuple[str, ...],
-    ) -> dict[str, Any]: ...
 
     def evaluate_due_formulas(
         self,
@@ -114,18 +107,6 @@ class DataTrunk:
             error_code=error_code,
         )
 
-    def acceptance_evidence(
-        self,
-        *,
-        solution_installation_id: UUID,
-        entity_definition_ids: Sequence[str],
-    ) -> dict[str, Any]:
-        """Read committed data-trunk evidence without changing runtime state."""
-        return self._repository.acceptance_evidence(
-            solution_installation_id=solution_installation_id,
-            entity_definition_ids=tuple(entity_definition_ids),
-        )
-
     def evaluate_due_formulas(self) -> tuple[UUID, ...]:
         """Evaluate installed typed formulas that reached their configured cadence."""
         event_ids = self._repository.evaluate_due_formulas(evaluate_processing)
@@ -156,12 +137,12 @@ class InMemoryDataTrunkRepository:
         self,
         *,
         installed_provider: Callable[[], tuple[InstalledPointProcessing, ...]],
-        site_configuration_version: Callable[[], int],
+        configuration_revision: Callable[[], int],
         on_l2_committed: Callable[[tuple[L2Observation, ...]], None] | None = None,
         clock: Callable[[], datetime],
     ) -> None:
         self._installed_provider = installed_provider
-        self._site_configuration_version = site_configuration_version
+        self._configuration_revision = configuration_revision
         self._on_l2_committed = on_l2_committed or (lambda _items: None)
         self._clock = clock
         self._source_digests: set[str] = set()
@@ -210,8 +191,8 @@ class InMemoryDataTrunkRepository:
                     evaluator(
                         installed=affected,
                         current_inputs={input_reference: observation},
-                        site_configuration_version=(
-                            self._site_configuration_version()
+                        configuration_revision=(
+                            self._configuration_revision()
                         ),
                         calculated_at=calculated_at,
                     )
@@ -253,90 +234,6 @@ class InMemoryDataTrunkRepository:
         with self._lock:
             self._failures.add(failure_id)
         return failure_id
-
-    def acceptance_evidence(
-        self,
-        *,
-        solution_installation_id: UUID,
-        entity_definition_ids: tuple[str, ...],
-    ) -> dict[str, Any]:
-        del solution_installation_id
-        required = set(entity_definition_ids)
-        with self._lock:
-            installed = self._installed_provider()
-            observed = {
-                item.definition_id
-                for item in self._l2_history
-                if item.definition_id in required
-            }
-            revisions = {
-                str(item.revision_id)
-                for item in installed
-                if item.entity_definition_id in required
-            }
-            entity_ids = {
-                str(item.entity_instance_id)
-                for item in installed
-                if item.entity_definition_id in required
-            }
-            site_versions = sorted(
-                {
-                    item.site_configuration_version
-                    for item in self._l2_history
-                    if item.definition_id in required
-                }
-            )
-            source_ids = {
-                str(source_id)
-                for item in self._l2_history
-                if item.definition_id in required
-                for source_id in item.source_observation_ids
-            }
-            latest_by_entity = {}
-            for item in self._l2_history:
-                if item.definition_id not in required:
-                    continue
-                current = latest_by_entity.get(item.entity_instance_id)
-                if current is None or (
-                    item.observed_at,
-                    item.source_order_key,
-                    str(item.event_id),
-                ) > (
-                    current.observed_at,
-                    current.source_order_key,
-                    str(current.event_id),
-                ):
-                    latest_by_entity[item.entity_instance_id] = item
-            good_latest_count = sum(
-                item.quality == TrunkQuality.GOOD
-                for item in latest_by_entity.values()
-            )
-            ordered_timestamp_count = sum(
-                item.observed_at <= item.received_at <= item.calculated_at
-                for item in latest_by_entity.values()
-            )
-            return {
-                "required_entity_definitions": sorted(required),
-                "observed_entity_definitions": sorted(observed),
-                "entity_instance_ids": sorted(entity_ids),
-                "processing_revision_ids": sorted(revisions),
-                "site_configuration_versions": site_versions,
-                "l0_observation_count": len(self._l0_history),
-                "l2_observation_count": sum(
-                    item.definition_id in required for item in self._l2_history
-                ),
-                "l2_latest_count": len(latest_by_entity),
-                "source_observation_count": len(source_ids),
-                "committed_event_count": sum(
-                    item.definition_id in required for item in self._l2_history
-                ),
-                "outbox_event_count": sum(
-                    item.definition_id in required for item in self._l2_history
-                ),
-                "good_latest_count": good_latest_count,
-                "ordered_timestamp_count": ordered_timestamp_count,
-            }
-
 
 def _raw_order_key(observation: RawObservation) -> str:
     if observation.source_sequence is None:

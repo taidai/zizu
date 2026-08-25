@@ -71,7 +71,7 @@ from app.services.solution_business_metrics import validate_business_metric_asse
 from app.services.point_processing import (
     ApplyPointProcessingPlan,
     PreviewPointProcessing,
-    PointProcessingDelivery,
+    PointProcessingService,
     PointProcessingError,
 )
 from app.services.gateway_readiness import GatewayReadiness
@@ -147,7 +147,7 @@ class SolutionDelivery:
         authorization_evidence_runtime: AuthorizationEvidenceRuntime | None = None,
         gateway_readiness: GatewayReadiness | None = None,
         release_lock_reader: Callable[[], dict[str, Any]] | None = None,
-        point_processings: PointProcessingDelivery | None = None,
+        point_processings: PointProcessingService | None = None,
         data_trunk_acceptance: DataTrunkAcceptance | None = None,
     ) -> None:
         self._repository = repository

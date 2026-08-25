@@ -23,18 +23,18 @@ from app.services.identity import Principal
 from app.services.point_processing import (
     ApplyPointProcessingPlan,
     PreviewPointProcessing,
-    PointProcessingDelivery,
+    PointProcessingService,
     PointProcessingError,
 )
 from app.services.point_processing_templates import PointProcessingTemplateError
 
 
 router = APIRouter()
-_point_processings: PointProcessingDelivery | None = None
+_point_processings: PointProcessingService | None = None
 _point_processing_templates: Any | None = None
 
 
-def get_point_processings() -> PointProcessingDelivery:
+def get_point_processings() -> PointProcessingService:
     global _point_processings
     if _point_processings is None:
         from app.services.point_processing_postgres import build_postgres_point_processing
@@ -172,7 +172,7 @@ async def export_point_processing_template(
 )
 async def list_point_processing_templates(
     device_category: str,
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     items = service.list_templates(device_category.upper())
     return {
@@ -188,7 +188,7 @@ async def list_point_processing_templates(
 async def read_node_data_trunk(
     node_id: UUID,
     principal: Principal = Depends(principal_for(RUNTIME_READ)),
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     return service.inspect(
         node_id,
@@ -205,7 +205,7 @@ async def create_point_processing_plan(
     node_id: UUID,
     body: PointProcessingPlanRequest,
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
         return service.preview(
@@ -223,7 +223,7 @@ async def preview_point_processing_formula(
     node_id: UUID,
     body: PointProcessingFormulaPreviewRequest,
     _principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
         return dict(
@@ -243,7 +243,7 @@ async def preview_point_processing_formula(
 )
 async def read_point_processing_plan(
     plan_id: UUID,
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
         return service.get_plan(plan_id).public_dict()
@@ -266,7 +266,7 @@ async def apply_point_processing_plan(
         max_length=128,
     ),
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
-    service: PointProcessingDelivery = Depends(get_point_processings),
+    service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
         return service.apply(

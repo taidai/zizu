@@ -128,8 +128,9 @@ class NodeDataTrunkHardCutMigrationPostgresTest(unittest.TestCase):
                     "SELECT id, node_id, definition_id FROM t_entity_instances WHERE id=%s",
                     (str(entity_id),),
                 )
+                migrated = cursor.fetchone()
                 self.assertEqual(
-                    cursor.fetchone(),
+                    (str(migrated[0]), str(migrated[1]), migrated[2]),
                     (str(entity_id), str(node_id), "pcs.activePower"),
                 )
                 cursor.execute(

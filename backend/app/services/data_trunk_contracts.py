@@ -323,7 +323,7 @@ class L2Observation:
     received_at: datetime
     calculated_at: datetime
     processing_revision_id: UUID
-    site_configuration_version: int
+    configuration_revision: int
     source_observation_ids: tuple[UUID, ...]
     source_digest: str
     source_order_key: str

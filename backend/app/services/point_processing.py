@@ -60,8 +60,6 @@ class PointProcessingSource:
 
 @dataclass(frozen=True)
 class CurrentPointProcessingContext:
-    entity_identity_installation_id: UUID
-    solution_installation_id: UUID
     revision_id: UUID
     input_source_ids: Mapping[str, UUID]
     output_entity_ids: Mapping[str, UUID]
@@ -96,9 +94,7 @@ class PreviewPointProcessing:
     template_revision_id: UUID
     input_selections: Mapping[str, UUID]
     actor: str
-    entity_identity_installation_id: UUID | None = None
     planned_output_entity_ids: Mapping[str, UUID] = field(default_factory=dict)
-    solution_installation_id: UUID | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -126,9 +122,7 @@ class PointProcessingPlan:
     id: UUID
     node_id: UUID
     template_revision_id: UUID
-    entity_identity_installation_id: UUID
-    solution_installation_id: UUID
-    base_site_configuration_version: int
+    base_configuration_revision: int
     source_catalog_digest: str
     status: str
     items: tuple[Mapping[str, Any], ...]
@@ -141,11 +135,7 @@ class PointProcessingPlan:
             "id": str(self.id),
             "node_id": str(self.node_id),
             "template_revision_id": str(self.template_revision_id),
-            "entity_identity_installation_id": str(
-                self.entity_identity_installation_id
-            ),
-            "solution_installation_id": str(self.solution_installation_id),
-            "base_site_configuration_version": self.base_site_configuration_version,
+            "base_configuration_revision": self.base_configuration_revision,
             "source_catalog_digest": self.source_catalog_digest,
             "status": self.status,
             "items": [_plain(item) for item in self.items],
@@ -159,9 +149,8 @@ class PointProcessingApplication:
     id: UUID
     plan_id: UUID
     installed_processing_id: UUID
-    solution_installation_id: UUID
     revision_id: UUID
-    site_configuration_version: int
+    configuration_revision: int
     output_entity_instance_ids: tuple[UUID, ...]
     actor: str
 
@@ -170,9 +159,8 @@ class PointProcessingApplication:
             "id": str(self.id),
             "plan_id": str(self.plan_id),
             "installed_processing_id": str(self.installed_processing_id),
-            "solution_installation_id": str(self.solution_installation_id),
             "revision_id": str(self.revision_id),
-            "site_configuration_version": self.site_configuration_version,
+            "configuration_revision": self.configuration_revision,
             "output_entity_instance_ids": [
                 str(item) for item in self.output_entity_instance_ids
             ],
@@ -267,7 +255,7 @@ class PointProcessingCatalog(Protocol):
 
 
 class PointProcessingRepository(Protocol):
-    def site_configuration_version(self) -> int: ...
+    def configuration_revision(self) -> int: ...
 
     def current_context(
         self,
@@ -297,7 +285,7 @@ class PointScanner(Protocol):
     def scan(self, node_name: str) -> ScannedPointCatalog: ...
 
 
-class PointProcessingDelivery:
+class PointProcessingService:
     """Hide deterministic matching, stable L2 identity and apply preconditions."""
 
     def __init__(
@@ -398,7 +386,7 @@ class PointProcessingDelivery:
             NAMESPACE_URL,
             f"zizu/formula-preview/{node_id}/{output.entity_definition_id}",
         )
-        site_version = self._repository.site_configuration_version()
+        configuration_revision = self._repository.configuration_revision()
         sources = self._catalog.list_sources(node_id)
         selected: dict[str, tuple[UUID, ...]] = {}
         selector_previews: list[dict[str, Any]] = []
@@ -418,7 +406,7 @@ class PointProcessingDelivery:
                     frozen = freeze_selector(
                         selector=selector,
                         target_node_id=node_id,
-                        site_configuration_version=site_version,
+                        configuration_revision=configuration_revision,
                         entity_instance_ids=self._catalog.list_selector_members(
                             node_id,
                             selector,
@@ -687,12 +675,12 @@ class InMemoryPointProcessingRepository:
         self._idempotency: dict[tuple[str, str], tuple[str, UUID]] = {}
         self._current: dict[UUID, CurrentPointProcessingContext] = {}
         self._installed_ids: dict[UUID, UUID] = {}
-        self._site_version = 0
+        self._configuration_revision = 0
         self._lock = RLock()
         self._on_applied = on_applied or (lambda _application: None)
 
-    def site_configuration_version(self) -> int:
-        return self._site_version
+    def configuration_revision(self) -> int:
+        return self._configuration_revision
 
     def current_context(
         self,
@@ -905,7 +893,7 @@ class InMemoryPointProcessingRepository:
                     current_selection = freeze_selector(
                         selector=selector,
                         target_node_id=plan.node_id,
-                        site_configuration_version=self._site_version,
+                        configuration_revision=self._configuration_revision,
                         entity_instance_ids=catalog.list_selector_members(
                             plan.node_id,
                             selector,
@@ -929,7 +917,7 @@ class InMemoryPointProcessingRepository:
                         template,
                         catalog,
                         plan.node_id,
-                        self._site_version,
+                        self._configuration_revision,
                     )
                 )
             except PointProcessingSelectorError as exc:
@@ -938,7 +926,7 @@ class InMemoryPointProcessingRepository:
                     "Point processing selector members changed after planning",
                 ) from exc
             if (
-                plan.base_site_configuration_version != self._site_version
+                plan.base_configuration_revision != self._configuration_revision
                 or plan.source_catalog_digest
                 != actual_source_digest
             ):
@@ -974,16 +962,7 @@ class InMemoryPointProcessingRepository:
                 if item.get("kind") == "dag_validation"
                 for source, target in item.get("planned_edges", ())
             )
-            current = self._current.get(plan.node_id)
-            solution_id = (
-                plan.solution_installation_id
-                if current is None
-                else uuid5(
-                    NAMESPACE_URL,
-                    f"zizu/derived-solution/{plan.solution_installation_id}/{plan.digest}",
-                )
-            )
-            next_version = self._site_version + 1
+            next_version = self._configuration_revision + 1
             installed_id = uuid5(
                 NAMESPACE_URL,
                 f"zizu/installed-point-processing/{plan.id}",
@@ -996,9 +975,8 @@ class InMemoryPointProcessingRepository:
                 id=application_id,
                 plan_id=plan.id,
                 installed_processing_id=installed_id,
-                solution_installation_id=solution_id,
                 revision_id=plan.template_revision_id,
-                site_configuration_version=next_version,
+                configuration_revision=next_version,
                 output_entity_instance_ids=tuple(
                     sorted(output_ids.values(), key=str)
                 ),
@@ -1008,8 +986,6 @@ class InMemoryPointProcessingRepository:
             self._applications[application.id] = application
             self._idempotency[key] = (request_digest, application.id)
             self._current[plan.node_id] = CurrentPointProcessingContext(
-                entity_identity_installation_id=plan.entity_identity_installation_id,
-                solution_installation_id=solution_id,
                 revision_id=plan.template_revision_id,
                 input_source_ids=input_ids,
                 output_entity_ids=output_ids,
@@ -1017,7 +993,7 @@ class InMemoryPointProcessingRepository:
             )
             catalog.record_dependencies(planned_edges)
             self._installed_ids[plan.node_id] = installed_id
-            self._site_version = next_version
+            self._configuration_revision = next_version
             self._plans[plan.id] = replace(plan, status="applied")
             return application
 
@@ -1046,18 +1022,7 @@ def compile_point_processing_plan(
             "Retired point processing revisions cannot be selected for a new plan",
         )
     current = repository.current_context(command.node_id)
-    identity_id = command.entity_identity_installation_id or (
-        current.entity_identity_installation_id if current is not None else None
-    )
-    solution_id = command.solution_installation_id or (
-        current.solution_installation_id if current is not None else None
-    )
-    if identity_id is None or solution_id is None:
-        raise PointProcessingError(
-            "POINT_PROCESSING_INSTALLATION_CONTEXT_REQUIRED",
-            "Entity identity and solution installation context are required",
-        )
-    base_site_configuration_version = repository.site_configuration_version()
+    base_configuration_revision = repository.configuration_revision()
 
     items: list[Mapping[str, Any]] = []
     blockers: list[Mapping[str, str]] = []
@@ -1098,7 +1063,7 @@ def compile_point_processing_plan(
                 frozen = freeze_selector(
                     selector=selector,
                     target_node_id=command.node_id,
-                    site_configuration_version=base_site_configuration_version,
+                    configuration_revision=base_configuration_revision,
                     entity_instance_ids=catalog.list_selector_members(
                         command.node_id,
                         selector,
@@ -1264,7 +1229,6 @@ def compile_point_processing_plan(
             requested_outputs.get(
                 output.output_id,
                 _stable_output_entity_id(
-                    identity_id,
                     command.node_id,
                     output.entity_definition_id,
                 ),
@@ -1371,9 +1335,7 @@ def compile_point_processing_plan(
         "node_id": str(command.node_id),
         "template_revision_id": str(command.template_revision_id),
         "template_digest": template.content_digest,
-        "entity_identity_installation_id": str(identity_id),
-        "solution_installation_id": str(solution_id),
-        "base_site_configuration_version": base_site_configuration_version,
+        "base_configuration_revision": base_configuration_revision,
         "source_catalog_digest": source_digest,
         "selected_inputs": {key: str(value) for key, value in sorted(selected_inputs.items())},
         "output_entity_ids": {key: str(value) for key, value in sorted(output_ids.items())},
@@ -1386,9 +1348,7 @@ def compile_point_processing_plan(
         id=uuid5(NAMESPACE_URL, f"zizu/point-processing-plan/{digest}"),
         node_id=command.node_id,
         template_revision_id=command.template_revision_id,
-        entity_identity_installation_id=identity_id,
-        solution_installation_id=solution_id,
-        base_site_configuration_version=base_site_configuration_version,
+        base_configuration_revision=base_configuration_revision,
         source_catalog_digest=source_digest,
         status="blocked" if blockers else "ready",
         items=tuple(items),
@@ -1567,13 +1527,12 @@ def _input_candidates(input_contract, sources, node_id: UUID):
 
 
 def _stable_output_entity_id(
-    identity_installation_id: UUID,
     node_id: UUID,
     definition_id: str,
 ) -> UUID:
     return uuid5(
         NAMESPACE_URL,
-        f"zizu/entity/{identity_installation_id}/{node_id}/{definition_id}",
+        f"zizu/entity/{node_id}/{definition_id}",
     )
 
 
@@ -1609,7 +1568,7 @@ def _effective_source_catalog_digest(
     template: PointProcessingTemplate,
     catalog: PointProcessingCatalog,
     node_id: UUID,
-    site_configuration_version: int,
+    configuration_revision: int,
 ) -> str:
     base_digest = _template_source_catalog_digest(
         template,
@@ -1629,7 +1588,7 @@ def _effective_source_catalog_digest(
         frozen = freeze_selector(
             selector=selector,
             target_node_id=node_id,
-            site_configuration_version=site_configuration_version,
+            configuration_revision=configuration_revision,
             entity_instance_ids=catalog.list_selector_members(node_id, selector),
         )
         selector_digests[input_contract.input_id] = frozen.digest

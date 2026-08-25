@@ -43,7 +43,7 @@ class Selector:
 class FrozenSelection:
     selector: Selector
     target_node_id: UUID
-    site_configuration_version: int
+    configuration_revision: int
     entity_instance_ids: tuple[UUID, ...]
     digest: str
 
@@ -52,10 +52,10 @@ def freeze_selector(
     *,
     selector: Selector,
     target_node_id: UUID,
-    site_configuration_version: int,
+    configuration_revision: int,
     entity_instance_ids: tuple[UUID, ...],
 ) -> FrozenSelection:
-    if site_configuration_version < 0 or len(set(entity_instance_ids)) != len(
+    if configuration_revision < 0 or len(set(entity_instance_ids)) != len(
         entity_instance_ids
     ):
         raise PointProcessingSelectorError(
@@ -80,7 +80,7 @@ def freeze_selector(
             "entity_definition_id": selector.entity_definition_id,
             "cardinality": selector.cardinality,
             "target_node_id": str(target_node_id),
-            "site_configuration_version": site_configuration_version,
+            "configuration_revision": configuration_revision,
             "entity_instance_ids": [str(item) for item in members],
         },
         ensure_ascii=True,
@@ -90,7 +90,7 @@ def freeze_selector(
     return FrozenSelection(
         selector=selector,
         target_node_id=target_node_id,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         entity_instance_ids=members,
         digest=hashlib.sha256(material.encode("utf-8")).hexdigest(),
     )

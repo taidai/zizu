@@ -96,7 +96,7 @@ def verify_data_trunk_contract_gate(
 @dataclass(frozen=True)
 class _ConversionSnapshot:
     installed: tuple[InstalledPointProcessing, ...]
-    site_configuration_version: int
+    configuration_revision: int
     current_inputs: Mapping[InputReference, RawObservation]
 
 
@@ -266,8 +266,8 @@ class PostgresDataTrunkRepository:
 
                         cursor.execute(
                             """
-                            SELECT current_version
-                            FROM t_site_configuration_state
+                            SELECT current_revision
+                            FROM t_configuration_state
                             WHERE singleton = TRUE
                             """
                         )
@@ -277,7 +277,7 @@ class PostgresDataTrunkRepository:
                                 "POINT_PROCESSING_CONFIGURATION_INVALID",
                                 "site configuration state is unavailable",
                             )
-                        site_configuration_version = int(site_row[0])
+                        configuration_revision = int(site_row[0])
 
                         installed_items: list[
                             tuple[InstalledPointProcessing, UUID]
@@ -424,7 +424,7 @@ class PostgresDataTrunkRepository:
                             evaluated = evaluator(
                                 installed=(installed,),
                                 current_inputs=current_inputs,
-                                site_configuration_version=site_configuration_version,
+                                configuration_revision=configuration_revision,
                                 calculated_at=calculated_at,
                             )
                             if len(evaluated) != 1:
@@ -500,7 +500,7 @@ class PostgresDataTrunkRepository:
                    latest.quality, latest.reason, latest.observed_at,
                    latest.received_at, latest.calculated_at,
                     latest.processing_revision_id,
-                    latest.site_configuration_version,
+                    latest.configuration_revision,
                     latest.source_digest, latest.source_order_key,
                     latest.event_time_basis
             FROM t_l2_latest AS latest
@@ -539,7 +539,7 @@ class PostgresDataTrunkRepository:
                 received_at=row[14],
                 calculated_at=row[15],
                 processing_revision_id=UUID(str(row[16])),
-                site_configuration_version=int(row[17]),
+                configuration_revision=int(row[17]),
                 source_observation_ids=(),
                 source_digest=row[18].strip(),
                 source_order_key=row[19],
@@ -605,99 +605,6 @@ class PostgresDataTrunkRepository:
             ) from exc
         return failure_id
 
-    def acceptance_evidence(
-        self,
-        *,
-        solution_installation_id: UUID,
-        entity_definition_ids: tuple[str, ...],
-    ) -> dict[str, Any]:
-        required = tuple(sorted(set(entity_definition_ids)))
-        with self._connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT DISTINCT output.entity_definition_id,
-                                    binding.entity_instance_id,
-                                    installed.revision_id,
-                                    installed.site_configuration_version
-                    FROM t_installed_point_processings AS installed
-                    JOIN t_point_processing_output_bindings AS binding
-                      ON binding.installed_processing_id = installed.id
-                    JOIN t_point_processing_outputs AS output
-                      ON output.id = binding.output_id
-                    WHERE installed.solution_installation_id = %s
-                      AND output.entity_definition_id = ANY(%s)
-                    ORDER BY output.entity_definition_id, binding.entity_instance_id
-                    """,
-                    (str(solution_installation_id), list(required)),
-                )
-                bindings = cursor.fetchall()
-                entity_ids = tuple(sorted({row[1] for row in bindings}, key=str))
-                if entity_ids:
-                    cursor.execute(
-                        """
-                        SELECT count(*),
-                               count(DISTINCT observation.event_id),
-                               count(DISTINCT source.l0_observation_id),
-                               count(DISTINCT observation.site_configuration_version),
-                               count(DISTINCT outbox.event_id)
-                        FROM t_l2_observations AS observation
-                        LEFT JOIN t_l2_observation_sources AS source
-                          ON source.l2_event_id = observation.event_id
-                         AND source.l2_observed_at = observation.observed_at
-                         AND source.source_kind = 'l0'
-                        LEFT JOIN t_l2_stream_outbox AS outbox
-                          ON outbox.event_id = observation.event_id
-                        WHERE observation.entity_instance_id = ANY(%s)
-                        """,
-                        (list(entity_ids),),
-                    )
-                    (
-                        l2_count,
-                        committed_count,
-                        source_count,
-                        _site_version_count,
-                        outbox_count,
-                    ) = cursor.fetchone()
-                    cursor.execute(
-                        """
-                        SELECT count(DISTINCT latest.entity_instance_id),
-                               count(DISTINCT latest.entity_instance_id)
-                                 FILTER (WHERE latest.quality = %s),
-                               count(DISTINCT latest.entity_instance_id)
-                                 FILTER (
-                                   WHERE latest.observed_at <= latest.received_at
-                                     AND latest.received_at <= latest.calculated_at
-                                 )
-                        FROM t_l2_latest AS latest
-                        WHERE latest.entity_instance_id = ANY(%s)
-                        """,
-                        (int(TrunkQuality.GOOD), list(entity_ids)),
-                    )
-                    (
-                        latest_count,
-                        good_latest_count,
-                        ordered_timestamp_count,
-                    ) = cursor.fetchone()
-                else:
-                    l2_count = committed_count = source_count = outbox_count = 0
-                    latest_count = good_latest_count = ordered_timestamp_count = 0
-        return {
-            "required_entity_definitions": list(required),
-            "observed_entity_definitions": sorted({row[0] for row in bindings}),
-            "entity_instance_ids": [str(item) for item in entity_ids],
-            "processing_revision_ids": sorted({str(row[2]) for row in bindings}),
-            "site_configuration_versions": sorted({int(row[3]) for row in bindings}),
-            "l0_observation_count": int(source_count),
-            "l2_observation_count": int(l2_count),
-            "l2_latest_count": int(latest_count),
-            "source_observation_count": int(source_count),
-            "committed_event_count": int(committed_count),
-            "outbox_event_count": int(outbox_count),
-            "good_latest_count": int(good_latest_count),
-            "ordered_timestamp_count": int(ordered_timestamp_count),
-        }
-
     def mark_expired_outputs_stale(self, now: datetime) -> tuple[UUID, ...]:
         try:
             with self._connection() as connection:
@@ -748,7 +655,7 @@ class PostgresDataTrunkRepository:
               latest.source_digest,
               latest.event_time_basis,
               latest.processing_revision_id,
-              latest.site_configuration_version,
+              latest.configuration_revision,
               output.entity_definition_id,
               output.data_type,
               output.unit,
@@ -788,7 +695,7 @@ class PostgresDataTrunkRepository:
                 source_digest,
                 source_event_time_basis,
                 revision_id,
-                site_configuration_version,
+                configuration_revision,
                 definition_id,
                 output_type,
                 output_unit,
@@ -819,7 +726,7 @@ class PostgresDataTrunkRepository:
                 received_at=now,
                 calculated_at=now,
                 processing_revision_id=UUID(str(revision_id)),
-                site_configuration_version=site_configuration_version,
+                configuration_revision=configuration_revision,
                 source_observation_ids=(),
                 source_digest=freshness_digest,
                 source_order_key=f"A:{deadline.isoformat()}:{freshness_digest}",
@@ -1358,8 +1265,8 @@ class PostgresDataTrunkRepository:
 
         cursor.execute(
             """
-            SELECT current_version
-            FROM t_site_configuration_state
+            SELECT current_revision
+            FROM t_configuration_state
             WHERE singleton = TRUE
             """
         )
@@ -1371,7 +1278,7 @@ class PostgresDataTrunkRepository:
             )
         return _ConversionSnapshot(
             installed=tuple(installed_items),
-            site_configuration_version=site_row[0],
+            configuration_revision=site_row[0],
             current_inputs=current_inputs,
         )
 
@@ -1410,8 +1317,8 @@ class PostgresDataTrunkRepository:
                 evaluator(
                     installed=affected,
                     current_inputs={input_reference: observation},
-                    site_configuration_version=(
-                        snapshot.site_configuration_version
+                    configuration_revision=(
+                        snapshot.configuration_revision
                     ),
                     calculated_at=calculated_at,
                 )
@@ -1426,7 +1333,7 @@ class PostgresDataTrunkRepository:
                 evaluator(
                     installed=boolean_affected,
                     current_inputs=snapshot.current_inputs,
-                    site_configuration_version=snapshot.site_configuration_version,
+                    configuration_revision=snapshot.configuration_revision,
                     calculated_at=calculated_at,
                 )
             )
@@ -1506,7 +1413,7 @@ class PostgresDataTrunkRepository:
                   (observed_at, event_id, entity_instance_id,
                    received_at, calculated_at, value_float, value_int,
                    value_numeric, value_bool, value_text, value_codes, quality, reason,
-                   processing_revision_id, site_configuration_version,
+                   processing_revision_id, configuration_revision,
                     source_digest, source_order_key,
                     producing_runtime_instance_id, event_time_basis)
                 VALUES (
@@ -1528,7 +1435,7 @@ class PostgresDataTrunkRepository:
                     int(observation.quality),
                     observation.reason,
                     str(observation.processing_revision_id),
-                    observation.site_configuration_version,
+                    observation.configuration_revision,
                     observation.source_digest,
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
@@ -1550,7 +1457,7 @@ class PostgresDataTrunkRepository:
                   (entity_instance_id, event_id, observed_at,
                    received_at, calculated_at, value_float, value_int,
                    value_numeric, value_bool, value_text, value_codes, quality, reason,
-                   processing_revision_id, site_configuration_version,
+                   processing_revision_id, configuration_revision,
                     source_digest, source_order_key,
                     producing_runtime_instance_id, event_time_basis)
                 VALUES (
@@ -1574,7 +1481,7 @@ class PostgresDataTrunkRepository:
                   quality = EXCLUDED.quality,
                   reason = EXCLUDED.reason,
                   processing_revision_id = EXCLUDED.processing_revision_id,
-                  site_configuration_version = EXCLUDED.site_configuration_version,
+                  configuration_revision = EXCLUDED.configuration_revision,
                   source_digest = EXCLUDED.source_digest,
                   source_order_key = EXCLUDED.source_order_key,
                   producing_runtime_instance_id =
@@ -1620,7 +1527,7 @@ class PostgresDataTrunkRepository:
                     int(observation.quality),
                     observation.reason,
                     str(observation.processing_revision_id),
-                    observation.site_configuration_version,
+                    observation.configuration_revision,
                     observation.source_digest,
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
@@ -1751,8 +1658,8 @@ class PostgresDataTrunkRepository:
                 "processing_revision_id": str(
                     observation.processing_revision_id
                 ),
-                "site_configuration_version": (
-                    observation.site_configuration_version
+                "configuration_revision": (
+                    observation.configuration_revision
                 ),
                 "source_digest": observation.source_digest,
                 "producing_runtime_instance_id": str(RUNTIME_INSTANCE_ID),

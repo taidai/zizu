@@ -48,7 +48,7 @@ class InMemoryDataTrunkTest(unittest.TestCase):
         committed = []
         repository = InMemoryDataTrunkRepository(
             installed_provider=lambda: (installed,),
-            site_configuration_version=lambda: 7,
+            configuration_revision=lambda: 7,
             on_l2_committed=committed.extend,
             clock=lambda: datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
         )
@@ -67,7 +67,7 @@ class InMemoryDataTrunkTest(unittest.TestCase):
         )
         self.assertEqual(len(committed), 1)
         self.assertEqual(committed[0].value, TypedValue.float(20.0))
-        self.assertEqual(committed[0].site_configuration_version, 7)
+        self.assertEqual(committed[0].configuration_revision, 7)
         self.assertEqual(first.l2_event_ids, (committed[0].event_id,))
         self.assertEqual(replay.l2_event_ids, ())
 
@@ -106,7 +106,7 @@ class InMemoryDataTrunkTest(unittest.TestCase):
         committed = []
         repository = InMemoryDataTrunkRepository(
             installed_provider=lambda: (installed,),
-            site_configuration_version=lambda: 7,
+            configuration_revision=lambda: 7,
             on_l2_committed=committed.extend,
             clock=lambda: received_at + datetime.resolution,
         )

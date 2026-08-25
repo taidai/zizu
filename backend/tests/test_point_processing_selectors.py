@@ -29,7 +29,7 @@ class PointProcessingSelectorTest(unittest.TestCase):
         frozen = freeze_selector(
             selector=self.selector(),
             target_node_id=SITE,
-            site_configuration_version=7,
+            configuration_revision=7,
             entity_instance_ids=(PCS_2, PCS_1),
         )
 
@@ -41,7 +41,7 @@ class PointProcessingSelectorTest(unittest.TestCase):
             freeze_selector(
                 selector=self.selector(),
                 target_node_id=SITE,
-                site_configuration_version=7,
+                configuration_revision=7,
                 entity_instance_ids=(),
             )
 
@@ -52,7 +52,7 @@ class PointProcessingSelectorTest(unittest.TestCase):
             freeze_selector(
                 selector=self.selector("one"),
                 target_node_id=SITE,
-                site_configuration_version=7,
+                configuration_revision=7,
                 entity_instance_ids=(PCS_1, PCS_2),
             )
 
@@ -63,7 +63,7 @@ class PointProcessingSelectorTest(unittest.TestCase):
             freeze_selector(
                 selector=self.selector(),
                 target_node_id=SITE,
-                site_configuration_version=7,
+                configuration_revision=7,
                 entity_instance_ids=(PCS_1, PCS_1),
             )
 

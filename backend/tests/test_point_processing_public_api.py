@@ -27,7 +27,7 @@ from app.services.point_processing import (
     InMemoryPointProcessingCatalog,
     InMemoryPointProcessingRepository,
     PreviewPointProcessing,
-    PointProcessingDelivery,
+    PointProcessingService,
     PointProcessingSource,
 )
 from app.services.point_processing_templates import InMemoryPointProcessingTemplates
@@ -56,7 +56,7 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
 
         assets = _assets()
         repository = InMemoryPointProcessingRepository()
-        service = PointProcessingDelivery(
+        service = PointProcessingService(
             repository,
             InMemoryPointProcessingCatalog(
                 templates={
@@ -86,8 +86,6 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 template_revision_id=BRAND_A_REVISION_ID,
                 input_selections={},
                 actor="user:seed-engineer",
-                entity_identity_installation_id=ENTITY_IDENTITY_INSTALLATION_ID,
-                solution_installation_id=SOLUTION_INSTALLATION_ID,
             )
         )
         service.apply(

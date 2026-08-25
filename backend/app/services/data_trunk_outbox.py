@@ -372,8 +372,8 @@ def _public_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             "calculated_at": payload.get("calculated_at"),
             "age_ms": age_ms,
             "processing_revision_id": payload.get("processing_revision_id"),
-            "site_configuration_version": payload.get(
-                "site_configuration_version"
+            "configuration_revision": payload.get(
+                "configuration_revision"
             ),
             "source_summary": {
                 "digest": payload.get("source_digest"),

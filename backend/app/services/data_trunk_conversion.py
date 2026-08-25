@@ -33,7 +33,7 @@ def evaluate_processing(
     *,
     installed: tuple[InstalledPointProcessing, ...],
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> tuple[L2Observation, ...]:
     """计算所有已安装输出；不执行持久化或其他副作用。"""
@@ -41,7 +41,7 @@ def evaluate_processing(
         _evaluate_output(
             item,
             current_inputs,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
         )
         for item in installed
@@ -52,35 +52,35 @@ def evaluate_processing(
 def _evaluate_output(
     installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if isinstance(installed.transform, FormulaTransform):
         return _evaluate_formula_output(
             installed,
             current_inputs,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
         )
     if isinstance(installed.transform, BooleanSetTransform):
         return _evaluate_boolean_set_output(
             installed,
             current_inputs,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
         )
     if isinstance(installed.transform, FaultCodeTransform):
         return _evaluate_fault_code_output(
             installed,
             current_inputs,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
         )
     if isinstance(installed.transform, EnumTransform):
         return _evaluate_enum_output(
             installed,
             current_inputs,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
         )
     if not isinstance(installed.transform, NumericTransform):
@@ -98,7 +98,7 @@ def _evaluate_output(
     if source is None:
         return _runtime_failure(
             installed,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "REQUIRED_INPUT_MISSING",
         )
@@ -112,7 +112,7 @@ def _evaluate_output(
         return _runtime_failure_from_source(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "UNIT_MISMATCH",
         )
@@ -122,7 +122,7 @@ def _evaluate_output(
         return _runtime_failure_from_source(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "TYPE_MISMATCH",
         )
@@ -141,7 +141,7 @@ def _evaluate_output(
         return _runtime_failure_from_source(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "INVALID_NUMBER",
         )
@@ -155,7 +155,7 @@ def _evaluate_output(
         return _runtime_failure_from_source(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "OUT_OF_RANGE",
         )
@@ -172,7 +172,7 @@ def _evaluate_output(
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
@@ -183,7 +183,7 @@ def _evaluate_output(
 def _evaluate_formula_output(
     installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
     transform = installed.transform
@@ -284,7 +284,7 @@ def _evaluate_formula_output(
             observed_at=observed_at,
             received_at=received_at,
             calculated_at=calculated_at,
-            site_configuration_version=site_configuration_version,
+            configuration_revision=configuration_revision,
             source_observation_ids=source_ids,
             source_digest=source_digest,
             source_order_key=source_order_key,
@@ -302,7 +302,7 @@ def _evaluate_formula_output(
             observed_at=observed_at,
             received_at=received_at,
             calculated_at=calculated_at,
-            site_configuration_version=site_configuration_version,
+            configuration_revision=configuration_revision,
             source_observation_ids=source_ids,
             source_digest=source_digest,
             source_order_key=source_order_key,
@@ -332,7 +332,7 @@ def _evaluate_formula_output(
         observed_at=observed_at,
         received_at=received_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=source_ids,
         source_digest=source_digest,
         source_order_key=source_order_key,
@@ -343,7 +343,7 @@ def _evaluate_formula_output(
 def _evaluate_boolean_set_output(
     installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if installed.output_kind is not ValueKind.CODE_SET:
@@ -386,7 +386,7 @@ def _evaluate_boolean_set_output(
         return _boolean_set_observation(
             installed,
             sources,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             value=None,
             quality=TrunkQuality.BAD,
@@ -398,7 +398,7 @@ def _evaluate_boolean_set_output(
         return _boolean_set_observation(
             installed,
             sources,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             value=None,
             quality=quality,
@@ -407,7 +407,7 @@ def _evaluate_boolean_set_output(
     return _boolean_set_observation(
         installed,
         sources,
-        site_configuration_version,
+        configuration_revision,
         calculated_at,
         value=tuple(active_codes),
         quality=quality,
@@ -418,7 +418,7 @@ def _evaluate_boolean_set_output(
 def _boolean_set_observation(
     installed: InstalledPointProcessing,
     sources: list[RawObservation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
     *,
     value: tuple[str, ...] | None,
@@ -443,7 +443,7 @@ def _boolean_set_observation(
             default=calculated_at,
         ),
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=tuple(source.observation_id for source in sources),
         source_digest=aggregate_digest,
         source_order_key=f"B:{len(sources):04d}:{aggregate_digest}",
@@ -454,7 +454,7 @@ def _boolean_set_observation(
 def _evaluate_fault_code_output(
     installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if installed.output_kind is not ValueKind.CODE_SET:
@@ -472,7 +472,7 @@ def _evaluate_fault_code_output(
     if source is None:
         return _runtime_failure(
             installed,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "REQUIRED_INPUT_MISSING",
         )
@@ -488,7 +488,7 @@ def _evaluate_fault_code_output(
         return _fault_code_observation(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             value=None,
             quality=TrunkQuality.BAD,
@@ -498,7 +498,7 @@ def _evaluate_fault_code_output(
         return _fault_code_observation(
             installed,
             source,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             value=None,
             quality=source.quality,
@@ -526,7 +526,7 @@ def _evaluate_fault_code_output(
     return _fault_code_observation(
         installed,
         source,
-        site_configuration_version,
+        configuration_revision,
         calculated_at,
         value=canonical_codes,
         quality=(TrunkQuality.UNCERTAIN if unknown else source.quality),
@@ -537,7 +537,7 @@ def _evaluate_fault_code_output(
 def _fault_code_observation(
     installed: InstalledPointProcessing,
     source: RawObservation,
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
     *,
     value: tuple[str, ...] | None,
@@ -552,7 +552,7 @@ def _fault_code_observation(
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
@@ -563,7 +563,7 @@ def _fault_code_observation(
 def _evaluate_enum_output(
     installed: InstalledPointProcessing,
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
     if installed.output_kind is not ValueKind.ENUM:
@@ -581,7 +581,7 @@ def _evaluate_enum_output(
     if source is None:
         return _runtime_failure(
             installed,
-            site_configuration_version,
+            configuration_revision,
             calculated_at,
             "REQUIRED_INPUT_MISSING",
         )
@@ -602,7 +602,7 @@ def _evaluate_enum_output(
             observed_at=source.source_timestamp,
             received_at=source.received_at,
             calculated_at=calculated_at,
-            site_configuration_version=site_configuration_version,
+            configuration_revision=configuration_revision,
             source_observation_ids=(source.observation_id,),
             source_digest=source.source_digest,
             source_order_key=_raw_order_key(source),
@@ -618,7 +618,7 @@ def _evaluate_enum_output(
             observed_at=source.source_timestamp,
             received_at=source.received_at,
             calculated_at=calculated_at,
-            site_configuration_version=site_configuration_version,
+            configuration_revision=configuration_revision,
             source_observation_ids=(source.observation_id,),
             source_digest=source.source_digest,
             source_order_key=_raw_order_key(source),
@@ -635,7 +635,7 @@ def _evaluate_enum_output(
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
@@ -646,7 +646,7 @@ def _evaluate_enum_output(
 def _runtime_failure_from_source(
     installed: InstalledPointProcessing,
     source: RawObservation,
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
     reason: str,
 ) -> L2Observation:
@@ -658,7 +658,7 @@ def _runtime_failure_from_source(
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
@@ -668,7 +668,7 @@ def _runtime_failure_from_source(
 
 def _runtime_failure(
     installed: InstalledPointProcessing,
-    site_configuration_version: int,
+    configuration_revision: int,
     calculated_at: datetime,
     reason: str,
 ) -> L2Observation:
@@ -680,7 +680,7 @@ def _runtime_failure(
         observed_at=calculated_at,
         received_at=calculated_at,
         calculated_at=calculated_at,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=(),
         source_digest=hashlib.sha256(b"").hexdigest(),
         source_order_key=f"{calculated_at.isoformat()}||",
@@ -707,7 +707,7 @@ def _observation(
     observed_at: datetime,
     received_at: datetime,
     calculated_at: datetime,
-    site_configuration_version: int,
+    configuration_revision: int,
     source_observation_ids: tuple[UUID, ...],
     source_digest: str,
     source_order_key: str,
@@ -739,7 +739,7 @@ def _observation(
         received_at=received_at,
         calculated_at=calculated_at,
         processing_revision_id=installed.revision_id,
-        site_configuration_version=site_configuration_version,
+        configuration_revision=configuration_revision,
         source_observation_ids=tuple(sorted(source_observation_ids, key=str)),
         source_digest=source_digest,
         source_order_key=source_order_key,

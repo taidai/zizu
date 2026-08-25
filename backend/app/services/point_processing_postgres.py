@@ -16,7 +16,7 @@ from psycopg2.extras import Json
 from app.services.point_processing import (
     ApplyPointProcessingPlan,
     CurrentPointProcessingContext,
-    PointProcessingDelivery,
+    PointProcessingService,
     PointProcessingApplication,
     PointProcessingCatalog,
     PointProcessingError,
@@ -45,6 +45,8 @@ from app.services.point_processing_templates import (
     point_processing_revision_id,
     point_processing_template_id,
 )
+from app.services.configuration_revision import ConfigurationRevisionError
+from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
 
 
 def _input_id(revision_id: UUID, input_key: str) -> UUID:
@@ -107,9 +109,7 @@ def lock_point_processing_authoritative_catalog(cursor: Any) -> None:
     """Freeze every table that can change source membership or contracts."""
     cursor.execute(
         """
-        LOCK TABLE t_nodes, t_device_instances, t_tags, t_entity_instances,
-                   t_entity_instance_bindings,
-                   t_entity_binding_confirmations,
+        LOCK TABLE t_nodes, t_tags, t_entity_instances,
                    t_point_processing_output_bindings,
                    t_point_processing_selector_members,
                    t_point_processing_dependencies,
@@ -571,9 +571,8 @@ class PostgresPointProcessingCatalog:
                     SELECT entity.id
                     FROM descendants
                     JOIN t_nodes AS node ON node.id = descendants.id
-                    JOIN t_device_instances AS device ON device.node_id = node.id
                     JOIN t_entity_instances AS entity
-                      ON entity.device_instance_id = device.id
+                      ON entity.node_id = node.id
                     WHERE node.node_type = %s
                       AND entity.definition_id = %s
                       AND entity.source_kind = 'point_processing'
@@ -629,29 +628,18 @@ class PostgresPointProcessingCatalog:
             FROM t_tags AS tag
             WHERE tag.node_id = %s AND tag.enabled = TRUE
             UNION ALL
-            SELECT entity.id, 'l2', device.node_id,
+            SELECT entity.id, 'l2', entity.node_id,
                    entity.definition_id, entity.data_type, entity.unit, TRUE
             FROM t_entity_instances AS entity
-            JOIN t_device_instances AS device
-              ON device.id = entity.device_instance_id
-            WHERE EXISTS (
-                    SELECT 1
-                    FROM t_entity_instance_bindings AS binding
-                    JOIN t_entity_binding_confirmations AS confirmation
-                      ON confirmation.id = binding.confirmation_audit_id
-                     AND confirmation.entity_instance_id = entity.id
-                     AND confirmation.selected_tag_id = binding.tag_id
-                    WHERE binding.entity_instance_id = entity.id
-                      AND binding.active = TRUE
-                  )
-               OR EXISTS (
+            WHERE entity.active = TRUE
+              AND (EXISTS (
                     SELECT 1
                     FROM t_point_processing_output_bindings AS output_binding
                     JOIN t_installed_point_processings AS installed
                       ON installed.id = output_binding.installed_processing_id
                      AND installed.current = TRUE
                     WHERE output_binding.entity_instance_id = entity.id
-                  )
+                  ))
             ORDER BY 2, 1
             """,
             (node_id,),
@@ -950,11 +938,11 @@ class PostgresPointProcessingRepository:
             else:
                 connection.commit()
 
-    def site_configuration_version(self) -> int:
+    def configuration_revision(self) -> int:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT current_version FROM t_site_configuration_state WHERE singleton = TRUE"
+                    "SELECT current_revision FROM t_configuration_state WHERE singleton = TRUE"
                 )
                 return int(cursor.fetchone()[0])
 
@@ -971,12 +959,8 @@ class PostgresPointProcessingRepository:
                 )
                 cursor.execute(
                     f"""
-                    SELECT installed.id, installed.solution_installation_id,
-                           installed.revision_id,
-                           site.entity_identity_installation_id
+                    SELECT installed.id, installed.revision_id
                     FROM t_installed_point_processings AS installed
-                    JOIN t_site_configuration_versions AS site
-                      ON site.version = installed.site_configuration_version
                     WHERE installed.node_id = %s
                       AND installed.current = TRUE
                       {scope_filter}
@@ -1026,9 +1010,7 @@ class PostgresPointProcessingRepository:
                 )
                 output_ids = dict(cursor.fetchall())
                 return CurrentPointProcessingContext(
-                    entity_identity_installation_id=installed[3],
-                    solution_installation_id=installed[1],
-                    revision_id=installed[2],
+                    revision_id=installed[1],
                     input_source_ids=input_ids,
                     output_entity_ids=output_ids,
                     selector_source_ids={
@@ -1050,22 +1032,18 @@ class PostgresPointProcessingRepository:
                         """
                         INSERT INTO t_point_processing_plans
                           (id, node_id, template_revision_id,
-                           entity_identity_installation_id,
-                           solution_installation_id,
-                           base_site_configuration_version,
+                           base_configuration_revision,
                            source_catalog_digest, status, items, blockers,
                            digest, planned_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s)
                         ON CONFLICT (id) DO NOTHING
                         """,
                         (
                             plan.id,
                             plan.node_id,
                             plan.template_revision_id,
-                            plan.entity_identity_installation_id,
-                            plan.solution_installation_id,
-                            plan.base_site_configuration_version,
+                            plan.base_configuration_revision,
                             plan.source_catalog_digest,
                             plan.status,
                             Json([_plain(item) for item in plan.items]),
@@ -1203,9 +1181,7 @@ class PostgresPointProcessingRepository:
                 cursor.execute(
                     """
                     SELECT id, node_id, template_revision_id,
-                           entity_identity_installation_id,
-                           solution_installation_id,
-                           base_site_configuration_version,
+                           base_configuration_revision,
                            source_catalog_digest, status, items, blockers,
                            digest, planned_by
                     FROM t_point_processing_plans WHERE id = %s
@@ -1222,7 +1198,6 @@ class PostgresPointProcessingRepository:
         *,
         transaction: Any | None = None,
         verified_source_catalog_digest: str | None = None,
-        trusted_business_metric_owner_key: UUID | None = None,
     ) -> PointProcessingApplication:
         del catalog
         if not command.actor.strip() or not command.idempotency_key.strip():
@@ -1236,7 +1211,6 @@ class PostgresPointProcessingRepository:
                 "plan_digest": command.plan_digest,
             }
         )
-        external_transaction = transaction is not None
         try:
             with self._connection(transaction) as connection:
                 with connection.cursor() as cursor:
@@ -1248,9 +1222,8 @@ class PostgresPointProcessingRepository:
                         """
                         SELECT application.id, application.plan_id,
                                application.installed_processing_id,
-                               application.solution_installation_id,
                                installed.revision_id,
-                               application.site_configuration_version,
+                               application.configuration_revision,
                                application.output_entity_instance_ids,
                                application.actor,
                                idempotency.request_digest
@@ -1266,17 +1239,17 @@ class PostgresPointProcessingRepository:
                     )
                     existing = cursor.fetchone()
                     if existing is not None:
-                        if existing[8].strip() != request_digest:
+                        if existing[7].strip() != request_digest:
                             raise PointProcessingError(
                                 "POINT_PROCESSING_IDEMPOTENCY_KEY_REUSED",
                                 "Idempotency key was already used for a different request",
                             )
-                        return _application_from_row(existing[:8])
+                        return _application_from_row(existing[:7])
 
                     cursor.execute(
                         """
-                        SELECT current_version
-                        FROM t_site_configuration_state
+                        SELECT current_revision
+                        FROM t_configuration_state
                         WHERE singleton = TRUE
                         FOR UPDATE
                         """
@@ -1285,9 +1258,7 @@ class PostgresPointProcessingRepository:
                     cursor.execute(
                         """
                         SELECT id, node_id, template_revision_id,
-                               entity_identity_installation_id,
-                               solution_installation_id,
-                               base_site_configuration_version,
+                               base_configuration_revision,
                                source_catalog_digest, status, items, blockers,
                                digest, planned_by
                         FROM t_point_processing_plans
@@ -1313,52 +1284,21 @@ class PostgresPointProcessingRepository:
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing plan is no longer ready",
                         )
-                    if current_version != plan.base_site_configuration_version:
+                    if current_version != plan.base_configuration_revision:
                         raise PointProcessingError(
                             "POINT_PROCESSING_PLAN_STALE",
                             "Site configuration changed after planning",
                         )
 
                     lock_point_processing_authoritative_catalog(cursor)
-                    internal_kind = _internal_revision_kind(
-                        cursor, plan.template_revision_id
-                    )
-                    trusted_internal_apply = (
-                        transaction is not None
-                        and trusted_business_metric_owner_key is not None
-                    )
-                    if internal_kind is not None and not trusted_internal_apply:
-                        raise PointProcessingError(
-                            "POINT_PROCESSING_INTERNAL_REVISION",
-                            "Internal point-processing revisions require their owning delivery transaction",
-                        )
                     template = PostgresPointProcessingCatalog._load_template(
                         cursor,
                         plan.template_revision_id,
-                        include_internal=trusted_internal_apply,
                     )
                     if template is None or template.status != "active":
                         raise PointProcessingError(
                             "POINT_PROCESSING_PLAN_STALE",
                             "Point processing template changed after planning",
-                        )
-                    processing_scope = (
-                        "business_metric"
-                        if template.outputs
-                        and all(
-                            output.transform.get("kind") == "business_metric"
-                            for output in template.outputs
-                        )
-                        else "node"
-                    )
-                    supports_processing_scope = _supports_processing_scope(cursor)
-                    if (
-                        processing_scope == "business_metric"
-                        and not supports_processing_scope
-                    ):
-                        raise PointProcessingError(
-                            "POINT_PROCESSING_SCHEMA_OUTDATED",
-                            "Business metric processing requires Schema 043",
                         )
                     actual_source_digest = verified_source_catalog_digest
                     if actual_source_digest is None:
@@ -1387,7 +1327,7 @@ class PostgresPointProcessingRepository:
                             frozen = freeze_selector(
                                 selector=selector,
                                 target_node_id=plan.node_id,
-                                site_configuration_version=current_version,
+                                configuration_revision=current_version,
                                 entity_instance_ids=(
                                     PostgresPointProcessingCatalog
                                     .list_selector_members_with_cursor(
@@ -1452,86 +1392,43 @@ class PostgresPointProcessingRepository:
                             "POINT_PROCESSING_DAG_STALE",
                             "Point processing dependency graph changed after planning",
                         ) from exc
-                    self._verify_package_ownership(cursor, plan, current_version)
                     self._apply_l0_plan_items(cursor, plan)
-
-                    processing_owner_key = (
-                        trusted_business_metric_owner_key
-                        if processing_scope == "business_metric"
-                        else None
+                    cursor.execute(
+                        """
+                        SELECT id FROM t_installed_point_processings
+                        WHERE node_id = %s AND current = TRUE
+                        FOR UPDATE
+                        """,
+                        (plan.node_id,),
                     )
-                    if processing_scope == "business_metric":
-                        planned_output_ids = {
-                            UUID(item["output_entity_instance_id"])
-                            for item in plan.items
-                            if item.get("kind") == "output_binding"
-                            and item.get("output_entity_instance_id")
-                        }
-                        if processing_owner_key not in planned_output_ids:
-                            raise PointProcessingError(
-                                "POINT_PROCESSING_INTERNAL_OWNER_INVALID",
-                                "Internal point-processing owner must be its planned output entity",
-                            )
+                    current_installed = cursor.fetchone()
+                    if current_installed is not None:
                         cursor.execute(
-                            """
-                            SELECT id
-                            FROM t_installed_point_processings
-                            WHERE node_id = %s AND current = TRUE
-                              AND processing_scope = 'business_metric'
-                              AND processing_owner_key = %s
-                            FOR UPDATE
-                            """,
-                            (plan.node_id, processing_owner_key),
+                            "UPDATE t_installed_point_processings "
+                            "SET current=FALSE WHERE id=%s",
+                            (current_installed[0],),
                         )
-                        current_installed = cursor.fetchone()
-                        if current_installed is not None:
-                            cursor.execute(
-                                """
-                                UPDATE t_installed_point_processings
-                                SET current = FALSE
-                                WHERE id = %s
-                                """,
-                                (current_installed[0],),
-                            )
-                    elif processing_scope == "node":
-                        scope_filter = (
-                            "AND processing_scope = 'node'"
-                            if supports_processing_scope
-                            else ""
-                        )
-                        cursor.execute(
-                            f"""
-                            SELECT id
-                            FROM t_installed_point_processings
-                            WHERE node_id = %s AND current = TRUE
-                              {scope_filter}
-                            FOR UPDATE
-                            """,
-                            (plan.node_id,),
-                        )
-                        current_installed = cursor.fetchone()
-                        if current_installed is not None:
-                            cursor.execute(
-                                """
-                                UPDATE t_installed_point_processings
-                                SET current = FALSE
-                                WHERE id = %s
-                                """,
-                                (current_installed[0],),
-                            )
 
-                    if external_transaction:
-                        solution_installation_id = plan.solution_installation_id
-                        next_version = current_version + 1
-                    else:
-                        solution_installation_id, next_version = (
-                            self._create_derived_solution_lineage(
-                                cursor,
-                                plan,
-                                command.actor,
-                                current_version,
-                            )
+                    try:
+                        next_version = PostgresConfigurationRevisions().publish(
+                            transaction=connection,
+                            base_revision=current_version,
+                            actor=command.actor,
+                            action="point_processing.publish",
+                            resource_kind="node",
+                            resource_id=str(plan.node_id),
+                            before_digest=None,
+                            after_digest=plan.digest,
+                            details={
+                                "plan_id": str(plan.id),
+                                "template_revision_id": str(plan.template_revision_id),
+                            },
                         )
+                    except ConfigurationRevisionError as exc:
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_PLAN_STALE",
+                            "Configuration changed after planning",
+                        ) from exc
 
                     installed_id = uuid5(
                         NAMESPACE_URL,
@@ -1544,42 +1441,22 @@ class PostgresPointProcessingRepository:
                             f"{command.actor}/{command.idempotency_key}"
                         ),
                     )
-                    installed_values = (
-                        installed_id,
-                        plan.node_id,
-                        plan.template_revision_id,
-                        plan.id,
-                        solution_installation_id,
-                        next_version,
-                        command.actor,
+                    cursor.execute(
+                        """
+                        INSERT INTO t_installed_point_processings
+                          (id, node_id, revision_id, source_plan_id,
+                           configuration_revision, installed_by, current)
+                        VALUES (%s, %s, %s, %s, %s, %s, TRUE)
+                        """,
+                        (
+                            installed_id,
+                            plan.node_id,
+                            plan.template_revision_id,
+                            plan.id,
+                            next_version,
+                            command.actor,
+                        ),
                     )
-                    if supports_processing_scope:
-                        cursor.execute(
-                            """
-                            INSERT INTO t_installed_point_processings
-                              (id, node_id, revision_id, source_plan_id,
-                               solution_installation_id, site_configuration_version,
-                               installed_by, current, processing_scope,
-                               processing_owner_key)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
-                            """,
-                            (
-                                *installed_values,
-                                processing_scope,
-                                processing_owner_key,
-                            ),
-                        )
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO t_installed_point_processings
-                              (id, node_id, revision_id, source_plan_id,
-                               solution_installation_id, site_configuration_version,
-                               installed_by, current)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
-                            """,
-                            installed_values,
-                        )
                     output_ids = self._install_bindings(
                         cursor,
                         plan,
@@ -1588,29 +1465,16 @@ class PostgresPointProcessingRepository:
                     )
                     cursor.execute(
                         """
-                        UPDATE t_solution_installations
-                        SET entity_instance_ids = ARRAY(
-                          SELECT DISTINCT value
-                          FROM unnest(entity_instance_ids || %s::uuid[]) AS value
-                          ORDER BY value
-                        )
-                        WHERE id = %s
-                        """,
-                        ([str(item) for item in output_ids], solution_installation_id),
-                    )
-                    cursor.execute(
-                        """
                         INSERT INTO t_point_processing_applications
                           (id, plan_id, installed_processing_id,
-                           solution_installation_id, site_configuration_version,
-                           actor, output_entity_instance_ids)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                           configuration_revision, actor,
+                           output_entity_instance_ids)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         """,
                         (
                             application_id,
                             plan.id,
                             installed_id,
-                            solution_installation_id,
                             next_version,
                             command.actor,
                             list(output_ids),
@@ -1650,7 +1514,7 @@ class PostgresPointProcessingRepository:
                                     "plan_id": str(plan.id),
                                     "plan_digest": plan.digest,
                                     "node_id": str(plan.node_id),
-                                    "site_configuration_version": next_version,
+                                    "configuration_revision": next_version,
                                 }
                             ),
                         ),
@@ -1659,9 +1523,8 @@ class PostgresPointProcessingRepository:
                         id=application_id,
                         plan_id=plan.id,
                         installed_processing_id=installed_id,
-                        solution_installation_id=solution_installation_id,
                         revision_id=plan.template_revision_id,
-                        site_configuration_version=next_version,
+                        configuration_revision=next_version,
                         output_entity_instance_ids=output_ids,
                         actor=command.actor,
                     )
@@ -1756,42 +1619,6 @@ class PostgresPointProcessingRepository:
                     after.get("decimal"),
                     after["freshness_seconds"],
                 ),
-            )
-
-    @staticmethod
-    def _verify_package_ownership(
-        cursor: Any,
-        plan: PointProcessingPlan,
-        current_version: int,
-    ) -> None:
-        cursor.execute(
-            """
-            SELECT 1
-            FROM t_solution_point_processing_assets AS asset
-            WHERE asset.template_revision_id = %s
-              AND asset.package_record_id = COALESCE(
-                (
-                  SELECT package_record_id
-                  FROM t_site_configuration_versions
-                  WHERE version = %s
-                ),
-                (
-                  SELECT package_record_id
-                  FROM t_solution_install_plans
-                  WHERE target_installation_id = %s
-                )
-              )
-            """,
-            (
-                plan.template_revision_id,
-                current_version,
-                plan.solution_installation_id,
-            ),
-        )
-        if cursor.fetchone() is None:
-            raise PointProcessingError(
-                "POINT_PROCESSING_PLAN_STALE",
-                "Point processing revision does not belong to the installed solution",
             )
 
     @staticmethod
@@ -2015,67 +1842,18 @@ class PostgresPointProcessingRepository:
                 "POINT_PROCESSING_PLAN_STALE",
                 "Point processing output target is unavailable",
             )
-        device_category, template_name, node_name = contract
-        device_id = uuid5(
-            NAMESPACE_URL,
-            (
-                "zizu/point-processing-device/"
-                f"{plan.entity_identity_installation_id}/{plan.node_id}/"
-                f"{str(device_category).casefold()}"
-            ),
-        )
-        slot_id = f"dynamic.point-processing.{str(device_category).casefold()}"
-        instance_key = str(plan.node_id)
-        cursor.execute(
-            """
-            INSERT INTO t_device_instances
-              (id, identity_installation_id, slot_id, instance_key,
-               device_category, display_name, node_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            (
-                device_id,
-                plan.entity_identity_installation_id,
-                slot_id,
-                instance_key,
-                str(device_category),
-                f"{node_name} 点位加工",
-                plan.node_id,
-            ),
-        )
-        cursor.execute(
-            """
-            SELECT identity_installation_id, slot_id, instance_key,
-                   device_category, node_id
-            FROM t_device_instances
-            WHERE id = %s
-            """,
-            (device_id,),
-        )
-        device = cursor.fetchone()
-        if device != (
-            plan.entity_identity_installation_id,
-            slot_id,
-            instance_key,
-            str(device_category),
-            plan.node_id,
-        ):
-            raise PointProcessingError(
-                "POINT_PROCESSING_PLAN_STALE",
-                "Point processing output device contract changed after planning",
-            )
+        _device_category, template_name, _node_name = contract
         cursor.execute(
             """
             INSERT INTO t_entity_instances
-              (id, device_instance_id, definition_id, display_name,
+              (id, node_id, definition_id, display_name,
                data_type, unit, direction, freshness_seconds, source_kind)
             VALUES (%s, %s, %s, %s, %s, %s, 'R', %s, 'point_processing')
             ON CONFLICT (id) DO NOTHING
             """,
             (
                 entity_id,
-                device_id,
+                plan.node_id,
                 definition_id,
                 f"{template_name} · {definition_id}",
                 data_type,
@@ -2084,199 +1862,12 @@ class PostgresPointProcessingRepository:
             ),
         )
 
-    @staticmethod
-    def _create_derived_solution_lineage(
-        cursor: Any,
-        plan: PointProcessingPlan,
-        actor: str,
-        current_version: int,
-    ) -> tuple[UUID, int]:
-        cursor.execute(
-            """
-            SELECT installation.id, installation.entity_instance_ids,
-                   site.package_record_id, site.package_digest,
-                   site.parameters, site.secret_references,
-                   site.parameter_metadata, site.configuration_digest,
-                   site.entity_identity_installation_id,
-                   source_plan.parameter_contracts,
-                   source_plan.parameter_sources,
-                   source_plan.entity_plan,
-                   source_plan.alarm_plan
-            FROM t_site_configuration_versions AS site
-            JOIN t_solution_installations AS installation
-              ON installation.id = site.installation_id
-            JOIN t_solution_install_plans AS source_plan
-              ON source_plan.id = installation.plan_id
-            WHERE site.version = %s
-            """,
-            (current_version,),
-        )
-        current = cursor.fetchone()
-        if current is None:
-            raise PointProcessingError(
-                "POINT_PROCESSING_PLAN_STALE",
-                "An installed solution is required before an independent replacement",
-            )
-        next_version = current_version + 1
-        configuration_digest = _digest(
-            {
-                "previous_configuration_digest": current[7].strip(),
-                "point_processing_plan_digest": plan.digest,
-            }
-        )
-        derived_plan_digest = _digest(
-            {
-                "kind": "point_processing",
-                "point_processing_plan_id": str(plan.id),
-                "point_processing_plan_digest": plan.digest,
-                "base_site_configuration_version": current_version,
-                "site_configuration_version": next_version,
-            }
-        )
-        derived_plan_id = uuid5(
-            NAMESPACE_URL,
-            f"zizu/derived-point-processing-plan/{derived_plan_digest}",
-        )
-        derived_installation_id = uuid5(
-            NAMESPACE_URL,
-            f"zizu/derived-point-processing-installation/{derived_plan_digest}",
-        )
-        public_plan = plan.public_dict()
-        cursor.execute(
-            """
-            INSERT INTO t_solution_install_plans
-              (id, package_record_id, package_digest,
-               base_site_configuration_version, status, items, blockers,
-               parameter_contracts, parameters, secret_references,
-               parameter_sources, parameter_metadata, configuration_digest,
-               target_installation_id, entity_identity_installation_id,
-               entity_plan, alarm_plan, point_processing_plans, digest)
-            VALUES (%s, %s, %s, %s, 'ready', %s, '[]', %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                derived_plan_id,
-                current[2],
-                current[3],
-                current_version,
-                Json(
-                    [
-                        {
-                            "asset_id": str(plan.node_id),
-                            "kind": "point_processing",
-                            "action": "update",
-                            "point_processing_plan_id": str(plan.id),
-                        }
-                    ]
-                ),
-                Json(current[9]),
-                Json(current[4]),
-                Json(current[5]),
-                Json(current[10]),
-                Json(current[6]),
-                configuration_digest,
-                derived_installation_id,
-                current[8],
-                Json(current[11]) if current[11] is not None else None,
-                Json(current[12]) if current[12] is not None else None,
-                Json([public_plan]),
-                derived_plan_digest,
-            ),
-        )
-        cursor.execute(
-            """
-            INSERT INTO t_solution_installations
-              (id, plan_id, package_record_id, package_digest,
-               site_configuration_version, status, entity_instance_ids)
-            VALUES (%s, %s, %s, %s, %s, 'installed', %s)
-            """,
-            (
-                derived_installation_id,
-                derived_plan_id,
-                current[2],
-                current[3],
-                next_version,
-                list(current[1]),
-            ),
-        )
-        cursor.execute(
-            """
-            INSERT INTO t_site_configuration_versions
-              (version, previous_version, installation_id,
-               package_record_id, package_digest, parameters,
-               secret_references, parameter_metadata, configuration_digest,
-               actor, entity_identity_installation_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                next_version,
-                current_version,
-                derived_installation_id,
-                current[2],
-                current[3],
-                Json(current[4]),
-                Json(current[5]),
-                Json(current[6]),
-                configuration_digest,
-                actor,
-                current[8],
-            ),
-        )
-        cursor.execute(
-            "UPDATE t_site_configuration_state SET current_version = %s WHERE singleton = TRUE",
-            (next_version,),
-        )
-        details = {
-            "plan_id": str(derived_plan_id),
-            "point_processing_plan_id": str(plan.id),
-            "point_processing_plan_digest": plan.digest,
-            "configuration_digest": configuration_digest,
-        }
-        cursor.execute(
-            """
-            INSERT INTO t_solution_delivery_audit
-              (id, actor, action, installation_id, package_record_id,
-               package_digest, site_configuration_version, details)
-            VALUES (%s, %s, 'solution.install', %s, %s, %s, %s, %s)
-            """,
-            (
-                uuid4(),
-                actor,
-                derived_installation_id,
-                current[2],
-                current[3],
-                next_version,
-                Json(details),
-            ),
-        )
-        cursor.execute(
-            """
-            INSERT INTO t_audit_events
-              (id, event, outcome, actor, target, details)
-            VALUES (%s, 'solution.install', 'allowed', %s, %s, %s)
-            """,
-            (
-                uuid4(),
-                actor,
-                f"installation:{derived_installation_id}",
-                Json(
-                    {
-                        **details,
-                        "package_record_id": str(current[2]),
-                        "package_digest": current[3].strip(),
-                        "site_configuration_version": next_version,
-                    }
-                ),
-            ),
-        )
-        return derived_installation_id, next_version
 
-
-def build_postgres_point_processing() -> PointProcessingDelivery:
+def build_postgres_point_processing() -> PointProcessingService:
     from app.services.neuron_client import get_neuron_client
     from app.services.neuron_point_processing_catalog import NeuronPointCatalog
 
-    return PointProcessingDelivery(
+    return PointProcessingService(
         PostgresPointProcessingRepository(),
         PostgresPointProcessingCatalog(),
         point_scanner=NeuronPointCatalog(get_neuron_client()),
@@ -2288,15 +1879,13 @@ def _plan_from_row(row: tuple[Any, ...]) -> PointProcessingPlan:
         id=row[0],
         node_id=row[1],
         template_revision_id=row[2],
-        entity_identity_installation_id=row[3],
-        solution_installation_id=row[4],
-        base_site_configuration_version=int(row[5]),
-        source_catalog_digest=row[6].strip(),
-        status=row[7],
-        items=tuple(MappingProxyType(item) for item in row[8]),
-        blockers=tuple(MappingProxyType(item) for item in row[9]),
-        digest=row[10].strip(),
-        planned_by=row[11],
+        base_configuration_revision=int(row[3]),
+        source_catalog_digest=row[4].strip(),
+        status=row[5],
+        items=tuple(MappingProxyType(item) for item in row[6]),
+        blockers=tuple(MappingProxyType(item) for item in row[7]),
+        digest=row[8].strip(),
+        planned_by=row[9],
     )
 
 
@@ -2305,11 +1894,10 @@ def _application_from_row(row: tuple[Any, ...]) -> PointProcessingApplication:
         id=row[0],
         plan_id=row[1],
         installed_processing_id=row[2],
-        solution_installation_id=row[3],
-        revision_id=row[4],
-        site_configuration_version=int(row[5]),
-        output_entity_instance_ids=tuple(row[6]),
-        actor=row[7],
+        revision_id=row[3],
+        configuration_revision=int(row[4]),
+        output_entity_instance_ids=tuple(row[5]),
+        actor=row[6],
     )
 
 
