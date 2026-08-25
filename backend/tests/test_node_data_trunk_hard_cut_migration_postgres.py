@@ -147,6 +147,93 @@ class NodeDataTrunkHardCutMigrationPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(cursor.fetchone()[0], 1)
 
+    def test_044_derives_missing_device_node_from_active_l0_binding(self) -> None:
+        entity_id = uuid4()
+        node_id = uuid4()
+        tag_id = uuid4()
+        device_id = uuid4()
+        confirmation_id = uuid4()
+        binding_id = uuid4()
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_043(cursor)
+                installation_id, _ = (
+                    _PostgresAlarmConfigurationTestBase._insert_installed_site(cursor)
+                )
+                cursor.execute(
+                    "INSERT INTO t_nodes (id, name, source_catalog_key) "
+                    "VALUES (%s, 'PCS-01', 'PCS-01')",
+                    (str(node_id),),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_tags
+                      (id, node_id, name, data_type, read_write, enabled)
+                    VALUES (%s, %s, 'GridFrequency', 'INT', 'R', TRUE)
+                    """,
+                    (str(tag_id), str(node_id)),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_device_instances
+                      (id, identity_installation_id, slot_id, instance_key,
+                       device_category, display_name)
+                    VALUES (%s, %s, 'validation', 'alarm-validation',
+                            'validation', 'Alarm validation source')
+                    """,
+                    (str(device_id), installation_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instances
+                      (id, device_instance_id, definition_id, display_name,
+                       data_type, direction, freshness_seconds, source_kind)
+                    VALUES (%s, %s, 'validation.gridFrequency',
+                            'Grid frequency alarm validation',
+                            'INT', 'R', 900, 'legacy_tag')
+                    """,
+                    (str(entity_id), str(device_id)),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_binding_confirmations
+                      (id, entity_instance_id, binding_id, actor, matcher_id,
+                       reason, plan_digest, selected_tag_id)
+                    VALUES (%s, %s, %s, 'user:installer', 'exact-name',
+                            'confirmed source', %s, %s)
+                    """,
+                    (
+                        str(confirmation_id),
+                        str(entity_id),
+                        str(binding_id),
+                        "d" * 64,
+                        str(tag_id),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instance_bindings
+                      (id, entity_instance_id, tag_id, matcher_id,
+                       confirmation_audit_id, active)
+                    VALUES (%s, %s, %s, 'exact-name', %s, TRUE)
+                    """,
+                    (
+                        str(binding_id),
+                        str(entity_id),
+                        str(tag_id),
+                        str(confirmation_id),
+                    ),
+                )
+
+                self._apply_044(cursor)
+
+                cursor.execute(
+                    "SELECT node_id FROM t_entity_instances WHERE id=%s",
+                    (str(entity_id),),
+                )
+                self.assertEqual(str(cursor.fetchone()[0]), str(node_id))
+
     def test_044_replay_keeps_the_same_configuration_revision(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True

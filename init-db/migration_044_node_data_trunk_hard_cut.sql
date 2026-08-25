@@ -51,6 +51,24 @@ BEGIN
   FROM public.t_device_instances AS device
   WHERE device.id = entity.device_instance_id;
 
+  UPDATE public.t_entity_instances AS entity
+  SET node_id = tag.node_id
+  FROM public.t_entity_instance_bindings AS binding
+  JOIN public.t_tags AS tag ON tag.id = binding.tag_id
+  WHERE entity.id = binding.entity_instance_id
+    AND entity.node_id IS NULL
+    AND binding.active = TRUE
+    AND tag.node_id IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.t_entity_instance_bindings AS other_binding
+      JOIN public.t_tags AS other_tag ON other_tag.id = other_binding.tag_id
+      WHERE other_binding.entity_instance_id = entity.id
+        AND other_binding.active = TRUE
+        AND other_tag.node_id IS NOT NULL
+        AND other_tag.node_id <> tag.node_id
+    );
+
   IF EXISTS (
     SELECT 1
     FROM public.t_entity_instances
