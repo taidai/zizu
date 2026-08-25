@@ -52,10 +52,15 @@ class DataTrunkStartupGateTest(unittest.TestCase):
 
         self.assertEqual(verify_data_trunk_contract_gate(connection), 3)
         self.assertEqual(len(calls), 2)
+        self.assertIn("t_configuration_state", calls[0])
+        self.assertIn("t_configuration_revisions", calls[0])
+        self.assertIn("t_configuration_audit", calls[0])
         self.assertIn("t_point_processing_expressions", calls[0])
         self.assertIn("t_point_processing_selector_members", calls[0])
         self.assertIn("t_point_processing_dependencies", calls[0])
         self.assertIn("t_point_processing_formula_runs", calls[0])
+        self.assertIn("column_name = 'node_id'", calls[0])
+        self.assertNotIn("t_cross_node_processing_acceptance_reports", calls[0])
         self.assertIn("assert_entity_instance_single_source(id)", calls[1])
         self.assertIn("FROM t_entity_instances", calls[1])
 

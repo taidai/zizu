@@ -52,13 +52,15 @@ def verify_data_trunk_contract_gate(
                 """
                 DO $$
                 BEGIN
-                  IF to_regclass('public.t_point_processing_expressions') IS NULL
+                  IF to_regclass('public.t_configuration_state') IS NULL
+                     OR to_regclass('public.t_configuration_revisions') IS NULL
+                     OR to_regclass('public.t_configuration_audit') IS NULL
+                     OR to_regclass('public.t_point_processing_expressions') IS NULL
                      OR to_regclass('public.t_point_processing_selectors') IS NULL
                      OR to_regclass('public.t_point_processing_selector_members') IS NULL
                      OR to_regclass('public.t_point_processing_dependencies') IS NULL
-                     OR to_regclass('public.t_point_processing_formula_runs') IS NULL
-                     OR to_regclass('public.t_cross_node_processing_acceptance_reports') IS NULL THEN
-                    RAISE EXCEPTION 'schema 042 point-processing contract is incomplete'
+                     OR to_regclass('public.t_point_processing_formula_runs') IS NULL THEN
+                    RAISE EXCEPTION 'schema 044 node data trunk contract is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF NOT EXISTS (
@@ -67,8 +69,14 @@ def verify_data_trunk_contract_gate(
                     WHERE table_schema = 'public'
                       AND table_name = 't_nodes'
                       AND column_name = 'parent_id'
+                  ) OR NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_entity_instances'
+                      AND column_name = 'node_id'
                   ) THEN
-                    RAISE EXCEPTION 'schema 042 node tree contract is incomplete'
+                    RAISE EXCEPTION 'schema 044 node ownership contract is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                 END;
