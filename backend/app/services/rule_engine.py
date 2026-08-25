@@ -31,26 +31,21 @@ def _entity_instance_context(instance_ids: set[str]) -> dict[str, dict[str, any]
     """通过 Registry.resolve 读取已确认来源，再从该来源取新鲜 GOOD 观测。"""
     if not instance_ids:
         return {}
-    from app.api.solution_delivery import (
-        get_default_entity_instance_registry,
-        get_default_entity_instance_runtime,
-    )
+    from app.api.entity_instances import get_entity_instance_runtime
     from app.services.entity_instance_registry import EntityInstanceError
 
-    registry = get_default_entity_instance_registry()
-    runtime = get_default_entity_instance_runtime()
+    runtime = get_entity_instance_runtime()
     context: dict[str, dict[str, any]] = {}
     for raw_id in sorted(instance_ids):
         try:
             entity_instance_id = UUID(raw_id)
-            resolved = registry.resolve(entity_instance_id)
             observation = runtime.read_for_alarm(entity_instance_id)
         except (ValueError, EntityInstanceError) as exc:
             logger.warning("[RuleEngine] entity instance {} is unavailable: {}", raw_id, exc)
             continue
         context[raw_id] = {
             "value": observation.value,
-            "entity_instance_id": resolved.entity_instance_id,
+            "entity_instance_id": observation.entity_instance_id,
             "observed_at": observation.observed_at.isoformat(),
             "quality": observation.quality,
             "fresh": observation.fresh,

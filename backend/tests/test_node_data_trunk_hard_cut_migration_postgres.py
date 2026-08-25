@@ -70,6 +70,8 @@ class NodeDataTrunkHardCutMigrationPostgresTest(unittest.TestCase):
                         "t_configuration_audit",
                     ),
                 )
+                cursor.execute("SELECT to_regclass('t_l2_control_bindings')")
+                self.assertEqual(cursor.fetchone()[0], "t_l2_control_bindings")
                 for removed in (
                     "t_solution_packages",
                     "t_solution_installations",

@@ -34,7 +34,7 @@ class SourceObservation:
     received_at: datetime | None = None
     calculated_at: datetime | None = None
     processing_revision_id: UUID | None = None
-    site_configuration_version: int | None = None
+    configuration_revision: int | None = None
     source_digest: str | None = None
 
 
@@ -56,13 +56,13 @@ class InMemoryObservationCatalog:
             self._observations[observation.tag_id] = observation
 
     def latest(self, source) -> SourceObservation | None:
-        source_id = source if isinstance(source, UUID) else source.source_id or source.tag_id
+        source_id = source if isinstance(source, UUID) else source.source_id or source.control_tag_id
         return self._observations.get(source_id)
 
     def history(self, source, range_key: str) -> list[SourceObservation]:
         # The in-memory adapter intentionally keeps the public test seam small:
         # the caller still validates the range grammar at its HTTP boundary.
-        source_id = source if isinstance(source, UUID) else source.source_id or source.tag_id
+        source_id = source if isinstance(source, UUID) else source.source_id or source.control_tag_id
         return sorted(self._history.get(source_id, []), key=lambda item: item.observed_at)
 
 
@@ -127,7 +127,8 @@ class InMemoryNeuronProtocolSimulator:
 class EntityInstanceObservation:
     entity_instance_id: UUID
     definition_id: str
-    instance_key: str
+    node_id: UUID
+    node_key: str
     value: Any
     data_type: str
     unit: str | None
@@ -137,13 +138,13 @@ class EntityInstanceObservation:
     fresh: bool
     quality_good: bool
     max_observation_gap_seconds: float | None = None
-    source_kind: str = "legacy_tag"
+    source_kind: str = "point_processing"
     event_id: UUID | None = None
     reason: str | None = None
     received_at: datetime | None = None
     calculated_at: datetime | None = None
     processing_revision_id: UUID | None = None
-    site_configuration_version: int | None = None
+    configuration_revision: int | None = None
     source_digest: str | None = None
 
     def source_evidence(self) -> dict[str, Any]:
@@ -156,7 +157,7 @@ class EntityInstanceObservation:
                 if self.processing_revision_id
                 else None
             ),
-            "site_configuration_version": self.site_configuration_version,
+            "configuration_revision": self.configuration_revision,
             "source_digest": self.source_digest,
         }
 
@@ -164,7 +165,8 @@ class EntityInstanceObservation:
         return {
             "entity_instance_id": str(self.entity_instance_id),
             "definition_id": self.definition_id,
-            "instance_key": self.instance_key,
+            "node_id": str(self.node_id),
+            "node_key": self.node_key,
             "value": self.value,
             "data_type": self.data_type,
             "unit": self.unit,
@@ -232,7 +234,8 @@ class EntityInstanceRuntime:
         return EntityInstanceObservation(
             entity_instance_id=resolved.entity_instance_id,
             definition_id=resolved.definition_id,
-            instance_key=resolved.instance_key,
+            node_id=resolved.node_id,
+            node_key=resolved.node_key,
             value=observation.value,
             data_type=resolved.data_type,
             unit=resolved.unit,
@@ -248,7 +251,7 @@ class EntityInstanceRuntime:
             received_at=observation.received_at,
             calculated_at=observation.calculated_at,
             processing_revision_id=observation.processing_revision_id,
-            site_configuration_version=observation.site_configuration_version,
+            configuration_revision=observation.configuration_revision,
             source_digest=observation.source_digest,
         )
 
@@ -259,7 +262,8 @@ class EntityInstanceRuntime:
             EntityInstanceObservation(
                 entity_instance_id=resolved.entity_instance_id,
                 definition_id=resolved.definition_id,
-                instance_key=resolved.instance_key,
+                node_id=resolved.node_id,
+                node_key=resolved.node_key,
                 value=item.value,
                 data_type=resolved.data_type,
                 unit=resolved.unit,
@@ -275,7 +279,7 @@ class EntityInstanceRuntime:
                 received_at=item.received_at,
                 calculated_at=item.calculated_at,
                 processing_revision_id=item.processing_revision_id,
-                site_configuration_version=item.site_configuration_version,
+                configuration_revision=item.configuration_revision,
                 source_digest=item.source_digest,
             )
             for item in self._observations.history(resolved, range_key)

@@ -52,7 +52,8 @@ class EntityAlarmAdapter:
                         source_ref=str(entity_instance_id),
                         evidence={
                             "definition_id": observation.definition_id,
-                            "instance_key": observation.instance_key,
+                            "node_id": str(observation.node_id),
+                            "node_key": observation.node_key,
                             "data_type": observation.data_type,
                             "unit": observation.unit,
                             "fresh": observation.fresh,

@@ -15,11 +15,9 @@ class EntityInstanceReferenceError(ValueError):
 @dataclass(frozen=True)
 class EntityInstanceDescriptor:
     id: UUID
-    device_instance_id: UUID
-    slot_id: str
-    instance_key: str
-    device_category: str
-    device_display_name: str
+    node_id: UUID
+    node_type: str
+    node_display_name: str
     definition_id: str
     display_name: str
     data_type: str
@@ -31,7 +29,7 @@ class EntityInstanceDescriptor:
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["id"] = str(self.id)
-        value["device_instance_id"] = str(self.device_instance_id)
+        value["node_id"] = str(self.node_id)
         value["confirmed"] = self.confirmed
         return value
 

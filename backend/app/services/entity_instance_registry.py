@@ -103,31 +103,26 @@ class ApplyOutcome:
 class ResolvedEntitySource:
     entity_instance_id: UUID
     definition_id: str
-    instance_key: str
-    device_instance_id: UUID
-    binding_id: UUID | None
-    tag_id: UUID | None
-    matcher_id: str | None
-    confirmation_audit_id: UUID | None
+    node_key: str
+    node_id: UUID
     data_type: str
     unit: str | None
     direction: str
     freshness_seconds: float
-    source_kind: str = "legacy_tag"
+    control_tag_id: UUID | None = None
+    source_kind: str = "point_processing"
     source_id: UUID | None = None
     processing_revision_id: UUID | None = None
-    site_configuration_version: int | None = None
+    configuration_revision: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
         for field in (
             "entity_instance_id",
-            "device_instance_id",
-            "binding_id",
-            "tag_id",
-            "confirmation_audit_id",
+            "node_id",
+            "control_tag_id",
         ):
-            value[field] = str(value[field])
+            value[field] = str(value[field]) if value[field] is not None else None
         return value
 
 
@@ -259,7 +254,9 @@ class InMemoryEntityInstanceRepository:
         pending_failovers: dict[UUID, dict[str, Any]] = {}
         removed_failovers: set[UUID] = set()
         reserved_tags = {
-            source.tag_id: entity_id for entity_id, source in self._bindings.items()
+            source.control_tag_id: entity_id
+            for entity_id, source in self._bindings.items()
+            if source.control_tag_id is not None
         }
         for entity_id, failover in self._failovers.items():
             reserved_tags[failover["primary_tag_id"]] = entity_id
@@ -308,16 +305,14 @@ class InMemoryEntityInstanceRepository:
             resolved_binding = ResolvedEntitySource(
                 entity_instance_id=entity_id,
                 definition_id=item["definition_id"],
-                instance_key=item["instance_key"],
-                device_instance_id=device_id,
-                binding_id=binding_id,
-                tag_id=tag_id,
-                matcher_id=item["matcher_id"],
-                confirmation_audit_id=audit_id,
+                node_key=item["instance_key"],
+                node_id=(UUID(item["node_id"]) if item.get("node_id") else device_id),
                 data_type=item["data_type"],
                 unit=item["unit"],
                 direction=item["direction"],
                 freshness_seconds=float(item["freshness_seconds"]),
+                control_tag_id=tag_id,
+                source_kind="legacy_tag",
             )
             if item.get("failover_policy") == "manual" and standby_tag_id:
                 previous = self._failovers.get(entity_id)
@@ -339,7 +334,7 @@ class InMemoryEntityInstanceRepository:
                 resolved_binding = ResolvedEntitySource(
                     **{
                         **asdict(resolved_binding),
-                        "tag_id": failover[f"{failover['current_role']}_tag_id"],
+                        "control_tag_id": failover[f"{failover['current_role']}_tag_id"],
                     }
                 )
                 pending_failovers[entity_id] = failover
@@ -395,12 +390,8 @@ class InMemoryEntityInstanceRepository:
             pending[entity_instance_id] = ResolvedEntitySource(
                 entity_instance_id=entity_instance_id,
                 definition_id=entity["definition_id"],
-                instance_key=device["instance_key"],
-                device_instance_id=entity["device_instance_id"],
-                binding_id=None,
-                tag_id=None,
-                matcher_id=None,
-                confirmation_audit_id=None,
+                node_key=device["instance_key"],
+                node_id=(UUID(device["node_id"]) if device.get("node_id") else entity["device_instance_id"]),
                 data_type=entity["data_type"],
                 unit=entity["unit"],
                 direction=entity["direction"],
@@ -408,7 +399,7 @@ class InMemoryEntityInstanceRepository:
                 source_kind="point_processing",
                 source_id=entity_instance_id,
                 processing_revision_id=revision_id,
-                site_configuration_version=site_configuration_version,
+                configuration_revision=site_configuration_version,
             )
         self._point_sources.update(pending)
 
@@ -445,11 +436,9 @@ class InMemoryEntityInstanceRepository:
             descriptors.append(
                 EntityInstanceDescriptor(
                     id=entity_id,
-                    device_instance_id=entity["device_instance_id"],
-                    slot_id=device["slot_id"],
-                    instance_key=device["instance_key"],
-                    device_category=device["device_category"],
-                    device_display_name=device["display_name"],
+                    node_id=(UUID(device["node_id"]) if device.get("node_id") else entity["device_instance_id"]),
+                    node_type=device["device_category"],
+                    node_display_name=device["display_name"],
                     definition_id=entity["definition_id"],
                     display_name=entity["display_name"],
                     data_type=entity["data_type"],
@@ -459,7 +448,7 @@ class InMemoryEntityInstanceRepository:
                     confirmed=True,
                 )
             )
-        return tuple(sorted(descriptors, key=lambda item: (item.instance_key, item.definition_id)))
+        return tuple(sorted(descriptors, key=lambda item: (item.node_display_name, item.definition_id)))
 
     def failover_state(self, entity_instance_id: UUID) -> EntityFailoverState | None:
         from app.services.entity_instance_failover import EntityFailoverState
@@ -516,7 +505,7 @@ class InMemoryEntityInstanceRepository:
             "changed_at": changed_at,
         }
         self._bindings[entity_instance_id] = ResolvedEntitySource(
-            **{**asdict(current), "tag_id": target_tag_id}
+            **{**asdict(current), "control_tag_id": target_tag_id}
         )
         state["current_role"] = target_role
         state["switch_count"] += 1
@@ -525,7 +514,9 @@ class InMemoryEntityInstanceRepository:
 
     def preview_legacy(self) -> tuple[LegacyEntityMigrationItem, ...]:
         candidates_by_tag = {
-            source.tag_id: source.entity_instance_id for source in self._bindings.values()
+            source.control_tag_id: source.entity_instance_id
+            for source in self._bindings.values()
+            if source.control_tag_id is not None
         }
         for entity_id, failover in self._failovers.items():
             candidates_by_tag[failover["primary_tag_id"]] = entity_id
@@ -668,14 +659,14 @@ class EntityInstanceRegistry:
             if (
                 source.source_id != source.entity_instance_id
                 or source.processing_revision_id is None
-                or source.site_configuration_version is None
+                or source.configuration_revision is None
             ):
                 raise EntityInstanceError(
                     "ENTITY_SOURCE_INVALID",
                     "Point processing entity source evidence is incomplete",
                 )
             return source
-        if source.source_kind != "legacy_tag" or source.tag_id is None:
+        if source.source_kind != "legacy_tag" or source.control_tag_id is None:
             raise EntityInstanceError(
                 "ENTITY_SOURCE_KIND_INVALID",
                 "Entity source kind is invalid",
@@ -684,7 +675,7 @@ class EntityInstanceRegistry:
             (
                 candidate
                 for candidate in self._source_catalog.list_sources()
-                if candidate.tag_id == source.tag_id and candidate.enabled
+                if candidate.tag_id == source.control_tag_id and candidate.enabled
             ),
             None,
         )
@@ -926,7 +917,7 @@ def _plan_definition(
         "code": code,
         "action": (
             "preserve"
-            if ready and existing is not None and existing.tag_id == selected.tag_id
+    if ready and existing is not None and existing.control_tag_id == selected.tag_id
             else "update"
             if ready and existing is not None
             else "add"

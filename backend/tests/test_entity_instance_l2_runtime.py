@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+import os
 import unittest
 from unittest.mock import patch
 from uuid import UUID
+
+os.environ.setdefault("DB_PASSWORD", "database-secret-value")
+os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
+os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-at-least-32-chars")
 
 from app.services.entity_instance_registry import (
     EntityInstanceError,
@@ -20,10 +25,9 @@ from app.services.entity_instance_runtime import (
 
 
 ENTITY_ID = UUID("87000000-0000-0000-0000-000000000001")
-DEVICE_ID = UUID("87000000-0000-0000-0000-000000000002")
+NODE_ID = UUID("87000000-0000-0000-0000-000000000002")
 REVISION_ID = UUID("87000000-0000-0000-0000-000000000003")
 EVENT_ID = UUID("87000000-0000-0000-0000-000000000012")
-INSTALLATION_ID = UUID("87000000-0000-0000-0000-000000000004")
 
 
 class PointSourceRepository:
@@ -33,12 +37,8 @@ class PointSourceRepository:
         return ResolvedEntitySource(
             entity_instance_id=ENTITY_ID,
             definition_id="pcs.active_power",
-            instance_key="PCS-01",
-            device_instance_id=DEVICE_ID,
-            binding_id=None,
-            tag_id=None,
-            matcher_id=None,
-            confirmation_audit_id=None,
+            node_key="PCS-01",
+            node_id=NODE_ID,
             data_type="FLOAT",
             unit="kW",
             direction="R",
@@ -46,7 +46,7 @@ class PointSourceRepository:
             source_kind="point_processing",
             source_id=ENTITY_ID,
             processing_revision_id=REVISION_ID,
-            site_configuration_version=1,
+            configuration_revision=1,
         )
 
 
@@ -57,11 +57,9 @@ class StaticEntityCatalogRepository:
         return (
             EntityInstanceDescriptor(
                 id=ENTITY_ID,
-                device_instance_id=DEVICE_ID,
-                slot_id="slot.pcs-primary",
-                instance_key="PCS-01",
-                device_category="pcs",
-                device_display_name="PCS-01",
+                node_id=NODE_ID,
+                node_type="pcs",
+                node_display_name="PCS-01",
                 definition_id="pcs.active_power",
                 display_name="PCS 有功功率",
                 data_type="FLOAT",
@@ -74,27 +72,6 @@ class StaticEntityCatalogRepository:
 
     def preview_legacy(self):
         return ()
-
-
-class StaticDeliveryRepository:
-    def __init__(self, manifest: dict) -> None:
-        self._manifest = manifest
-
-    def site_configuration_version(self) -> int:
-        return 1
-
-    def get_site_configuration_version(self, version: int):
-        return SimpleNamespace(installation_id=INSTALLATION_ID) if version == 1 else None
-
-    def get_installation(self, installation_id: UUID):
-        if installation_id != INSTALLATION_ID:
-            return None
-        return SimpleNamespace(id=installation_id, entity_instance_ids=(ENTITY_ID,))
-
-    def package_for_installation(self, installation):
-        if installation.id != INSTALLATION_ID:
-            return None
-        return SimpleNamespace(manifest=self._manifest)
 
 
 class EntityInstanceL2RuntimeTest(unittest.TestCase):
@@ -119,7 +96,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 192,
                 event_id=EVENT_ID,
                 processing_revision_id=REVISION_ID,
-                site_configuration_version=1,
+                configuration_revision=1,
                 source_digest="b" * 64,
             )
         )
@@ -128,7 +105,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
         self.assertEqual(value["event_id"], str(EVENT_ID))
         self.assertEqual(value["source_kind"], "point_processing")
         self.assertEqual(value["processing_revision_id"], str(REVISION_ID))
-        self.assertEqual(value["site_configuration_version"], 1)
+        self.assertEqual(value["configuration_revision"], 1)
         self.assertEqual(value["source_digest"], "b" * 64)
 
     def test_point_processing_entity_reads_l2_latest_and_history(self) -> None:
@@ -143,7 +120,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 192,
                 event_id=first_event,
                 processing_revision_id=REVISION_ID,
-                site_configuration_version=1,
+                configuration_revision=1,
                 source_digest="a" * 64,
             )
         )
@@ -155,7 +132,7 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
                 192,
                 event_id=second_event,
                 processing_revision_id=REVISION_ID,
-                site_configuration_version=1,
+                configuration_revision=1,
                 source_digest="b" * 64,
             )
         )
@@ -224,88 +201,12 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
 
         self.publish_l2()
         with patch(
-            "app.api.solution_delivery.get_default_entity_instance_registry",
-            return_value=self.registry,
-        ), patch(
-            "app.api.solution_delivery.get_default_entity_instance_runtime",
+            "app.api.entity_instances.get_entity_instance_runtime",
             return_value=self.runtime,
         ):
             context = _entity_instance_context({str(ENTITY_ID)})
 
         self.assert_l2_provenance(context[str(ENTITY_ID)])
-
-    def test_policy_input_keeps_the_l2_event_and_conversion_provenance(self) -> None:
-        from app.services.ems_policy_runtime import EmsPolicyRuntime
-        from app.services.entity_instance_catalog import EntityInstanceCatalog
-
-        self.publish_l2()
-        policy = {
-            "id": "policy.pcs-observe",
-            "revision": 1,
-            "input": {
-                "slot": "slot.pcs-primary",
-                "definition": "pcs.active_power",
-            },
-            "condition": {"operator": "gt", "threshold": 10},
-            "action": {
-                "id": "observe-only",
-                "target": {
-                    "slot": "slot.pcs-primary",
-                    "definition": "pcs.active_power",
-                },
-                "value": 0,
-            },
-            "simulation": {
-                "input": {"value": 12.345},
-                "expected": {"triggered": True, "actionValue": 0},
-            },
-        }
-        runtime = EmsPolicyRuntime(
-            StaticDeliveryRepository({"_policy_assets": [policy]}),  # type: ignore[arg-type]
-            EntityInstanceCatalog(StaticEntityCatalogRepository()),
-            self.runtime,
-            SimpleNamespace(),  # command dispatch is outside this read-only test
-        )
-
-        enabled = runtime.enable("policy.pcs-observe", "user:engineer")
-
-        self.assert_l2_provenance(enabled["input"])
-
-    def test_workbench_metric_keeps_the_l2_event_and_conversion_provenance(self) -> None:
-        from app.services.ems_workbench import EmsWorkbench
-        from app.services.entity_instance_catalog import EntityInstanceCatalog
-
-        self.publish_l2()
-        workbench = {
-            "id": "ems.main",
-            "navigation": [],
-            "groups": [
-                {
-                    "id": "pcs",
-                    "label": "PCS",
-                    "entities": [
-                        {
-                            "slot": "slot.pcs-primary",
-                            "definition": "pcs.active_power",
-                        }
-                    ],
-                }
-            ],
-            "kpis": [],
-            "trends": [],
-            "alarms": {},
-            "controls": {},
-        }
-        runtime = EmsWorkbench(
-            StaticDeliveryRepository({"_workbench_assets": [workbench]}),  # type: ignore[arg-type]
-            EntityInstanceCatalog(StaticEntityCatalogRepository()),
-            self.runtime,
-        )
-
-        metric = runtime.read()["groups"][0]["entities"][0]
-
-        self.assert_l2_provenance(metric)
-
 
 if __name__ == "__main__":
     unittest.main()

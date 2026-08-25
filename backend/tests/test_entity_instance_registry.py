@@ -124,10 +124,9 @@ class EntityInstanceRegistryTest(unittest.TestCase):
         self.assertEqual(1, repository.binding_count)
 
         resolved = registry.resolve(first.entity_instance_ids[0])
-        self.assertEqual(TAG_ID, resolved.tag_id)
+        self.assertEqual(TAG_ID, resolved.control_tag_id)
         self.assertEqual("pcs.activePower", resolved.definition_id)
-        self.assertEqual("PCS-01", resolved.instance_key)
-        self.assertEqual("matcher.pcs-active-power", resolved.matcher_id)
+        self.assertEqual("PCS-01", resolved.node_key)
 
         catalog.replace(
             (

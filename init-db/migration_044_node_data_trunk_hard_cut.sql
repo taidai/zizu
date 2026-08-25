@@ -141,6 +141,21 @@ BEGIN
     ON public.t_entity_instances(node_id, definition_id)
     WHERE active = TRUE;
 
+  CREATE TABLE public.t_l2_control_bindings (
+    entity_instance_id UUID PRIMARY KEY
+      REFERENCES public.t_entity_instances(id),
+    l0_tag_id UUID NOT NULL UNIQUE REFERENCES public.t_tags(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  INSERT INTO public.t_l2_control_bindings(entity_instance_id, l0_tag_id, created_at)
+  SELECT binding.entity_instance_id, binding.tag_id, binding.created_at
+  FROM public.t_entity_instance_bindings AS binding
+  JOIN public.t_entity_instances AS entity
+    ON entity.id = binding.entity_instance_id
+  WHERE binding.active = TRUE
+    AND entity.active = TRUE
+    AND entity.direction IN ('W', 'RW');
+
   DROP TABLE IF EXISTS public.t_alarm_configuration_acceptance_idempotency CASCADE;
   DROP TABLE IF EXISTS public.t_alarm_configuration_reports CASCADE;
   DROP TABLE IF EXISTS public.t_cross_node_processing_acceptance_reports CASCADE;

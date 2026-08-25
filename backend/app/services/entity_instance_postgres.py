@@ -378,42 +378,27 @@ class PostgresEntityInstanceRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT ei.id, ei.definition_id, di.instance_key, di.id,
-                           b.id, b.tag_id, b.matcher_id, b.confirmation_audit_id,
-                           ei.data_type, ei.unit, ei.direction, ei.freshness_seconds
-                    FROM t_entity_instances ei
-                    JOIN t_device_instances di ON di.id = ei.device_instance_id
-                    JOIN t_entity_instance_bindings b
-                      ON b.entity_instance_id = ei.id AND b.active = TRUE
-                    WHERE ei.id = %s AND ei.active = TRUE AND di.active = TRUE
-                    """,
-                    (entity_instance_id,),
-                )
-                row = cur.fetchone()
-                if row is not None:
-                    return ResolvedEntitySource(*row)
-                cur.execute(
-                    """
-                    SELECT ei.id, ei.definition_id, di.instance_key, di.id,
-                           NULL::uuid, NULL::uuid, NULL::text, NULL::uuid,
+                    SELECT ei.id, ei.definition_id,
+                           COALESCE(node.source_catalog_key, node.name), node.id,
                            ei.data_type, ei.unit, ei.direction,
-                           ei.freshness_seconds, 'point_processing', ei.id,
-                           installed.revision_id,
-                           installed.site_configuration_version
+                           ei.freshness_seconds, control.l0_tag_id,
+                           'point_processing', ei.id, installed.revision_id,
+                           installed.configuration_revision
                     FROM t_entity_instances ei
-                    JOIN t_device_instances di ON di.id = ei.device_instance_id
+                    JOIN t_nodes node ON node.id = ei.node_id AND node.enabled = TRUE
                     JOIN t_point_processing_output_bindings output
                       ON output.entity_instance_id = ei.id
                     JOIN t_installed_point_processings installed
                       ON installed.id = output.installed_processing_id
                      AND installed.current = TRUE
-                    WHERE ei.id = %s AND ei.active = TRUE AND di.active = TRUE
-                      AND ei.source_kind = 'point_processing'
+                    LEFT JOIN t_l2_control_bindings control
+                      ON control.entity_instance_id = ei.id
+                    WHERE ei.id = %s AND ei.active = TRUE
                     """,
                     (entity_instance_id,),
                 )
-                point_row = cur.fetchone()
-        return ResolvedEntitySource(*point_row) if point_row else None
+                row = cur.fetchone()
+        return ResolvedEntitySource(*row) if row else None
 
     def control_policy(self, entity_instance_id: UUID) -> dict[str, Any] | None:
         with _connection() as conn:
@@ -427,7 +412,7 @@ class PostgresEntityInstanceRepository:
 
     def entity_instance_for_definition(
         self,
-        device_instance_id: UUID,
+        node_id: UUID,
         definition_id: str,
     ) -> UUID | None:
         with _connection() as conn:
@@ -436,16 +421,11 @@ class PostgresEntityInstanceRepository:
                     """
                     SELECT ei.id
                     FROM t_entity_instances ei
-                    WHERE ei.device_instance_id = %s
+                    WHERE ei.node_id = %s
                       AND ei.definition_id = %s
                       AND ei.active = TRUE
                       AND (
                         EXISTS (
-                          SELECT 1 FROM t_entity_instance_bindings binding
-                          WHERE binding.entity_instance_id = ei.id
-                            AND binding.active = TRUE
-                        )
-                        OR EXISTS (
                           SELECT 1
                           FROM t_point_processing_output_bindings output
                           JOIN t_installed_point_processings installed
@@ -455,7 +435,7 @@ class PostgresEntityInstanceRepository:
                         )
                       )
                     """,
-                    (device_instance_id, definition_id),
+                    (node_id, definition_id),
                 )
                 rows = cur.fetchall()
         return rows[0][0] if len(rows) == 1 else None
@@ -465,30 +445,14 @@ class PostgresEntityInstanceRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT ei.id, di.id, di.slot_id, di.instance_key,
-                           di.device_category, di.display_name, ei.definition_id,
+                    SELECT ei.id, node.id, node.node_type, node.name,
+                           ei.definition_id,
                            ei.display_name, ei.data_type, ei.unit, ei.direction,
                            ei.freshness_seconds, TRUE
                     FROM t_entity_instances ei
-                    JOIN t_device_instances di ON di.id = ei.device_instance_id
-                    JOIN t_site_configuration_state state ON state.singleton = TRUE
-                    JOIN t_site_configuration_versions site
-                      ON site.version = state.current_version
-                     AND di.identity_installation_id = site.entity_identity_installation_id
-                    WHERE ei.active = TRUE AND di.active = TRUE
-                      AND (
-                        EXISTS (
-                          SELECT 1
-                          FROM t_entity_instance_bindings binding
-                          JOIN t_entity_binding_confirmations confirmation
-                            ON confirmation.id = binding.confirmation_audit_id
-                           AND confirmation.entity_instance_id = binding.entity_instance_id
-                           AND confirmation.binding_id = binding.id
-                           AND confirmation.selected_tag_id = binding.tag_id
-                          WHERE binding.entity_instance_id = ei.id
-                            AND binding.active = TRUE
-                        )
-                        OR EXISTS (
+                    JOIN t_nodes node ON node.id = ei.node_id
+                    WHERE ei.active = TRUE AND node.enabled = TRUE
+                      AND EXISTS (
                           SELECT 1
                           FROM t_point_processing_output_bindings output
                           JOIN t_installed_point_processings installed
@@ -496,8 +460,7 @@ class PostgresEntityInstanceRepository:
                            AND installed.current = TRUE
                           WHERE output.entity_instance_id = ei.id
                         )
-                      )
-                    ORDER BY di.instance_key, ei.definition_id
+                    ORDER BY node.name, ei.definition_id
                     """
                 )
                 rows = cur.fetchall()
@@ -666,7 +629,7 @@ class PostgresObservationCatalog:
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
                                processing_revision_id,
-                               site_configuration_version, source_digest
+                               configuration_revision, source_digest
                         FROM t_l2_latest WHERE entity_instance_id = %s
                         """,
                         (source.source_id,),
@@ -705,7 +668,7 @@ class PostgresObservationCatalog:
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
                                processing_revision_id,
-                               site_configuration_version, source_digest
+                               configuration_revision, source_digest
                         FROM t_l2_observations
                         WHERE entity_instance_id = %s
                           AND observed_at > NOW() - %s::interval
