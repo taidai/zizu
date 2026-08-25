@@ -1,5 +1,25 @@
 ---
 
+## Session 2026-08-26 — v0.4.85-rc.1 节点数据主干已部署到 1 号机
+
+- 已把硬切主线 `节点 → L0 原始点位 → L1 点位加工模板 → L2 全局实体 → 告警/JDM/控制/画面`
+  部署到 1 号机；最终 ARM64 固定摘要为
+  `ghcr.io/taidai/zizu@sha256:d024a8301a16943783e8c7683b5d114db97f90615a65ca860538ec4669bf3a03`，
+  源码 `3184064`，GitHub Actions `32872105720`，Schema 精确为 044。
+- 保留旧容器约束：host network、`/dev/mqueue` tmpfs、unless-stopped、既有数据卷；未启动
+  Caddy/TLS，未验证自动策略，未执行任何设备写入。完整备份位于
+  `/opt/zizu-backups/zizu-pre-0.4.85-rc.1-20260825.dump`，SHA 和 `pg_restore -l` 已校验。
+- 现场预检发现旧告警验证实体的 device 漏写 node_id，但其唯一活动 L0 绑定明确属于“变流器”；
+  migration 044 新增 fail-closed 回填并保留无法唯一归属就拒绝的保护，PostgreSQL RED→GREEN 已覆盖。
+- 首次切换发现生产 `t_telemetry` 启用 Timescale columnstore，043 直接添加 `DEFAULT now()` 被拒绝；
+  立即恢复旧摘要后新增同构回归，改为迁移时刻常量回填、后续写入仍 `now()`。最终 043、044 均应用且
+  `errors=0`，F0 加载 97 条规则、NanoMQ 已连接，核心只读 API 均为 200，过度设计路由清单为空。
+- 当前 L0 可见：储能电表 55、变流器 42；L2 输出 1。`pcs.active_power` 因源点存在约 60–90 秒真实
+  上报空档而返回 `ENTITY_DATA_STALE`，没有转换/数据库错误，也未放宽 30 秒 freshness 掩盖断流。
+  下一步只读排查 Neuron/设备采集间歇空档，再决定采集周期或 freshness 契约，不先改阈值。
+- 详细部署证据见 `docs/deploy-1号机-v0.4.85-rc.1-http.md`。分支
+  `ticket/v0.4.85-node-data-trunk-hard-cut` 已推送，尚未合并 main。
+
 ## Session 2026-08-24 — v0.4.84 业务指标 Task 3 最终输入边界收口
 
 - Task 3 最后一轮修复把 projection 输入隔离提前到 UUID/duplicate 之前：非 counter 只处理当前窗口，counter 只处理一个窗口时长的 baseline 回看至窗口末端；窗口外合法 timestamp 的非法 ID、冲突副本和其他字段不再污染当前 decision。
