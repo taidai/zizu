@@ -1,0 +1,14 @@
+.git
+.github
+.superpowers
+.pytest_cache
+**/__pycache__
+**/*.pyc
+backend/.venv
+backend/tests
+frontend/node_modules
+frontend/dist
+docs
+reference-deliveries
+reference-point-processings
+*.zip
