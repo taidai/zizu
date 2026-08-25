@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: partially-superseded-by-adr-0013
 date: 2026-08-23
 ---
 

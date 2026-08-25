@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-08-13
+Superseded by ADR-0013 — 2026-08-25
 
 维护者已确认本文的公开主测试缝，本文作为票据 01 的 TDD 契约。
 
