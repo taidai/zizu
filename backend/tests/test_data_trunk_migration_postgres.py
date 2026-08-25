@@ -313,6 +313,37 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(cursor.fetchone(), ("received_at", None))
 
+    def test_043_adds_received_time_to_columnstore_enabled_l0_history(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                cursor.execute(
+                    "SELECT create_hypertable('t_telemetry', 'ts', "
+                    "if_not_exists => TRUE, migrate_data => TRUE)"
+                )
+                cursor.execute(
+                    "ALTER TABLE t_telemetry SET "
+                    "(timescaledb.compress, "
+                    "timescaledb.compress_segmentby = 'node_id,tag_id')"
+                )
+
+                self._apply_043(cursor)
+
+                cursor.execute(
+                    """
+                    SELECT is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 't_telemetry'
+                      AND column_name = 'event_received_at'
+                    """
+                )
+                nullable, default = cursor.fetchone()
+                self.assertEqual(nullable, "NO")
+                self.assertEqual(default, "now()")
+
     def test_043_rejects_schema_041_without_schema_042(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True

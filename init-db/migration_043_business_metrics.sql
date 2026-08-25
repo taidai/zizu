@@ -857,8 +857,27 @@ ALTER TABLE public.t_tags
   ADD COLUMN IF NOT EXISTS timestamp_trusted BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE public.t_telemetry
   ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
+DO $migration$
+DECLARE
+  migration_received_at TIMESTAMPTZ := clock_timestamp();
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 't_telemetry'
+      AND column_name = 'event_received_at'
+  ) THEN
+    EXECUTE format(
+      'ALTER TABLE public.t_telemetry '
+      'ADD COLUMN event_received_at TIMESTAMPTZ NOT NULL DEFAULT %L',
+      migration_received_at
+    );
+  END IF;
+END;
+$migration$;
 ALTER TABLE public.t_telemetry
-  ADD COLUMN IF NOT EXISTS event_received_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  ALTER COLUMN event_received_at SET DEFAULT now();
 ALTER TABLE public.t_telemetry_latest
   ADD COLUMN IF NOT EXISTS event_time_basis TEXT NOT NULL DEFAULT 'received_at';
 ALTER TABLE public.t_telemetry_latest
