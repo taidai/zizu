@@ -197,7 +197,7 @@ function RuleForm({
     const needle = entitySearch.trim().toLocaleLowerCase()
     if (!needle) return entityInstanceOptions
     return entityInstanceOptions.filter((item) =>
-      [item.device_display_name, item.instance_key, item.display_name, item.definition_id]
+      [item.node_display_name, item.node_type, item.display_name, item.definition_id]
         .some((value) => value.toLocaleLowerCase().includes(needle)),
     )
   }, [entityInstanceOptions, entitySearch])
@@ -485,8 +485,8 @@ function RuleForm({
                             }}
                             className="w-4 h-4 accent-[#52c41a]"
                           />
-                          <span className="truncate whitespace-nowrap text-gray-700 text-xs" title={e.definition_id}>{e.device_display_name} / {e.display_name}</span>
-                          <span className="text-[10px] text-gray-400 font-mono ml-auto">{e.instance_key}</span>
+                          <span className="truncate whitespace-nowrap text-gray-700 text-xs" title={e.definition_id}>{e.node_display_name} / {e.display_name}</span>
+                          <span className="text-[10px] text-gray-400 font-mono ml-auto">{e.node_type}</span>
                         </label>
                       )
                     })}
@@ -526,7 +526,7 @@ function RuleForm({
                                   <option value="">-- 选择实体 --</option>
                                   {entityInstanceOptions.map((e) => (
                                     <option key={e.id} value={e.id}>
-                                      {e.device_display_name} / {e.display_name}
+                                      {e.node_display_name} / {e.display_name}
                                     </option>
                                   ))}
                                 </select>
@@ -654,7 +654,7 @@ function RuleForm({
                               >
                                 <option value="">-- 选择实体实例 --</option>
                                 {entityInstanceOptions.map((e) => (
-                                  <option key={e.id} value={e.id}>{e.device_display_name} / {e.display_name}</option>
+                                  <option key={e.id} value={e.id}>{e.node_display_name} / {e.display_name}</option>
                                 ))}
                               </select>
                             </td>
@@ -698,7 +698,7 @@ function RuleForm({
                       >
                         <option value="">-- 选择实体实例 --</option>
                         {entityInstanceOptions.map((e) => (
-                          <option key={e.id} value={e.id}>{e.device_display_name} / {e.display_name}</option>
+                          <option key={e.id} value={e.id}>{e.node_display_name} / {e.display_name}</option>
                         ))}
                       </select>
                       <input

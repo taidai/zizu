@@ -120,8 +120,7 @@ class PostgresAlarmDefinitionCatalog:
                     cur.execute(
                         """
                         SELECT id FROM t_alarm_definitions
-                        WHERE installation_id = %s
-                          AND asset_id = %s
+                        WHERE asset_id = %s
                           AND entity_instance_id = %s
                           AND definition_version = %s
                           AND entity_definition_id = %s
@@ -135,7 +134,6 @@ class PostgresAlarmDefinitionCatalog:
                         LIMIT 1
                         """,
                         (
-                            definition.installation_id,
                             definition.asset_id,
                             definition.entity_instance_id,
                             definition.version,
@@ -154,23 +152,22 @@ class PostgresAlarmDefinitionCatalog:
                         cur.execute(
                             """
                             INSERT INTO t_alarm_definitions
-                              (id, asset_id, definition_version, installation_id,
-                               site_configuration_version, entity_instance_id,
+                              (id, asset_id, definition_version,
+                               configuration_revision, entity_instance_id,
                                entity_definition_id, trigger_condition,
                                trigger_duration_seconds, recovery_condition,
                                recovery_duration_seconds, severity,
                                notification_throttle_seconds, content_digest,
                                content_digest_algorithm)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                    %s, %s, %s, %s, %s,
+                                    %s, %s, %s, %s,
                                     'sha256-v2-content')
                             """,
                             (
                                 definition_id,
                                 definition.asset_id,
                                 definition.version,
-                                definition.installation_id,
-                                definition.site_configuration_version,
+                                definition.configuration_revision,
                                 definition.entity_instance_id,
                                 definition.entity_definition_id,
                                 Json(definition.trigger),
@@ -186,19 +183,19 @@ class PostgresAlarmDefinitionCatalog:
                         """
                         INSERT INTO t_alarm_definition_current
                           (asset_id, entity_instance_id, definition_id,
-                           site_configuration_version)
+                           configuration_revision)
                         VALUES (%s, %s, %s, %s)
                         ON CONFLICT (asset_id, entity_instance_id) DO UPDATE
                         SET definition_id = EXCLUDED.definition_id,
-                            site_configuration_version = EXCLUDED.site_configuration_version
-                        WHERE t_alarm_definition_current.site_configuration_version
-                              <= EXCLUDED.site_configuration_version
+                            configuration_revision = EXCLUDED.configuration_revision
+                        WHERE t_alarm_definition_current.configuration_revision
+                              <= EXCLUDED.configuration_revision
                         """,
                         (
                             definition.asset_id,
                             definition.entity_instance_id,
                             definition_id,
-                            definition.site_configuration_version,
+                            definition.configuration_revision,
                         ),
                     )
                     installed_ids.append(definition_id)

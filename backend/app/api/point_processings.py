@@ -1,7 +1,6 @@
 """Authenticated REST adapter for L1 point-processing planning and apply."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 from typing import Any, NoReturn
@@ -77,11 +76,6 @@ class PointProcessingFormulaPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     template_revision_id: UUID
     expression: str = Field(min_length=1, max_length=4096)
-
-
-class RunEN9AcceptanceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    observed_for_seconds: float = Field(ge=1800, le=86400)
 
 
 def _raise_point_processing_http(exc: PointProcessingError) -> NoReturn:
@@ -214,7 +208,6 @@ async def create_point_processing_plan(
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
 
-
 @router.post(
     "/nodes/{node_id}/point-processing-formula-preview",
     openapi_extra=capability_metadata(CONFIGURATION_WRITE),
@@ -279,64 +272,3 @@ async def apply_point_processing_plan(
         ).public_dict()
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
-
-
-@router.post(
-    "/point-processing-applications/{application_id}/acceptance",
-    status_code=status.HTTP_201_CREATED,
-    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
-)
-async def run_en9_point_processing_acceptance(
-    application_id: UUID,
-    body: RunEN9AcceptanceRequest,
-    _principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
-) -> dict:
-    from app.services.en9_point_processing_acceptance import run_en9_acceptance
-
-    try:
-        report = await asyncio.to_thread(
-            run_en9_acceptance,
-            application_id,
-            body.observed_for_seconds,
-        )
-        return report.public_dict()
-    except ValueError as exc:
-        code = str(exc)
-        raise HTTPException(
-            status_code=(
-                status.HTTP_404_NOT_FOUND
-                if code == "EN9_APPLICATION_NOT_FOUND"
-                else status.HTTP_422_UNPROCESSABLE_CONTENT
-            ),
-            detail={"code": code},
-        ) from exc
-
-
-@router.get(
-    "/nodes/{node_id}/point-processing-acceptance-state",
-    **protected(CONFIGURATION_READ),
-)
-async def read_latest_en9_point_processing_acceptance_state(node_id: UUID) -> dict:
-    from app.services.en9_point_processing_acceptance import (
-        get_latest_en9_acceptance_state,
-    )
-
-    return await asyncio.to_thread(get_latest_en9_acceptance_state, node_id)
-
-
-@router.get(
-    "/point-processing-acceptance-reports/{report_id}",
-    **protected(CONFIGURATION_READ),
-)
-async def read_en9_point_processing_acceptance(report_id: UUID) -> dict:
-    from app.services.en9_point_processing_acceptance import (
-        get_en9_acceptance_report,
-    )
-
-    try:
-        return await asyncio.to_thread(get_en9_acceptance_report, report_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": str(exc)},
-        ) from exc

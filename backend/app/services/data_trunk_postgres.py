@@ -1759,11 +1759,4 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def build_postgres_data_trunk() -> DataTrunk:
-    from app.services.metric_projection_postgres import (
-        get_default_metric_projection,
-    )
-
-    return DataTrunk(
-        PostgresDataTrunkRepository(),
-        projection_observer=get_default_metric_projection(),
-    )
+    return DataTrunk(PostgresDataTrunkRepository())

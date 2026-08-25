@@ -45,7 +45,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
         self.assertNotIn("process_entity_alarms", imported)
         self.assertNotIn("process_entity_alarms", called)
         self.assertIn("_submit_installed_entity_alarms", source)
-        self.assertIn("_submit_unified_tag_alarms", source)
+        self.assertNotIn("_submit_unified_tag_alarms", source)
 
     def test_open_event_keeps_its_immutable_definition_after_an_upgrade(self) -> None:
         from app.services.alarm_runtime import (
@@ -114,7 +114,8 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
                 return EntityInstanceObservation(
                     entity_instance_id=entity_instance_id,
                     definition_id="pcs.activePower",
-                    instance_key="PCS-01",
+                    node_id=UUID("71000000-0000-0000-0000-000000000001"),
+                    node_key="PCS-01",
                     value=self.value,
                     data_type="FLOAT",
                     unit="kW",

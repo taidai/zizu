@@ -5,10 +5,9 @@ import {
   type Node, type Rule, type Category, type NeuronNode, type NeuronGroup,
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
-import NodeEntityPanel from '../components/NodeEntityPanel'
 import DataTrunkWorkspace from '../components/data-trunk/DataTrunkWorkspace'
 
-type TabKey = 'data-trunk' | 'overview' | 'tags' | 'entities'
+type TabKey = 'data-trunk' | 'overview' | 'tags'
 type FormMode = 'create' | 'edit'
 
 const LAYER_NAMES: Record<number, string> = {
@@ -675,12 +674,11 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
 
             <div className="flex items-center gap-2 mb-3">
               {(readOnly ? [
-                { key: 'data-trunk', label: '全局实体运行' },
+                { key: 'data-trunk', label: 'L0 → L1 → L2' },
               ] : [
-                { key: 'data-trunk', label: '数据主干' },
+                { key: 'data-trunk', label: 'L0 → L1 → L2' },
                 { key: 'overview', label: '节点概览' },
-                { key: 'tags', label: '点位管理' },
-                { key: 'entities', label: '全局实体' },
+                { key: 'tags', label: 'L0 点位实时' },
               ]).map((t) => (
                 <button
                   key={t.key}
@@ -727,7 +725,6 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
                 </div>
               )}
               {activeTab === 'tags' && <NodeTagPanel nodeId={selectedNode.id} />}
-              {activeTab === 'entities' && <NodeEntityPanel nodeId={selectedNode.id} />}
             </div>
           </>
         ) : (

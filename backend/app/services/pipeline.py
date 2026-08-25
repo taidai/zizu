@@ -36,23 +36,12 @@ from app.models.schemas import (
 from app.services.mqtt_client import MqttClient
 from app.services.normalizer import TagNormalizationRule, normalize
 from app.services.parser import parse_neuron_json
-from app.services.alarm_runtime import AlarmRuntime
 from app.services.data_trunk import DataTrunk, RawObservationAdapter, TagMetadata
 from app.services.data_trunk_contracts import (
     DataTrunkError,
     RawObservation,
-    ValueKind,
 )
 from app.services.data_trunk_postgres import build_postgres_data_trunk
-from app.services.telemetry_store import TelemetryRecord
-from app.services.tag_mqtt_alarm_adapter import (
-    ERROR_LEVELS,
-    InMemoryTagAlarmSourceResolver,
-    MqttAlarmAdapter,
-    TagAlarmAdapter,
-    TagAlarmSample,
-    TagAlarmSource,
-)
 
 
 MAX_INGEST_ATTEMPTS = 5
@@ -76,10 +65,6 @@ class DataPipeline:
         self._rules: dict[str, TagNormalizationRule] = {}  # {tag_name: rule}
         self._node_id_map: dict[str, UUID] = {}            # {node_name: node_id}
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
-        self._tag_alarm_sources = InMemoryTagAlarmSourceResolver()
-        self._mqtt_alarm_tag_ids: dict[str, UUID] = {}
-        self._tag_alarm_adapter: TagAlarmAdapter | None = None
-        self._mqtt_alarm_adapter: MqttAlarmAdapter | None = None
         self._entity_alarm_adapter = None
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
@@ -94,7 +79,6 @@ class DataPipeline:
         self._data_trunk = data_trunk or build_postgres_data_trunk()
         self._raw_observation_adapter = RawObservationAdapter()
         self._buffer: list[RawObservation] = []
-        self._legacy_projections: dict[UUID, TelemetryRecord] = {}
         self._buffer_lock = asyncio.Lock()
         self._flush_lock = asyncio.Lock()  # 串行化 flush，避免连接池耗尽
         self._flush_event = asyncio.Event()  # 缓冲区满或停更时唤醒 flush
@@ -204,18 +188,9 @@ class DataPipeline:
         self.metrics.messages_received += 1
         self.metrics.last_message_at = datetime.now(timezone.utc)
 
-        # 告警 topic 只构造统一观测；生命周期由 AlarmRuntime 独占。
+        # Legacy alarm topics are not configuration targets after the L2 hard cut.
         if self._mqtt is not None and self._mqtt.is_alarm_topic(mqtt_msg.topic):
-            try:
-                outcomes = await asyncio.to_thread(
-                    self._submit_mqtt_alarm_observations,
-                    mqtt_msg.topic,
-                    mqtt_msg.payload,
-                    datetime.now(timezone.utc),
-                )
-                logger.debug("[Pipeline] MQTT alarm observations submitted: {}", len(outcomes))
-            except Exception as e:
-                logger.error("[Pipeline] MQTT alarm adaptation failed: {}", e)
+            logger.debug("[Pipeline] Ignored legacy alarm topic after L2 hard cut")
             return
 
         raw = RawMessage(
@@ -247,24 +222,6 @@ class DataPipeline:
             source_sequence=source_sequence,
         )
 
-        # 从普通 telemetry 消息中提取 error1/error2/error3 分组告警
-        if self._mqtt is not None and not self._mqtt.is_alarm_topic(raw.topic):
-            if any(k in ERROR_LEVELS for k in parsed.tags):
-                try:
-                    outcomes = await asyncio.to_thread(
-                        self._submit_mqtt_alarm_observations,
-                        raw.topic,
-                        raw.payload,
-                        parsed.ts,
-                    )
-                    logger.debug(
-                        "[Pipeline] MQTT observations extracted from {}: {}",
-                        raw.topic,
-                        len(outcomes),
-                    )
-                except Exception as e:
-                    logger.error("[Pipeline] MQTT alarm extraction failed: {}", e)
-
         # ── Hook 2: 归一化 (CPU 密集型，放到线程池避免阻塞事件循环) ──
         # 复制 rules 引用避免 reload 期间的竞态；dict 引用替换是原子的。
         rules_snapshot = self._rules
@@ -276,13 +233,8 @@ class DataPipeline:
             point.node_name = parsed.node_name
 
         # ── Hook 3: 持久化 (缓冲写入) (~30 行) ──
-        legacy_by_tag = {item.tag_id: item for item in self._to_records(normalized)}
         async with self._buffer_lock:
             self._buffer.extend(raw_observations)
-            for observation in raw_observations:
-                projection = legacy_by_tag.get(observation.tag_id)
-                if projection is not None:
-                    self._legacy_projections[observation.observation_id] = projection
             if len(self._buffer) >= settings.pipeline_batch_size:
                 self._flush_event.set()
 
@@ -326,36 +278,6 @@ class DataPipeline:
     # ══════════════════════════════
     # 辅助方法
     # ══════════════════════════════
-
-    def _to_records(self, msg: NormalizedMessage) -> list[TelemetryRecord]:
-        """NormalizedMessage → TelemetryRecord[] (需要 ID 映射)."""
-        records: list[TelemetryRecord] = []
-        for point in msg.points:
-            nid: UUID | None = None
-            tid: UUID | None = None
-
-            # 优先按 Neuron source_path 精确匹配 (neuron_node/group/tag_name)
-            if point.group:
-                key = (point.node_name or msg.source_node, point.group, point.tag_name)
-                mapped = self._neuron_tag_map.get(key)
-                if mapped:
-                    nid, tid, _rule = mapped
-
-            # 回退：按 node_name + tag_name 全局匹配 (兼容 telemetry/# 格式)
-            if nid is None or tid is None:
-                nid = self._node_id_map.get(point.node_name or msg.source_node)
-                tid = self._tag_id_map.get(point.tag_name)
-
-            if nid is not None and tid is not None:
-                records.append(TelemetryRecord.from_point(point, nid, tid))
-            else:
-                logger.debug(
-                    "[Pipeline] Unresolved: node={} group={} tag={}",
-                    point.node_name or msg.source_node,
-                    point.group,
-                    point.tag_name,
-                )
-        return records
 
     def _raw_tag_catalog(self, parsed: ParsedMessage) -> dict[str, TagMetadata]:
         """Resolve parsed names to exact physical identities before buffering L0."""
@@ -492,53 +414,9 @@ class DataPipeline:
             self._raw_neuron_tag_map = new_raw_neuron_tag_map
             self._raw_node_tag_map = new_raw_node_tag_map
 
-            # 仅加载已确认实体实例的活动物理来源。重名 MQTT 外部 ID 不猜测
-            # 映射，必须先通过解决方案绑定/命名消歧后才进入统一告警。
-            def _fetch_alarm_sources() -> tuple[dict[UUID, TagAlarmSource], dict[str, UUID]]:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT binding.tag_id, binding.entity_instance_id,
-                                   tag.name, instance.freshness_seconds
-                            FROM t_entity_instance_bindings binding
-                            JOIN t_entity_instances instance
-                              ON instance.id = binding.entity_instance_id
-                            JOIN t_device_instances device
-                              ON device.id = instance.device_instance_id
-                            JOIN t_tags tag ON tag.id = binding.tag_id
-                            WHERE binding.active = TRUE
-                              AND instance.active = TRUE
-                              AND device.active = TRUE
-                              AND tag.enabled = TRUE
-                        """)
-                        sources: dict[UUID, TagAlarmSource] = {}
-                        by_name: dict[str, list[UUID]] = {}
-                        for row in cur.fetchall():
-                            tag_id, entity_instance_id, tag_name, freshness_seconds = row
-                            sources[tag_id] = TagAlarmSource(
-                                tag_id=tag_id,
-                                entity_instance_id=entity_instance_id,
-                                tag_name=tag_name,
-                                max_observation_gap_seconds=freshness_seconds,
-                            )
-                            by_name.setdefault(tag_name, []).append(tag_id)
-                return (
-                    sources,
-                    {
-                        tag_name: tag_ids[0]
-                        for tag_name, tag_ids in by_name.items()
-                        if len(tag_ids) == 1
-                    },
-                )
-
-            alarm_sources, mqtt_tag_ids = await asyncio.to_thread(_fetch_alarm_sources)
-            self._tag_alarm_sources.replace(alarm_sources)
-            self._mqtt_alarm_tag_ids = mqtt_tag_ids
-            if self._mqtt_alarm_adapter is not None:
-                self._mqtt_alarm_adapter.replace_tag_ids(mqtt_tag_ids)
             logger.info(
-                "[Pipeline] Loaded {} tag rules, {} neuron source-path mappings, {} unified alarm sources",
-                len(self._rules), len(self._neuron_tag_map), len(alarm_sources),
+                "[Pipeline] Loaded {} tag rules and {} Neuron source-path mappings",
+                len(self._rules), len(self._neuron_tag_map),
             )
 
         except Exception as e:
@@ -637,29 +515,12 @@ class DataPipeline:
             accepted_ids = set(receipt.accepted_l0_observation_ids)
             if not accepted_ids and receipt.accepted_l0_count == len(batch):
                 accepted_ids = set(committed_ids)
-            compatibility_batch = [
-                self._legacy_projections.pop(
-                    item.observation_id,
-                    _legacy_record(item),
-                )
-                for item in batch
-                if item.observation_id in accepted_ids
-            ]
-            for item in batch:
-                self._legacy_projections.pop(item.observation_id, None)
         self._reset_retry_state()
         self.metrics.points_written_db += receipt.accepted_l0_count
 
         try:
-            if compatibility_batch:
-                await asyncio.to_thread(
-                    self._submit_unified_tag_alarms,
-                    compatibility_batch,
-                )
-                await asyncio.to_thread(
-                    self._submit_installed_entity_alarms,
-                    self._entity_instances_covered_by_tag_batch(compatibility_batch),
-                )
+            if accepted_ids:
+                await asyncio.to_thread(self._submit_installed_entity_alarms, set())
         except Exception as e:
             logger.error("[Pipeline] Unified alarm processing failed: {}", e)
 
@@ -690,8 +551,6 @@ class DataPipeline:
             if current_ids != committed_ids:
                 raise RuntimeError("pipeline buffer prefix changed during failure record")
             del self._buffer[: len(batch)]
-            for item in batch:
-                self._legacy_projections.pop(item.observation_id, None)
         logger.error(
             "[Pipeline] Terminal ingestion failure recorded: {}",
             failure_reference,
@@ -702,18 +561,6 @@ class DataPipeline:
         self._retry_prefix_ids = ()
         self._retry_attempts = 0
         self._retry_error_code = "DATA_TRUNK_UNAVAILABLE"
-
-    def _entity_instances_covered_by_tag_batch(
-        self,
-        batch: list[TelemetryRecord],
-    ) -> set[UUID]:
-        """Keep each confirmed physical source on exactly one lifecycle path per flush."""
-        return {
-            source.entity_instance_id
-            for record in batch
-            if _telemetry_value(record) is not None
-            and (source := self._tag_alarm_sources.resolve(record.tag_id)) is not None
-        }
 
     def _submit_installed_entity_alarms(
         self,
@@ -735,93 +582,8 @@ class DataPipeline:
                 len(outcomes),
             )
 
-    def _tag_alarm_adapter_for_runtime(self) -> TagAlarmAdapter:
-        if self._tag_alarm_adapter is None:
-            from app.services.alarm_postgres import (
-                PostgresAlarmDefinitionCatalog,
-                PostgresAlarmRepository,
-            )
-
-            definitions = PostgresAlarmDefinitionCatalog()
-            self._tag_alarm_adapter = TagAlarmAdapter(
-                definitions,
-                AlarmRuntime(definitions, PostgresAlarmRepository()),
-                self._tag_alarm_sources,
-            )
-        return self._tag_alarm_adapter
-
-    def _submit_unified_tag_alarms(self, batch: list[TelemetryRecord]) -> None:
-        """Submit only durable, uniquely confirmed tag observations to ADR-0004."""
-        adapter = self._tag_alarm_adapter_for_runtime()
-        outcomes = []
-        for record in sorted(batch, key=lambda item: item.ts):
-            value = _telemetry_value(record)
-            if value is None:
-                continue
-            outcomes.extend(
-                adapter.submit(
-                    TagAlarmSample(
-                        record.tag_id,
-                        record.ts,
-                        value,
-                        record.quality,
-                    )
-                )
-            )
-        if outcomes:
-            logger.debug(
-                "[Pipeline] Unified tag observations submitted: {}",
-                len(outcomes),
-            )
-
-    def _submit_mqtt_alarm_observations(
-        self,
-        topic: str,
-        payload: bytes,
-        observed_at: datetime,
-    ) -> tuple:
-        if self._mqtt_alarm_adapter is None:
-            self._mqtt_alarm_adapter = MqttAlarmAdapter(
-                self._tag_alarm_adapter_for_runtime(),
-                self._mqtt_alarm_tag_ids,
-            )
-        return self._mqtt_alarm_adapter.submit(topic, payload, observed_at)
-
     @property
     def uptime_seconds(self) -> float:
         if self._started_at:
             return (datetime.now(timezone.utc) - self._started_at).total_seconds()
         return 0.0
-
-
-def _telemetry_value(record: TelemetryRecord):
-    for name in ("value_str", "value_bool", "value_int", "value_float"):
-        value = getattr(record, name)
-        if value is not None:
-            return value
-    return None
-
-
-def _legacy_record(observation: RawObservation) -> TelemetryRecord:
-    """Project committed L0 into the legacy alarm reader without a second DB write."""
-    fields: dict[str, object] = {}
-    if observation.value.kind is ValueKind.FLOAT:
-        fields["value_float"] = float(observation.value.value)
-    elif observation.value.kind is ValueKind.INT:
-        fields["value_int"] = int(observation.value.value)
-    elif observation.value.kind is ValueKind.BOOL:
-        fields["value_bool"] = bool(observation.value.value)
-    elif observation.value.kind in {ValueKind.STRING, ValueKind.ENUM}:
-        fields["value_str"] = str(observation.value.value)
-    else:
-        raise DataTrunkError(
-            "RAW_OBSERVATION_INVALID",
-            "Committed L0 observation cannot be projected to legacy telemetry",
-        )
-    return TelemetryRecord(
-        ts=observation.source_timestamp,
-        node_id=observation.node_id,
-        tag_id=observation.tag_id,
-        quality=int(observation.quality),
-        **fields,
-    )

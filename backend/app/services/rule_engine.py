@@ -267,7 +267,7 @@ def _execute_control(
     outputs: dict | None = None,
 ) -> bool:
     """Create one automatic command; rules never know device addresses."""
-    from app.api.solution_delivery import get_default_automated_control_commands
+    from app.api.control_commands import get_automated_control_commands
     from app.services.automated_control_commands import AutomatedControlCommandRequest
 
     try:
@@ -298,7 +298,7 @@ def _execute_control(
         ],
         "outputs": outputs or {},
     }
-    command = get_default_automated_control_commands().submit(
+    command = get_automated_control_commands().submit(
         AutomatedControlCommandRequest(
             source_type="rule",
             subject_id=rule_id,

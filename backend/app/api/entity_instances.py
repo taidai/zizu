@@ -18,6 +18,7 @@ router = APIRouter()
 _repository = None
 _runtime = None
 _catalog = None
+_registry = None
 
 
 def _entity_repository():
@@ -29,24 +30,36 @@ def _entity_repository():
     return _repository
 
 
-def get_entity_instance_runtime() -> EntityInstanceRuntime:
-    global _runtime
-    if _runtime is None:
+def get_entity_instance_repository():
+    return _entity_repository()
+
+
+def get_entity_instance_registry():
+    global _registry
+    if _registry is None:
         from app.services.configuration_revision_postgres import (
             PostgresConfigurationRevisions,
         )
-        from app.services.entity_instance_postgres import (
-            PostgresObservationCatalog,
-            PostgresSourceCatalog,
-        )
+        from app.services.entity_instance_postgres import PostgresSourceCatalog
         from app.services.entity_instance_registry import EntityInstanceRegistry
 
-        registry = EntityInstanceRegistry(
+        _registry = EntityInstanceRegistry(
             _entity_repository(),
             PostgresSourceCatalog(),
             PostgresConfigurationRevisions().current,
         )
-        _runtime = EntityInstanceRuntime(registry, PostgresObservationCatalog())
+    return _registry
+
+
+def get_entity_instance_runtime() -> EntityInstanceRuntime:
+    global _runtime
+    if _runtime is None:
+        from app.services.entity_instance_postgres import PostgresObservationCatalog
+
+        _runtime = EntityInstanceRuntime(
+            get_entity_instance_registry(),
+            PostgresObservationCatalog(),
+        )
     return _runtime
 
 

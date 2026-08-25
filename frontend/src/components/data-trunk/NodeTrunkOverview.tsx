@@ -38,8 +38,8 @@ export default function NodeTrunkOverview({
     .filter((item): item is typeof item & { descriptor: EntityInstance } => Boolean(item.descriptor))
 
   return (
-    <section className={`grid gap-3 ${readOnly ? 'grid-cols-1' : 'xl:grid-cols-[0.8fr_0.9fr_1.7fr]'}`}>
-      {!readOnly && (
+    <section className="grid gap-3 xl:grid-cols-[0.8fr_0.9fr_1.7fr]">
+      {(
         <div className="rounded-xl border border-gray-200 bg-white/45 p-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-gray-800">L0 原始点位</h3>
@@ -58,7 +58,7 @@ export default function NodeTrunkOverview({
         </div>
       )}
 
-      {!readOnly && (
+      {(
         <div className="rounded-xl border border-blue-200 bg-blue-50/55 p-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-blue-950">L1 点位加工</h3>
@@ -100,7 +100,7 @@ export default function NodeTrunkOverview({
           ))}
           {entityRows.length === 0 && (
             <div className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-xs text-gray-500">
-              当前节点尚未形成 L2 全局实体。请先安装解决方案并完成点位加工。
+              当前节点尚未形成 L2 全局实体。请先选择点位加工模板并发布。
             </div>
           )}
         </div>

@@ -157,7 +157,7 @@ class EntityInstanceRepository(Protocol):
 
     def entity_instance_for_definition(
         self,
-        device_instance_id: UUID,
+        node_id: UUID,
         definition_id: str,
     ) -> UUID | None: ...
 
@@ -409,13 +409,13 @@ class InMemoryEntityInstanceRepository:
 
     def entity_instance_for_definition(
         self,
-        device_instance_id: UUID,
+        node_id: UUID,
         definition_id: str,
     ) -> UUID | None:
         matches = [
             entity_id
             for entity_id, entity in self._entities.items()
-            if entity["device_instance_id"] == device_instance_id
+            if UUID(str(entity.get("node_id", entity["device_instance_id"]))) == node_id
             and entity["definition_id"] == definition_id
             and (
                 entity_id in self._bindings

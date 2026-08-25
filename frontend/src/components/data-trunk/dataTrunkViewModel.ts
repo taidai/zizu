@@ -12,7 +12,6 @@ export const DATA_TRUNK_STEPS = [
   { key: 'scan', label: '只读扫描' },
   { key: 'preview', label: '统一预览' },
   { key: 'apply', label: '原子应用' },
-  { key: 'acceptance', label: '机器验收' },
 ] as const
 
 export const DATA_TRUNK_LAYERS = ['L0', 'L1', 'L2'] as const
@@ -28,7 +27,7 @@ const BLOCKER_ACTIONS: Record<string, (input: string) => string> = {
   POINT_PROCESSING_INPUT_MISSING: (input) => `请先采集“${input}”原始点位`,
   POINT_PROCESSING_INPUT_INCOMPATIBLE: (input) => `请修正“${input}”的数据类型或单位`,
   POINT_PROCESSING_INPUT_SELECTION_INVALID: (input) => `请重新选择“${input}”原始点位`,
-  POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH: () => '输出实体契约已变化，请重新安装解决方案',
+  POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH: () => '输出实体契约已变化，请重新发布点位加工',
 }
 
 export function qualityLabel(quality: number): string {
@@ -91,7 +90,7 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
     : plan?.status === 'ready'
       ? '核对变更后应用点位加工'
       : plan?.status === 'applied'
-        ? '查看全局实体实时值与验收证据'
+        ? '查看全局实体实时值与来源证据'
         : '选择点位加工模板并生成计划'
   return {
     steps: DATA_TRUNK_STEPS,

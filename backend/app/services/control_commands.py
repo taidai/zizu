@@ -156,7 +156,7 @@ class ControlPolicyCatalog(Protocol):
     def control_policy(self, entity_instance_id: UUID) -> ControlPolicy | None: ...
     def entity_instance_for_definition(
         self,
-        device_instance_id: UUID,
+        node_id: UUID,
         definition_id: str,
     ) -> UUID | None: ...
 
@@ -201,12 +201,12 @@ class PostgresControlTargetResolver:
                 """
                 SELECT ei.id, n.name, t.name, t.source_path
                 FROM t_entity_instances ei
-                JOIN t_entity_instance_bindings binding
-                  ON binding.entity_instance_id = ei.id AND binding.active = TRUE
-                JOIN t_tags t ON t.id = binding.tag_id AND t.enabled = TRUE
+                JOIN t_l2_control_bindings binding
+                  ON binding.entity_instance_id = ei.id
+                JOIN t_tags t ON t.id = binding.l0_tag_id AND t.enabled = TRUE
                 JOIN t_nodes n ON n.id = t.node_id AND n.enabled = TRUE
-                JOIN t_device_instances di ON di.id = ei.device_instance_id AND di.active = TRUE
                 WHERE ei.active = TRUE
+                  AND ei.node_id = n.id
                   AND n.name = %s
                   AND t.name = %s
                   AND (t.source_type IS NULL OR lower(t.source_type) = 'neuron')
@@ -230,15 +230,13 @@ class PostgresControlTargetResolver:
             cur.execute(
                 """
                 SELECT binding.entity_instance_id
-                FROM t_entity_instance_bindings binding
+                FROM t_l2_control_bindings binding
                 JOIN t_entity_instances ei ON ei.id = binding.entity_instance_id
-                JOIN t_device_instances di ON di.id = ei.device_instance_id
-                JOIN t_tags tag ON tag.id = binding.tag_id AND tag.enabled = TRUE
+                JOIN t_tags tag ON tag.id = binding.l0_tag_id AND tag.enabled = TRUE
                 JOIN t_nodes node ON node.id = tag.node_id AND node.enabled = TRUE
                 WHERE binding.entity_instance_id = %s
-                  AND binding.active = TRUE
                   AND ei.active = TRUE
-                  AND di.active = TRUE
+                  AND ei.node_id = node.id
                   AND node.id = %s
                   AND (tag.source_type IS NULL OR lower(tag.source_type) = 'neuron')
                 """,
@@ -252,15 +250,13 @@ class PostgresControlTargetResolver:
             cur.execute(
                 """
                 SELECT binding.entity_instance_id
-                FROM t_entity_instance_bindings binding
+                FROM t_l2_control_bindings binding
                 JOIN t_entity_instances ei ON ei.id = binding.entity_instance_id
-                JOIN t_device_instances di ON di.id = ei.device_instance_id
-                JOIN t_tags tag ON tag.id = binding.tag_id AND tag.enabled = TRUE
+                JOIN t_tags tag ON tag.id = binding.l0_tag_id AND tag.enabled = TRUE
                 JOIN t_nodes node ON node.id = tag.node_id AND node.enabled = TRUE
                 WHERE ei.definition_id = %s
-                  AND binding.active = TRUE
                   AND ei.active = TRUE
-                  AND di.active = TRUE
+                  AND ei.node_id = node.id
                   AND node.id = %s
                   AND (tag.source_type IS NULL OR lower(tag.source_type) = 'neuron')
                 """,
@@ -270,28 +266,17 @@ class PostgresControlTargetResolver:
         return rows[0][0] if len(rows) == 1 else None
 
     def legacy_entity_target(self, *, entity_id: UUID) -> UUID | None:
-        """Map an old global entity only through an active confirmed source reservation."""
+        """Accept only an active L2 entity with an explicit physical control binding."""
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT active_binding.entity_instance_id
-                FROM t_entity_bindings legacy_binding
-                JOIN t_entities legacy
-                  ON legacy.id = legacy_binding.entity_id AND legacy.enabled = TRUE
-                JOIN t_entity_instance_bindings active_binding
-                  ON active_binding.tag_id = legacy_binding.tag_id
-                 AND active_binding.active = TRUE
-                JOIN t_entity_instances ei
-                  ON ei.id = active_binding.entity_instance_id AND ei.active = TRUE
-                JOIN t_device_instances di
-                  ON di.id = ei.device_instance_id AND di.active = TRUE
-                JOIN t_tags active_tag
-                  ON active_tag.id = legacy_binding.tag_id AND active_tag.enabled = TRUE
-                JOIN t_nodes active_node
-                  ON active_node.id = active_tag.node_id AND active_node.enabled = TRUE
-                WHERE legacy_binding.entity_id = %s
-                  AND legacy_binding.enabled = TRUE
-                  AND (active_tag.source_type IS NULL OR lower(active_tag.source_type) = 'neuron')
+                SELECT binding.entity_instance_id
+                FROM t_l2_control_bindings binding
+                JOIN t_entity_instances entity
+                  ON entity.id=binding.entity_instance_id AND entity.active=TRUE
+                JOIN t_tags tag
+                  ON tag.id=binding.l0_tag_id AND tag.enabled=TRUE
+                WHERE binding.entity_instance_id=%s
                 """,
                 (entity_id,),
             )
@@ -839,8 +824,21 @@ class ControlCommandRuntime:
         ):
             return self._transition(command, "rejected", "CONTROL_COOLDOWN_ACTIVE", at=now)
         try:
+            if source.control_tag_id is None:
+                return self._transition(
+                    command,
+                    "rejected",
+                    "CONTROL_TARGET_UNMAPPED",
+                    at=now,
+                )
             self._dispatcher.dispatch(
-                DispatchControlCommand(command.id, command.entity_instance_id, source.tag_id, request.value, source.data_type)
+                DispatchControlCommand(
+                    command.id,
+                    command.entity_instance_id,
+                    source.control_tag_id,
+                    request.value,
+                    source.data_type,
+                )
             )
         except Exception:
             return self._transition(command, "failed", "CONTROL_DISPATCH_FAILED", at=now)
@@ -900,7 +898,7 @@ class ControlCommandRuntime:
         except Exception:
             return self._transition(command, "failed", "CONTROL_ENTITY_UNAVAILABLE", at=now)
         readback_id = self._policies.entity_instance_for_definition(
-            source.device_instance_id, str(command.policy_snapshot["readback_definition"])
+            source.node_id, str(command.policy_snapshot["readback_definition"])
         )
         if readback_id is None:
             return self._transition(command, "failed", "CONTROL_READBACK_UNAVAILABLE", at=now)
@@ -934,7 +932,7 @@ class ControlCommandRuntime:
     def _validate_interlocks(self, source: ResolvedEntitySource, policy: ControlPolicy) -> str | None:
         for interlock in policy.interlocks:
             entity_id = self._policies.entity_instance_for_definition(
-                source.device_instance_id, interlock.definition_id
+                source.node_id, interlock.definition_id
             )
             if entity_id is None:
                 return "CONTROL_INTERLOCK_UNAVAILABLE"

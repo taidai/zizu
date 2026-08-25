@@ -13,7 +13,7 @@ os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
 import httpx
 from fastapi import FastAPI
 
-from tests.test_delivery_public_api import AuthenticatedDeliveryClient
+from tests.api_test_client import AuthenticatedApiClient
 
 
 DEFINITION_ID = UUID("71000000-0000-0000-0000-000000000001")
@@ -122,7 +122,7 @@ class AlarmEventPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         app.include_router(router, prefix="/api/v1")
         app.dependency_overrides[get_alarm_runtime] = lambda: runtime
-        async with AuthenticatedDeliveryClient(app) as client:
+        async with AuthenticatedApiClient(app) as client:
             operator_headers = {"Authorization": await client._bearer("operator")}
             listed = await client._client.get(
                 "/api/v1/alarm-events",

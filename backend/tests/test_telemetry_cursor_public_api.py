@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import FastAPI
 
 from app.api.telemetry import router as telemetry_router
-from tests.test_delivery_public_api import AuthenticatedDeliveryClient
+from tests.api_test_client import AuthenticatedApiClient
 
 
 class CursorTelemetryDatabase:
@@ -105,7 +105,7 @@ class TelemetryCursorPublicApiTest(unittest.IsolatedAsyncioTestCase):
             "app.services.telemetry_store.get_connection",
             database.connection,
         ):
-            async with AuthenticatedDeliveryClient(app) as client:
+            async with AuthenticatedApiClient(app) as client:
                 first = await client.get(
                     "/api/v1/telemetry?range=all&page_size=2"
                 )

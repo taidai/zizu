@@ -12,7 +12,11 @@ from app.api.business_security import (
     principal_for,
     protected,
 )
-from app.api.solution_delivery import get_default_control_commands
+from app.api.entity_instances import (
+    get_entity_instance_registry,
+    get_entity_instance_repository,
+    get_entity_instance_runtime,
+)
 from app.services.control_commands import (
     ControlCommand,
     ControlCommandCompatibility,
@@ -23,6 +27,36 @@ from app.services.identity import Principal
 
 
 router = APIRouter()
+_commands: ControlCommandRuntime | None = None
+_compatibility: ControlCommandCompatibility | None = None
+_automated = None
+
+
+def get_default_control_commands() -> ControlCommandRuntime:
+    global _commands
+    if _commands is None:
+        from app.services.control_commands import (
+            NeuronControlDispatcher,
+            PostgresControlCommandRepository,
+        )
+
+        _commands = ControlCommandRuntime(
+            registry=get_entity_instance_registry(),
+            policies=get_entity_instance_repository(),
+            readback=get_entity_instance_runtime(),
+            dispatcher=NeuronControlDispatcher(),
+            repository=PostgresControlCommandRepository(),
+        )
+    return _commands
+
+
+def get_automated_control_commands():
+    global _automated
+    if _automated is None:
+        from app.services.automated_control_commands import AutomatedControlCommands
+
+        _automated = AutomatedControlCommands(get_default_control_commands())
+    return _automated
 
 
 class ControlCommandRequest(BaseModel):
@@ -31,9 +65,15 @@ class ControlCommandRequest(BaseModel):
 
 
 def get_control_compatibility() -> ControlCommandCompatibility:
-    from app.api.solution_delivery import get_default_control_compatibility
+    global _compatibility
+    if _compatibility is None:
+        from app.services.control_commands import PostgresControlTargetResolver
 
-    return get_default_control_compatibility()
+        _compatibility = ControlCommandCompatibility(
+            get_default_control_commands(),
+            PostgresControlTargetResolver(),
+        )
+    return _compatibility
 
 
 def compatibility_response(command: ControlCommand) -> dict:

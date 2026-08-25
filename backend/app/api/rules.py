@@ -7,6 +7,7 @@ ZiZu Rules API - 规则引擎管理
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
+    principal_for,
     protected,
 )
 from app.api.entity_instances import get_entity_instance_catalog
@@ -30,8 +32,39 @@ from app.services.rule_alarm_adapter import (
     RuleAlarmAdapter,
     build_postgres_rule_alarm_adapter,
 )
+from app.services.identity import Principal
+from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
 
 router = APIRouter()
+
+
+def _rule_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _publish_jdm_revision(
+    connection,
+    *,
+    actor: str,
+    action: str,
+    rule_id: UUID,
+    content: object,
+) -> int:
+    revisions = PostgresConfigurationRevisions()
+    base = revisions.current(transaction=connection)
+    return revisions.publish(
+        transaction=connection,
+        base_revision=base,
+        actor=actor,
+        action=action,
+        resource_kind="jdm_rule",
+        resource_id=str(rule_id),
+        before_digest=None,
+        after_digest=_rule_digest(content),
+        details={},
+    )
 
 
 def get_rule_alarm_adapter() -> RuleAlarmAdapter:
@@ -184,6 +217,7 @@ async def list_rules(enabled: bool | None = Query(None)) -> dict:
 @router.post("/rules", **protected(CONFIGURATION_WRITE))
 async def create_rule(
     req: RuleCreateRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
     rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
 ) -> dict:
@@ -215,6 +249,13 @@ async def create_rule(
                 )
                 row = dict(zip([desc[0] for desc in cur.description], cur.fetchone()))
                 _replace_rule_entity_instance_references(cur, row["id"], references)
+                _publish_jdm_revision(
+                    conn,
+                    actor=principal.actor,
+                    action="jdm_rule.create",
+                    rule_id=row["id"],
+                    content=row,
+                )
                 conn.commit()
         return _serialize_rule(row)
     except Exception as e:
@@ -244,6 +285,7 @@ async def get_rule(rule_id: UUID) -> dict:
 async def update_rule(
     rule_id: UUID,
     req: RuleUpdateRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
     rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
 ) -> dict:
@@ -289,11 +331,19 @@ async def update_rule(
                 row = cur.fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Rule not found")
+                columns = [desc[0] for desc in cur.description]
                 if req.jdm_content is not None:
                     _replace_rule_entity_instance_references(cur, rule_id, references)
+                result = _serialize_rule(dict(zip(columns, row)))
+                _publish_jdm_revision(
+                    conn,
+                    actor=principal.actor,
+                    action="jdm_rule.update",
+                    rule_id=rule_id,
+                    content=result,
+                )
                 conn.commit()
-                columns = [desc[0] for desc in cur.description]
-                return _serialize_rule(dict(zip(columns, row)))
+                return result
     except HTTPException:
         raise
     except Exception as e:
@@ -302,7 +352,10 @@ async def update_rule(
 
 
 @router.delete("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
-async def delete_rule(rule_id: UUID) -> dict:
+async def delete_rule(
+    rule_id: UUID,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+) -> dict:
     """删除规则。"""
     from app.services.telemetry_store import get_connection
 
@@ -312,6 +365,13 @@ async def delete_rule(rule_id: UUID) -> dict:
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Rule not found")
+            _publish_jdm_revision(
+                conn,
+                actor=principal.actor,
+                action="jdm_rule.delete",
+                rule_id=rule_id,
+                content={"deleted": str(rule_id)},
+            )
             conn.commit()
     return {"status": "deleted", "id": str(rule_id)}
 

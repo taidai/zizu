@@ -27,12 +27,22 @@ from app.services.identity import Principal
 
 
 router = APIRouter()
+_runtime: AlarmRuntime | None = None
 
 
 def get_alarm_runtime() -> AlarmRuntime:
-    from app.api.solution_delivery import get_default_alarm_runtime
+    global _runtime
+    if _runtime is None:
+        from app.services.alarm_postgres import (
+            PostgresAlarmDefinitionCatalog,
+            PostgresAlarmRepository,
+        )
 
-    return get_default_alarm_runtime()
+        _runtime = AlarmRuntime(
+            PostgresAlarmDefinitionCatalog(),
+            PostgresAlarmRepository(),
+        )
+    return _runtime
 
 
 class AcknowledgeAlarmRequest(BaseModel):

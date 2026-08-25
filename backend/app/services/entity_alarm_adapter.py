@@ -100,13 +100,13 @@ def build_postgres_entity_alarm_adapter() -> EntityAlarmAdapter:
         PostgresSourceCatalog,
     )
     from app.services.entity_instance_registry import EntityInstanceRegistry
-    from app.services.solution_delivery_repository import PostgresDeliveryRepository
+    from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
 
     entity_repository = PostgresEntityInstanceRepository()
     registry = EntityInstanceRegistry(
         entity_repository,
         PostgresSourceCatalog(),
-        PostgresDeliveryRepository().site_configuration_version,
+        PostgresConfigurationRevisions().current,
     )
     entity_runtime = EntityInstanceRuntime(registry, PostgresObservationCatalog())
     definitions = PostgresAlarmDefinitionCatalog()

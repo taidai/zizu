@@ -178,7 +178,7 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(trusted[0].event_time_basis, "observed_at")
 
-    async def test_on_message_buffers_canonical_raw_not_normalized_telemetry(self) -> None:
+    async def test_on_message_buffers_only_canonical_raw_observation(self) -> None:
         trunk = _FailOnceDataTrunk()
         pipeline = DataPipeline(data_trunk=trunk)
         rule = TagNormalizationRule(
@@ -211,8 +211,7 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((9,), pipeline.buffer_sequences())
         self.assertEqual(TypedValue.float(12345.0), pipeline._buffer[0].value)
-        projection = pipeline._legacy_projections[pipeline._buffer[0].observation_id]
-        self.assertEqual(12.345, projection.value_float)
+        self.assertFalse(hasattr(pipeline, "_legacy_projections"))
 
     async def test_failed_ingest_keeps_exact_buffer_prefix_for_retry(self) -> None:
         trunk = _FailOnceDataTrunk()

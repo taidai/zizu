@@ -8,12 +8,9 @@ import {
   fetchEntityInstanceHistory,
   fetchEntityInstances,
   fetchNodeDataTrunk,
-  fetchPointProcessingAcceptanceState,
   fetchPointProcessingPlan,
   fetchPointProcessingTemplates,
   previewPointProcessingFormula,
-  runEN9PointProcessingAcceptance,
-  type EN9AcceptanceReport,
   type EntityInstance,
   type EntityInstanceObservation,
   type Node,
@@ -48,12 +45,11 @@ export default function DataTrunkWorkspace({
   const [selections, setSelections] = useState<Record<string, string>>({})
   const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
   const [application, setApplication] = useState<PointProcessingApplication | null>(null)
-  const [acceptance, setAcceptance] = useState<EN9AcceptanceReport | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
   const [observations, setObservations] = useState<Map<string, EntityInstanceObservation>>(new Map())
   const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'plan' | 'apply' | 'acceptance' | 'formula' | null>(null)
+  const [busy, setBusy] = useState<'plan' | 'apply' | 'formula' | null>(null)
   const [error, setError] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
   const [formulaPreview, setFormulaPreview] = useState<PointProcessingFormulaPreview | null>(null)
@@ -90,13 +86,8 @@ export default function DataTrunkWorkspace({
     try {
       const nextTrunk = await loadRuntime()
       if (!readOnly) {
-        const [nextTemplates, acceptanceState] = await Promise.all([
-          fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase()),
-          fetchPointProcessingAcceptanceState(node.id),
-        ])
+        const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
         setTemplates(nextTemplates)
-        setApplication(acceptanceState.application)
-        setAcceptance(acceptanceState.latest_report)
         setSelectedRevisionId((current) => current || nextTrunk.l1_summary.revision_id || nextTemplates[0]?.revision_id || '')
         const retry = findDataTrunkApplyRetry(sessionStorage, actorId, node.id)
         if (retry) {
@@ -127,7 +118,6 @@ export default function DataTrunkWorkspace({
   useEffect(() => {
     setPlan(null)
     setApplication(null)
-    setAcceptance(null)
     setSelectedRevisionId('')
     setSelections({})
     setResultUnknown(false)
@@ -148,8 +138,7 @@ export default function DataTrunkWorkspace({
       })
     },
     async () => { await loadRuntime() },
-    application?.id,
-  ), [l2Ids.join('|'), loadRuntime, application?.id])
+  ), [l2Ids.join('|'), loadRuntime])
 
   const selectedTemplate = templates.find((item) => item.revision_id === selectedRevisionId) || null
   const installedTemplate = templates.find((item) => item.revision_id === trunk?.l1_summary.revision_id) || null
@@ -214,7 +203,6 @@ export default function DataTrunkWorkspace({
 
   const handleApply = async () => {
     if (!plan) return
-    setAcceptance(null)
     setBusy('apply')
     setError('')
     const identity = { actorId, nodeId: node.id, planId: plan.id, planDigest: plan.digest }
@@ -240,31 +228,13 @@ export default function DataTrunkWorkspace({
     }
   }
 
-  const handleAcceptance = async () => {
-    if (!application) return
-    setBusy('acceptance')
-    setError('')
-    try {
-      setAcceptance(await runEN9PointProcessingAcceptance(application.id, 1800))
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '机器验收失败')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const currentAcceptance = acceptance?.application_id === application?.id
-    ? acceptance
-    : null
-  const completedStage = currentAcceptance?.passed
-    ? 4
-    : application || plan?.status === 'applied'
-      ? 3
-      : plan
-        ? 2
-        : selectedTemplate
-          ? 1
-          : trunk?.l1_summary.installed ? 3 : 0
+  const completedStage = application || plan?.status === 'applied'
+    ? 3
+    : plan
+      ? 2
+      : selectedTemplate
+        ? 1
+        : trunk?.l1_summary.installed ? 3 : 0
 
   if (loading) {
     return <div className="neu-card p-6 text-sm text-gray-500">正在读取节点数据主干...</div>
@@ -314,34 +284,7 @@ export default function DataTrunkWorkspace({
 
       {!readOnly && (
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="rounded-xl border border-gray-200 bg-white/45 p-4">
-            <h3 className="text-sm font-semibold text-gray-900">交付证据</h3>
-            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">已安装输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div>
-              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">站点配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.site_configuration_version ?? observations.values().next().value?.site_configuration_version ?? '等待安装'}</div></div>
-              <div className="border-l-2 border-blue-500 pl-3">
-                <div className="text-[10px] text-gray-500">运行验收</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">{currentAcceptance ? (currentAcceptance.passed ? '机器验收通过' : '机器验收未通过') : application ? (observations.size >= 3 ? '三实体在线，待机器报告' : '等待三实体实时值') : '应用后生成'}</div>
-                {application && !currentAcceptance?.passed && (
-                  <button type="button" disabled={busy !== null} onClick={() => void handleAcceptance()} className="neu-btn mt-2 px-2 py-1 text-[10px] text-blue-700 disabled:opacity-50">
-                    {busy === 'acceptance' ? '验收中...' : currentAcceptance ? '重新运行机器验收' : '运行机器验收'}
-                  </button>
-                )}
-                {currentAcceptance && (
-                  <div className="mt-2 space-y-1 text-[10px] text-gray-500">
-                    <div>报告 {currentAcceptance.id.slice(0, 8)} · 摘要 {currentAcceptance.digest.slice(0, 12)}</div>
-                    {currentAcceptance.checks.map((check) => (
-                      <div key={check.code} className={`rounded border px-2 py-1 ${check.passed ? 'border-emerald-100 text-emerald-700' : 'border-red-100 bg-red-50 text-red-700'}`}>
-                        <div>{check.passed ? '通过' : '未通过'} · {check.code}</div>
-                        <div className="mt-0.5 break-all text-gray-500">{Object.entries(check.evidence).map(([key, value]) => `${key}=${String(value)}`).join(' · ')}</div>
-                        {!check.passed && <div className="mt-0.5">建议：检查该项证据后修复，再重新运行验收。</div>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+          <div className="rounded-xl border border-gray-200 bg-white/45 p-4"><h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3><div className="mt-3 grid grid-cols-2 gap-3"><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">L2 输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">统一配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.configuration_revision ?? observations.values().next().value?.configuration_revision ?? '未发布'}</div></div></div></div>
           <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}

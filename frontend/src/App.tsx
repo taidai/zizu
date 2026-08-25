@@ -8,18 +8,14 @@ import {
   type AuthSession,
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
-import { clearAcceptanceRetry } from './components/alarm-configuration/acceptanceRetryState'
 import { clearDataTrunkApplyRetry } from './components/data-trunk/dataTrunkRetryState'
-import { Network, Scale, Bell, Settings, Box, Layers, AlertTriangle, LayoutDashboard, PackageCheck } from 'lucide-react'
+import { Network, Scale, Bell, Settings, AlertTriangle, LayoutDashboard } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
-const EntityManagerPage = lazy(() => import('./pages/EntityManagerPage'))
-const DeviceTemplatePage = lazy(() => import('./pages/DeviceTemplatePage'))
 const AlarmConfigurationPage = lazy(() => import('./pages/AlarmConfigurationPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
-const SolutionDeliveryPage = lazy(() => import('./pages/SolutionDeliveryPage'))
 
 function PageLoader() {
   return (
@@ -57,7 +53,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'workbench' | 'delivery' | 'tree' | 'entities' | 'rules' | 'alarms' | 'alarm-config' | 'templates' | 'admin'
+type PageKey = 'workbench' | 'tree' | 'rules' | 'alarms' | 'alarm-config' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -78,13 +74,10 @@ const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
 
 const NAV_ITEMS: NavigationItem[] = [
   { key: 'workbench', label: 'EMS 工作台', icon: <LayoutDashboard size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'delivery', label: '解决方案交付', icon: <PackageCheck size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'entities', label: '实体管理', icon: <Box size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
-  { key: 'templates', label: '设备模板', icon: <Layers size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   // Server-side protection for system/control APIs is intentionally Ticket #4.
   { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} />, roles: ['admin'] },
 ]
@@ -188,7 +181,6 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
     } catch {
       // Local logout is authoritative even when the server is unavailable.
     } finally {
-      clearAcceptanceRetry(sessionStorage)
       clearDataTrunkApplyRetry(sessionStorage)
       onLoggedOut()
     }
@@ -278,13 +270,10 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
-            {activePage === 'delivery' && <SolutionDeliveryPage canImport={session.user.role === 'admin'} />}
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} actorId={session.user.id} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage />}
             {activePage === 'alarm-config' && <AlarmConfigurationPage actorId={session.user.id} onOpenAlarms={() => setActivePage('alarms')} />}
-            {activePage === 'entities' && <EntityManagerPage />}
-            {activePage === 'templates' && <DeviceTemplatePage />}
           </Suspense>
           {activePage === 'admin' && <AdminPanel />}
         </div>
@@ -329,7 +318,6 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = subscribeAuthenticationRequired(() => {
-      clearAcceptanceRetry(sessionStorage)
       clearDataTrunkApplyRetry(sessionStorage)
       setSession(null)
       setRestoreError('')
@@ -352,7 +340,6 @@ export default function App() {
           <button onClick={() => void restoreSession()} className="mt-5 rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white">重试</button>
           <button
             onClick={() => {
-              clearAcceptanceRetry(sessionStorage)
               clearDataTrunkApplyRetry(sessionStorage)
               clearAuthSession()
               setRestoreError('')

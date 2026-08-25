@@ -19,7 +19,6 @@ from starlette.websockets import WebSocketDisconnect
 from app.api.auth import router as auth_router
 from app.api.security import get_identity
 from app.api.websocket import (
-    get_en9_stream_evidence,
     get_entity_observation_broadcaster,
     get_entity_observation_catalog,
     router as websocket_router,
@@ -140,6 +139,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await dispatcher.run_once(limit=20), 1)
         self.assertEqual(repository.published, [EVENT_ID])
 
+    @unittest.skip("machine acceptance removed by L0/L1/L2 hard cut")
     async def test_authenticated_acceptance_subscription_records_only_client_ack(self) -> None:
         runtime_id = UUID("91000000-0000-0000-0000-000000000003")
         binding = object()
@@ -181,6 +181,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
             recorder.deliveries,
         )
 
+    @unittest.skip("machine acceptance removed by L0/L1/L2 hard cut")
     async def test_acceptance_ack_rejects_event_not_sent_to_socket(self) -> None:
         broadcaster = EntityObservationBroadcaster(
             receipt_recorder=_AcceptanceEvidence(),
@@ -196,6 +197,7 @@ class EntityObservationBroadcasterTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "ACK_EVENT_NOT_PENDING"):
             await broadcaster.acknowledge(socket, EVENT_ID, "not-a-real-nonce")
 
+    @unittest.skip("machine acceptance removed by L0/L1/L2 hard cut")
     async def test_acceptance_ack_nonce_allows_immediate_ack_and_blocks_forgery(self) -> None:
         runtime_id = UUID("91000000-0000-0000-0000-000000000003")
         application_id = UUID("91000000-0000-0000-0000-000000000020")
@@ -291,10 +293,7 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
             ]
         )
         identity = Identity(repository)
-        acceptance_evidence = _AcceptanceEvidence()
-        broadcaster = EntityObservationBroadcaster(
-            receipt_recorder=acceptance_evidence,
-        )
+        broadcaster = EntityObservationBroadcaster()
         app = FastAPI()
         app.include_router(auth_router, prefix="/api/v1")
         app.include_router(websocket_router, prefix="/api/v1")
@@ -303,10 +302,6 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
         app.dependency_overrides[
             get_entity_observation_broadcaster
         ] = lambda: broadcaster
-        app.dependency_overrides[
-            get_en9_stream_evidence
-        ] = lambda: acceptance_evidence
-        app.state.acceptance_evidence = acceptance_evidence
         return app
 
     def test_ticket_authenticates_entity_subscription_and_logout_revokes_it(self) -> None:
@@ -347,6 +342,7 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
                     websocket.receive_json()
                 self.assertEqual(closed.exception.code, 4401)
 
+    @unittest.skip("machine acceptance removed by L0/L1/L2 hard cut")
     def test_acceptance_subscription_is_bound_to_authenticated_principal(self) -> None:
         app = self.build_app()
         application_id = UUID("91000000-0000-0000-0000-000000000020")
@@ -380,6 +376,7 @@ class EntityObservationWebSocketPublicApiTest(unittest.TestCase):
         self.assertEqual("operator", principal.username)
         self.assertEqual("operator", principal.role)
 
+    @unittest.skip("machine acceptance removed by L0/L1/L2 hard cut")
     def test_acceptance_ack_is_accepted_only_after_server_sent_event(self) -> None:
         app = self.build_app()
         application_id = UUID("91000000-0000-0000-0000-000000000020")

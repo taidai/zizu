@@ -101,7 +101,7 @@ export default function EntityObservationCard({
 
       <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-gray-200 pt-2 text-[10px] text-gray-500">
         <div><dt className="inline">数据年龄：</dt><dd className="inline">{observation ? ageLabel(observation.age_ms) : '等待数据'}</dd></div>
-        <div><dt className="inline">站点配置：</dt><dd className="inline">{observation?.site_configuration_version ?? '未记录'}</dd></div>
+        <div><dt className="inline">统一配置：</dt><dd className="inline">{observation?.configuration_revision ?? '未记录'}</dd></div>
         <div><dt className="inline">加工来源：</dt><dd className="inline">{revisionLabel(observation?.processing_revision_id ?? null)}</dd></div>
         <div title={sourceDigest || undefined}><dt className="inline">来源证据：</dt><dd className="inline">{sourceDigest ? sourceDigest.slice(0, 10) : '未记录'}</dd></div>
       </dl>

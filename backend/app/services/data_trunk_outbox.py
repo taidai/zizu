@@ -9,10 +9,8 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
-import secrets
 
 from app.services.data_trunk_contracts import DataTrunkError
-from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 
 
 @dataclass(frozen=True)
@@ -33,107 +31,36 @@ class OutboxEvent:
         }
 
 
-class AcceptanceReceiptRecorder(Protocol):
-    def record_acknowledgement(
-        self,
-        binding: Any,
-        event: OutboxEvent,
-        runtime_instance_id: UUID,
-    ) -> None: ...
-
-
 @dataclass(frozen=True)
 class _Subscription:
     entity_instance_ids: frozenset[UUID]
-    acceptance_binding: Any | None = None
-
-
-@dataclass(frozen=True)
-class _PendingAcceptanceEvent:
-    event: OutboxEvent
-    nonce: str
-    sent: bool
 
 
 class EntityObservationBroadcaster:
     """Keep per-socket L2 entity subscriptions and publish commit evidence."""
 
-    def __init__(
-        self,
-        *,
-        receipt_recorder: AcceptanceReceiptRecorder | None = None,
-        runtime_instance_id: UUID = RUNTIME_INSTANCE_ID,
-    ) -> None:
+    def __init__(self) -> None:
         self._subscriptions: dict[Any, _Subscription | None] = {}
-        self._pending_acceptance_events: dict[
-            Any, dict[UUID, _PendingAcceptanceEvent]
-        ] = {}
         self._lock = asyncio.Lock()
-        self._receipt_recorder = receipt_recorder
-        self._runtime_instance_id = runtime_instance_id
 
     async def connect(self, websocket: Any) -> None:
         async with self._lock:
             self._subscriptions[websocket] = None
-            self._pending_acceptance_events[websocket] = {}
 
     async def disconnect(self, websocket: Any) -> None:
         async with self._lock:
             self._subscriptions.pop(websocket, None)
-            self._pending_acceptance_events.pop(websocket, None)
 
     async def subscribe(
         self,
         websocket: Any,
         entity_instance_ids: tuple[UUID, ...],
-        *,
-        acceptance_binding: Any | None = None,
     ) -> None:
         async with self._lock:
             if websocket in self._subscriptions:
                 self._subscriptions[websocket] = _Subscription(
-                    frozenset(entity_instance_ids),
-                    acceptance_binding,
+                    frozenset(entity_instance_ids)
                 )
-                self._pending_acceptance_events[websocket] = {}
-
-    async def acknowledge(
-        self,
-        websocket: Any,
-        event_id: UUID,
-        nonce: str,
-        application_id: UUID | None = None,
-    ) -> None:
-        """Persist evidence only after this authenticated socket ACKs a sent event."""
-        async with self._lock:
-            subscription = self._subscriptions.get(websocket)
-            pending = self._pending_acceptance_events.get(websocket, {})
-            pending_event = pending.get(event_id)
-        if (
-            subscription is None
-            or subscription.acceptance_binding is None
-            or pending_event is None
-            or not pending_event.sent
-            or not secrets.compare_digest(pending_event.nonce, nonce)
-            or self._receipt_recorder is None
-            or (
-                application_id is not None
-                and getattr(
-                    subscription.acceptance_binding,
-                    "application_id",
-                    application_id,
-                ) != application_id
-            )
-        ):
-            raise ValueError("ACK_EVENT_NOT_PENDING")
-        await asyncio.to_thread(
-            self._receipt_recorder.record_acknowledgement,
-            subscription.acceptance_binding,
-            pending_event.event,
-            self._runtime_instance_id,
-        )
-        async with self._lock:
-            self._pending_acceptance_events.get(websocket, {}).pop(event_id, None)
 
     async def publish(self, event: OutboxEvent) -> None:
         async with self._lock:
@@ -145,24 +72,9 @@ class EntityObservationBroadcaster:
             )
         payload = event.public_dict()
         failed = []
-        for websocket, subscription in subscribers:
-            socket_payload = payload
-            nonce = None
-            if subscription.acceptance_binding is not None:
-                nonce = secrets.token_urlsafe(32)
-                socket_payload = {**payload, "acceptance_ack_nonce": nonce}
-                async with self._lock:
-                    pending = self._pending_acceptance_events.get(websocket)
-                    if pending is not None:
-                        pending[event.event_id] = _PendingAcceptanceEvent(
-                            event,
-                            nonce,
-                            True,
-                        )
-                        while len(pending) > 1000:
-                            pending.pop(next(iter(pending)))
+        for websocket, _subscription in subscribers:
             try:
-                await websocket.send_json(socket_payload)
+                await websocket.send_json(payload)
             except Exception:
                 failed.append(websocket)
                 continue
@@ -170,7 +82,6 @@ class EntityObservationBroadcaster:
             async with self._lock:
                 for websocket in failed:
                     self._subscriptions.pop(websocket, None)
-                    self._pending_acceptance_events.pop(websocket, None)
 
 
 class OutboxRepository(Protocol):

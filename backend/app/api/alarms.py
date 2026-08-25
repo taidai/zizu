@@ -128,29 +128,25 @@ async def alarm_counts(
                 placeholders = ",".join(["%s"] * len(uuids))
                 cur.execute(
                     f"""
-                    SELECT tag.node_id, COUNT(DISTINCT event.id) AS cnt
+                    SELECT entity.node_id, COUNT(DISTINCT event.id) AS cnt
                     FROM t_alarm_events event
-                    JOIN t_entity_instance_bindings binding
-                      ON binding.entity_instance_id = event.entity_instance_id
-                     AND binding.active = TRUE
-                    JOIN t_tags tag ON tag.id = binding.tag_id
+                    JOIN t_entity_instances entity
+                      ON entity.id = event.entity_instance_id
                     WHERE event.state IN ('active_unacknowledged', 'active_acknowledged')
-                      AND tag.node_id IN ({placeholders})
-                    GROUP BY tag.node_id
+                      AND entity.node_id IN ({placeholders})
+                    GROUP BY entity.node_id
                     """,
                     uuids,
                 )
             else:
                 cur.execute(
                     """
-                    SELECT tag.node_id, COUNT(DISTINCT event.id) AS cnt
+                    SELECT entity.node_id, COUNT(DISTINCT event.id) AS cnt
                     FROM t_alarm_events event
-                    JOIN t_entity_instance_bindings binding
-                      ON binding.entity_instance_id = event.entity_instance_id
-                     AND binding.active = TRUE
-                    JOIN t_tags tag ON tag.id = binding.tag_id
+                    JOIN t_entity_instances entity
+                      ON entity.id = event.entity_instance_id
                     WHERE event.state IN ('active_unacknowledged', 'active_acknowledged')
-                    GROUP BY tag.node_id
+                    GROUP BY entity.node_id
                     """
                 )
             counts = {str(row[0]): row[1] for row in cur.fetchall()}

@@ -788,11 +788,6 @@ class PostgresPointProcessingCatalog:
         )
         expression = cursor.fetchone()
         if expression is not None:
-            if expression[1].get("kind") == "business_metric":
-                # Private compiled transform.  It is deliberately stored in the
-                # existing immutable expression record only to reuse the L1
-                # catalog/revision seam; it is never a user-editable formula.
-                return dict(expression[1])
             return {
                 "kind": "formula",
                 "expression": expression[0],

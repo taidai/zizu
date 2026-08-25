@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         init_config_table()
         try:
-            from app.api.solution_delivery import get_default_control_commands
+            from app.api.control_commands import get_default_control_commands
 
             recovered_commands = get_default_control_commands().recover()
             if recovered_commands:
@@ -134,41 +134,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "[Main] Control command recovery unavailable (development mode): {}",
                 control_recovery_error,
             )
-        # 幂等播种标准全局实体目录（单一数据源）
-        try:
-            from app.core.standard_entities import seed_standard_entities
-            _seed_res = seed_standard_entities()
-            logger.info("[Main] Standard entities seeded: {}", _seed_res.get("seeded"))
-        except Exception as _se:
-            logger.warning("[Main] Standard entity seed (non-fatal): {}", _se)
         try:
             from app.core.standard_fault_maps import seed_standard_fault_maps
             _fm_res = seed_standard_fault_maps()
             logger.info("[Main] Standard fault maps: {}", _fm_res)
         except Exception as _fe:
             logger.warning("[Main] Standard fault map seed (non-fatal): {}", _fe)
-        try:
-            from app.core.standard_device_templates import seed_standard_device_templates
-            _dt_res = seed_standard_device_templates()
-            logger.info("[Main] Standard device templates: {}", _dt_res)
-        except Exception as _de:
-            logger.warning("[Main] Standard device template seed (non-fatal): {}", _de)
-        # 若当前没有任何实体绑定，自动执行一次国标映射绑定，提升开箱即用性
-        try:
-            from app.services.entity_binder import auto_bind_standard_entities
-            from app.services.telemetry_store import get_connection
-            _binding_count = 0
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM t_entity_bindings")
-                    _binding_count = cur.fetchone()[0]
-            if _binding_count == 0:
-                _ab_res = auto_bind_standard_entities(dry_run=False)
-                logger.info("[Main] Auto-bind on startup: created={}, skipped={}", _ab_res.get("created"), _ab_res.get("skipped"))
-            else:
-                logger.info("[Main] Auto-bind skipped: {} existing bindings", _binding_count)
-        except Exception as _abe:
-            logger.warning("[Main] Auto-bind on startup (non-fatal): {}", _abe)
         persisted_topic = load_mqtt_topics()
         if persisted_topic:
             settings.mqtt_telemetry_topic = persisted_topic
@@ -202,32 +173,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _data_trunk_tasks = []
     _data_trunk_stop = asyncio.Event()
     try:
-        from app.api.websocket import (
-            get_en9_stream_evidence,
-            get_entity_observation_broadcaster,
-        )
+        from app.api.websocket import get_entity_observation_broadcaster
         from app.services.data_trunk_outbox import (
             OutboxDispatcher,
             PostgresOutboxRepository,
         )
         from app.services.data_trunk_postgres import PostgresDataTrunkRepository
         from app.services.data_trunk import DataTrunk
-        from app.services.metric_projection_postgres import (
-            get_default_metric_projection,
-        )
-        from app.services.runtime_identity import RUNTIME_INSTANCE_ID
 
         freshness_repository = PostgresDataTrunkRepository()
-        metric_projection = get_default_metric_projection()
-        formula_trunk = DataTrunk(
-            freshness_repository,
-            projection_observer=metric_projection,
-        )
-        stream_evidence = get_en9_stream_evidence()
-        await asyncio.to_thread(
-            stream_evidence.register_runtime,
-            RUNTIME_INSTANCE_ID,
-        )
+        formula_trunk = DataTrunk(freshness_repository)
         _outbox_dispatcher = OutboxDispatcher(
             PostgresOutboxRepository(),
             get_entity_observation_broadcaster(),
@@ -269,42 +224,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     )
                 await _wait_or_stop(1.0)
 
-        async def _metric_projection_loop() -> None:
-            while not _data_trunk_stop.is_set():
-                try:
-                    await asyncio.to_thread(
-                        metric_projection.advance,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "[MetricProjection] projection tick failed: {}",
-                        error,
-                    )
-                await _wait_or_stop(1.0)
-
-        async def _runtime_health_loop() -> None:
-            while not _data_trunk_stop.is_set():
-                try:
-                    mqtt_connected = bool(
-                        _pipeline._mqtt and _pipeline._mqtt.is_connected
-                    )
-                    if _pipeline.metrics.last_message_at is not None:
-                        await asyncio.to_thread(
-                            stream_evidence.record_health,
-                            RUNTIME_INSTANCE_ID,
-                            pipeline_running=(
-                                _pipeline.metrics.status.name == "RUNNING"
-                            ),
-                            mqtt_connected=mqtt_connected,
-                            last_message_at=_pipeline.metrics.last_message_at,
-                        )
-                except Exception as error:
-                    logger.warning(
-                        "[DataTrunk] runtime health evidence failed: {}",
-                        error,
-                    )
-                await _wait_or_stop(30.0)
-
         _data_trunk_tasks = [
             asyncio.create_task(_freshness_loop(), name="data_trunk_freshness"),
             asyncio.create_task(_outbox_loop(), name="data_trunk_outbox"),
@@ -312,17 +231,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 _typed_formula_loop(),
                 name="data_trunk_typed_formulas",
             ),
-            asyncio.create_task(
-                _metric_projection_loop(),
-                name="business_metric_projection",
-            ),
-            asyncio.create_task(
-                _runtime_health_loop(),
-                name="data_trunk_runtime_health",
-            ),
         ]
         logger.success(
-            "[Main] L2 freshness, metrics, typed formulas and outbox dispatch started ✅"
+            "[Main] L2 freshness, typed formulas and outbox dispatch started ✅"
         )
     except Exception as error:
         from app.core.config import settings
@@ -341,7 +252,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.aggregator import run_aggregation_tick
         from app.services.formula_engine import run_formula_tick
         from app.services.rule_engine import run_rule_tick
-        from app.api.solution_delivery import get_default_ems_policy_runtime
 
         async def _periodic_task(name: str, interval: int, fn) -> None:
             while True:
@@ -367,12 +277,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             asyncio.create_task(
                 _periodic_task("rules", RULE_INTERVAL_SEC, run_rule_tick),
                 name="f2_rules",
-            )
-        )
-        _scheduler_tasks.append(
-            asyncio.create_task(
-                _periodic_task("ems-policies", RULE_INTERVAL_SEC, get_default_ems_policy_runtime().tick),
-                name="ems_policies",
             )
         )
         logger.success(
@@ -474,27 +378,11 @@ def create_app() -> FastAPI:
     app.include_router(rule_templates_router, prefix="/api/v1", tags=["Rule Templates"])
 
     # ---- Static Frontend (F0 可视化 V1) ----
-    from app.api.entities import router as entities_router
-    app.include_router(entities_router, prefix="/api/v1", tags=["Entities"])
-
     from app.api.fault_maps import router as fault_maps_router
     app.include_router(fault_maps_router, prefix="/api/v1", tags=["Fault Maps"])
 
-    from app.api.alarm_levels import router as alarm_levels_router
-    app.include_router(alarm_levels_router, prefix="/api/v1", tags=["Alarm Levels"])
-
-    from app.api.device_templates import router as device_templates_router
-    app.include_router(device_templates_router, prefix="/api/v1", tags=["Device Templates"])
-
     from app.api.nanomq import router as nanomq_router
     app.include_router(nanomq_router, prefix="/api/v1", tags=["nanoMQ"])
-
-    from app.api.solution_delivery import router as solution_delivery_router
-    app.include_router(
-        solution_delivery_router,
-        prefix="/api/v1",
-        tags=["Solution Delivery"],
-    )
 
     from app.api.ems_workbench import router as ems_workbench_router
     app.include_router(
@@ -502,9 +390,6 @@ def create_app() -> FastAPI:
         prefix="/api/v1",
         tags=["EMS Workbench"],
     )
-
-    from app.api.ems_policies import router as ems_policy_router
-    app.include_router(ems_policy_router, prefix="/api/v1", tags=["EMS Policies"])
 
     from app.api.entity_instances import router as entity_instances_router
     app.include_router(

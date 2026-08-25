@@ -158,6 +158,81 @@ BEGIN
 
   DROP TABLE IF EXISTS public.t_alarm_configuration_acceptance_idempotency CASCADE;
   DROP TABLE IF EXISTS public.t_alarm_configuration_reports CASCADE;
+  DROP TRIGGER IF EXISTS trg_alarm_configuration_plans_append_only
+    ON public.t_alarm_configuration_plans;
+  DROP TRIGGER IF EXISTS trg_alarm_configuration_plans_truncate
+    ON public.t_alarm_configuration_plans;
+  DROP TABLE IF EXISTS public.t_legacy_alarm_migration_targets CASCADE;
+  DROP TABLE IF EXISTS public.t_legacy_alarm_migrations CASCADE;
+  DROP TABLE IF EXISTS public.t_alarm_definition_origins CASCADE;
+
+  DELETE FROM public.t_alarm_configuration_idempotency
+  WHERE plan_id IN (
+    SELECT id FROM public.t_alarm_configuration_plans
+    WHERE plan_kind = 'legacy_migration'
+  );
+  DELETE FROM public.t_alarm_configuration_plans
+  WHERE plan_kind = 'legacy_migration';
+  ALTER TABLE public.t_alarm_configuration_plans
+    DROP COLUMN IF EXISTS source_installation_id,
+    DROP COLUMN IF EXISTS plan_kind;
+  ALTER TABLE public.t_alarm_configuration_plans
+    RENAME COLUMN base_site_configuration_version TO base_configuration_revision;
+  ALTER TABLE public.t_alarm_configuration_plans
+    ALTER COLUMN rule_set_id SET NOT NULL,
+    ALTER COLUMN rule_set_revision SET NOT NULL,
+    ADD CONSTRAINT fk_alarm_plan_configuration_revision
+      FOREIGN KEY(base_configuration_revision)
+      REFERENCES public.t_configuration_revisions(revision);
+
+  CREATE OR REPLACE FUNCTION public.enforce_alarm_configuration_plan_append_only()
+  RETURNS trigger LANGUAGE plpgsql AS $function$
+  BEGIN
+    IF TG_OP = 'UPDATE'
+       AND OLD.status = 'ready'
+       AND NEW.status = 'applied'
+       AND NEW.id = OLD.id
+       AND NEW.base_configuration_revision = OLD.base_configuration_revision
+       AND NEW.rule_set_id = OLD.rule_set_id
+       AND NEW.rule_set_revision = OLD.rule_set_revision
+       AND NEW.planned_by = OLD.planned_by
+       AND NEW.canonical_plan = OLD.canonical_plan
+       AND NEW.digest = OLD.digest
+       AND NEW.created_at = OLD.created_at THEN
+      RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'applied alarm configuration plans are append-only';
+  END;
+  $function$;
+  CREATE TRIGGER trg_alarm_configuration_plans_append_only
+    BEFORE UPDATE OR DELETE ON public.t_alarm_configuration_plans
+    FOR EACH ROW EXECUTE FUNCTION public.enforce_alarm_configuration_plan_append_only();
+
+  ALTER TABLE public.t_alarm_configuration_idempotency
+    DROP COLUMN IF EXISTS applied_installation_id;
+
+  DROP TRIGGER IF EXISTS trg_alarm_definitions_immutable
+    ON public.t_alarm_definitions;
+  ALTER TABLE public.t_alarm_definitions
+    DROP COLUMN IF EXISTS installation_id CASCADE;
+  ALTER TABLE public.t_alarm_definitions
+    RENAME COLUMN site_configuration_version TO configuration_revision;
+  ALTER TABLE public.t_alarm_definitions
+    ADD CONSTRAINT fk_alarm_definition_configuration_revision
+      FOREIGN KEY(configuration_revision)
+      REFERENCES public.t_configuration_revisions(revision),
+    ADD CONSTRAINT uq_alarm_definition_content
+      UNIQUE(asset_id, entity_instance_id, content_digest_algorithm, content_digest);
+  CREATE TRIGGER trg_alarm_definitions_immutable
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON public.t_alarm_definitions
+    FOR EACH STATEMENT EXECUTE FUNCTION public.reject_alarm_definition_mutation();
+
+  ALTER TABLE public.t_alarm_definition_current
+    RENAME COLUMN site_configuration_version TO configuration_revision;
+  ALTER TABLE public.t_alarm_definition_current
+    ADD CONSTRAINT fk_alarm_current_configuration_revision
+      FOREIGN KEY(configuration_revision)
+      REFERENCES public.t_configuration_revisions(revision);
   DROP TABLE IF EXISTS public.t_cross_node_processing_acceptance_reports CASCADE;
   DROP TABLE IF EXISTS public.t_en9_acceptance_ws_receipts CASCADE;
   DROP TABLE IF EXISTS public.t_en9_acceptance_reports CASCADE;
@@ -279,12 +354,6 @@ BEGIN
   ALTER TABLE public.t_l2_latest
     RENAME COLUMN site_configuration_version TO configuration_revision;
 
-  ALTER TABLE public.t_alarm_configuration_plans
-    RENAME COLUMN base_site_configuration_version TO base_configuration_revision;
-  ALTER TABLE public.t_alarm_configuration_plans
-    ADD CONSTRAINT fk_alarm_plan_configuration_revision
-      FOREIGN KEY(base_configuration_revision)
-      REFERENCES public.t_configuration_revisions(revision);
 END;
 $$;
 

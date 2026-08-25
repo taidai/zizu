@@ -81,30 +81,24 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         )
 
         self.clock = MutableClock(datetime(2026, 8, 14, 8, tzinfo=timezone.utc))
-        device_id = UUID("50000000-0000-0000-0000-000000000001")
+        node_id = UUID("50000000-0000-0000-0000-000000000001")
+        control_tag_id = UUID("50000000-0000-0000-0000-000000000003")
         self.source = ResolvedEntitySource(
             entity_instance_id=TARGET_ID,
             definition_id="pcs.setpoint",
-            instance_key="PCS-01",
-            device_instance_id=device_id,
-            binding_id=UUID("50000000-0000-0000-0000-000000000002"),
-            tag_id=UUID("50000000-0000-0000-0000-000000000003"),
-            matcher_id="matcher.setpoint",
-            confirmation_audit_id=UUID("50000000-0000-0000-0000-000000000004"),
+            node_key="PCS-01",
+            node_id=node_id,
             data_type="FLOAT",
             unit="kW",
             direction="RW",
             freshness_seconds=30,
+            control_tag_id=control_tag_id,
         )
         self.readback_source = ResolvedEntitySource(
             entity_instance_id=READBACK_ID,
             definition_id="pcs.readback",
-            instance_key="PCS-01",
-            device_instance_id=device_id,
-            binding_id=UUID("50000000-0000-0000-0000-000000000005"),
-            tag_id=UUID("50000000-0000-0000-0000-000000000006"),
-            matcher_id="matcher.readback",
-            confirmation_audit_id=UUID("50000000-0000-0000-0000-000000000007"),
+            node_key="PCS-01",
+            node_id=node_id,
             data_type="FLOAT",
             unit="kW",
             direction="R",
@@ -113,12 +107,8 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.interlock_source = ResolvedEntitySource(
             entity_instance_id=INTERLOCK_ID,
             definition_id="bms.ready",
-            instance_key="PCS-01",
-            device_instance_id=device_id,
-            binding_id=UUID("50000000-0000-0000-0000-000000000008"),
-            tag_id=UUID("50000000-0000-0000-0000-000000000009"),
-            matcher_id="matcher.ready",
-            confirmation_audit_id=UUID("50000000-0000-0000-0000-000000000010"),
+            node_key="PCS-01",
+            node_id=node_id,
             data_type="BOOL",
             unit=None,
             direction="R",
@@ -162,7 +152,8 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.readback.observations[entity_instance_id] = EntityInstanceObservation(
             entity_instance_id=entity_instance_id,
             definition_id=source.definition_id,
-            instance_key=source.instance_key,
+            node_id=source.node_id,
+            node_key=source.node_key,
             value=value,
             data_type=source.data_type,
             unit=source.unit,
@@ -195,11 +186,26 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual("readback_confirmed", command.status)
         self.assertEqual(command.id, repeated.id)
         self.assertEqual(1, len(self.dispatcher.requests))
+        self.assertEqual(self.source.control_tag_id, self.dispatcher.requests[0].tag_id)
         self.assertEqual(
             ["accepted", "validated", "dispatched", "readback_confirmed"],
             [event.to_status for event in self.repository.events(command.id)],
         )
         self.assertEqual("control.write", command.capability)
+
+    def test_unmapped_l2_control_target_is_rejected_without_device_write(self) -> None:
+        from dataclasses import replace
+
+        self.runtime._registry.sources[TARGET_ID] = replace(
+            self.source,
+            control_tag_id=None,
+        )
+        self._observe(INTERLOCK_ID, True)
+
+        command = self.runtime.submit(self._request(key="unmapped-l2"))
+
+        self.assertEqual(("rejected", "CONTROL_TARGET_UNMAPPED"), (command.status, command.code))
+        self.assertEqual([], self.dispatcher.requests)
 
     def test_limit_and_interlock_rejections_never_dispatch(self) -> None:
         self._observe(INTERLOCK_ID, False)

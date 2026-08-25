@@ -28,7 +28,6 @@ from app.api.security import (
 from app.core.config import settings
 from app.services.identity import AuditEvent, Identity, IdentityError
 from app.services.data_trunk_outbox import EntityObservationBroadcaster
-from app.services.en9_point_processing_acceptance import PostgresEN9StreamEvidence
 from app.services.entity_instance_catalog import (
     EntityInstanceCatalog,
     EntityInstanceReferenceError,
@@ -176,24 +175,17 @@ class TelemetryBroadcaster:
 
 # 全局单例
 _broadcaster = TelemetryBroadcaster()
-_en9_stream_evidence = PostgresEN9StreamEvidence()
-_entity_observation_broadcaster = EntityObservationBroadcaster(
-    receipt_recorder=_en9_stream_evidence,
-)
+_entity_observation_broadcaster = EntityObservationBroadcaster()
 
 
 def get_entity_observation_broadcaster() -> EntityObservationBroadcaster:
     return _entity_observation_broadcaster
 
 
-def get_en9_stream_evidence() -> PostgresEN9StreamEvidence:
-    return _en9_stream_evidence
-
-
 def get_entity_observation_catalog() -> EntityInstanceCatalog:
-    from app.api.solution_delivery import get_default_entity_instance_catalog
+    from app.api.entity_instances import get_entity_instance_catalog
 
-    return get_default_entity_instance_catalog()
+    return get_entity_instance_catalog()
 
 
 @router.websocket("/ws/telemetry")
@@ -318,12 +310,7 @@ async def entity_observations_ws(
     ws: WebSocket,
     identity: Identity = Depends(get_identity),
     catalog: EntityInstanceCatalog = Depends(get_entity_observation_catalog),
-    broadcaster: EntityObservationBroadcaster = Depends(
-        get_entity_observation_broadcaster
-    ),
-    acceptance_evidence: PostgresEN9StreamEvidence = Depends(
-        get_en9_stream_evidence
-    ),
+    broadcaster: EntityObservationBroadcaster = Depends(get_entity_observation_broadcaster),
 ) -> None:
     """Authenticate once, then stream only explicitly subscribed L2 entities."""
     await ws.accept()
@@ -386,40 +373,6 @@ async def entity_observations_ws(
         while True:
             try:
                 message = json.loads(await ws.receive_text())
-                acknowledgement = message.get("acknowledge_acceptance_event")
-                if acknowledgement is not None:
-                    acknowledgement_nonce = message.get(
-                        "acceptance_ack_nonce"
-                    )
-                    if not isinstance(acknowledgement_nonce, str):
-                        raise ValueError("acceptance ACK nonce required")
-                    if principal != _INSECURE_DEVELOPMENT_PRINCIPAL:
-                        principal = await asyncio.to_thread(
-                            identity.revalidate_session,
-                            principal,
-                            client_ip=_client_ip(ws),
-                        )
-                    await asyncio.to_thread(
-                        identity.authorize,
-                        principal,
-                        "runtime.read",
-                    )
-                    acceptance_application_id = message.get(
-                        "acceptance_application_id"
-                    )
-                    if acceptance_application_id is None:
-                        raise ValueError("acceptance application required")
-                    await broadcaster.acknowledge(
-                        ws,
-                        UUID(str(acknowledgement)),
-                        acknowledgement_nonce,
-                        UUID(str(acceptance_application_id)),
-                    )
-                    await ws.send_json({
-                        "type": "acknowledged",
-                        "event_id": str(acknowledgement),
-                    })
-                    continue
                 values = message.get("subscribe")
                 if (
                     not isinstance(values, list)
@@ -440,22 +393,7 @@ async def entity_observations_ws(
                     "runtime.read",
                 )
                 await asyncio.to_thread(catalog.require, entity_ids)
-                acceptance_binding = None
-                acceptance_application_id = message.get(
-                    "acceptance_application_id"
-                )
-                if acceptance_application_id is not None:
-                    acceptance_binding = await asyncio.to_thread(
-                        acceptance_evidence.bind,
-                        UUID(str(acceptance_application_id)),
-                        entity_ids,
-                        principal,
-                    )
-                await broadcaster.subscribe(
-                    ws,
-                    entity_ids,
-                    acceptance_binding=acceptance_binding,
-                )
+                await broadcaster.subscribe(ws, entity_ids)
                 await ws.send_json(
                     {
                         "type": "subscribed",

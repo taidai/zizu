@@ -1135,7 +1135,7 @@ export interface PointProcessingPlan {
   id: string
   node_id: string
   template_revision_id: string
-  base_site_configuration_version: number
+  base_configuration_revision: number
   status: 'ready' | 'blocked' | 'applied'
   items: PointProcessingPlanItem[]
   blockers: Array<{ code: string; input_id: string }>
@@ -1146,31 +1146,9 @@ export interface PointProcessingApplication {
   id: string
   plan_id: string
   installed_processing_id: string
-  solution_installation_id: string
   revision_id: string
-  site_configuration_version: number
+  configuration_revision: number
   output_entity_instance_ids: string[]
-}
-
-export interface EN9AcceptanceReport {
-  id: string
-  application_id: string
-  required_input_count: number
-  output_entity_count: number
-  observed_for_seconds: number
-  passed: boolean
-  generated_at: string
-  digest: string
-  checks: Array<{
-    code: string
-    passed: boolean
-    evidence: Record<string, number | string | boolean>
-  }>
-}
-
-export interface PointProcessingAcceptanceState {
-  application: PointProcessingApplication | null
-  latest_report: EN9AcceptanceReport | null
 }
 
 export interface EntityInstanceObservation {
@@ -1191,7 +1169,7 @@ export interface EntityInstanceObservation {
   fresh?: boolean
   quality_good?: boolean
   processing_revision_id: string | null
-  site_configuration_version: number | null
+  configuration_revision: number | null
   source_digest?: string | null
   source_summary?: { digest?: string } | string | null
 }
@@ -1290,27 +1268,6 @@ export async function applyPointProcessingPlan(
   catch (cause) { throw new DataTrunkResultUnknownError(cause) }
 }
 
-export async function runEN9PointProcessingAcceptance(
-  applicationId: string,
-  observedForSeconds = 1800,
-): Promise<EN9AcceptanceReport> {
-  const response = await apiFetch(`${API_BASE}/point-processing-applications/${encodeURIComponent(applicationId)}/acceptance`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ observed_for_seconds: observedForSeconds }),
-  })
-  if (!response.ok) throw await dataTrunkError(response, `运行 EN9 机器验收失败：${response.status}`)
-  return response.json() as Promise<EN9AcceptanceReport>
-}
-
-export async function fetchPointProcessingAcceptanceState(
-  nodeId: string,
-): Promise<PointProcessingAcceptanceState> {
-  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-acceptance-state`)
-  if (!response.ok) throw await dataTrunkError(response, `读取点位加工验收状态失败：${response.status}`)
-  return response.json() as Promise<PointProcessingAcceptanceState>
-}
-
 export async function fetchEntityInstanceHistory(
   entityInstanceId: string,
   range: '1h' | '6h' | '24h' | '7d' = '1h',
@@ -1324,7 +1281,6 @@ export function connectEntityObservationWS(
   entityInstanceIds: string[],
   onObservation: (observation: EntityInstanceObservation) => void,
   onReconnectRefresh: () => Promise<void>,
-  acceptanceApplicationId?: string,
 ): () => void {
   let socket: WebSocket | null = null
   let cancelled = false
@@ -1359,15 +1315,9 @@ export function connectEntityObservationWS(
           type?: string
           event_id?: string | null
           entity_instance_id?: string
-          acceptance_ack_nonce?: string
         }
         if (payload.type === 'authenticated') {
-          socket?.send(JSON.stringify({
-            subscribe: entityInstanceIds,
-            ...(acceptanceApplicationId
-              ? { acceptance_application_id: acceptanceApplicationId }
-              : {}),
-          }))
+          socket?.send(JSON.stringify({ subscribe: entityInstanceIds }))
         } else if (
           payload.type === 'entity_observation'
           && payload.event_id
@@ -1375,13 +1325,6 @@ export function connectEntityObservationWS(
           && remember(payload.event_id)
         ) {
           onObservation(payload as unknown as EntityInstanceObservation)
-          if (acceptanceApplicationId && payload.acceptance_ack_nonce) {
-            socket?.send(JSON.stringify({
-              acknowledge_acceptance_event: payload.event_id,
-              acceptance_ack_nonce: payload.acceptance_ack_nonce,
-              acceptance_application_id: acceptanceApplicationId,
-            }))
-          }
         }
       } catch { /* Malformed stream frames do not alter the current projection. */ }
     }
@@ -1443,10 +1386,8 @@ export interface AlarmConfigurationPlanItem {
 
 export interface AlarmConfigurationPlan {
   id: string
-  kind: 'rule_set' | 'legacy_migration'
-  installation_id: string
-  base_site_configuration_version: number
-  rule_set_revision: AlarmRuleSetRevision | null
+  base_configuration_revision: number
+  rule_set_revision: AlarmRuleSetRevision
   status: AlarmPlanStatus
   items: AlarmConfigurationPlanItem[]
   blockers: AlarmBlocker[]
@@ -1490,7 +1431,7 @@ export interface LegacyAlarmMigrationPlan {
 }
 
 export interface AlarmConfigurationCurrent {
-  site_configuration_version: number
+  configuration_revision: number
   definitions: {
     entity_display_name: string; rule_name: string; severity: AlarmSeverity; trigger: AlarmCondition; recovery: AlarmCondition
     source: string; version_description: string; enabled: boolean; status: 'current'
@@ -1500,8 +1441,7 @@ export interface AlarmConfigurationCurrent {
 export interface AlarmConfigurationApplyResult {
   id: string
   plan_id: string
-  installation_id: string
-  site_configuration_version: number
+  configuration_revision: number
   definition_ids: string[]
   audit_event_id: string
   applied_at: string
@@ -1634,8 +1574,7 @@ export async function createAlarmRuleSetRevision(ruleSetId: string, rules: Alarm
 }
 
 export async function createAlarmConfigurationPlan(input: {
-  installation_id: string
-  selection: { entity_instance_ids: string[]; device_instance_ids: string[]; entity_definition_ids: string[] }
+  selection: { entity_instance_ids: string[]; node_ids: string[]; entity_definition_ids: string[] }
   rule_set_id: string
   rule_set_revision: number
 }): Promise<AlarmConfigurationPlan> {
@@ -1708,11 +1647,9 @@ export async function createLegacyAlarmMigrationPlan(input: {
 
 export interface EntityInstance {
   id: string
-  device_instance_id: string
-  slot_id: string
-  instance_key: string
-  device_category: string
-  device_display_name: string
+  node_id: string
+  node_type: string
+  node_display_name: string
   definition_id: string
   display_name: string
   data_type: string
@@ -1736,8 +1673,8 @@ export interface ControlConfirmation {
 
 export interface WorkbenchEntity {
   entity_instance_id: string
-  slot_id: string
-  instance_key: string
+  node_id: string
+  node_name: string
   definition_id: string
   display_name: string
   data_type: 'float' | 'int' | 'bool' | 'string' | string
@@ -1752,7 +1689,7 @@ export interface WorkbenchEntity {
 
 export interface EmsWorkbench {
   workbench_id: string
-  site_configuration_version: number
+  configuration_revision: number
   navigation: { id: 'overview' | 'trends' | 'alarms' | 'controls'; label: string }[]
   groups: { id: string; label: string; entities: WorkbenchEntity[] }[]
   kpis: { id: string; label: string; entities: WorkbenchEntity[] }[]
@@ -1830,145 +1767,9 @@ export async function reconcileControlCommand(commandId: string): Promise<Contro
   return response.json()
 }
 
-export interface SolutionPackage {
-  id: string
-  package_id: string
-  version: string
-  display_name: string
-  digest: string
-  status: string
-  parameter_contracts: { id: string; type: string; required?: boolean; description?: string; values?: string[] }[]
-}
-
-export interface InstallationPlan {
-  id: string
-  package_record_id: string
-  status: string
-  digest: string
-  blockers: { code: string; message: string }[]
-  items: Record<string, unknown>[]
-}
-
-export interface EntityBindingCandidate {
-  tag_id: string
-  device_key: string
-  device_name: string
-  tag_name: string
-  data_type: string
-  unit: string | null
-  direction: string
-  reason: string
-}
-
-export interface EntityBindingPlanItem extends Record<string, unknown> {
-  asset_id: string
-  kind: 'entity_binding'
-  code: string
-  expected_tag_name: string
-  definition_display_name: string
-  override_candidates: EntityBindingCandidate[]
-}
-
-export interface SolutionInstallation {
-  id: string
-  package_record_id: string
-  site_configuration_version: number
-  status: string
-}
-
-export interface DeliveryReport {
-  id: string
-  installation_id: string
-  status: string
-  items: { acceptance_id: string; status: string; code: string }[]
-}
-
-export async function fetchSolutionPackages(): Promise<SolutionPackage[]> {
-  const response = await apiFetch(`${API_BASE}/solution-packages`)
-  if (!response.ok) throw await authError(response, `Fetch solution packages failed: ${response.status}`)
-  return (await response.json() as { items: SolutionPackage[] }).items
-}
-
-export async function importSolutionPackage(archive: File): Promise<SolutionPackage> {
-  const data = new FormData()
-  data.append('archive', archive)
-  const response = await apiFetch(`${API_BASE}/solution-packages/import`, { method: 'POST', body: data })
-  if (!response.ok) throw await authError(response, `Import solution package failed: ${response.status}`)
-  return response.json()
-}
-
-export async function createInstallationPlan(
-  packageRecordId: string,
-  request: {
-    parameters: Record<string, unknown>
-    secret_references: Record<string, string>
-    binding_overrides?: Record<string, string>
-  },
-): Promise<InstallationPlan> {
-  const response = await apiFetch(`${API_BASE}/solution-packages/${encodeURIComponent(packageRecordId)}/install-plans`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  })
-  if (!response.ok) throw await authError(response, `Create installation plan failed: ${response.status}`)
-  return response.json()
-}
-
-export async function applyInstallationPlan(plan: InstallationPlan): Promise<SolutionInstallation> {
-  const response = await apiFetch(`${API_BASE}/install-plans/${encodeURIComponent(plan.id)}/apply`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
-    body: JSON.stringify({ plan_digest: plan.digest }),
-  })
-  if (!response.ok) throw await authError(response, `Apply installation plan failed: ${response.status}`)
-  return response.json()
-}
-
-export async function fetchSolutionInstallations(): Promise<SolutionInstallation[]> {
-  const response = await apiFetch(`${API_BASE}/solution-installations`)
-  if (!response.ok) throw await authError(response, `Fetch solution installations failed: ${response.status}`)
-  return (await response.json() as { items: SolutionInstallation[] }).items
-}
-
-export interface DeliveryAcceptanceInput {
-  manual_commands?: Record<string, string>
-  policy_commands?: Record<string, string>
-  authorization_denials?: Record<string, string>
-}
-
-export async function runDeliveryAcceptance(
-  installationId: string,
-  input: DeliveryAcceptanceInput = {},
-): Promise<DeliveryReport> {
-  const response = await apiFetch(`${API_BASE}/solution-installations/${encodeURIComponent(installationId)}/acceptance-runs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
-    body: JSON.stringify(input),
-  })
-  if (!response.ok) throw await authError(response, `Run delivery acceptance failed: ${response.status}`)
-  return response.json()
-}
-
-export interface LegacyEntityMigrationItem {
-  legacy_entity_id: string
-  legacy_entity_name: string
-  classification: 'unique' | 'missing' | 'ambiguous'
-  candidate_entity_instance_ids: string[]
-}
-
 export async function fetchEntityInstances(): Promise<{ items: EntityInstance[]; total: number }> {
   const res = await apiFetch(`${API_BASE}/entity-instances`)
   if (!res.ok) throw new Error(`Fetch entity instances failed: ${res.status}`)
-  return res.json()
-}
-
-export async function previewLegacyEntityMigration(): Promise<{
-  items: LegacyEntityMigrationItem[]
-  counts: Record<'unique' | 'missing' | 'ambiguous', number>
-  writes_applied: 0
-}> {
-  const res = await apiFetch(`${API_BASE}/entity-instances/legacy-migration-preview`)
-  if (!res.ok) throw new Error(`Preview legacy entity migration failed: ${res.status}`)
   return res.json()
 }
 
