@@ -4433,3 +4433,30 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - Docker 控制面恢复后，以全新隔离容器 `zizu-retention-rc4-clean-test-pg`（`zizu_retention_rc4_test`、端口 55446、临时凭据）运行一次真实 PostgreSQL 045 + data-trunk 门禁：17/17 通过、0 skip。环境为 PostgreSQL 16.15 / TimescaleDB 2.29.2；完成后按精确名称 `docker rm -fv` 删除容器及匿名卷，未触碰 `zizu-tsdb` 或旧 `zizu-metric-test-pg`。
 - 发布构建契约 1/1、批量写入 5/5、scripts discovery 37/37、完整后端 `197 passed, 86 skipped, 55 subtests passed`、`compileall app`、Vite production build（exit 0）和 `git diff --check` 均通过。
 - 八个预期改动文件已复核：全部版本文本为 `0.4.85-rc.4`，Schema 045 发布断言与 Migration 045 一致；README 仅改当前候选版本，lockfile 仅改两个版本字段。未连接、修改或操作 1 号机。
+
+### 2026-08-27 — 单站实时黑板与数据帧架构（整体设计已确认）
+
+- 用户整体确认新的秒级运行机制：每站一块常驻内存实时黑板、默认 1 秒统一节拍、有变化才冻结完整
+  数据帧；迟到/重复样本直接丢弃，同一节拍每点只保留最后一条。
+- 启动门槛只看活动 L1 依赖的必需 L0；全部收到本轮新样本后 READY。连续三拍未更新时保留旧值供
+  诊断，但有效质量转为 STALE，质量变化本身触发数据帧。
+- 持久化拆成两段：事务 A 先保存帧元数据和变化 L0；帧处理器按固定配置修订执行一次全量即时 L1；
+  事务 B 原子推进 L0 latest、保存 L2/来源/outbox 并完成帧，提交后才通知页面及上层应用。
+- 采用一张共享帧元数据表以及现有共享类型化 L0/L2 时序表；不使用巨型 JSON、分层超级表、Redis、
+  Kafka、逐点节拍或 L0 数据库轮询式实时推送。
+- 单站只允许一个活动采集写者持有黑板；首版不支持 active-active backend，帧序号由事务 A 在数据库
+  分配，避免双写和重启后顺序冲突。
+- 每个节拍递增 capture beat、每条变化 L0 保存 accepted beat；PENDING 帧可由两者精确重建 STALE，
+  不增加全量帧明细表。latest 对新主干统一按 frame sequence 推进。
+- 配置发布必须先清空旧帧与未发布 outbox；切换后旧修订只作 STALE 诊断，直至新修订 READY 首帧。
+  已排队控制在写设备前重验来源修订。L1 失败传播到强类型 DAG 全部下游闭包，无法定位时全部活动
+  L2 fail closed。
+- 现有 L2 outbox 目标上硬切为每个终态帧一条的统一数据帧 outbox，提交后同时提供 L0/L2 实时增量，
+  不增加第二张 L0 outbox 或继续数据库轮询。
+- 失败帧保留 L0，最多 3 次且总年龄 60 秒；超限后 FAILED、系统告警、相关 L2 STALE，并继续后续帧。
+- 书面自检补齐两个边界：FAILED 终结也原子推进已提交 L0、写 L2 STALE 后再通知；迁移前历史不伪造
+  frame_id。新语义明确取代旧的“迟到仍入历史 / STALE 清空值”，STALE 保留最后值但机器消费者必须
+  按质量 fail closed；即时 L2 也不再按实体周期写历史或心跳，统一随站级变化帧提交。
+- 正式规格：`docs/superpowers/specs/2026-08-27-site-realtime-blackboard-frame-design.md`；架构决策：
+  `docs/adr/0014-site-realtime-blackboard-and-committed-frames.md`。当前只完成设计文档，尚未写实现计划或
+  改生产代码；下一步先由用户复核书面规格，确认后再使用 writing-plans 拆分纵向 TDD 实施任务。
