@@ -4419,3 +4419,17 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 只读盘点确认根盘 91% 主要来自 `/opt/zizu-backups` 约 3.33GB 与 `/home/omnithings/bak` 约 2GB；数据库位于独立 `/userdata`，最大表 `t_l0_observation_dedup` 约 1.32GB/21.5 小时且无清理策略。
 - 设计将“防重复缓存”与“来源证据”分开：移除历史表对缓存的三处 FK，但保留 L0/L2 历史中的 observation ID、digest、质量和时间依据；固定使用 Timescale 原生 job，不建设策略中心。
 - 规格文件：`docs/superpowers/specs/2026-08-26-edge-storage-retention-design.md`。用户已确认规格；下一步按 `docs/superpowers/plans/2026-08-26-edge-storage-retention-implementation.md` 执行，当前仍未改代码、删除文件或操作 1 号机。
+
+### 2026-08-26 — v0.4.85-rc.4 发布身份与回归（进行中，环境阻断）
+
+- 发布身份已统一为 `0.4.85-rc.4`，发布构建契约固定要求 Schema `045`；`migration_045_edge_storage_retention.sql` 存在时定向 release 测试为 1/1 通过。
+- 本地定向回归：批量 L0 写入 5/5、`compileall app`、scripts discovery 37/37 均通过；完整后端为 `197 passed, 86 skipped, 55 subtests passed`（仅既有 Starlette/httpx deprecation warning）。前端生产构建已完成产物写入，但原命令受本地 30 秒工具窗口截断，尚缺一次可记录的退出码。
+- 真实 PostgreSQL 预期使用隔离容器 `zizu-metric-test-pg` 的 `zizu_metric_test`；版本 PostgreSQL 16.15 / TimescaleDB 2.29.2。首次未注入 DB 环境被测试的 `*_test` 保护拒绝；改用容器 owner 后，045 模块前 7 项已通过，但命令窗口中断后并发重跑触发 Timescale relation OID 缓存错误。随后 Docker 对该容器的 inspect/restart/exec 控制操作持续挂起，未能安全重启隔离容器并取得完整 0 skip 结果。
+- 未连接、修改或操作 1 号机；未提交发布候选。恢复 `zizu-metric-test-pg` 控制面后，必须完整重跑 045 + data-trunk PostgreSQL 模块、前端 build（记录退出 0）和 `git diff --check`，再提交 `chore(release): prepare v0.4.85-rc.4`。详细记录见 `.superpowers/sdd/2026-08-26-edge-storage-retention-implementation/task-3-report.md`。
+- 控制器随后要求不复用污染容器，改建一次性 `zizu-retention-rc4-test-pg`（`zizu_retention_test`、端口 55445）。Docker daemon 的 `info` 在 1.9 秒响应，但该精确容器仅能创建为 `Created`；`docker start` 与经名称核对后的 `docker rm -fv` 均在 15 秒内挂起，容器仍为 `Created`。未启动、未运行测试、未能清除该残留测试容器；需维护 Docker 控制面后按该精确名称复核和清理，再恢复 Task 3。
+
+### 2026-08-26 — v0.4.85-rc.4 发布身份与回归（完成）
+
+- Docker 控制面恢复后，以全新隔离容器 `zizu-retention-rc4-clean-test-pg`（`zizu_retention_rc4_test`、端口 55446、临时凭据）运行一次真实 PostgreSQL 045 + data-trunk 门禁：17/17 通过、0 skip。环境为 PostgreSQL 16.15 / TimescaleDB 2.29.2；完成后按精确名称 `docker rm -fv` 删除容器及匿名卷，未触碰 `zizu-tsdb` 或旧 `zizu-metric-test-pg`。
+- 发布构建契约 1/1、批量写入 5/5、scripts discovery 37/37、完整后端 `197 passed, 86 skipped, 55 subtests passed`、`compileall app`、Vite production build（exit 0）和 `git diff --check` 均通过。
+- 八个预期改动文件已复核：全部版本文本为 `0.4.85-rc.4`，Schema 045 发布断言与 Migration 045 一致；README 仅改当前候选版本，lockfile 仅改两个版本字段。未连接、修改或操作 1 号机。
