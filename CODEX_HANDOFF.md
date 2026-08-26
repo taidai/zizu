@@ -4413,9 +4413,9 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - rc.3 现场连续 10 分钟/30 秒取样共 21 次全部通过：L0/L2 延迟约 1.16～11.12 秒，均小于 30 秒，时间戳每次一致、质量 192；认证 L2 realtime HTTP 200、fresh/quality_good 均 true；容器 healthy、restart 0、运行错误 0。
 - 仍不做 TLS、Caddy、自动策略或设备写控制。下一优先事项是处理 1 号机根分区 91% 使用率（约 1.4GB 可用），重点评估 telemetry/dedup 容量、压缩和保留期。
 
-### 2026-08-26 — v0.4.85-rc.4 边缘存储治理设计（待规格审阅）
+### 2026-08-26 — v0.4.85-rc.4 边缘存储治理设计（已确认）
 
 - 用户确认：清理过期备份/无用镜像；防重复缓存 6 小时；L0 明细 7 天并在 6 小时后压缩；小时/日聚合长期保留；允许 5～15 分钟 backend 维护窗。
 - 只读盘点确认根盘 91% 主要来自 `/opt/zizu-backups` 约 3.33GB 与 `/home/omnithings/bak` 约 2GB；数据库位于独立 `/userdata`，最大表 `t_l0_observation_dedup` 约 1.32GB/21.5 小时且无清理策略。
 - 设计将“防重复缓存”与“来源证据”分开：移除历史表对缓存的三处 FK，但保留 L0/L2 历史中的 observation ID、digest、质量和时间依据；固定使用 Timescale 原生 job，不建设策略中心。
-- 规格文件：`docs/superpowers/specs/2026-08-26-edge-storage-retention-design.md`。本轮只写规格，不改代码、不删除文件、不操作 1 号机；用户审阅规格后才进入 writing-plans。
+- 规格文件：`docs/superpowers/specs/2026-08-26-edge-storage-retention-design.md`。用户已确认规格；下一步按 `docs/superpowers/plans/2026-08-26-edge-storage-retention-implementation.md` 执行，当前仍未改代码、删除文件或操作 1 号机。
