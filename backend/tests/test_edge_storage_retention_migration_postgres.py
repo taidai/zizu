@@ -223,6 +223,28 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
         return cursor.fetchall()
 
     @staticmethod
+    def _governed_job_stats_snapshot(cursor):
+        cursor.execute(
+            """
+            SELECT stats.job_id, stats.job_status, stats.last_run_status,
+                   stats.last_run_started_at, stats.last_successful_finish,
+                   stats.last_run_duration, stats.next_start,
+                   stats.total_runs, stats.total_successes,
+                   stats.total_failures
+            FROM timescaledb_information.job_stats AS stats
+            JOIN timescaledb_information.jobs AS jobs USING (job_id)
+            WHERE jobs.proc_name IN (
+              'prune_l0_observation_dedup',
+              'policy_compression',
+              'policy_retention',
+              'policy_refresh_continuous_aggregate'
+            )
+            ORDER BY stats.job_id
+            """
+        )
+        return cursor.fetchall()
+
+    @staticmethod
     def _cache_snapshot(cursor):
         cursor.execute(
             """
@@ -929,6 +951,172 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
                     (retention_job_id,),
                 )
                 self.assertFalse(cursor.fetchone()[0])
+
+    def test_045_replay_rejects_far_future_prune_job_without_writes(
+        self,
+    ) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._insert_cache_evidence(cursor, "3" * 64)
+                cursor.execute(
+                    "SELECT _timescaledb_functions.stop_background_workers()"
+                )
+                try:
+                    cursor.execute(
+                        """
+                        SELECT job_id
+                        FROM timescaledb_information.jobs
+                        WHERE proc_schema='public'
+                          AND proc_name='prune_l0_observation_dedup'
+                        """
+                    )
+                    prune_job_id = cursor.fetchone()[0]
+                    cursor.execute(
+                        "SELECT alter_job(%s, next_start => "
+                        "clock_timestamp()+interval '100 years')",
+                        (prune_job_id,),
+                    )
+                    jobs_before = self._governed_jobs_snapshot(cursor)
+                    job_stats_before = self._governed_job_stats_snapshot(cursor)
+                    cache_before = self._cache_snapshot(cursor)
+
+                    with self.assertRaises(
+                        psycopg2.errors.ObjectNotInPrerequisiteState
+                    ) as raised:
+                        self._apply_045(cursor)
+                    self.assertEqual("55000", raised.exception.pgcode)
+                    connection.rollback()
+
+                    self.assertEqual(
+                        jobs_before,
+                        self._governed_jobs_snapshot(cursor),
+                    )
+                    self.assertEqual(
+                        job_stats_before,
+                        self._governed_job_stats_snapshot(cursor),
+                    )
+                    self.assertEqual(cache_before, self._cache_snapshot(cursor))
+                    cursor.execute(
+                        """
+                        SELECT next_start >
+                               clock_timestamp()+interval '99 years'
+                        FROM timescaledb_information.job_stats
+                        WHERE job_id=%s
+                        """,
+                        (prune_job_id,),
+                    )
+                    self.assertTrue(cursor.fetchone()[0])
+                finally:
+                    cursor.execute(
+                        "SELECT "
+                        "_timescaledb_functions.start_background_workers()"
+                    )
+
+    def test_045_replay_accepts_running_prune_job(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._insert_cache_evidence(cursor, "4" * 64)
+                cursor.execute(
+                    "UPDATE t_l0_observation_dedup "
+                    "SET created_at=clock_timestamp()-interval '7 hours' "
+                    "WHERE source_digest=%s",
+                    ("4" * 64,),
+                )
+                cursor.execute(
+                    """
+                    SELECT job_id, application_name
+                    FROM timescaledb_information.jobs
+                    WHERE proc_schema='public'
+                      AND proc_name='prune_l0_observation_dedup'
+                    """
+                )
+                prune_job_id, application_name = cursor.fetchone()
+
+                blocker = psycopg2.connect(**self.connection_kwargs)
+                blocker.autocommit = False
+                try:
+                    with blocker.cursor() as blocker_cursor:
+                        blocker_cursor.execute(
+                            "SELECT 1 FROM t_l0_observation_dedup "
+                            "WHERE source_digest=%s FOR UPDATE",
+                            ("4" * 64,),
+                        )
+
+                    def run_prune_job() -> None:
+                        with psycopg2.connect(
+                            **self.connection_kwargs,
+                            application_name=application_name,
+                        ) as runner:
+                            runner.autocommit = True
+                            with runner.cursor() as runner_cursor:
+                                runner_cursor.execute(
+                                    "CALL public.run_job(%s)",
+                                    (prune_job_id,),
+                                )
+
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(run_prune_job)
+                        try:
+                            deadline = time.monotonic() + 5
+                            while True:
+                                cursor.execute(
+                                    "SELECT job_status "
+                                    "FROM timescaledb_information.job_stats "
+                                    "WHERE job_id=%s",
+                                    (prune_job_id,),
+                                )
+                                if cursor.fetchone()[0] == "Running":
+                                    break
+                                if time.monotonic() >= deadline:
+                                    self.fail("prune job did not enter Running")
+                                time.sleep(0.05)
+
+                            jobs_before = self._governed_jobs_snapshot(cursor)
+                            cache_before = self._cache_snapshot(cursor)
+                            self._apply_045(cursor)
+                            self.assertEqual(
+                                jobs_before,
+                                self._governed_jobs_snapshot(cursor),
+                            )
+                            self.assertEqual(
+                                cache_before,
+                                self._cache_snapshot(cursor),
+                            )
+                            cursor.execute(
+                                "SELECT job_status "
+                                "FROM timescaledb_information.job_stats "
+                                "WHERE job_id=%s",
+                                (prune_job_id,),
+                            )
+                            self.assertEqual("Running", cursor.fetchone()[0])
+                        finally:
+                            blocker.rollback()
+                        future.result(timeout=10)
+                        cursor.execute(
+                            """
+                            SELECT stats.job_status,
+                                   stats.next_start <= clock_timestamp()
+                                     + jobs.schedule_interval
+                            FROM timescaledb_information.job_stats AS stats
+                            JOIN timescaledb_information.jobs AS jobs
+                              USING (job_id)
+                            WHERE stats.job_id=%s
+                            """,
+                            (prune_job_id,),
+                        )
+                        self.assertEqual(
+                            ("Scheduled", True),
+                            cursor.fetchone(),
+                        )
+                        self._apply_045(cursor)
+                finally:
+                    blocker.close()
 
     def test_045_expired_cache_replay_does_not_duplicate_l0_l2_or_outbox(self) -> None:
         from app.services.data_trunk import DataTrunk

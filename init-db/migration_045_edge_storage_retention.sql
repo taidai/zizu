@@ -187,23 +187,32 @@ BEGIN
 
   SELECT count(*) = 1
          AND bool_and(
-           schedule_interval = interval '15 minutes'
-           AND max_runtime = interval '0'
-           AND max_retries = -1
-           AND retry_period = interval '5 minutes'
-           AND config = '{}'::jsonb
-           AND scheduled
-           AND fixed_schedule
-           AND initial_start IS NOT NULL
-           AND hypertable_schema IS NULL
-           AND hypertable_name IS NULL
-           AND check_schema IS NULL
-           AND check_name IS NULL
+           jobs.schedule_interval = interval '15 minutes'
+           AND jobs.max_runtime = interval '0'
+           AND jobs.max_retries = -1
+           AND jobs.retry_period = interval '5 minutes'
+           AND jobs.config = '{}'::jsonb
+           AND jobs.scheduled
+           AND jobs.fixed_schedule
+           AND jobs.initial_start IS NOT NULL
+           AND jobs.hypertable_schema IS NULL
+           AND jobs.hypertable_name IS NULL
+           AND jobs.check_schema IS NULL
+           AND jobs.check_name IS NULL
+           AND (
+             stats.job_status = 'Running'
+             OR (
+               stats.job_status = 'Scheduled'
+               AND stats.next_start <= clock_timestamp()
+                 + GREATEST(jobs.schedule_interval, jobs.retry_period)
+             )
+           )
          )
     INTO prune_job_valid
-  FROM timescaledb_information.jobs
-  WHERE proc_schema = 'public'
-    AND proc_name = 'prune_l0_observation_dedup';
+  FROM timescaledb_information.jobs AS jobs
+  JOIN timescaledb_information.job_stats AS stats USING (job_id)
+  WHERE jobs.proc_schema = 'public'
+    AND jobs.proc_name = 'prune_l0_observation_dedup';
 
   SELECT count(*) = 1
          AND bool_and(time_interval = interval '1 hour')
@@ -219,6 +228,14 @@ BEGIN
     AND hypertable_name = 't_telemetry';
 
   SELECT count(*) = 4
+         AND bool_and(
+           job_status = 'Running'
+           OR (
+             job_status = 'Scheduled'
+             AND next_start <= clock_timestamp()
+               + GREATEST(schedule_interval, retry_period)
+           )
+         )
          AND count(*) FILTER (
            WHERE proc_name = 'policy_compression'
              AND logical_name = 't_telemetry'
@@ -314,8 +331,11 @@ BEGIN
            jobs.fixed_schedule,
            jobs.config,
            jobs.check_schema,
-           jobs.check_name
+           jobs.check_name,
+           stats.job_status,
+           stats.next_start
     FROM timescaledb_information.jobs AS jobs
+    JOIN timescaledb_information.job_stats AS stats USING (job_id)
     LEFT JOIN timescaledb_information.continuous_aggregates AS cagg
       ON cagg.materialization_hypertable_schema = jobs.hypertable_schema
      AND cagg.materialization_hypertable_name = jobs.hypertable_name
@@ -488,23 +508,32 @@ BEGIN
 
   SELECT count(*) = 1
          AND bool_and(
-           schedule_interval = interval '15 minutes'
-           AND max_runtime = interval '0'
-           AND max_retries = -1
-           AND retry_period = interval '5 minutes'
-           AND config = '{}'::jsonb
-           AND scheduled
-           AND fixed_schedule
-           AND initial_start IS NOT NULL
-           AND hypertable_schema IS NULL
-           AND hypertable_name IS NULL
-           AND check_schema IS NULL
-           AND check_name IS NULL
+           jobs.schedule_interval = interval '15 minutes'
+           AND jobs.max_runtime = interval '0'
+           AND jobs.max_retries = -1
+           AND jobs.retry_period = interval '5 minutes'
+           AND jobs.config = '{}'::jsonb
+           AND jobs.scheduled
+           AND jobs.fixed_schedule
+           AND jobs.initial_start IS NOT NULL
+           AND jobs.hypertable_schema IS NULL
+           AND jobs.hypertable_name IS NULL
+           AND jobs.check_schema IS NULL
+           AND jobs.check_name IS NULL
+           AND (
+             stats.job_status = 'Running'
+             OR (
+               stats.job_status = 'Scheduled'
+               AND stats.next_start <= clock_timestamp()
+                 + GREATEST(jobs.schedule_interval, jobs.retry_period)
+             )
+           )
          )
     INTO prune_job_valid
-  FROM timescaledb_information.jobs
-  WHERE proc_schema = 'public'
-    AND proc_name = 'prune_l0_observation_dedup';
+  FROM timescaledb_information.jobs AS jobs
+  JOIN timescaledb_information.job_stats AS stats USING (job_id)
+  WHERE jobs.proc_schema = 'public'
+    AND jobs.proc_name = 'prune_l0_observation_dedup';
 
   SELECT count(*) = 1
          AND bool_and(time_interval = interval '1 hour')
@@ -520,6 +549,14 @@ BEGIN
     AND hypertable_name = 't_telemetry';
 
   SELECT count(*) = 4
+         AND bool_and(
+           job_status = 'Running'
+           OR (
+             job_status = 'Scheduled'
+             AND next_start <= clock_timestamp()
+               + GREATEST(schedule_interval, retry_period)
+           )
+         )
          AND count(*) FILTER (
            WHERE proc_name = 'policy_compression'
              AND logical_name = 't_telemetry'
@@ -615,8 +652,11 @@ BEGIN
            jobs.fixed_schedule,
            jobs.config,
            jobs.check_schema,
-           jobs.check_name
+           jobs.check_name,
+           stats.job_status,
+           stats.next_start
     FROM timescaledb_information.jobs AS jobs
+    JOIN timescaledb_information.job_stats AS stats USING (job_id)
     LEFT JOIN timescaledb_information.continuous_aggregates AS cagg
       ON cagg.materialization_hypertable_schema = jobs.hypertable_schema
      AND cagg.materialization_hypertable_name = jobs.hypertable_name
