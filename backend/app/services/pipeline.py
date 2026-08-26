@@ -459,14 +459,18 @@ class DataPipeline:
     async def _flush_loop(self) -> None:
         """后台 flush 循环：缓冲区满或超时则写入 DB。"""
         while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._flush_event.wait(),
-                    timeout=settings.pipeline_flush_interval_sec,
-                )
-            except asyncio.TimeoutError:
-                pass
-            self._flush_event.clear()
+            async with self._buffer_lock:
+                has_backlog = bool(self._buffer)
+                if not has_backlog:
+                    self._flush_event.clear()
+            if not has_backlog:
+                try:
+                    await asyncio.wait_for(
+                        self._flush_event.wait(),
+                        timeout=settings.pipeline_flush_interval_sec,
+                    )
+                except asyncio.TimeoutError:
+                    pass
             if self._buffer:
                 async with self._flush_lock:
                     await self._do_flush()
@@ -542,6 +546,7 @@ class DataPipeline:
                 len(batch),
                 exc.code,
             )
+            await asyncio.sleep(INGEST_RETRY_DELAYS[-1])
             return
         async with self._buffer_lock:
             committed_ids = tuple(item.observation_id for item in batch)

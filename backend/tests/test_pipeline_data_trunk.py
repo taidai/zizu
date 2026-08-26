@@ -7,7 +7,7 @@ import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.models.schemas import ParsedMessage
 from app.services.data_trunk import RawObservationAdapter, TagMetadata
@@ -240,6 +240,31 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((2,), pipeline.buffer_sequences())
 
+    async def test_flush_loop_drains_existing_backlog_without_timeout(self) -> None:
+        pipeline = DataPipeline(data_trunk=_DuplicateDataTrunk())
+        pipeline._buffer.append(_observation(1))
+        flush_calls = 0
+
+        async def drain_one_batch() -> None:
+            nonlocal flush_calls
+            flush_calls += 1
+            pipeline._buffer.clear()
+            if flush_calls == 1:
+                pipeline._buffer.append(_observation(2))
+            else:
+                pipeline._stop_event.set()
+
+        pipeline._do_flush = drain_one_batch  # type: ignore[method-assign]
+        pipeline._flush_event.set()
+        loop = asyncio.create_task(pipeline._flush_loop())
+        try:
+            await asyncio.wait_for(pipeline._stop_event.wait(), timeout=0.5)
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+
+        self.assertEqual(2, flush_calls)
+
     async def test_fifth_failure_is_removed_only_after_safe_failure_record(self) -> None:
         trunk = _AlwaysFailDataTrunk(failure_record_fails_once=True)
         pipeline = DataPipeline(data_trunk=trunk)
@@ -260,6 +285,23 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), pipeline.buffer_observation_ids())
         self.assertEqual(5, trunk.recorded[1])
         self.assertEqual("DATA_TRUNK_UNAVAILABLE", trunk.recorded[2])
+
+    async def test_terminal_failure_ledger_unavailable_backs_off(self) -> None:
+        trunk = _AlwaysFailDataTrunk(failure_record_fails_once=True)
+        pipeline = DataPipeline(data_trunk=trunk)
+        observation = _observation(1)
+        pipeline._buffer.append(observation)
+        pipeline._retry_prefix_ids = (observation.observation_id,)
+        pipeline._retry_attempts = 5
+
+        with patch(
+            "app.services.pipeline.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            await pipeline.flush_now()
+
+        sleep.assert_awaited_once_with(4.0)
+        self.assertEqual((observation.observation_id,), pipeline.buffer_observation_ids())
 
     async def test_lost_receipt_retry_does_not_resubmit_duplicate_legacy_alarm(self) -> None:
         pipeline = DataPipeline(data_trunk=_DuplicateDataTrunk())
