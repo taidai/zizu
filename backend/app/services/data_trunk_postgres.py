@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 
 from app.services.data_trunk import ConversionEvaluator, DataTrunk
 from app.services.data_trunk_contracts import (
@@ -770,31 +770,48 @@ class PostgresDataTrunkRepository:
 
     @staticmethod
     def _insert_l0(cursor, observations: tuple[RawObservation, ...]) -> tuple[RawObservation, ...]:
-        accepted: list[RawObservation] = []
+        if not observations:
+            return ()
+        rows = []
         for observation in observations:
-            cursor.execute(
-                """
-                INSERT INTO t_l0_observation_dedup
-                  (observation_id, tag_id, observed_at, source_digest,
-                   source_message_id, source_sequence)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (source_digest) DO NOTHING
-                RETURNING observation_id
-                """,
+            compatibility, raw = _raw_columns(observation.value)
+            rows.append(
                 (
                     str(observation.observation_id),
+                    str(observation.node_id),
                     str(observation.tag_id),
                     observation.source_timestamp,
                     observation.source_digest,
                     observation.source_message_id,
                     observation.source_sequence,
-                ),
+                    *compatibility,
+                    int(observation.quality),
+                    observation.raw_unit,
+                    *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
+                )
             )
-            if cursor.fetchone() is None:
-                continue
-            compatibility, raw = _raw_columns(observation.value)
-            cursor.execute(
-                """
+        returned = execute_values(
+            cursor,
+            """
+                WITH input (
+                  observation_id, node_id, tag_id, observed_at,
+                  source_digest, source_message_id, source_sequence,
+                  value_float, value_int, value_bool, value_str, quality,
+                  raw_unit, raw_value_float, raw_value_int, raw_value_bool,
+                  raw_value_text, event_time_basis, event_received_at
+                ) AS (VALUES %s),
+                accepted AS (
+                INSERT INTO t_l0_observation_dedup
+                  (observation_id, tag_id, observed_at, source_digest,
+                   source_message_id, source_sequence)
+                SELECT observation_id, tag_id, observed_at, source_digest,
+                       source_message_id, source_sequence
+                FROM input
+                ON CONFLICT (source_digest) DO NOTHING
+                RETURNING observation_id
+                )
                 INSERT INTO t_telemetry
                   (ts, node_id, tag_id,
                    value_float, value_int, value_bool, value_str,
@@ -802,44 +819,129 @@ class PostgresDataTrunkRepository:
                    source_sequence, source_digest, raw_unit,
                    raw_value_float, raw_value_int, raw_value_bool,
                    raw_value_text, event_time_basis, event_received_at)
-                VALUES (
-                  %s, %s, %s,
-                  %s, %s, %s, %s,
-                  FALSE, %s, %s, %s,
-                  %s, %s, %s,
-                  %s, %s, %s, %s, %s, %s
-                )
+                SELECT
+                  input.observed_at, input.node_id, input.tag_id,
+                  input.value_float, input.value_int,
+                  input.value_bool, input.value_str,
+                  FALSE, input.quality, input.observation_id,
+                  input.source_message_id, input.source_sequence,
+                  input.source_digest, input.raw_unit,
+                  input.raw_value_float, input.raw_value_int,
+                  input.raw_value_bool, input.raw_value_text,
+                  input.event_time_basis, input.event_received_at
+                FROM input
+                JOIN accepted USING (observation_id)
+                RETURNING observation_id
                 """,
-                (
-                    observation.source_timestamp,
-                    str(observation.node_id),
-                    str(observation.tag_id),
-                    *compatibility,
-                    int(observation.quality),
-                    str(observation.observation_id),
-                    observation.source_message_id,
-                    observation.source_sequence,
-                    observation.source_digest,
-                    observation.raw_unit,
-                    *raw,
-                    observation.event_time_basis,
-                    observation.received_at,
-                ),
-            )
-            accepted.append(observation)
-        return tuple(accepted)
+            rows,
+            template=(
+                "(%s::uuid,%s::uuid,%s::uuid,%s::timestamptz,%s::char(64),"
+                "%s::text,%s::bigint,%s::double precision,%s::bigint,"
+                "%s::boolean,%s::text,%s::smallint,%s::text,"
+                "%s::double precision,%s::bigint,%s::boolean,%s::text,"
+                "%s::text,%s::timestamptz)"
+            ),
+            page_size=len(rows),
+            fetch=True,
+        )
+        accepted_ids = {UUID(str(row[0])) for row in returned}
+        return tuple(
+            observation
+            for observation in observations
+            if observation.observation_id in accepted_ids
+        )
 
     @staticmethod
     def _advance_l0_latest(
         cursor,
         observations: tuple[RawObservation, ...],
     ) -> tuple[tuple[RawObservation, ...], int]:
-        late = 0
+        if not observations:
+            return (), 0
+        lock_keys = sorted(
+            {
+                f"{observation.node_id}:{observation.tag_id}"
+                for observation in observations
+            }
+        )
+        cursor.execute(
+            """
+            SELECT pg_advisory_xact_lock(hashtextextended(lock_key, 0))
+            FROM (
+              SELECT DISTINCT lock_key
+              FROM unnest(%s::text[]) AS keys(lock_key)
+              ORDER BY lock_key
+            ) AS ordered_keys
+            """,
+            (lock_keys,),
+        )
+        cursor.execute(
+            """
+            SELECT node_id, tag_id, ts, event_received_at,
+                   event_time_basis, source_order_key
+            FROM t_telemetry_latest
+            WHERE tag_id = ANY(%s::uuid[])
+            """,
+            ([str(item.tag_id) for item in observations],),
+        )
+        latest_by_key = {
+            (UUID(str(node_id)), UUID(str(tag_id))): (
+                observed_at if event_time_basis == "observed_at" else received_at,
+                source_order_key or "",
+            )
+            for (
+                node_id,
+                tag_id,
+                observed_at,
+                received_at,
+                event_time_basis,
+                source_order_key,
+            ) in cursor.fetchall()
+        }
         advanced: list[RawObservation] = []
+        final_by_key: dict[tuple[UUID, UUID], RawObservation] = {}
         for observation in observations:
+            key = (observation.node_id, observation.tag_id)
+            candidate_order = (
+                observation.source_timestamp
+                if observation.event_time_basis == "observed_at"
+                else observation.received_at,
+                _raw_order_key(observation),
+            )
+            if candidate_order <= latest_by_key.get(
+                key,
+                (datetime.min.replace(tzinfo=UTC), ""),
+            ):
+                continue
+            latest_by_key[key] = candidate_order
+            final_by_key[key] = observation
+            advanced.append(observation)
+
+        rows = []
+        for observation in final_by_key.values():
             compatibility, raw = _raw_columns(observation.value)
-            order_key = _raw_order_key(observation)
-            cursor.execute(
+            rows.append(
+                (
+                    str(observation.node_id),
+                    str(observation.tag_id),
+                    observation.source_timestamp,
+                    *compatibility,
+                    int(observation.quality),
+                    str(observation.observation_id),
+                    observation.source_message_id,
+                    observation.source_sequence,
+                    observation.source_digest,
+                    _raw_order_key(observation),
+                    observation.raw_unit,
+                    *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
+                )
+            )
+        returned = []
+        if rows:
+            returned = execute_values(
+                cursor,
                 """
                 INSERT INTO t_telemetry_latest
                   (node_id, tag_id, ts,
@@ -849,14 +951,7 @@ class PostgresDataTrunkRepository:
                    source_order_key, raw_unit, raw_value_float,
                    raw_value_int, raw_value_bool, raw_value_text,
                    event_time_basis, event_received_at)
-                VALUES (
-                  %s, %s, %s,
-                  %s, %s, %s, %s,
-                  FALSE, %s, now(), %s,
-                  %s, %s, %s,
-                  %s, %s, %s,
-                  %s, %s, %s, %s, %s
-                )
+                VALUES %s
                 ON CONFLICT (node_id, tag_id) DO UPDATE SET
                   ts = EXCLUDED.ts,
                   value_float = EXCLUDED.value_float,
@@ -899,28 +994,29 @@ class PostgresDataTrunkRepository:
                   )
                 RETURNING observation_id
                 """,
-                (
-                    str(observation.node_id),
-                    str(observation.tag_id),
-                    observation.source_timestamp,
-                    *compatibility,
-                    int(observation.quality),
-                    str(observation.observation_id),
-                    observation.source_message_id,
-                    observation.source_sequence,
-                    observation.source_digest,
-                    order_key,
-                    observation.raw_unit,
-                    *raw,
-                    observation.event_time_basis,
-                    observation.received_at,
+                rows,
+                template=(
+                    "(%s::uuid,%s::uuid,%s::timestamptz,%s::double precision,"
+                    "%s::bigint,%s::boolean,%s::text,FALSE,%s::smallint,now(),"
+                    "%s::uuid,%s::text,%s::bigint,%s::char(64),%s::text,"
+                    "%s::text,%s::double precision,%s::bigint,%s::boolean,"
+                    "%s::text,%s::text,%s::timestamptz)"
                 ),
+                page_size=len(rows),
+                fetch=True,
             )
-            if cursor.fetchone() is None:
-                late += 1
-            else:
-                advanced.append(observation)
-        return tuple(advanced), late
+        advanced_final_ids = {UUID(str(row[0])) for row in returned}
+        successful_keys = {
+            key
+            for key, observation in final_by_key.items()
+            if observation.observation_id in advanced_final_ids
+        }
+        committed_advanced = tuple(
+            observation
+            for observation in advanced
+            if (observation.node_id, observation.tag_id) in successful_keys
+        )
+        return committed_advanced, len(observations) - len(committed_advanced)
 
     @staticmethod
     def _derive_l0_freshness(
