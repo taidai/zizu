@@ -4401,3 +4401,14 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 043 replay 的 append-only 与关键 evidence/projection trigger 指纹现在只接受普通会话启用态 `tgenabled='O'` 且无 `WHEN` 条件；`ENABLE REPLICA`、`ENABLE ALWAYS` 和同函数同事件的 `WHEN(false)` 均在修补 DDL 前稳定返回 SQLSTATE `55000` / `SCHEMA_043_PARTIAL_STRUCTURE`。
 - 新增真实 PostgreSQL mutation 回归，并在每个失败场景后回滚、核对 trigger 恢复为 `O`/无条件，再完整 replay；没有纳入 TimescaleDB 内部 trigger。
 - 最终门禁：内存 27/27；串行隔离 PostgreSQL 72/72、0 skip；相关生产模块与 migration 测试 `py_compile` 通过。未新增依赖，未触碰 001–042、Task 3+ 或 1 号机。
+
+### 2026-08-26 — v0.4.85-rc.3 实时主干修复与 1 号机验收
+
+- 根因确认不是 Neuron 或 NanoMQ 断流，而是 L0 每个观测执行多次独立 SQL，处理速度低于约 61 observations/s 的现场输入；改为批量 history/dedup/latest 写入。
+- latest 对每个 node/tag 使用固定顺序事务 advisory lock，并用 UPSERT RETURNING 复核实际推进，保留并发和 late 语义。
+- rc.2 首次 10 分钟观察在第 7 分钟出现 L0 37.7 秒与 L2 短暂 STALE，判定失败；继续发现 pipeline 在 backlog 非空时仍每批空等 1 秒。
+- rc.3 改为有 backlog 就连续 drain、空 buffer 才等待；失败台账持续不可用时 4 秒 backoff，避免忙循环。最终独立复审 Ready。
+- 验证：后端 `196 passed, 69 skipped, 55 subtests passed`；scripts `37 passed`；真实 PostgreSQL data trunk `1 passed`；前端 build 通过；`git diff --check` 通过。
+- GitHub 提交 `f357809205d136879851cb04c988873136dd5271`，Actions `32936642061`；1 号机运行 ARM64 固定镜像 `ghcr.io/taidai/zizu@sha256:7eb0b5650061ced14123be491a12b4dd97592e176adc4560205f6242e19b6e84`，Schema 044。
+- rc.3 现场连续 10 分钟/30 秒取样共 21 次全部通过：L0/L2 延迟约 1.16～11.12 秒，均小于 30 秒，时间戳每次一致、质量 192；认证 L2 realtime HTTP 200、fresh/quality_good 均 true；容器 healthy、restart 0、运行错误 0。
+- 仍不做 TLS、Caddy、自动策略或设备写控制。下一优先事项是处理 1 号机根分区 91% 使用率（约 1.4GB 可用），重点评估 telemetry/dedup 容量、压缩和保留期。
