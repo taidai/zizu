@@ -831,6 +831,8 @@ class PostgresDataTrunkRepository:
                   input.event_time_basis, input.event_received_at
                 FROM input
                 JOIN accepted USING (observation_id)
+                ON CONFLICT (tag_id, ts, source_digest)
+                WHERE source_digest IS NOT NULL DO NOTHING
                 RETURNING observation_id
                 """,
             rows,

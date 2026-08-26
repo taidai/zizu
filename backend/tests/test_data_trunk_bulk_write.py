@@ -60,6 +60,30 @@ class _BoundedLatestCursor:
 
 
 class DataTrunkBulkWriteTest(unittest.TestCase):
+    def test_l0_history_conflict_returns_only_rows_inserted_into_history(self) -> None:
+        observations = (_observation(1), _observation(2))
+        captured: dict[str, str] = {}
+
+        def execute_values_contract(_cursor, statement, _rows, **_kwargs):
+            captured["sql"] = statement
+            return [(str(observations[1].observation_id),)]
+
+        with patch(
+            "app.services.data_trunk_postgres.execute_values",
+            side_effect=execute_values_contract,
+        ):
+            accepted = PostgresDataTrunkRepository._insert_l0(
+                _RejectPerRowCursor(), observations
+            )
+
+        normalized = " ".join(captured["sql"].split())
+        self.assertIn(
+            "ON CONFLICT (tag_id, ts, source_digest) "
+            "WHERE source_digest IS NOT NULL DO NOTHING",
+            normalized,
+        )
+        self.assertEqual((observations[1],), accepted)
+
     def test_l0_history_batch_is_written_in_one_database_call(self) -> None:
         observations = (_observation(1), _observation(2))
         returned_rows = [(str(item.observation_id),) for item in observations]
