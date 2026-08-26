@@ -7,6 +7,9 @@ DECLARE
   required_objects INTEGER;
   history_foreign_keys INTEGER;
   typed_value_checks INTEGER;
+  cache_columns_valid BOOLEAN;
+  cache_constraints_valid BOOLEAN;
+  cache_table_valid BOOLEAN;
   cache_index_valid BOOLEAN;
   prune_procedure_valid BOOLEAN;
   prune_job_valid BOOLEAN;
@@ -71,6 +74,80 @@ BEGIN
       'public.t_telemetry_latest'::regclass
     );
 
+  SELECT count(*) = 7
+         AND bool_and(
+           (attnum = 1 AND attname = 'observation_id'
+             AND data_type = 'uuid' AND attnotnull AND default_expr IS NULL)
+           OR (attnum = 2 AND attname = 'tag_id'
+             AND data_type = 'uuid' AND attnotnull AND default_expr IS NULL)
+           OR (attnum = 3 AND attname = 'observed_at'
+             AND data_type = 'timestamp with time zone'
+             AND attnotnull AND default_expr IS NULL)
+           OR (attnum = 4 AND attname = 'source_digest'
+             AND data_type = 'character(64)'
+             AND attnotnull AND default_expr IS NULL)
+           OR (attnum = 5 AND attname = 'source_message_id'
+             AND data_type = 'text'
+             AND NOT attnotnull AND default_expr IS NULL)
+           OR (attnum = 6 AND attname = 'source_sequence'
+             AND data_type = 'bigint'
+             AND NOT attnotnull AND default_expr IS NULL)
+           OR (attnum = 7 AND attname = 'created_at'
+             AND data_type = 'timestamp with time zone'
+             AND attnotnull
+             AND default_expr IS NOT DISTINCT FROM 'now()')
+         )
+    INTO cache_columns_valid
+  FROM (
+    SELECT attribute.attnum,
+           attribute.attname,
+           format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
+           attribute.attnotnull,
+           pg_get_expr(default_entry.adbin, default_entry.adrelid)
+             AS default_expr
+    FROM pg_attribute AS attribute
+    LEFT JOIN pg_attrdef AS default_entry
+      ON default_entry.adrelid = attribute.attrelid
+     AND default_entry.adnum = attribute.attnum
+    WHERE attribute.attrelid =
+            'public.t_l0_observation_dedup'::regclass
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+  ) AS cache_columns;
+
+  SELECT count(*) = 3
+         AND count(*) FILTER (
+           WHERE contype = 'p'
+             AND pg_get_constraintdef(oid) =
+               'PRIMARY KEY (observation_id)'
+         ) = 1
+         AND count(*) FILTER (
+           WHERE contype = 'u'
+             AND pg_get_constraintdef(oid) = 'UNIQUE (source_digest)'
+         ) = 1
+         AND count(*) FILTER (
+           WHERE contype = 'f'
+             AND pg_get_constraintdef(oid) =
+               'FOREIGN KEY (tag_id) REFERENCES t_tags(id)'
+         ) = 1
+    INTO cache_constraints_valid
+  FROM pg_constraint
+  WHERE conrelid = 'public.t_l0_observation_dedup'::regclass;
+
+  cache_table_valid :=
+    cache_columns_valid
+    AND cache_constraints_valid
+    AND EXISTS (
+      SELECT 1
+      FROM pg_class AS cache_relation
+      JOIN pg_namespace AS cache_schema
+        ON cache_schema.oid = cache_relation.relnamespace
+      WHERE cache_schema.nspname = 'public'
+        AND cache_relation.relname = 't_l0_observation_dedup'
+        AND cache_relation.relkind = 'r'
+        AND cache_relation.relpersistence = 'p'
+    );
+
   SELECT count(*) = 1 INTO cache_index_valid
   FROM pg_index AS index_entry
   JOIN pg_class AS index_relation
@@ -87,19 +164,41 @@ BEGIN
   FROM pg_proc AS procedure_entry
   JOIN pg_namespace AS procedure_schema
     ON procedure_schema.oid = procedure_entry.pronamespace
+  JOIN pg_language AS procedure_language
+    ON procedure_language.oid = procedure_entry.prolang
   WHERE procedure_schema.nspname = 'public'
     AND procedure_entry.proname = 'prune_l0_observation_dedup'
     AND procedure_entry.prokind = 'p'
+    AND procedure_language.lanname = 'plpgsql'
+    AND procedure_entry.provolatile = 'v'
+    AND NOT procedure_entry.prosecdef
+    AND NOT procedure_entry.proisstrict
+    AND procedure_entry.proconfig =
+      ARRAY['search_path=pg_catalog, public']::text[]
     AND pg_get_function_identity_arguments(procedure_entry.oid)
       = 'IN job_id integer, IN config jsonb'
-    AND pg_get_functiondef(procedure_entry.oid)
-      LIKE '%clock_timestamp() - interval ''6 hours''%';
+    AND btrim(regexp_replace(
+      procedure_entry.prosrc,
+      '[[:space:]]+',
+      ' ',
+      'g'
+    )) = 'BEGIN DELETE FROM public.t_l0_observation_dedup '
+        'WHERE created_at < clock_timestamp() - interval ''6 hours''; END;';
 
   SELECT count(*) = 1
          AND bool_and(
            schedule_interval = interval '15 minutes'
+           AND max_runtime = interval '0'
+           AND max_retries = -1
+           AND retry_period = interval '5 minutes'
            AND config = '{}'::jsonb
            AND scheduled
+           AND fixed_schedule
+           AND initial_start IS NOT NULL
+           AND hypertable_schema IS NULL
+           AND hypertable_name IS NULL
+           AND check_schema IS NULL
+           AND check_name IS NULL
          )
     INTO prune_job_valid
   FROM timescaledb_information.jobs
@@ -123,43 +222,99 @@ BEGIN
          AND count(*) FILTER (
            WHERE proc_name = 'policy_compression'
              AND logical_name = 't_telemetry'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
+             AND schedule_interval = interval '30 minutes'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 hour'
+             AND scheduled
+             AND NOT fixed_schedule
+             AND initial_start IS NULL
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_compression_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 2
+             AND config ? 'hypertable_id'
+             AND config ? 'compress_after'
              AND (config->>'compress_after')::interval = interval '6 hours'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_retention'
              AND logical_name = 't_telemetry'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
+             AND schedule_interval = interval '1 day'
+             AND max_runtime = interval '5 minutes'
+             AND max_retries = -1
+             AND retry_period = interval '5 minutes'
+             AND scheduled
+             AND NOT fixed_schedule
+             AND initial_start IS NULL
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_retention_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 2
+             AND config ? 'hypertable_id'
+             AND config ? 'drop_after'
              AND (config->>'drop_after')::interval = interval '7 days'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_refresh_continuous_aggregate'
              AND logical_name = 'tel_agg_1h'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
              AND schedule_interval = interval '1 hour'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 hour'
+             AND scheduled
              AND initial_start IS NOT NULL
              AND fixed_schedule
-             AND (config->>'start_offset')::interval = interval '8 days'
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_refresh_continuous_aggregate_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 3
+             AND config ? 'mat_hypertable_id'
+             AND config ? 'start_offset'
+             AND config ? 'end_offset'
+             AND (config->>'start_offset')::interval = interval '6 days'
              AND (config->>'end_offset')::interval = interval '1 hour'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_refresh_continuous_aggregate'
              AND logical_name = 'tel_agg_1d'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
              AND schedule_interval = interval '1 day'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 day'
+             AND scheduled
              AND initial_start IS NOT NULL
              AND fixed_schedule
-             AND (config->>'start_offset')::interval = interval '8 days'
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_refresh_continuous_aggregate_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 3
+             AND config ? 'mat_hypertable_id'
+             AND config ? 'start_offset'
+             AND config ? 'end_offset'
+             AND (config->>'start_offset')::interval = interval '6 days'
              AND (config->>'end_offset')::interval = interval '1 day'
          ) = 1
-         AND count(*) FILTER (
-           WHERE proc_name = 'policy_refresh_continuous_aggregate'
-             AND logical_name = 'tel_agg_5min'
-         ) = 0
     INTO storage_jobs_valid
   FROM (
     SELECT jobs.proc_name,
+           jobs.proc_schema,
            COALESCE(cagg.view_name, jobs.hypertable_name) AS logical_name,
+           jobs.hypertable_schema,
            jobs.schedule_interval,
+           jobs.max_runtime,
+           jobs.max_retries,
+           jobs.retry_period,
+           jobs.scheduled,
            jobs.initial_start,
            jobs.fixed_schedule,
-           jobs.config
+           jobs.config,
+           jobs.check_schema,
+           jobs.check_name
     FROM timescaledb_information.jobs AS jobs
     LEFT JOIN timescaledb_information.continuous_aggregates AS cagg
       ON cagg.materialization_hypertable_schema = jobs.hypertable_schema
@@ -170,13 +325,14 @@ BEGIN
         'policy_refresh_continuous_aggregate'
       )
       AND COALESCE(cagg.view_name, jobs.hypertable_name) IN (
-        't_telemetry', 'tel_agg_5min', 'tel_agg_1h', 'tel_agg_1d'
+        't_telemetry', 'tel_agg_1h', 'tel_agg_1d'
       )
   ) AS governed_jobs;
 
   final_contract :=
     history_foreign_keys = 0
     AND typed_value_checks = 2
+    AND cache_table_valid
     AND cache_index_valid
     AND prune_procedure_valid
     AND prune_job_valid
@@ -200,6 +356,7 @@ BEGIN
 
   IF history_foreign_keys <> 3
      OR typed_value_checks <> 2
+     OR NOT cache_table_valid
      OR cache_index_valid
      OR to_regprocedure(
        'public.prune_l0_observation_dedup(integer,jsonb)'
@@ -287,10 +444,6 @@ BEGIN
     if_exists => TRUE
   );
   PERFORM public.remove_continuous_aggregate_policy(
-    'public.tel_agg_5min',
-    if_exists => TRUE
-  );
-  PERFORM public.remove_continuous_aggregate_policy(
     'public.tel_agg_1h',
     if_exists => TRUE
   );
@@ -318,7 +471,7 @@ BEGIN
   );
   PERFORM public.add_continuous_aggregate_policy(
     'public.tel_agg_1h',
-    start_offset => interval '8 days',
+    start_offset => interval '6 days',
     end_offset => interval '1 hour',
     schedule_interval => interval '1 hour',
     initial_start => clock_timestamp() + interval '1 minute',
@@ -326,7 +479,7 @@ BEGIN
   );
   PERFORM public.add_continuous_aggregate_policy(
     'public.tel_agg_1d',
-    start_offset => interval '8 days',
+    start_offset => interval '6 days',
     end_offset => interval '1 day',
     schedule_interval => interval '1 day',
     initial_start => clock_timestamp() + interval '1 minute',
@@ -336,8 +489,17 @@ BEGIN
   SELECT count(*) = 1
          AND bool_and(
            schedule_interval = interval '15 minutes'
+           AND max_runtime = interval '0'
+           AND max_retries = -1
+           AND retry_period = interval '5 minutes'
            AND config = '{}'::jsonb
            AND scheduled
+           AND fixed_schedule
+           AND initial_start IS NOT NULL
+           AND hypertable_schema IS NULL
+           AND hypertable_name IS NULL
+           AND check_schema IS NULL
+           AND check_name IS NULL
          )
     INTO prune_job_valid
   FROM timescaledb_information.jobs
@@ -361,43 +523,99 @@ BEGIN
          AND count(*) FILTER (
            WHERE proc_name = 'policy_compression'
              AND logical_name = 't_telemetry'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
+             AND schedule_interval = interval '30 minutes'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 hour'
+             AND scheduled
+             AND NOT fixed_schedule
+             AND initial_start IS NULL
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_compression_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 2
+             AND config ? 'hypertable_id'
+             AND config ? 'compress_after'
              AND (config->>'compress_after')::interval = interval '6 hours'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_retention'
              AND logical_name = 't_telemetry'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
+             AND schedule_interval = interval '1 day'
+             AND max_runtime = interval '5 minutes'
+             AND max_retries = -1
+             AND retry_period = interval '5 minutes'
+             AND scheduled
+             AND NOT fixed_schedule
+             AND initial_start IS NULL
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_retention_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 2
+             AND config ? 'hypertable_id'
+             AND config ? 'drop_after'
              AND (config->>'drop_after')::interval = interval '7 days'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_refresh_continuous_aggregate'
              AND logical_name = 'tel_agg_1h'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
              AND schedule_interval = interval '1 hour'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 hour'
+             AND scheduled
              AND initial_start IS NOT NULL
              AND fixed_schedule
-             AND (config->>'start_offset')::interval = interval '8 days'
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_refresh_continuous_aggregate_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 3
+             AND config ? 'mat_hypertable_id'
+             AND config ? 'start_offset'
+             AND config ? 'end_offset'
+             AND (config->>'start_offset')::interval = interval '6 days'
              AND (config->>'end_offset')::interval = interval '1 hour'
          ) = 1
          AND count(*) FILTER (
            WHERE proc_name = 'policy_refresh_continuous_aggregate'
              AND logical_name = 'tel_agg_1d'
+             AND proc_schema = '_timescaledb_functions'
+             AND hypertable_schema = 'public'
              AND schedule_interval = interval '1 day'
+             AND max_runtime = interval '0'
+             AND max_retries = -1
+             AND retry_period = interval '1 day'
+             AND scheduled
              AND initial_start IS NOT NULL
              AND fixed_schedule
-             AND (config->>'start_offset')::interval = interval '8 days'
+             AND check_schema = '_timescaledb_functions'
+             AND check_name = 'policy_refresh_continuous_aggregate_check'
+             AND (SELECT count(*) FROM jsonb_object_keys(config)) = 3
+             AND config ? 'mat_hypertable_id'
+             AND config ? 'start_offset'
+             AND config ? 'end_offset'
+             AND (config->>'start_offset')::interval = interval '6 days'
              AND (config->>'end_offset')::interval = interval '1 day'
          ) = 1
-         AND count(*) FILTER (
-           WHERE proc_name = 'policy_refresh_continuous_aggregate'
-             AND logical_name = 'tel_agg_5min'
-         ) = 0
     INTO storage_jobs_valid
   FROM (
     SELECT jobs.proc_name,
+           jobs.proc_schema,
            COALESCE(cagg.view_name, jobs.hypertable_name) AS logical_name,
+           jobs.hypertable_schema,
            jobs.schedule_interval,
+           jobs.max_runtime,
+           jobs.max_retries,
+           jobs.retry_period,
+           jobs.scheduled,
            jobs.initial_start,
            jobs.fixed_schedule,
-           jobs.config
+           jobs.config,
+           jobs.check_schema,
+           jobs.check_name
     FROM timescaledb_information.jobs AS jobs
     LEFT JOIN timescaledb_information.continuous_aggregates AS cagg
       ON cagg.materialization_hypertable_schema = jobs.hypertable_schema
@@ -408,7 +626,7 @@ BEGIN
         'policy_refresh_continuous_aggregate'
       )
       AND COALESCE(cagg.view_name, jobs.hypertable_name) IN (
-        't_telemetry', 'tel_agg_5min', 'tel_agg_1h', 'tel_agg_1d'
+        't_telemetry', 'tel_agg_1h', 'tel_agg_1d'
       )
   ) AS governed_jobs;
 

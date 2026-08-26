@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import time
 import unittest
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -51,10 +52,50 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                hard_cut = migration.NodeDataTrunkHardCutMigrationPostgresTest
-                hard_cut._reset_through_043(cursor)
-                hard_cut._apply_044(cursor)
-                self._restore_timescale_001_footprint(cursor)
+                cursor.execute(
+                    "SELECT _timescaledb_functions.stop_background_workers()"
+                )
+                try:
+                    hard_cut = migration.NodeDataTrunkHardCutMigrationPostgresTest
+                    hard_cut._reset_through_043(cursor)
+                    hard_cut._apply_044(cursor)
+                    self._restore_timescale_001_footprint(cursor)
+                finally:
+                    cursor.execute(
+                        "SELECT "
+                        "_timescaledb_functions.start_background_workers()"
+                    )
+
+    @staticmethod
+    def _quiesce_test_jobs(cursor, *, include_refresh: bool = True) -> None:
+        proc_names = [
+            "prune_l0_observation_dedup",
+            "policy_compression",
+            "policy_retention",
+        ]
+        if include_refresh:
+            proc_names.append("policy_refresh_continuous_aggregate")
+        cursor.execute(
+            "SELECT job_id FROM timescaledb_information.jobs "
+            "WHERE proc_name=ANY(%s) AND scheduled",
+            (proc_names,),
+        )
+        job_ids = [row[0] for row in cursor.fetchall()]
+        for job_id in job_ids:
+            cursor.execute("SELECT alter_job(%s, scheduled=>FALSE)", (job_id,))
+
+        deadline = time.monotonic() + 10
+        while job_ids:
+            cursor.execute(
+                "SELECT count(*) FROM timescaledb_information.job_stats "
+                "WHERE job_id=ANY(%s) AND last_run_status='Running'",
+                (job_ids,),
+            )
+            if cursor.fetchone()[0] == 0:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timescale test jobs did not become idle")
+            time.sleep(0.05)
 
     @staticmethod
     def _apply_045(cursor) -> None:
@@ -129,6 +170,79 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
             (str(tag_id), str(node_id)),
         )
         return node_id, tag_id
+
+    @staticmethod
+    def _add_existing_5min_policy(cursor) -> int:
+        cursor.execute(
+            """
+            SELECT add_continuous_aggregate_policy(
+              'public.tel_agg_5min',
+              start_offset => interval '12 hours',
+              end_offset => interval '5 minutes',
+              schedule_interval => interval '5 minutes',
+              initial_start => clock_timestamp()+interval '1 hour',
+              if_not_exists => TRUE
+            )
+            """
+        )
+        return cursor.fetchone()[0]
+
+    @staticmethod
+    def _job_snapshot(cursor, job_id: int):
+        cursor.execute(
+            """
+            SELECT job_id, application_name, schedule_interval, max_runtime,
+                   max_retries, retry_period, proc_schema, proc_name, owner,
+                   scheduled, fixed_schedule, config, initial_start,
+                   hypertable_schema, hypertable_name, check_schema, check_name
+            FROM timescaledb_information.jobs
+            WHERE job_id=%s
+            """,
+            (job_id,),
+        )
+        return cursor.fetchone()
+
+    @staticmethod
+    def _governed_jobs_snapshot(cursor):
+        cursor.execute(
+            """
+            SELECT job_id, schedule_interval, max_runtime, max_retries,
+                   retry_period, proc_schema, proc_name, scheduled,
+                   fixed_schedule, config, initial_start,
+                   hypertable_schema, hypertable_name
+            FROM timescaledb_information.jobs
+            WHERE proc_name IN (
+              'prune_l0_observation_dedup',
+              'policy_compression',
+              'policy_retention',
+              'policy_refresh_continuous_aggregate'
+            )
+            ORDER BY job_id
+            """
+        )
+        return cursor.fetchall()
+
+    @staticmethod
+    def _cache_snapshot(cursor):
+        cursor.execute(
+            """
+            SELECT count(*), array_agg(source_digest ORDER BY source_digest)
+            FROM t_l0_observation_dedup
+            """
+        )
+        count, digests = cursor.fetchone()
+        return count, tuple(item.strip() for item in (digests or ()))
+
+    def _insert_cache_evidence(self, cursor, digest: str) -> None:
+        _, tag_id = self._insert_node_and_tag(cursor)
+        cursor.execute(
+            """
+            INSERT INTO t_l0_observation_dedup
+              (observation_id,tag_id,observed_at,source_digest)
+            VALUES(%s,%s,clock_timestamp(),%s)
+            """,
+            (str(uuid4()), str(tag_id), digest),
+        )
 
     def _insert_upgrade_facts(
         self,
@@ -368,6 +482,7 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
                     ),
                     actual,
                 )
+                self._quiesce_test_jobs(cursor, include_refresh=False)
 
                 node_id, tag_id = self._insert_node_and_tag(cursor)
                 cursor.execute(
@@ -441,6 +556,92 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
                     (str(tag_id),),
                 )
                 self.assertEqual(aggregate_1d_count, cursor.fetchone()[0])
+
+    def test_045_refresh_jobs_preserve_aggregates_older_than_raw_retention(
+        self,
+    ) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._quiesce_test_jobs(cursor, include_refresh=False)
+                node_id, tag_id = self._insert_node_and_tag(cursor)
+                cursor.execute(
+                    """
+                    INSERT INTO t_telemetry
+                      (ts,node_id,tag_id,value_float,is_virtual,quality,
+                       event_time_basis,event_received_at)
+                    VALUES
+                      (clock_timestamp()-interval '7 days 12 hours',
+                       %s,%s,11.0,FALSE,192,'observed_at',clock_timestamp())
+                    """,
+                    (str(node_id), str(tag_id)),
+                )
+                for aggregate in ("tel_agg_1h", "tel_agg_1d"):
+                    cursor.execute(
+                        f"CALL refresh_continuous_aggregate("
+                        f"'public.{aggregate}', "
+                        "clock_timestamp()-interval '9 days', "
+                        "clock_timestamp()-interval '6 days')"
+                    )
+                    cursor.execute(
+                        f"SELECT count(*) FROM {aggregate} WHERE tag_id=%s",
+                        (str(tag_id),),
+                    )
+                    self.assertEqual(1, cursor.fetchone()[0])
+
+                cursor.execute(
+                    "SELECT drop_chunks("
+                    "'public.t_telemetry', "
+                    "older_than => clock_timestamp()-interval '7 days')"
+                )
+                cursor.execute(
+                    "SELECT count(*) FROM t_telemetry WHERE tag_id=%s",
+                    (str(tag_id),),
+                )
+                self.assertEqual(0, cursor.fetchone()[0])
+
+                cursor.execute(
+                    """
+                    SELECT job_id
+                    FROM timescaledb_information.jobs
+                    WHERE proc_name='policy_refresh_continuous_aggregate'
+                      AND hypertable_name IN ('tel_agg_1h', 'tel_agg_1d')
+                    ORDER BY hypertable_name
+                    """
+                )
+                for (job_id,) in cursor.fetchall():
+                    cursor.execute("CALL public.run_job(%s)", (job_id,))
+
+                for aggregate in ("tel_agg_1h", "tel_agg_1d"):
+                    cursor.execute(
+                        f"SELECT count(*) FROM {aggregate} WHERE tag_id=%s",
+                        (str(tag_id),),
+                    )
+                    self.assertEqual(1, cursor.fetchone()[0])
+
+    def test_045_upgrade_preserves_existing_5min_policy_verbatim(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                job_id = self._add_existing_5min_policy(cursor)
+                before = self._job_snapshot(cursor, job_id)
+
+                self._apply_045(cursor)
+
+                self.assertEqual(before, self._job_snapshot(cursor, job_id))
+
+    def test_045_replay_preserves_later_5min_policy_verbatim(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                job_id = self._add_existing_5min_policy(cursor)
+                before = self._job_snapshot(cursor, job_id)
+
+                self._apply_045(cursor)
+
+                self.assertEqual(before, self._job_snapshot(cursor, job_id))
 
     def test_045_schedules_first_aggregate_backfill_promptly(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
@@ -608,6 +809,126 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
                     "AND proc_name='prune_l0_observation_dedup'"
                 )
                 self.assertEqual(2, cursor.fetchone()[0])
+
+    def test_045_replay_rejects_mutated_prune_procedure_without_writes(
+        self,
+    ) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._insert_cache_evidence(cursor, "f" * 64)
+                cursor.execute(
+                    """
+                    CREATE OR REPLACE PROCEDURE prune_l0_observation_dedup(
+                      job_id INTEGER,
+                      config JSONB
+                    )
+                    LANGUAGE plpgsql
+                    SET search_path = pg_catalog, public
+                    AS $procedure$
+                    BEGIN
+                      RETURN;
+                      DELETE FROM public.t_l0_observation_dedup
+                      WHERE created_at <
+                        clock_timestamp() - interval '6 hours';
+                    END;
+                    $procedure$
+                    """
+                )
+                jobs_before = self._governed_jobs_snapshot(cursor)
+                cache_before = self._cache_snapshot(cursor)
+
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_045(cursor)
+                self.assertEqual("55000", raised.exception.pgcode)
+                connection.rollback()
+
+                self.assertEqual(jobs_before, self._governed_jobs_snapshot(cursor))
+                self.assertEqual(cache_before, self._cache_snapshot(cursor))
+                cursor.execute(
+                    """
+                    SELECT prosrc
+                    FROM pg_proc
+                    WHERE oid='public.prune_l0_observation_dedup'::regproc
+                    """
+                )
+                self.assertIn("RETURN", cursor.fetchone()[0])
+
+    def test_045_replay_rejects_mutated_cache_table_without_writes(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._insert_cache_evidence(cursor, "1" * 64)
+                cursor.execute(
+                    "ALTER TABLE t_l0_observation_dedup "
+                    "ALTER COLUMN created_at DROP DEFAULT"
+                )
+                jobs_before = self._governed_jobs_snapshot(cursor)
+                cache_before = self._cache_snapshot(cursor)
+
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_045(cursor)
+                self.assertEqual("55000", raised.exception.pgcode)
+                connection.rollback()
+
+                self.assertEqual(jobs_before, self._governed_jobs_snapshot(cursor))
+                self.assertEqual(cache_before, self._cache_snapshot(cursor))
+                cursor.execute(
+                    """
+                    SELECT column_default
+                    FROM information_schema.columns
+                    WHERE table_schema='public'
+                      AND table_name='t_l0_observation_dedup'
+                      AND column_name='created_at'
+                    """
+                )
+                self.assertIsNone(cursor.fetchone()[0])
+
+    def test_045_replay_rejects_disabled_retention_job_without_writes(
+        self,
+    ) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._apply_045(cursor)
+                self._insert_cache_evidence(cursor, "2" * 64)
+                cursor.execute(
+                    """
+                    SELECT job_id
+                    FROM timescaledb_information.jobs
+                    WHERE proc_name='policy_retention'
+                      AND hypertable_name='t_telemetry'
+                    """
+                )
+                retention_job_id = cursor.fetchone()[0]
+                cursor.execute(
+                    "SELECT alter_job(%s, scheduled => FALSE)",
+                    (retention_job_id,),
+                )
+                jobs_before = self._governed_jobs_snapshot(cursor)
+                cache_before = self._cache_snapshot(cursor)
+
+                with self.assertRaises(
+                    psycopg2.errors.ObjectNotInPrerequisiteState
+                ) as raised:
+                    self._apply_045(cursor)
+                self.assertEqual("55000", raised.exception.pgcode)
+                connection.rollback()
+
+                self.assertEqual(jobs_before, self._governed_jobs_snapshot(cursor))
+                self.assertEqual(cache_before, self._cache_snapshot(cursor))
+                cursor.execute(
+                    "SELECT scheduled FROM timescaledb_information.jobs "
+                    "WHERE job_id=%s",
+                    (retention_job_id,),
+                )
+                self.assertFalse(cursor.fetchone()[0])
 
     def test_045_expired_cache_replay_does_not_duplicate_l0_l2_or_outbox(self) -> None:
         from app.services.data_trunk import DataTrunk
