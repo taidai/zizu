@@ -4460,3 +4460,17 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 正式规格：`docs/superpowers/specs/2026-08-27-site-realtime-blackboard-frame-design.md`；架构决策：
   `docs/adr/0014-site-realtime-blackboard-and-committed-frames.md`。当前只完成设计文档，尚未写实现计划或
   改生产代码；下一步先由用户复核书面规格，确认后再使用 writing-plans 拆分纵向 TDD 实施任务。
+
+### 2026-08-27 — ZiZu 平台核心架构总纲（待书面复核）
+
+- 用户确认新建唯一现行总纲、保留专项链接、标记旧规格冲突，并要求按新总纲重新出规格。
+- 新总纲统一了产品目标、真实节点树、L0/L1/L2 领域骨架、唯一配置路径、运行组件、实时黑板与数据
+  帧、共享数据结构、告警/JDM/控制/工作台边界、界面清单、安全原则、交付闭环和四阶段开发顺序。
+- 只读源码盘点写入总纲：L0、L1、L2 和固定 EMS 工作台底座已实现；节点/解决方案硬切、实时界面、
+  上层 committed L2 收口和配置修订为部分实现；L1 在旧结构上已有能力但 Schema 044 硬切服务适配
+  尚未完成；统计实体仅保留目标语义、旧实现已删除；实时黑板、统一节拍和数据帧两段事务未实现。
+- 总纲：`docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md`。相关 2026-08-17、
+  08-23、08-25、08-27 专项规格增加状态说明，README 顶部增加唯一架构入口；未改生产代码或部署。
+- 总纲在最终书面复核前保持 Proposed，不先覆盖 accepted ADR；复核后再改为唯一现行入口。
+- 下一步：完成规格自检和提交，请用户最终复核；确认后先为“数据帧底座”单独编写实施计划，不启动
+  一次性全平台重构。

@@ -5,6 +5,8 @@
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
 > 当前候选版本：**v0.4.85-rc.4**。本版本硬切到单一节点数据主干，删除“解决方案交付”、设备模板、独立实体管理、EMS 策略与业务指标投影等并行语义，并修复实时数据批量入库积压及积压批次间的空等。
+>
+> 候选统一架构入口（待最终书面复核）：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。复核前以 accepted ADR 为正式决策；README 后部仍含历史接口说明时，以最新 ADR 与当前源码为准。
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 
