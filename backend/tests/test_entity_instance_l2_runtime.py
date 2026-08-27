@@ -159,43 +159,6 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
             self.runtime.read(ENTITY_ID)
         self.assertEqual(raised.exception.code, "ENTITY_DATA_MISSING")
 
-    def test_alarm_evidence_keeps_the_l2_event_and_conversion_provenance(self) -> None:
-        from app.services.alarm_runtime import (
-            AlarmDefinition,
-            AlarmRuntime,
-            InMemoryAlarmDefinitionCatalog,
-            InMemoryAlarmRepository,
-        )
-        from app.services.entity_alarm_adapter import EntityAlarmAdapter
-
-        self.publish_l2()
-        definition = AlarmDefinition(
-            id=UUID("87000000-0000-0000-0000-000000000021"),
-            asset_id="alarm.pcs.active-power-high",
-            version="1",
-            entity_instance_id=ENTITY_ID,
-            entity_definition_id="pcs.active_power",
-            trigger={"op": "gt", "value": 10},
-            trigger_duration_seconds=0,
-            recovery={"op": "lte", "value": 9},
-            recovery_duration_seconds=0,
-            severity="MAJOR",
-            notification_throttle_seconds=60,
-        )
-        definitions = InMemoryAlarmDefinitionCatalog((definition,))
-        repository = InMemoryAlarmRepository()
-        adapter = EntityAlarmAdapter(
-            definitions,
-            self.runtime,
-            AlarmRuntime(definitions, repository),
-        )
-
-        adapter.submit_entity(ENTITY_ID)
-
-        event = repository.list_events()[0]
-        self.assertIsNotNone(event.first_observation)
-        self.assert_l2_provenance(event.first_observation["evidence"])
-
     def test_rule_context_keeps_the_l2_event_and_conversion_provenance(self) -> None:
         from app.services.rule_engine import _entity_instance_context
 

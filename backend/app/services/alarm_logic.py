@@ -1,10 +1,4 @@
-"""
-Alarm logic — shared pure functions for both alarm paths (tag-based + MQTT-extracted).
-
-This module is intentionally DB-free so it can be unit-tested in isolation.
-Both tag_alarm_engine and alarm_processor call these functions to ensure
-unified fault-code resolution and message formatting.
-"""
+"""Legacy alarm labels retained for read-only history and API presentation."""
 from __future__ import annotations
 
 from typing import Any

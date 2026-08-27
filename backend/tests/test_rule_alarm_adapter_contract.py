@@ -146,14 +146,20 @@ class RuleAlarmAdapterContractTest(unittest.TestCase):
         services = Path(__file__).resolve().parents[1] / "app" / "services"
         for filename in (
             "rule_engine.py",
-            "alarm_processor.py",
-            "tag_alarm_engine.py",
             "entity_alarm_engine.py",
         ):
             source = (services / filename).read_text(encoding="utf-8").lower()
             with self.subTest(source=filename):
                 self.assertNotIn("insert into t_alarms", source)
                 self.assertNotIn("update t_alarms", source)
+
+        for removed in (
+            "alarm_processor.py",
+            "tag_alarm_engine.py",
+            "tag_mqtt_alarm_adapter.py",
+            "entity_alarm_adapter.py",
+        ):
+            self.assertFalse((services / removed).exists())
 
         migration = (
             Path(__file__).resolve().parents[2]
