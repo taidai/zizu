@@ -37,6 +37,8 @@ class ConversionEvaluator(Protocol):
         current_inputs: Mapping[InputReference, RawObservation | L2Observation],
         configuration_revision: int,
         calculated_at: datetime,
+        frame_id: UUID | None = None,
+        frame_sequence: int = 0,
     ) -> tuple[L2Observation, ...]: ...
 
 

@@ -18,6 +18,7 @@ from app.services.data_trunk_contracts import (
     BlackboardRecovery,
     BooleanCodeInput,
     BooleanSetTransform,
+    ClaimedFrame,
     CommitReceipt,
     DataTrunkError,
     EnumTransform,
@@ -32,11 +33,13 @@ from app.services.data_trunk_contracts import (
     InstalledPointProcessing,
     L2Observation,
     PendingFrame,
+    ProcessingSnapshot,
     RawObservation,
     SourceOrder,
     SourceOrderMode,
     TrunkQuality,
     TypedValue,
+    TerminalFrame,
     ValueKind,
 )
 from app.services.point_processing_dag import validate_processing_dag
@@ -162,6 +165,7 @@ class PostgresFrameRepository:
         if state_heartbeat_seconds <= 0:
             raise ValueError("state heartbeat must be positive")
         self._state_heartbeat_seconds = state_heartbeat_seconds
+        self._processing_owner = uuid4()
 
     def acquire_writer(self) -> FrameWriterLease:
         manager = self._connection()
@@ -422,6 +426,552 @@ class PostgresFrameRepository:
             )
         return pending
 
+    def claim_next(self, now: datetime) -> ClaimedFrame | None:
+        token = uuid4()
+        lease_until = now + timedelta(seconds=30)
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            WITH candidate AS (
+                              SELECT frame_id
+                              FROM t_data_frames
+                              WHERE status='PENDING' AND attempt_count < 3
+                              ORDER BY frame_sequence
+                              FOR UPDATE SKIP LOCKED
+                              LIMIT 1
+                            )
+                            UPDATE t_data_frames AS frame
+                            SET status='PROCESSING',
+                                attempt_count=frame.attempt_count+1,
+                                processing_owner=%s,
+                                processing_token=%s,
+                                lease_until=%s
+                            FROM candidate
+                            WHERE frame.frame_id=candidate.frame_id
+                            RETURNING frame.frame_id,frame.frame_sequence,
+                                      frame.capture_beat,frame.shot_at,
+                                      frame.configuration_revision,
+                                      frame.attempt_count,
+                                      frame.processing_owner,
+                                      frame.processing_token,
+                                      frame.lease_until,frame.created_at
+                            """,
+                            (str(self._processing_owner), str(token), lease_until),
+                        )
+                        row = cursor.fetchone()
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_CLAIM_FAILED",
+                "DATA_FRAME_CLAIM_FAILED",
+            ) from exc
+        if row is None:
+            return None
+        return ClaimedFrame(
+            frame_id=UUID(str(row[0])),
+            frame_sequence=int(row[1]),
+            capture_beat=int(row[2]),
+            shot_at=row[3],
+            configuration_revision=int(row[4]),
+            attempt_count=int(row[5]),
+            processing_owner=UUID(str(row[6])),
+            processing_token=UUID(str(row[7])),
+            lease_until=row[8],
+            created_at=row[9],
+        )
+
+    def load_processing_snapshot(self, claimed: ClaimedFrame) -> ProcessingSnapshot:
+        try:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH relevant_tags AS (
+                      SELECT DISTINCT binding.l0_tag_id AS tag_id
+                      FROM t_point_processing_input_bindings AS binding
+                      JOIN t_installed_point_processings AS installed
+                        ON installed.id=binding.installed_processing_id
+                      WHERE binding.source_kind='l0'
+                        AND installed.current=TRUE
+                        AND installed.configuration_revision <= %s
+                      UNION
+                      SELECT tag_id FROM t_telemetry WHERE frame_id=%s
+                    )
+                    SELECT DISTINCT ON (telemetry.tag_id)
+                      telemetry.observation_id,telemetry.node_id,
+                      telemetry.tag_id,tag.name,
+                      COALESCE(tag.value_data_type,tag.data_type),
+                      telemetry.raw_unit,telemetry.raw_value_float,
+                      telemetry.raw_value_int,telemetry.raw_value_bool,
+                      telemetry.raw_value_text,telemetry.quality,telemetry.ts,
+                      telemetry.event_received_at,telemetry.source_message_id,
+                      telemetry.source_sequence,telemetry.source_digest,
+                      telemetry.event_time_basis,telemetry.accepted_beat,
+                      telemetry.source_order_mode,
+                      telemetry.source_receive_ordinal
+                    FROM t_telemetry AS telemetry
+                    JOIN relevant_tags USING(tag_id)
+                    JOIN t_tags AS tag ON tag.id=telemetry.tag_id
+                    WHERE telemetry.frame_sequence <= %s
+                    ORDER BY telemetry.tag_id,telemetry.frame_sequence DESC,
+                             telemetry.ts DESC
+                    """,
+                    (
+                        claimed.configuration_revision,
+                        str(claimed.frame_id),
+                        claimed.frame_sequence,
+                    ),
+                )
+                cells: dict[UUID, FramedRawObservation] = {}
+                for row in cursor.fetchall():
+                    tag_id = UUID(str(row[2]))
+                    mode = SourceOrderMode(str(row[18]))
+                    ordinal = int(row[19] or 0)
+                    if mode is SourceOrderMode.SEQUENCE:
+                        order = SourceOrder.sequence(int(row[14]))
+                    elif mode is SourceOrderMode.OBSERVED_AT:
+                        order = SourceOrder.observed_at(
+                            row[11], ordinal, str(row[15]).strip()
+                        )
+                    else:
+                        order = SourceOrder.received_at(
+                            row[12], ordinal, str(row[15]).strip()
+                        )
+                    raw = RawObservation(
+                        observation_id=UUID(str(row[0])),
+                        node_id=UUID(str(row[1])),
+                        tag_id=tag_id,
+                        source_key=str(row[3]),
+                        value=_raw_value_from_columns(
+                            str(row[4]), row[6], row[7], row[8], row[9]
+                        ),
+                        raw_unit=row[5],
+                        quality=TrunkQuality(int(row[10])),
+                        source_timestamp=row[11],
+                        received_at=row[12],
+                        source_message_id=row[13],
+                        source_sequence=row[14],
+                        source_digest=str(row[15]).strip(),
+                        event_time_basis=str(row[16]),
+                        source_order=order,
+                    )
+                    cells[tag_id] = FramedRawObservation(
+                        observation=raw,
+                        accepted_beat=int(row[17]),
+                        effective_quality=TrunkQuality(int(row[10])),
+                    )
+                legacy_snapshot = self._load_conversion_snapshot(
+                    cursor,
+                    tuple(cell.observation for cell in cells.values()),
+                    calculated_at=claimed.shot_at,
+                )
+                installed = {
+                    item.entity_instance_id: item
+                    for item in legacy_snapshot.installed
+                }
+                installed.update(
+                    {
+                        item.entity_instance_id: item
+                        for item in self._load_frame_formula_processings(
+                            cursor, claimed.configuration_revision
+                        )
+                    }
+                )
+                cursor.execute(
+                    """
+                    SELECT source_entity_instance_id,target_entity_instance_id
+                    FROM t_point_processing_dependencies AS dependency
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id=dependency.installed_processing_id
+                    WHERE installed.current=TRUE
+                      AND installed.configuration_revision <= %s
+                    ORDER BY source_entity_instance_id,target_entity_instance_id
+                    """,
+                    (claimed.configuration_revision,),
+                )
+                edges = tuple(
+                    (UUID(str(source)), UUID(str(target)))
+                    for source, target in cursor.fetchall()
+                    if UUID(str(source)) in installed
+                    and UUID(str(target)) in installed
+                )
+                dag_order = validate_processing_dag(
+                    existing_edges=edges,
+                    planned_edges=(),
+                ).order
+                ordered = dag_order + tuple(
+                    sorted(
+                        set(installed) - set(dag_order),
+                        key=str,
+                    )
+                )
+                connection.commit()
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_SNAPSHOT_FAILED",
+                "DATA_FRAME_SNAPSHOT_FAILED",
+            ) from exc
+        return ProcessingSnapshot(
+            l0_by_tag=MappingProxyType(cells),
+            installed_by_entity_id=MappingProxyType(installed),
+            topological_output_ids=ordered,
+            dependency_edges=edges,
+        )
+
+    @staticmethod
+    def _load_frame_formula_processings(
+        cursor,
+        configuration_revision: int,
+    ) -> tuple[InstalledPointProcessing, ...]:
+        cursor.execute(
+            """
+            SELECT installed.id,installed.revision_id,output.id,
+                   output_binding.entity_instance_id,
+                   output.entity_definition_id,output.data_type,output.unit,
+                   output.freshness_seconds,expression.dsl_text,
+                   expression.canonical_ast,expression.ast_digest,
+                   expression.schedule_seconds,expression.control_eligible
+            FROM t_installed_point_processings AS installed
+            JOIN t_point_processing_outputs AS output
+              ON output.revision_id=installed.revision_id
+            JOIN t_point_processing_output_bindings AS output_binding
+              ON output_binding.installed_processing_id=installed.id
+             AND output_binding.output_id=output.id
+            JOIN t_point_processing_expressions AS expression
+              ON expression.output_id=output.id
+            WHERE installed.current=TRUE
+              AND installed.configuration_revision <= %s
+            ORDER BY output_binding.entity_instance_id
+            """,
+            (configuration_revision,),
+        )
+        items: list[InstalledPointProcessing] = []
+        for row in cursor.fetchall():
+            (
+                installation_id,
+                revision_id,
+                output_id,
+                target_entity_id,
+                definition_id,
+                output_type,
+                output_unit,
+                freshness_seconds,
+                dsl_text,
+                canonical_ast,
+                ast_digest,
+                schedule_seconds,
+                control_eligible,
+            ) = row
+            cursor.execute(
+                """
+                SELECT input.id,input.input_key,input.data_type,input.unit,
+                       input.required,COALESCE(selector.cardinality,'one'),
+                       selector.default_value
+                FROM t_point_processing_inputs AS input
+                LEFT JOIN t_point_processing_selectors AS selector
+                  ON selector.input_id=input.id
+                WHERE input.revision_id=%s
+                ORDER BY input.input_key
+                """,
+                (revision_id,),
+            )
+            input_rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT input_id,source_entity_instance_id
+                FROM t_point_processing_dependencies
+                WHERE installed_processing_id=%s AND output_id=%s
+                ORDER BY input_id,source_entity_instance_id
+                """,
+                (installation_id, output_id),
+            )
+            dependency_sources: dict[UUID, list[UUID]] = {}
+            for input_id, source_id in cursor.fetchall():
+                dependency_sources.setdefault(UUID(str(input_id)), []).append(
+                    UUID(str(source_id))
+                )
+            referenced_inputs = set(_formula_input_names(canonical_ast))
+            source_contracts: dict[str, FormulaSource] = {}
+            sources: dict[str, tuple[InputReference, ...]] = {}
+            for (
+                input_id,
+                input_key,
+                data_type,
+                unit,
+                required,
+                cardinality,
+                default_value,
+            ) in input_rows:
+                if input_key not in referenced_inputs:
+                    continue
+                source_ids = tuple(
+                    dependency_sources.get(UUID(str(input_id)), ())
+                )
+                if not source_ids and required:
+                    raise DataTrunkError(
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
+                        "required formula input has no frozen source",
+                    )
+                source_contracts[input_key] = FormulaSource(
+                    input_key,
+                    ValueKind(data_type),
+                    unit,
+                    cardinality,
+                    bool(required),
+                    default_value,
+                )
+                sources[input_key] = tuple(
+                    InputReference.l2(source_id) for source_id in source_ids
+                )
+            items.append(
+                InstalledPointProcessing(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(target_entity_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind(output_type),
+                    output_unit=output_unit,
+                    freshness_seconds=float(freshness_seconds),
+                    transform=FormulaTransform(
+                        sources=sources,
+                        source_contracts=source_contracts,
+                        compiled=CompiledFormula(
+                            text=dsl_text,
+                            ast=canonical_ast,
+                            digest=str(ast_digest).strip(),
+                            result_kind=ValueKind(output_type),
+                            result_unit=output_unit,
+                        ),
+                        schedule_seconds=int(schedule_seconds),
+                        control_eligible=bool(control_eligible),
+                    ),
+                )
+            )
+        return tuple(items)
+
+    def complete(
+        self,
+        claimed: ClaimedFrame,
+        snapshot: ProcessingSnapshot,
+        outputs: tuple[L2Observation, ...],
+    ) -> TerminalFrame:
+        finished_at = self._clock()
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT 1 FROM t_data_frames
+                            WHERE frame_id=%s AND status='PROCESSING'
+                              AND processing_owner=%s AND processing_token=%s
+                              AND attempt_count=%s
+                              AND lease_until > clock_timestamp()
+                            FOR UPDATE
+                            """,
+                            (
+                                str(claimed.frame_id),
+                                str(claimed.processing_owner),
+                                str(claimed.processing_token),
+                                claimed.attempt_count,
+                            ),
+                        )
+                        if cursor.fetchone() is None:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CLAIM_LOST",
+                                "DATA_FRAME_CLAIM_LOST",
+                            )
+                        self._advance_frame_l0_latest(
+                            cursor,
+                            claimed.frame_sequence,
+                            tuple(snapshot.l0_by_tag.values()),
+                        )
+                        self._ensure_runtime(cursor)
+                        self._insert_frame_l2(cursor, outputs)
+                        self._advance_frame_l2_latest(cursor, outputs)
+                        self._insert_sources(cursor, outputs)
+                        self._fault_hook("source")
+                        cursor.execute(
+                            """
+                            INSERT INTO t_data_frame_outbox
+                              (frame_id,frame_sequence,terminal_status)
+                            VALUES(%s,%s,'COMPLETE')
+                            """,
+                            (str(claimed.frame_id), claimed.frame_sequence),
+                        )
+                        self._fault_hook("outbox")
+                        cursor.execute(
+                            """
+                            UPDATE t_data_frames
+                            SET status='COMPLETE',processing_owner=NULL,
+                                processing_token=NULL,lease_until=NULL,
+                                finished_at=%s
+                            WHERE frame_id=%s AND processing_owner=%s
+                              AND processing_token=%s AND attempt_count=%s
+                            """,
+                            (
+                                finished_at,
+                                str(claimed.frame_id),
+                                str(claimed.processing_owner),
+                                str(claimed.processing_token),
+                                claimed.attempt_count,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CLAIM_LOST",
+                                "DATA_FRAME_CLAIM_LOST",
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_COMPLETE_FAILED",
+                "DATA_FRAME_COMPLETE_FAILED",
+            ) from exc
+        return TerminalFrame(
+            frame_id=claimed.frame_id,
+            frame_sequence=claimed.frame_sequence,
+            configuration_revision=claimed.configuration_revision,
+            status=FrameStatus.COMPLETE,
+            finished_at=finished_at,
+        )
+
+    @staticmethod
+    def _insert_frame_l2(
+        cursor,
+        observations: tuple[L2Observation, ...],
+    ) -> None:
+        if not observations:
+            return
+        rows = []
+        for observation in observations:
+            if observation.frame_id is None or observation.frame_sequence < 1:
+                raise DataTrunkError(
+                    "DATA_FRAME_L2_IDENTITY_REQUIRED",
+                    "DATA_FRAME_L2_IDENTITY_REQUIRED",
+                )
+            rows.append(
+                (
+                    observation.observed_at,
+                    str(observation.event_id),
+                    str(observation.entity_instance_id),
+                    observation.received_at,
+                    observation.calculated_at,
+                    *_l2_columns(observation.value),
+                    int(observation.quality),
+                    observation.reason,
+                    str(observation.processing_revision_id),
+                    observation.configuration_revision,
+                    observation.source_digest,
+                    observation.source_order_key,
+                    str(RUNTIME_INSTANCE_ID),
+                    observation.event_time_basis,
+                    str(observation.frame_id),
+                    observation.frame_sequence,
+                )
+            )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO t_l2_observations
+              (observed_at,event_id,entity_instance_id,received_at,
+               calculated_at,value_float,value_int,value_numeric,value_bool,
+               value_text,value_codes,quality,reason,processing_revision_id,
+               configuration_revision,source_digest,source_order_key,
+               producing_runtime_instance_id,event_time_basis,frame_id,
+               commit_sequence)
+            VALUES %s
+            ON CONFLICT (event_id,observed_at) DO NOTHING
+            """,
+            rows,
+            template=(
+                "(%s::timestamptz,%s::uuid,%s::uuid,%s::timestamptz,"
+                "%s::timestamptz,%s::double precision,%s::bigint,%s::numeric,"
+                "%s::boolean,%s::text,%s::text[],%s::smallint,%s::text,"
+                "%s::uuid,%s::bigint,%s::char(64),%s::text,%s::uuid,"
+                "%s::text,%s::uuid,%s::bigint)"
+            ),
+            page_size=len(rows),
+        )
+
+    @staticmethod
+    def _advance_frame_l2_latest(
+        cursor,
+        observations: tuple[L2Observation, ...],
+    ) -> None:
+        if not observations:
+            return
+        rows = [
+            (
+                str(observation.entity_instance_id),
+                str(observation.event_id),
+                observation.observed_at,
+                observation.received_at,
+                observation.calculated_at,
+                *_l2_columns(observation.value),
+                int(observation.quality),
+                observation.reason,
+                str(observation.processing_revision_id),
+                observation.configuration_revision,
+                observation.source_digest,
+                observation.source_order_key,
+                str(RUNTIME_INSTANCE_ID),
+                observation.event_time_basis,
+                observation.frame_sequence,
+            )
+            for observation in observations
+        ]
+        execute_values(
+            cursor,
+            """
+            INSERT INTO t_l2_latest
+              (entity_instance_id,event_id,observed_at,received_at,
+               calculated_at,value_float,value_int,value_numeric,value_bool,
+               value_text,value_codes,quality,reason,processing_revision_id,
+               configuration_revision,source_digest,source_order_key,
+               producing_runtime_instance_id,event_time_basis,frame_sequence)
+            VALUES %s
+            ON CONFLICT (entity_instance_id) DO UPDATE SET
+              event_id=EXCLUDED.event_id,observed_at=EXCLUDED.observed_at,
+              received_at=EXCLUDED.received_at,
+              calculated_at=EXCLUDED.calculated_at,
+              value_float=EXCLUDED.value_float,value_int=EXCLUDED.value_int,
+              value_numeric=EXCLUDED.value_numeric,
+              value_bool=EXCLUDED.value_bool,value_text=EXCLUDED.value_text,
+              value_codes=EXCLUDED.value_codes,quality=EXCLUDED.quality,
+              reason=EXCLUDED.reason,
+              processing_revision_id=EXCLUDED.processing_revision_id,
+              configuration_revision=EXCLUDED.configuration_revision,
+              source_digest=EXCLUDED.source_digest,
+              source_order_key=EXCLUDED.source_order_key,
+              producing_runtime_instance_id=EXCLUDED.producing_runtime_instance_id,
+              event_time_basis=EXCLUDED.event_time_basis,
+              frame_sequence=EXCLUDED.frame_sequence
+            WHERE EXCLUDED.frame_sequence > t_l2_latest.frame_sequence
+            """,
+            rows,
+            template=(
+                "(%s::uuid,%s::uuid,%s::timestamptz,%s::timestamptz,"
+                "%s::timestamptz,%s::double precision,%s::bigint,%s::numeric,"
+                "%s::boolean,%s::text,%s::text[],%s::smallint,%s::text,"
+                "%s::uuid,%s::bigint,%s::char(64),%s::text,%s::uuid,"
+                "%s::text,%s::bigint)"
+            ),
+            page_size=len(rows),
+        )
+
     @staticmethod
     def _same_candidate(row, candidate: FrozenFrameCandidate) -> bool:
         return (
@@ -534,6 +1084,90 @@ class PostgresFrameRepository:
                 "%s::double precision,%s::bigint,%s::boolean,%s::text,"
                 "%s::text,%s::timestamptz,%s::uuid,%s::bigint,%s::bigint,"
                 "%s::text,%s::bigint)"
+            ),
+            page_size=len(rows),
+        )
+
+    @staticmethod
+    def _advance_frame_l0_latest(
+        cursor,
+        frame_sequence: int,
+        observations: tuple[FramedRawObservation, ...],
+    ) -> None:
+        if not observations:
+            return
+        rows = []
+        for framed in observations:
+            observation = framed.observation
+            order = observation.source_order
+            if order is None:
+                raise DataTrunkError(
+                    "DATA_FRAME_SOURCE_ORDER_REQUIRED",
+                    "DATA_FRAME_SOURCE_ORDER_REQUIRED",
+                )
+            compatibility, raw = _raw_columns(observation.value)
+            rows.append(
+                (
+                    str(observation.node_id),
+                    str(observation.tag_id),
+                    observation.source_timestamp,
+                    *compatibility,
+                    int(framed.effective_quality),
+                    str(observation.observation_id),
+                    observation.source_message_id,
+                    observation.source_sequence,
+                    observation.source_digest,
+                    observation.raw_unit,
+                    *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
+                    _raw_order_key(observation),
+                    frame_sequence,
+                    order.mode.value,
+                    None
+                    if order.mode is SourceOrderMode.SEQUENCE
+                    else order.secondary,
+                )
+            )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO t_telemetry_latest
+              (node_id,tag_id,ts,value_float,value_int,value_bool,value_str,
+               quality,observation_id,source_message_id,source_sequence,
+               source_digest,raw_unit,raw_value_float,raw_value_int,
+               raw_value_bool,raw_value_text,event_time_basis,
+               event_received_at,source_order_key,frame_sequence,
+               source_order_mode,source_receive_ordinal)
+            VALUES %s
+            ON CONFLICT (node_id,tag_id) DO UPDATE SET
+              ts=EXCLUDED.ts,value_float=EXCLUDED.value_float,
+              value_int=EXCLUDED.value_int,value_bool=EXCLUDED.value_bool,
+              value_str=EXCLUDED.value_str,quality=EXCLUDED.quality,
+              observation_id=EXCLUDED.observation_id,
+              source_message_id=EXCLUDED.source_message_id,
+              source_sequence=EXCLUDED.source_sequence,
+              source_digest=EXCLUDED.source_digest,raw_unit=EXCLUDED.raw_unit,
+              raw_value_float=EXCLUDED.raw_value_float,
+              raw_value_int=EXCLUDED.raw_value_int,
+              raw_value_bool=EXCLUDED.raw_value_bool,
+              raw_value_text=EXCLUDED.raw_value_text,
+              event_time_basis=EXCLUDED.event_time_basis,
+              event_received_at=EXCLUDED.event_received_at,
+              source_order_key=EXCLUDED.source_order_key,
+              frame_sequence=EXCLUDED.frame_sequence,
+              source_order_mode=EXCLUDED.source_order_mode,
+              source_receive_ordinal=EXCLUDED.source_receive_ordinal
+            WHERE EXCLUDED.frame_sequence > t_telemetry_latest.frame_sequence
+            """,
+            rows,
+            template=(
+                "(%s::uuid,%s::uuid,%s::timestamptz,%s::double precision,"
+                "%s::bigint,%s::boolean,%s::text,%s::smallint,%s::uuid,"
+                "%s::text,%s::bigint,%s::char(64),%s::text,"
+                "%s::double precision,%s::bigint,%s::boolean,%s::text,"
+                "%s::text,%s::timestamptz,%s::text,%s::bigint,%s::text,"
+                "%s::bigint)"
             ),
             page_size=len(rows),
         )
@@ -1922,13 +2556,14 @@ class PostgresFrameRepository:
                    value_numeric, value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, configuration_revision,
                     source_digest, source_order_key,
-                    producing_runtime_instance_id, event_time_basis)
+                    producing_runtime_instance_id, event_time_basis,
+                    frame_id, commit_sequence)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (event_id, observed_at) DO NOTHING
                 """,
@@ -1947,6 +2582,8 @@ class PostgresFrameRepository:
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
                     observation.event_time_basis,
+                    None if observation.frame_id is None else str(observation.frame_id),
+                    observation.frame_sequence,
                 ),
             )
 
@@ -1966,13 +2603,14 @@ class PostgresFrameRepository:
                    value_numeric, value_bool, value_text, value_codes, quality, reason,
                    processing_revision_id, configuration_revision,
                     source_digest, source_order_key,
-                    producing_runtime_instance_id, event_time_basis)
+                    producing_runtime_instance_id, event_time_basis,
+                    frame_sequence)
                 VALUES (
                   %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s, %s
+                  %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (entity_instance_id) DO UPDATE SET
                   event_id = EXCLUDED.event_id,
@@ -1994,34 +2632,8 @@ class PostgresFrameRepository:
                   producing_runtime_instance_id =
                     EXCLUDED.producing_runtime_instance_id,
                   event_time_basis = EXCLUDED.event_time_basis
-                WHERE
-                  CASE EXCLUDED.event_time_basis
-                    WHEN 'observed_at' THEN EXCLUDED.observed_at
-                    WHEN 'received_at' THEN EXCLUDED.received_at
-                    WHEN 'calculated_at' THEN EXCLUDED.calculated_at
-                    ELSE EXCLUDED.received_at
-                  END
-                    > CASE t_l2_latest.event_time_basis
-                        WHEN 'observed_at' THEN t_l2_latest.observed_at
-                        WHEN 'received_at' THEN t_l2_latest.received_at
-                        WHEN 'calculated_at' THEN t_l2_latest.calculated_at
-                        ELSE t_l2_latest.received_at
-                      END
-                  OR (
-                    CASE EXCLUDED.event_time_basis
-                      WHEN 'observed_at' THEN EXCLUDED.observed_at
-                      WHEN 'received_at' THEN EXCLUDED.received_at
-                      WHEN 'calculated_at' THEN EXCLUDED.calculated_at
-                      ELSE EXCLUDED.received_at
-                    END
-                      = CASE t_l2_latest.event_time_basis
-                          WHEN 'observed_at' THEN t_l2_latest.observed_at
-                          WHEN 'received_at' THEN t_l2_latest.received_at
-                          WHEN 'calculated_at' THEN t_l2_latest.calculated_at
-                          ELSE t_l2_latest.received_at
-                        END
-                    AND EXCLUDED.source_order_key > t_l2_latest.source_order_key
-                  )
+                  ,frame_sequence = EXCLUDED.frame_sequence
+                WHERE EXCLUDED.frame_sequence > t_l2_latest.frame_sequence
                 RETURNING event_id
                 """,
                 (
@@ -2039,6 +2651,7 @@ class PostgresFrameRepository:
                     observation.source_order_key,
                     str(RUNTIME_INSTANCE_ID),
                     observation.event_time_basis,
+                    observation.frame_sequence,
                 ),
             )
             if cursor.fetchone() is not None:

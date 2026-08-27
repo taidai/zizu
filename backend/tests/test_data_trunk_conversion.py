@@ -99,6 +99,30 @@ class PcsNumericConversionTest(unittest.TestCase):
 
         self.assertEqual(first[0].event_id, second[0].event_id)
 
+    def test_frame_identity_changes_event_identity_and_stale_keeps_value(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        fixture["current_inputs"] = {
+            InputReference.l0(raw.tag_id): replace(
+                raw, quality=TrunkQuality.STALE
+            )
+        }
+        first = evaluate_processing(
+            **fixture,
+            frame_id=UUID("00000000-0000-0000-0000-000000000901"),
+            frame_sequence=9,
+        )[0]
+        second = evaluate_processing(
+            **fixture,
+            frame_id=UUID("00000000-0000-0000-0000-000000000902"),
+            frame_sequence=10,
+        )[0]
+
+        self.assertEqual(TypedValue.float(12.345), first.value)
+        self.assertEqual(TrunkQuality.STALE, first.quality)
+        self.assertEqual(9, first.frame_sequence)
+        self.assertNotEqual(first.event_id, second.event_id)
+
     def test_raw_observation_is_immutable(self) -> None:
         raw = next(iter(self.fixture()["current_inputs"].values()))
 
@@ -372,8 +396,9 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.GOOD, output.quality)
         self.assertEqual(88, len(output.source_observation_ids))
 
-    def test_boolean_set_fails_closed_when_one_required_input_is_stale(self) -> None:
+    def test_boolean_set_keeps_value_when_one_required_input_is_stale(self) -> None:
         fixture = self._boolean_set_fixture()
+        expected_value = evaluate_processing(**fixture)[0].value
         stale_key = next(iter(fixture["current_inputs"]))
         stale = replace(
             fixture["current_inputs"][stale_key],
@@ -386,7 +411,7 @@ class PcsNumericConversionTest(unittest.TestCase):
 
         output = evaluate_processing(**fixture)[0]
 
-        self.assertEqual(TypedValue.code_set(None), output.value)
+        self.assertEqual(expected_value, output.value)
         self.assertEqual(
             (TrunkQuality.STALE, "INPUT_STALE"),
             (output.quality, output.reason),

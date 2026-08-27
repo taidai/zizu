@@ -6,6 +6,7 @@ import json
 import math
 from collections.abc import Mapping
 from datetime import datetime
+from dataclasses import replace
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import (
@@ -35,6 +36,8 @@ def evaluate_processing(
     current_inputs: Mapping[InputReference, RawObservation | L2Observation],
     configuration_revision: int,
     calculated_at: datetime,
+    frame_id: UUID | None = None,
+    frame_sequence: int = 0,
 ) -> tuple[L2Observation, ...]:
     """计算所有已安装输出；不执行持久化或其他副作用。"""
     outputs = tuple(
@@ -46,6 +49,19 @@ def evaluate_processing(
         )
         for item in installed
     )
+    if frame_id is not None:
+        outputs = tuple(
+            replace(
+                output,
+                event_id=uuid5(
+                    NAMESPACE_URL,
+                    f"zizu:frame-l2:{frame_id}:{output.event_id}",
+                ),
+                frame_id=frame_id,
+                frame_sequence=frame_sequence,
+            )
+            for output in outputs
+        )
     return tuple(sorted(outputs, key=lambda item: str(item.entity_instance_id)))
 
 
@@ -161,9 +177,7 @@ def _evaluate_output(
         )
 
     quality = source.quality
-    typed_value = TypedValue.float(
-        value if quality not in {TrunkQuality.BAD, TrunkQuality.STALE} else None
-    )
+    typed_value = TypedValue.float(value if quality is not TrunkQuality.BAD else None)
     return _observation(
         installed=installed,
         value=typed_value,
@@ -223,14 +237,14 @@ def _evaluate_formula_output(
             and not contract.required
             and contract.default_value is not None
         )
-        if missing or invalid_quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+        if missing or invalid_quality is TrunkQuality.BAD:
             if can_default:
                 values[name] = contract.default_value
                 default_used = True
                 continue
             failure_quality = (
                 invalid_quality
-                if selected and invalid_quality in {TrunkQuality.BAD, TrunkQuality.STALE}
+                if selected and invalid_quality is TrunkQuality.BAD
                 else TrunkQuality.BAD
             )
             failure_reason = (
@@ -394,7 +408,7 @@ def _evaluate_boolean_set_output(
         )
 
     quality = min((source.quality for source in sources), default=TrunkQuality.GOOD)
-    if quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+    if quality is TrunkQuality.BAD:
         return _boolean_set_observation(
             installed,
             sources,
@@ -494,7 +508,7 @@ def _evaluate_fault_code_output(
             quality=TrunkQuality.BAD,
             reason="TYPE_MISMATCH",
         )
-    if source.quality in {TrunkQuality.BAD, TrunkQuality.STALE}:
+    if source.quality is TrunkQuality.BAD:
         return _fault_code_observation(
             installed,
             source,
@@ -628,7 +642,7 @@ def _evaluate_enum_output(
     return _observation(
         installed=installed,
         value=TypedValue.enum(
-            mapped if quality not in {TrunkQuality.BAD, TrunkQuality.STALE} else None
+            mapped if quality is not TrunkQuality.BAD else None
         ),
         quality=quality,
         reason=_input_quality_reason(quality),

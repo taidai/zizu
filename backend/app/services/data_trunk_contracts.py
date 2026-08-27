@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, IntEnum
@@ -200,12 +200,35 @@ class PendingFrame:
 
 
 @dataclass(frozen=True)
+class ClaimedFrame:
+    frame_id: UUID
+    frame_sequence: int
+    capture_beat: int
+    shot_at: datetime
+    configuration_revision: int
+    attempt_count: int
+    processing_owner: UUID
+    processing_token: UUID
+    lease_until: datetime
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class BlackboardRecovery:
     capture_beat: int
     configuration_revision: int
     active_input_contracts: Mapping[UUID, SourceOrderMode]
     required_tag_ids: frozenset[UUID]
     observations: tuple[FramedRawObservation, ...]
+
+
+@dataclass(frozen=True)
+class TerminalFrame:
+    frame_id: UUID
+    frame_sequence: int
+    configuration_revision: int
+    status: FrameStatus
+    finished_at: datetime
 
 
 @dataclass(frozen=True)
@@ -449,6 +472,25 @@ class InstalledPointProcessing:
 
 
 @dataclass(frozen=True)
+class ProcessingSnapshot:
+    l0_by_tag: Mapping[UUID, FramedRawObservation]
+    installed_by_entity_id: Mapping[UUID, InstalledPointProcessing]
+    topological_output_ids: tuple[UUID, ...]
+    dependency_edges: tuple[tuple[UUID, UUID], ...]
+
+    def current_inputs(
+        self,
+    ) -> dict[InputReference, RawObservation | "L2Observation"]:
+        return {
+            InputReference.l0(tag_id): replace(
+                cell.observation,
+                quality=cell.effective_quality,
+            )
+            for tag_id, cell in self.l0_by_tag.items()
+        }
+
+
+@dataclass(frozen=True)
 class L2Observation:
     event_id: UUID
     entity_instance_id: UUID
@@ -466,6 +508,8 @@ class L2Observation:
     source_digest: str
     source_order_key: str
     event_time_basis: str
+    frame_id: UUID | None = None
+    frame_sequence: int = 0
 
     def __post_init__(self) -> None:
         if self.event_time_basis not in {
