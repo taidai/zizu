@@ -46,6 +46,7 @@ from app.services.data_trunk_contracts import (
 from app.services.point_processing_dag import validate_processing_dag
 from app.services.point_processing import _formula_input_names
 from app.services.runtime_identity import RUNTIME_INSTANCE_ID
+from app.services.data_trunk_outbox import build_frame_outbox_event
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 FaultHook = Callable[[str], None]
 
@@ -958,13 +959,29 @@ class PostgresFrameRepository:
                         self._advance_frame_l2_latest(cursor, outputs)
                         self._insert_sources(cursor, outputs)
                         self._fault_hook("source")
+                        event = build_frame_outbox_event(
+                            cursor,
+                            frame_id=claimed.frame_id,
+                            frame_sequence=claimed.frame_sequence,
+                            status=FrameStatus.COMPLETE,
+                            configuration_revision=(
+                                claimed.configuration_revision
+                            ),
+                            capture_beat=claimed.capture_beat,
+                            frame_time=finished_at,
+                        )
                         cursor.execute(
                             """
                             INSERT INTO t_data_frame_outbox
-                              (frame_id,frame_sequence,terminal_status)
-                            VALUES(%s,%s,'COMPLETE')
+                              (frame_id,frame_sequence,terminal_status,
+                               payload_version,payload)
+                            VALUES(%s,%s,'COMPLETE',1,%s)
                             """,
-                            (str(claimed.frame_id), claimed.frame_sequence),
+                            (
+                                str(claimed.frame_id),
+                                claimed.frame_sequence,
+                                Json(event.public_dict()),
+                            ),
                         )
                         self._fault_hook("outbox")
                         cursor.execute(
@@ -1273,10 +1290,29 @@ class PostgresFrameRepository:
                         cursor.execute(
                             """
                             INSERT INTO t_data_frame_outbox
-                              (frame_id,frame_sequence,terminal_status)
-                            VALUES(%s,%s,'FAILED')
+                              (frame_id,frame_sequence,terminal_status,
+                               payload_version,payload)
+                            VALUES(%s,%s,'FAILED',1,%s)
                             """,
-                            (str(claimed.frame_id), claimed.frame_sequence),
+                            (
+                                str(claimed.frame_id),
+                                claimed.frame_sequence,
+                                Json(
+                                    build_frame_outbox_event(
+                                        cursor,
+                                        frame_id=claimed.frame_id,
+                                        frame_sequence=claimed.frame_sequence,
+                                        status=FrameStatus.FAILED,
+                                        configuration_revision=(
+                                            claimed.configuration_revision
+                                        ),
+                                        capture_beat=claimed.capture_beat,
+                                        frame_time=now,
+                                        failure_id=failure_id,
+                                        failure_code=failure.code,
+                                    ).public_dict()
+                                ),
+                            ),
                         )
                         cursor.execute(
                             """

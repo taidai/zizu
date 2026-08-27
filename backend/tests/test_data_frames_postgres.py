@@ -30,6 +30,7 @@ from app.services.data_trunk_outbox import PostgresFrameOutboxRepository
 from app.services.data_trunk_conversion import evaluate_processing
 from app.services.frame_processor import FrameProcessor
 from tests import test_data_frames_migration_postgres as frame_migration
+from tests import test_committed_frame_payload_migration_postgres as payload_migration
 
 
 NOW = datetime.now(UTC)
@@ -58,6 +59,7 @@ class DataFramesPostgresTest(unittest.TestCase):
         with psycopg2.connect(**cls.connection_kwargs) as connection:
             with connection.cursor() as cursor:
                 migration_test._apply_046(cursor)
+                payload_migration.CommittedFramePayloadMigrationPostgresTest._apply_047(cursor)
             connection.commit()
 
     def setUp(self) -> None:
@@ -335,10 +337,15 @@ class DataFramesPostgresTest(unittest.TestCase):
                 cursor.fetchone(),
             )
             cursor.execute(
-                "SELECT terminal_status FROM t_data_frame_outbox WHERE frame_id=%s",
+                "SELECT terminal_status,payload_version,payload "
+                "FROM t_data_frame_outbox WHERE frame_id=%s",
                 (str(pending.frame_id),),
             )
-            self.assertEqual(("COMPLETE",), cursor.fetchone())
+            terminal_status, payload_version, payload = cursor.fetchone()
+            self.assertEqual("COMPLETE", terminal_status)
+            self.assertEqual(1, payload_version)
+            self.assertEqual(pending.frame_sequence, payload["frame_sequence"])
+            self.assertEqual(str(self.node_id), payload["l0_changes"][0]["node_id"])
 
     def test_terminal_frame_outbox_rebuilds_atomic_event_and_acks_token(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=108))
@@ -347,6 +354,12 @@ class DataFramesPostgresTest(unittest.TestCase):
             evaluator=evaluate_processing,
             clock=lambda: datetime.now(UTC),
         ).process_next(datetime.now(UTC))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("DELETE FROM t_l2_observation_sources")
+            cursor.execute("DELETE FROM t_l2_observations")
+            cursor.execute("DELETE FROM t_telemetry")
+            cursor.execute("SET session_replication_role=origin")
         outbox = PostgresFrameOutboxRepository(
             connection_factory=self._connection_factory(),
         )

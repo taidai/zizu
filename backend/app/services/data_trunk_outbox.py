@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
@@ -29,6 +30,44 @@ class CommittedL0Change:
     source_timestamp: datetime
     received_at: datetime
     accepted_beat: int
+    node_id: UUID | None = None
+    unit: str | None = None
+    source_path: str | None = None
+    source_type: str | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "tag_id": str(self.tag_id),
+            "observation_id": str(self.observation_id),
+            "node_id": None if self.node_id is None else str(self.node_id),
+            "data_type": self.value.kind.value,
+            "value": _json_value(self.value.value),
+            "unit": self.unit,
+            "source_quality": int(self.source_quality),
+            "effective_quality": int(self.effective_quality),
+            "source_timestamp": _utc_iso(self.source_timestamp),
+            "received_at": _utc_iso(self.received_at),
+            "accepted_beat": self.accepted_beat,
+            "source_path": self.source_path,
+            "source_type": self.source_type,
+        }
+
+    @classmethod
+    def from_public_dict(cls, payload: Mapping[str, Any]) -> "CommittedL0Change":
+        return cls(
+            tag_id=UUID(str(payload["tag_id"])),
+            observation_id=UUID(str(payload["observation_id"])),
+            value=_typed_value_from_payload(payload),
+            source_quality=TrunkQuality(int(payload["source_quality"])),
+            effective_quality=TrunkQuality(int(payload["effective_quality"])),
+            source_timestamp=_datetime_from_payload(payload["source_timestamp"]),
+            received_at=_datetime_from_payload(payload["received_at"]),
+            accepted_beat=int(payload["accepted_beat"]),
+            node_id=_optional_uuid(payload.get("node_id")),
+            unit=_optional_string(payload.get("unit")),
+            source_path=_optional_string(payload.get("source_path")),
+            source_type=_optional_string(payload.get("source_type")),
+        )
 
 
 @dataclass(frozen=True)
@@ -38,6 +77,53 @@ class CommittedL2Change:
     value: TypedValue
     quality: TrunkQuality
     reason: str | None
+    node_id: UUID | None = None
+    unit: str | None = None
+    observed_at: datetime | None = None
+    received_at: datetime | None = None
+    calculated_at: datetime | None = None
+    processing_revision_id: UUID | None = None
+    source_digest: str | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "entity_instance_id": str(self.entity_instance_id),
+            "event_id": str(self.event_id),
+            "node_id": None if self.node_id is None else str(self.node_id),
+            "data_type": self.value.kind.value,
+            "value": _json_value(self.value.value),
+            "unit": self.unit,
+            "quality": int(self.quality),
+            "reason": self.reason,
+            "observed_at": _optional_utc_iso(self.observed_at),
+            "received_at": _optional_utc_iso(self.received_at),
+            "calculated_at": _optional_utc_iso(self.calculated_at),
+            "processing_revision_id": (
+                None
+                if self.processing_revision_id is None
+                else str(self.processing_revision_id)
+            ),
+            "source_digest": self.source_digest,
+        }
+
+    @classmethod
+    def from_public_dict(cls, payload: Mapping[str, Any]) -> "CommittedL2Change":
+        return cls(
+            entity_instance_id=UUID(str(payload["entity_instance_id"])),
+            event_id=UUID(str(payload["event_id"])),
+            value=_typed_value_from_payload(payload),
+            quality=TrunkQuality(int(payload["quality"])),
+            reason=_optional_string(payload.get("reason")),
+            node_id=_optional_uuid(payload.get("node_id")),
+            unit=_optional_string(payload.get("unit")),
+            observed_at=_optional_datetime(payload.get("observed_at")),
+            received_at=_optional_datetime(payload.get("received_at")),
+            calculated_at=_optional_datetime(payload.get("calculated_at")),
+            processing_revision_id=_optional_uuid(
+                payload.get("processing_revision_id")
+            ),
+            source_digest=_optional_string(payload.get("source_digest")),
+        )
 
 
 @dataclass(frozen=True)
@@ -50,6 +136,60 @@ class FrameOutboxEvent:
     l2_changes: tuple[CommittedL2Change, ...]
     failure_id: UUID | None
     failure_code: str | None
+    frame_time: datetime | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "type": "frame_delta",
+            "frame_id": str(self.frame_id),
+            "frame_sequence": self.frame_sequence,
+            "status": self.status.value,
+            "frame_time": _optional_utc_iso(self.frame_time),
+            "configuration_revision": self.configuration_revision,
+            "l0_changes": [item.public_dict() for item in self.l0_changes],
+            "l2_changes": [item.public_dict() for item in self.l2_changes],
+            "failure": (
+                None
+                if self.failure_id is None and self.failure_code is None
+                else {
+                    "failure_id": (
+                        None if self.failure_id is None else str(self.failure_id)
+                    ),
+                    "code": self.failure_code,
+                }
+            ),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "FrameOutboxEvent":
+        if payload.get("type") != "frame_delta":
+            raise ValueError("frame payload type is invalid")
+        failure = payload.get("failure")
+        if failure is not None and not isinstance(failure, Mapping):
+            raise ValueError("frame failure payload is invalid")
+        return cls(
+            frame_id=UUID(str(payload["frame_id"])),
+            frame_sequence=int(payload["frame_sequence"]),
+            status=FrameStatus(str(payload["status"])),
+            configuration_revision=int(payload["configuration_revision"]),
+            l0_changes=tuple(
+                CommittedL0Change.from_public_dict(item)
+                for item in payload["l0_changes"]
+            ),
+            l2_changes=tuple(
+                CommittedL2Change.from_public_dict(item)
+                for item in payload["l2_changes"]
+            ),
+            failure_id=(
+                None
+                if failure is None
+                else _optional_uuid(failure.get("failure_id"))
+            ),
+            failure_code=(
+                None if failure is None else _optional_string(failure.get("code"))
+            ),
+            frame_time=_optional_datetime(payload.get("frame_time")),
+        )
 
 
 @dataclass(frozen=True)
@@ -454,8 +594,8 @@ class PostgresFrameOutboxRepository:
                             SELECT outbox.frame_id,outbox.frame_sequence,
                                    outbox.terminal_status,
                                    frame.configuration_revision,
-                                   frame.capture_beat,outbox.next_attempt_at,
-                                   outbox.claimed_until
+                                   frame.capture_beat,outbox.payload,
+                                   outbox.next_attempt_at,outbox.claimed_until
                             FROM t_data_frame_outbox AS outbox
                             JOIN t_data_frames AS frame
                               ON frame.frame_id=outbox.frame_id
@@ -469,8 +609,8 @@ class PostgresFrameOutboxRepository:
                         if row is None:
                             connection.commit()
                             return None
-                        if row[5] > current or (
-                            row[6] is not None and row[6] > current
+                        if row[6] > current or (
+                            row[7] is not None and row[7] > current
                         ):
                             connection.commit()
                             return None
@@ -577,12 +717,48 @@ class PostgresFrameOutboxRepository:
             ) from exc
 
     def _load_event(self, cursor, frame_row) -> FrameOutboxEvent:
-        frame_id = UUID(str(frame_row[0]))
-        frame_sequence = int(frame_row[1])
-        status = FrameStatus(str(frame_row[2]))
-        configuration_revision = int(frame_row[3])
-        capture_beat = int(frame_row[4])
-        current_l0 = self._load_l0_state(cursor, frame_sequence, capture_beat)
+        del cursor
+        try:
+            event = FrameOutboxEvent.from_payload(frame_row[5])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_OUTBOX_PAYLOAD_INVALID",
+                "DATA_FRAME_OUTBOX_PAYLOAD_INVALID",
+            ) from exc
+        expected = (
+            UUID(str(frame_row[0])),
+            int(frame_row[1]),
+            FrameStatus(str(frame_row[2])),
+            int(frame_row[3]),
+        )
+        actual = (
+            event.frame_id,
+            event.frame_sequence,
+            event.status,
+            event.configuration_revision,
+        )
+        if actual != expected:
+            raise DataTrunkError(
+                "DATA_FRAME_OUTBOX_PAYLOAD_MISMATCH",
+                "DATA_FRAME_OUTBOX_PAYLOAD_MISMATCH",
+            )
+        return event
+
+    @classmethod
+    def build_event_from_history(
+        cls,
+        cursor,
+        *,
+        frame_id: UUID,
+        frame_sequence: int,
+        status: FrameStatus,
+        configuration_revision: int,
+        capture_beat: int,
+        frame_time: datetime,
+        failure_id: UUID | None = None,
+        failure_code: str | None = None,
+    ) -> FrameOutboxEvent:
+        current_l0 = cls._load_l0_state(cursor, frame_sequence, capture_beat)
         cursor.execute(
             """
             SELECT max(frame_sequence)
@@ -600,7 +776,7 @@ class PostgresFrameOutboxRepository:
                 (previous_sequence,),
             )
             previous_capture = int(cursor.fetchone()[0])
-            previous_l0 = self._load_l0_state(
+            previous_l0 = cls._load_l0_state(
                 cursor, previous_sequence, previous_capture
             )
         l0_changes = tuple(
@@ -615,7 +791,11 @@ class PostgresFrameOutboxRepository:
                    observation.value_int,observation.value_numeric,
                    observation.value_bool,observation.value_text,
                    observation.value_codes,observation.quality,
-                   observation.reason
+                   observation.reason,entity.node_id,entity.unit,
+                   observation.observed_at,observation.received_at,
+                   observation.calculated_at,
+                   observation.processing_revision_id,
+                   observation.source_digest
             FROM t_l2_observations AS observation
             JOIN t_entity_instances AS entity
               ON entity.id=observation.entity_instance_id
@@ -631,14 +811,16 @@ class PostgresFrameOutboxRepository:
                 value=_typed_value_from_columns(str(row[2]), *row[3:9]),
                 quality=TrunkQuality(int(row[9])),
                 reason=row[10],
+                node_id=UUID(str(row[11])),
+                unit=row[12],
+                observed_at=row[13],
+                received_at=row[14],
+                calculated_at=row[15],
+                processing_revision_id=UUID(str(row[16])),
+                source_digest=str(row[17]).strip(),
             )
             for row in cursor.fetchall()
         )
-        cursor.execute(
-            "SELECT id FROM t_ingestion_failures WHERE frame_id=%s",
-            (str(frame_id),),
-        )
-        failure_row = cursor.fetchone()
         return FrameOutboxEvent(
             frame_id=frame_id,
             frame_sequence=frame_sequence,
@@ -646,20 +828,10 @@ class PostgresFrameOutboxRepository:
             configuration_revision=configuration_revision,
             l0_changes=l0_changes,
             l2_changes=l2_changes,
-            failure_id=(
-                None if failure_row is None else UUID(str(failure_row[0]))
-            ),
-            failure_code=(None if status is FrameStatus.COMPLETE else self._failure_code(cursor, frame_id)),
+            failure_id=failure_id,
+            failure_code=failure_code,
+            frame_time=frame_time,
         )
-
-    @staticmethod
-    def _failure_code(cursor, frame_id: UUID) -> str | None:
-        cursor.execute(
-            "SELECT failure_code FROM t_data_frames WHERE frame_id=%s",
-            (str(frame_id),),
-        )
-        row = cursor.fetchone()
-        return None if row is None else row[0]
 
     @staticmethod
     def _load_l0_state(cursor, frame_sequence: int, capture_beat: int):
@@ -670,7 +842,8 @@ class PostgresFrameOutboxRepository:
                    telemetry.raw_value_float,telemetry.raw_value_int,
                    telemetry.raw_value_bool,telemetry.raw_value_text,
                    telemetry.quality,telemetry.ts,
-                   telemetry.event_received_at,telemetry.accepted_beat
+                   telemetry.event_received_at,telemetry.accepted_beat,
+                   tag.node_id,tag.unit,tag.source_path,tag.source_type
             FROM t_telemetry AS telemetry
             JOIN t_tags AS tag ON tag.id=telemetry.tag_id
             WHERE telemetry.frame_sequence IS NOT NULL
@@ -700,9 +873,94 @@ class PostgresFrameOutboxRepository:
                 source_timestamp=row[8],
                 received_at=row[9],
                 accepted_beat=accepted_beat,
+                node_id=UUID(str(row[11])),
+                unit=row[12],
+                source_path=row[13],
+                source_type=row[14],
             )
             state[change.tag_id] = change
         return state
+
+
+def build_frame_outbox_event(
+    cursor,
+    *,
+    frame_id: UUID,
+    frame_sequence: int,
+    status: FrameStatus,
+    configuration_revision: int,
+    capture_beat: int,
+    frame_time: datetime,
+    failure_id: UUID | None = None,
+    failure_code: str | None = None,
+) -> FrameOutboxEvent:
+    """Build the immutable delta once, inside the terminal-frame transaction."""
+    return PostgresFrameOutboxRepository.build_event_from_history(
+        cursor,
+        frame_id=frame_id,
+        frame_sequence=frame_sequence,
+        status=status,
+        configuration_revision=configuration_revision,
+        capture_beat=capture_beat,
+        frame_time=frame_time,
+        failure_id=failure_id,
+        failure_code=failure_code,
+    )
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("frame payload datetime must be timezone-aware")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _optional_utc_iso(value: datetime | None) -> str | None:
+    return None if value is None else _utc_iso(value)
+
+
+def _datetime_from_payload(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("frame payload datetime is invalid")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("frame payload datetime must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _optional_datetime(value: Any) -> datetime | None:
+    return None if value is None else _datetime_from_payload(value)
+
+
+def _optional_uuid(value: Any) -> UUID | None:
+    return None if value is None else UUID(str(value))
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("frame payload string is invalid")
+    return value
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def _typed_value_from_payload(payload: Mapping[str, Any]) -> TypedValue:
+    kind = ValueKind(str(payload["data_type"]).upper())
+    value = payload.get("value")
+    if kind is ValueKind.CODE_SET and value is not None:
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError("frame code-set payload is invalid")
+        value = tuple(value)
+    return TypedValue(kind, value)
 
 
 def _typed_value_from_columns(
