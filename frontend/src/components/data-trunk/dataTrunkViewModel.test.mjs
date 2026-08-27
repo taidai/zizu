@@ -47,7 +47,7 @@ test('delete candidate explains runtime stop without erasing history', async () 
   )
 })
 
-test('delivery wizard exposes five steps and the L0 L1 L2 backbone', async () => {
+test('delivery wizard exposes the four-step L0 L1 L2 backbone', async () => {
   const viewModel = await import('./dataTrunkViewModel.ts')
   const view = viewModel.buildDataTrunkViewModel({
     plan: {
@@ -61,7 +61,7 @@ test('delivery wizard exposes five steps and the L0 L1 L2 backbone', async () =>
     },
   })
 
-  assert.equal(view.steps.map((step) => step.key).join(','), 'target,scan,preview,apply,acceptance')
+  assert.equal(view.steps.map((step) => step.key).join(','), 'target,scan,preview,apply')
   assert.deepEqual(view.layers, ['L0', 'L1', 'L2'])
   assert.equal(view.canApply, false)
   assert.equal(view.labels.l1, 'L1 点位加工')

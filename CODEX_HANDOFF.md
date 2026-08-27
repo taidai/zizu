@@ -1,5 +1,21 @@
 ---
 
+## Session 2026-08-27 — committed frame 实时流实现完成，准备 rc.5 部署
+
+- 已实现统一实时读取：REST 完整快照 + 当前节点游标 + WebSocket 原子帧增量；L0 原始点位与 L2
+  全局实体在前端按同一帧一次更新，STALE 保留末值并灰显。
+- Schema 047 为终态帧 outbox 固化不可变版本化 payload；Schema 048 固定 L0/L2 明细 7 天、已发布
+  outbox 一小时/5000 帧，并保留当前 latest 与受引用失败证据。
+- 已删除旧 `/ws/telemetry`、`/ws/entity-observations`、两个前端旧连接器、旧广播/仓储实现和未使用
+  `NodeRealtimePanel`；历史查询继续保留。
+- 版本准备为 `0.4.85-rc.5` / Schema 048。定向后端 26 项、前端投影 3 项、TypeScript 和生产构建已
+  通过；真实 PostgreSQL 已执行 52 个现有测试且全部通过（原计划列出的
+  `test_data_frame_acceptance_postgres` 文件在仓库中不存在，正确测试组将再以零错误命令确认）。
+- 下一步：完成全量门禁、生成固定 ARM64 摘要，先备份 1 号机 Schema 045 数据，再只替换 backend；
+  保留 host network、`/dev/mqueue`、unless-stopped、现有卷，不启动 Caddy/TLS，不执行策略或设备写入。
+
+---
+
 ## Session 2026-08-27 — 提交后数据帧实时流实施计划（待执行）
 
 - 用户已书面确认 `docs/superpowers/specs/2026-08-27-committed-frame-realtime-stream-design.md`。

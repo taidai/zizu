@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 当前候选版本：**v0.4.85-rc.4**。本版本硬切到单一节点数据主干，删除“解决方案交付”、设备模板、独立实体管理、EMS 策略与业务指标投影等并行语义，并修复实时数据批量入库积压及积压批次间的空等。
+> 当前候选版本：**v0.4.85-rc.5**。本版本把节点实时读取硬切为唯一的已提交数据帧：L0 原始点位与 L2 全局实体来自同一帧，并删除旧双实时通道。
 >
 > 唯一现行架构入口：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。README 后部仍含历史接口说明时，以总纲、最新 accepted ADR 与当前源码为准。
 
@@ -213,11 +213,11 @@ docker compose exec backend \
 有效 480 分钟，可用 `AUTH_SESSION_MINUTES` 在 5-1440 分钟内调整；客户端通过
 `Authorization: Bearer <opaque-session-token>` 调用受保护接口，并可用
 `GET /api/v1/auth/me` 查询当前身份、`POST /api/v1/auth/logout` 主动注销。
-浏览器实时订阅先以 Bearer 调用 `POST /api/v1/auth/ws-ticket` 获取 30 秒一次性票据，
-再通过 WSS 首帧提交票据；长期会话令牌不会进入 WebSocket URL、代理日志或浏览器历史。
-L2 全局实体使用 `WS /api/v1/ws/entity-observations`：认证后提交
-`{"subscribe":["<entity-instance-uuid>"]}`，服务端只发送已提交 outbox 的实体观测；
-消息携带稳定 `event_id` 供客户端去重，不包含 L0 点位路径、MQTT topic 或令牌。
+浏览器先读取 `GET /api/v1/runtime/frame-snapshot?node_id=<uuid>`，一次取得当前节点同一终态帧内的
+完整 L0/L2、帧号和游标；再以 Bearer 调用 `POST /api/v1/auth/ws-ticket` 获取 30 秒一次性票据，
+连接 `WS /api/v1/ws/data-frames`，认证后提交
+`{"subscribe":{"node_id":"<uuid>","after":"<cursor>"}}`。服务端只发送该游标后的已提交原子帧增量；
+普通断线补发，游标过旧则要求重读快照。长期会话令牌不会进入 WebSocket URL、代理日志或浏览器历史。
 
 TLS 由反向代理终结时，backend 必须只允许该代理访问，并同时满足以下条件才可读取
 `X-Forwarded-Proto`：
@@ -487,8 +487,8 @@ zizu/
 | GET | `/api/v1/snapshots` | 节点快照查询（数据黑板） |
 | POST | `/api/v1/query` | admin：SELECT-only SQL 查询 |
 | POST | `/api/v1/auth/ws-ticket` | 为实时订阅签发 30 秒一次性票据 |
-| WS | `/api/v1/ws/telemetry` | WSS 首帧认证后实时原始值/工程值推送 |
-| WS | `/api/v1/ws/entity-observations` | WSS 首帧认证后按全局实体实例订阅已提交的 L2 观测 |
+| GET | `/api/v1/runtime/frame-snapshot?node_id=X` | 读取当前节点同一终态帧的完整 L0/L2 与游标 |
+| WS | `/api/v1/ws/data-frames` | 认证后按节点和游标订阅已提交原子帧增量 |
 | POST | `/api/v1/rules/{id}/simulate` | 模拟规则（返回 triggered/actions/engine） |
 | GET | `/api/v1/entities` | 全局实体列表 |
 | POST | `/api/v1/entities` | 创建全局实体 |

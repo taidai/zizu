@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-08-27
 supersedes:
   - legacy L0 polling WebSocket
@@ -282,3 +282,9 @@ ZiZu 的实时读取固定为“数据库先原子提交完整数据帧，`Commi
 有序 at-least-once 增量”。节点页只订阅当前节点，断线在一小时/5000 帧内补发，超过范围重读快照；
 L0/L2/帧秒级明细固定保留七天，outbox 短期保留。该方案用一个深模块隐藏一致性、补帧和清理复杂度，
 不增加新中间件，也不给页面或上层应用留下旁路。
+
+## 14. 实现记录
+
+已在 `ticket/v0.4.85-node-data-trunk-hard-cut` 完成实现，核心提交为 `09734bf` 至 `8c3baa0`；
+数据库 Schema 为 048。唯一公开实时读取接口为 `GET /api/v1/runtime/frame-snapshot` 与
+`WS /api/v1/ws/data-frames`，旧 L0/L2 实时 WebSocket、前端连接器和未使用面板均已删除。
