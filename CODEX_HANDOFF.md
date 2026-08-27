@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-28 — v0.4.85-rc.10 告警 committed L2 收口（待部署）
+## Session 2026-08-28 — v0.4.85-rc.10 告警 committed L2 收口已部署
 
 - 阶段三“上层收口”第一切片已完成：一条有序 `CommittedFrameFanout` 先把终态帧交给
   `CommittedL2AlarmConsumer`，告警只读取 `l2_changes`，整帧事件/转换/通知/消费收据在同一事务提交；
@@ -13,8 +13,13 @@
   `tag_alarm_engine.py` 及旧实体告警契约测试；恢复依据为本分支提交历史。JDM 的暂存告警动作保留到下一
   独立切片，不在本轮混改。
 - 新鲜验证：后端 discovery 288 项通过、116 项环境型 skip；隔离 Timescale/PostgreSQL 16 专项 3 项
-  通过且 0 skip；前端 `tsc -b && vite build` 成功（8184 modules）。尚未构建/推送最终 ARM64 镜像，
-  尚未连接或修改 1 号机；未执行自动策略、控制或设备写入。
+  通过且 0 skip；前端 `tsc -b && vite build` 成功（8184 modules）。GitHub Actions `33124140499`
+  成功，1 号机已切换到 ARM64 固定摘要
+  `ghcr.io/taidai/zizu@sha256:5e92e7efef2cb645cee96c41d5136ae45ce683c2b38d89b64d413767c5478544`。
+- 1 号机最终为 `v0.4.85-rc.10` / Schema 049、healthy、restart 0、host network、`/dev/mqueue`
+  tmpfs、unless-stopped；公网、登录、告警 API、消费收据与零 outbox 积压均通过。切换前 Schema 048
+  备份已做 SHA 与 `pg_restore -l` 验证。未执行自动策略、控制或设备写入；完整证据见
+  `docs/deploy-1号机-v0.4.85-rc.10-http.md`。
 
 ---
 
