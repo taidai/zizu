@@ -52,6 +52,71 @@ class CommittedFrameConsumersMigrationPostgresTest(unittest.TestCase):
     def _connection(self):
         return psycopg2.connect(**self.connection_kwargs)
 
+    @staticmethod
+    def _insert_frame(cursor, configuration_revision: int, capture_beat: int):
+        cursor.execute("SET session_replication_role=replica")
+        cursor.execute(
+            "INSERT INTO t_data_frames"
+            "(frame_id,candidate_digest,capture_beat,shot_at,configuration_revision,"
+            " status,attempt_count,finished_at) "
+            "VALUES(%s,%s,%s,clock_timestamp(),%s,'COMPLETE',1,clock_timestamp()) "
+            "RETURNING frame_id,frame_sequence",
+            (
+                str(uuid4()),
+                f"{capture_beat:064x}"[-64:],
+                capture_beat,
+                configuration_revision,
+            ),
+        )
+        row = cursor.fetchone()
+        cursor.execute("SET session_replication_role=origin")
+        return row
+
+    def test_alarm_transaction_receipt_is_atomic_and_idempotent(self) -> None:
+        from app.services.alarm_postgres import _PostgresAlarmTransaction
+        from app.services.alarm_runtime import AlarmRuntimeError
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(MIGRATION_049.read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT current_revision FROM t_configuration_state "
+                "WHERE singleton=TRUE"
+            )
+            configuration_revision = int(cursor.fetchone()[0])
+            frame_id, sequence = self._insert_frame(
+                cursor,
+                configuration_revision,
+                490001,
+            )
+            transaction = _PostgresAlarmTransaction(connection)
+            self.assertTrue(
+                transaction.begin_committed_frame(
+                    "alarm",
+                    frame_id,
+                    sequence,
+                    configuration_revision,
+                )
+            )
+            self.assertFalse(
+                transaction.begin_committed_frame(
+                    "alarm",
+                    frame_id,
+                    sequence,
+                    configuration_revision,
+                )
+            )
+            with self.assertRaises(AlarmRuntimeError) as raised:
+                transaction.begin_committed_frame(
+                    "alarm",
+                    frame_id,
+                    sequence,
+                    configuration_revision + 1,
+                )
+            self.assertEqual(
+                "ALARM_FRAME_CONFIGURATION_MISMATCH",
+                raised.exception.code,
+            )
+
     def test_049_is_replayable_and_rejects_duplicate_consumer_sequence(self) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(MIGRATION_049.read_text(encoding="utf-8"))
