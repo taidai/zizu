@@ -306,11 +306,15 @@ class PointProcessingService:
         node_source_key = self._catalog.node_source_key(command.node_id)
         template = self._catalog.get_template(command.template_revision_id)
         scan = None
-        if template is not None and template.asset_id == "pcs.en9":
+        requires_scan = template is not None and any(
+            item.source_kind == "l0" and item.source_contract is not None
+            for item in template.inputs
+        )
+        if requires_scan:
             if self._point_scanner is None or node_source_key is None:
                 raise PointProcessingError(
                     "NEURON_POINT_CATALOG_UNAVAILABLE",
-                    "EN9 installation requires a readable Neuron point catalog",
+                    "Template installation requires a readable Neuron point catalog",
                 )
             try:
                 scan = self._point_scanner.scan(node_source_key)

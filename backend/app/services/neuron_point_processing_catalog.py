@@ -153,7 +153,7 @@ def _normalize_point(
     )
     value_data_type = (
         "FLOAT"
-        if normalized_decimal is not None and type_contract[1] == "INT"
+        if normalized_decimal not in {None, 0.0} and type_contract[1] == "INT"
         else type_contract[1]
     )
     return (

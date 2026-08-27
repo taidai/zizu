@@ -18,6 +18,7 @@ BRAND_A_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000a")
 BRAND_B_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000b")
 EN9_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000c")
 SITE_FORMULA_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000d")
+METER_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000e")
 PCS_POWER_1 = UUID("85000000-0000-0000-0000-000000000001")
 PCS_POWER_2 = UUID("85000000-0000-0000-0000-000000000002")
 GRID_POWER = UUID("85000000-0000-0000-0000-000000000003")
@@ -362,6 +363,53 @@ class PointProcessingTest(unittest.TestCase):
                 )
             },
         )
+
+    def test_meter_source_contract_uses_the_same_neuron_scan(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingService,
+            PreviewPointProcessing,
+        )
+
+        class MeterNeuron:
+            def get_groups(self, node_name: str) -> list[dict]:
+                self.node_name = node_name
+                return [{"name": "data", "interval": 100}]
+
+            def get_tags(self, node_name: str, group_name: str) -> list[dict]:
+                return [{
+                    "name": "总有功功率",
+                    "type": 3,
+                    "attribute": 1,
+                    "decimal": 0.0,
+                    "bias": 0.0,
+                    "address": "1!416409",
+                }]
+
+        service = PointProcessingService(
+            InMemoryPointProcessingRepository(),
+            InMemoryPointProcessingCatalog(
+                templates={
+                    METER_REVISION_ID: _assets()["meter.modbus-active-power"],
+                },
+                node_source_keys={NODE_ID: "tk_db"},
+            ),
+            point_scanner=NeuronPointCatalog(MeterNeuron()),
+        )
+
+        plan = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=METER_REVISION_ID,
+            input_selections={},
+            actor="user:engineer",
+        ))
+
+        self.assertEqual("ready", plan.status, plan.public_dict())
+        l0 = next(item for item in plan.items if item["kind"] == "l0_point")
+        self.assertEqual("1!416409", l0["after"]["source_address"])
+        self.assertEqual("INT", l0["after"]["value_data_type"])
 
     def test_en9_apply_rejects_point_catalog_changed_after_preview(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog

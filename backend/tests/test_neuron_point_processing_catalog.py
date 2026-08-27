@@ -39,6 +39,22 @@ class FakeNeuron:
 
 
 class NeuronPointProcessingCatalogTest(unittest.TestCase):
+    def test_zero_decimal_keeps_an_integer_register_integer(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+
+        neuron = FakeNeuron()
+        neuron.tags = [{
+            "name": "总有功功率",
+            "address": "1!416409",
+            "attribute": 1,
+            "type": 3,
+            "decimal": 0.0,
+        }]
+
+        scan = NeuronPointCatalog(neuron).scan("tk_db")
+
+        self.assertEqual("INT", scan.points[0].value_data_type)
+
     def test_scan_normalizes_exact_en9_read_only_catalog_without_mutation(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
 
