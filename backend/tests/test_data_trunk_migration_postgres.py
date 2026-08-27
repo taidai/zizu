@@ -43,6 +43,9 @@ MIGRATION_040 = MIGRATIONS_ROOT / "migration_040_point_processing.sql"
 MIGRATION_041 = MIGRATIONS_ROOT / "migration_041_en9_runtime_evidence.sql"
 MIGRATION_042 = MIGRATIONS_ROOT / "migration_042_cross_node_formulas.sql"
 MIGRATION_043 = MIGRATIONS_ROOT / "migration_043_business_metrics.sql"
+MIGRATION_044 = MIGRATIONS_ROOT / "migration_044_node_data_trunk_hard_cut.sql"
+MIGRATION_045 = MIGRATIONS_ROOT / "migration_045_edge_storage_retention.sql"
+MIGRATION_046 = MIGRATIONS_ROOT / "migration_046_data_frames.sql"
 
 
 @unittest.skipUnless(
@@ -103,6 +106,18 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     @staticmethod
     def _apply_043(cursor) -> None:
         cursor.execute(MIGRATION_043.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_044(cursor) -> None:
+        cursor.execute(MIGRATION_044.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_045(cursor) -> None:
+        cursor.execute(MIGRATION_045.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _apply_046(cursor) -> None:
+        cursor.execute(MIGRATION_046.read_text(encoding="utf-8"))
 
     @classmethod
     def _reset_through_041(cls, cursor) -> None:
