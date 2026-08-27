@@ -11,6 +11,7 @@ from app.services.data_trunk_contracts import (
 )
 from app.services.data_trunk_outbox import (
     CommittedL0Change,
+    CommittedFrameFanout,
     FrameOutboxDispatcher,
     FrameOutboxEvent,
     InMemoryFrameOutboxRepository,
@@ -64,7 +65,64 @@ class _FailOncePublisher(_RecordingPublisher):
         await super().publish(event)
 
 
+class _CallbackPublisher:
+    def __init__(self, callback) -> None:
+        self._callback = callback
+
+    async def publish(self, event: FrameOutboxEvent) -> None:
+        self._callback(event)
+
+
+class _FailingPublisher:
+    def __init__(self, calls: list[str], name: str) -> None:
+        self._calls = calls
+        self._name = name
+
+    async def publish(self, event: FrameOutboxEvent) -> None:
+        del event
+        self._calls.append(self._name)
+        raise RuntimeError("consumer offline")
+
+
 class DataFrameOutboxTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fanout_delivers_one_frame_in_registration_order(self) -> None:
+        calls: list[tuple[str, int]] = []
+        event = _event(10)
+
+        await CommittedFrameFanout(
+            (
+                _CallbackPublisher(
+                    lambda value: calls.append(("alarm", value.frame_sequence))
+                ),
+                _CallbackPublisher(
+                    lambda value: calls.append(("stream", value.frame_sequence))
+                ),
+            )
+        ).publish(event)
+
+        self.assertEqual([("alarm", 10), ("stream", 10)], calls)
+
+    async def test_fanout_failure_stops_later_consumers_and_keeps_head(self) -> None:
+        event = _event(10)
+        repository = InMemoryFrameOutboxRepository((event,), clock=lambda: NOW)
+        calls: list[object] = []
+        fanout = CommittedFrameFanout(
+            (
+                _FailingPublisher(calls, "alarm"),
+                _CallbackPublisher(
+                    lambda value: calls.append(("stream", value.frame_sequence))
+                ),
+            )
+        )
+
+        dispatched = await FrameOutboxDispatcher(repository, fanout).run_once(
+            now=NOW
+        )
+
+        self.assertEqual(0, dispatched)
+        self.assertEqual(["alarm"], calls)
+        self.assertEqual((), repository.published_ids)
+
     async def test_dispatches_one_atomic_event_per_terminal_frame(self) -> None:
         event = _event()
         repository = InMemoryFrameOutboxRepository((event,), clock=lambda: NOW)

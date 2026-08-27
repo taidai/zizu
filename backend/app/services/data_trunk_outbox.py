@@ -201,6 +201,19 @@ class CommittedFramePublisher(Protocol):
     async def publish(self, event: FrameOutboxEvent) -> None: ...
 
 
+class CommittedFrameFanout:
+    """Deliver one frame to every registered consumer in a fixed order."""
+
+    def __init__(self, consumers: tuple[CommittedFramePublisher, ...]) -> None:
+        if not consumers:
+            raise ValueError("committed frame fanout requires a consumer")
+        self._consumers = consumers
+
+    async def publish(self, event: FrameOutboxEvent) -> None:
+        for consumer in self._consumers:
+            await consumer.publish(event)
+
+
 class FrameOutboxRepository(Protocol):
     def claim_unpublished(
         self, now: datetime | None = None
