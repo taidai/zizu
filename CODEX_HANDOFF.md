@@ -1,6 +1,17 @@
 ---
 
-## Session 2026-08-27 — 提交后数据帧实时流设计（待书面复核）
+## Session 2026-08-27 — 提交后数据帧实时流实施计划（待执行）
+
+- 用户已书面确认 `docs/superpowers/specs/2026-08-27-committed-frame-realtime-stream-design.md`。
+- 新增实施计划 `docs/superpowers/plans/2026-08-27-committed-frame-realtime-stream-implementation.md`，拆为 8 个
+  可独立 RED/GREEN/提交的任务：领域 seam、Schema 047 payload、PostgreSQL 快照/replay、统一 API 与
+  consumer、Schema 048 保留、前端投影、界面硬切、全量门禁。
+- 计划明确不增加中间件和依赖，不改告警/JDM/控制/EMS 工作台，不构建镜像、不连接或部署 1 号机。
+- 当前仍未改生产代码；下一步选择执行方式后，从 Task 1 开始。
+
+---
+
+## Session 2026-08-27 — 提交后数据帧实时流设计（已确认）
 
 - 用户确认实时界面采用一个统一 committed frame 通道：节点首次打开以 REST 取得当前节点完整 L0/L2
   终态快照和游标，随后 WebSocket 只接收该游标后的原子帧增量；断线在一小时/5000 帧内补发，过旧
@@ -12,8 +23,8 @@
   L0/L2 历史。旧 L0 1.5 秒轮询与旧 L2 独立 WebSocket 将在新链路验收后硬删除。
 - 固定 L0/L2 秒级明细 7 天、无长期证据引用的帧 7 天、已发布 outbox 一小时或 5000 帧；普通会话的
   append-only/终态不可删门禁继续生效，仅受控维护路径可按引用顺序清理。
-- 正式规格：`docs/superpowers/specs/2026-08-27-committed-frame-realtime-stream-design.md`。当前仅写规格，
-  尚未写实施计划、改生产代码、构建镜像或连接 1 号机；下一步先由用户复核书面规格。
+- 正式规格：`docs/superpowers/specs/2026-08-27-committed-frame-realtime-stream-design.md`。用户已确认书面规格；
+  当前尚未改生产代码、构建镜像或连接 1 号机，实施步骤见同日 committed frame realtime stream 计划。
 
 ---
 
