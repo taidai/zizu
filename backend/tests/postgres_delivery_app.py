@@ -17,13 +17,22 @@ from app.api.neuron import router as neuron_router
 from app.api.rpc import router as rpc_router
 from app.api.rules import router as rules_router
 from app.api.point_processings import router as point_processings_router
-from app.api.websocket import router as websocket_router
+from app.api.committed_frames import (
+    router as committed_frames_router,
+    set_committed_frame_stream,
+)
 from app.core.config import settings
 from app.services.telemetry_store import init_db_pool
 from app.services.data_trunk_postgres import build_postgres_data_trunk
 from app.services.pipeline import DataPipeline
-from app.services.data_trunk_outbox import OutboxDispatcher, PostgresOutboxRepository
-from app.api.websocket import get_entity_observation_broadcaster
+from app.services.committed_frame_stream import CommittedFrameStream
+from app.services.committed_frame_stream_postgres import (
+    PostgresCommittedFrameStreamRepository,
+)
+from app.services.data_trunk_outbox import (
+    FrameOutboxDispatcher,
+    PostgresFrameOutboxRepository,
+)
 
 
 init_db_pool(min_conn=1, max_conn=4)
@@ -40,7 +49,7 @@ app.include_router(neuron_router, prefix="/api/v1")
 app.include_router(rpc_router, prefix="/api/v1")
 app.include_router(rules_router, prefix="/api/v1")
 app.include_router(point_processings_router, prefix="/api/v1")
-app.include_router(websocket_router, prefix="/api/v1")
+app.include_router(committed_frames_router, prefix="/api/v1")
 
 
 @dataclass(frozen=True)
@@ -51,9 +60,13 @@ class _SimulatedMqttMessage:
 
 
 _protocol_pipeline = DataPipeline(data_trunk=build_postgres_data_trunk())
-_protocol_outbox = OutboxDispatcher(
-    PostgresOutboxRepository(),
-    get_entity_observation_broadcaster(),
+_committed_frame_stream = CommittedFrameStream(
+    PostgresCommittedFrameStreamRepository()
+)
+set_committed_frame_stream(_committed_frame_stream)
+_protocol_outbox = FrameOutboxDispatcher(
+    PostgresFrameOutboxRepository(),
+    _committed_frame_stream,
 )
 
 

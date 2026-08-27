@@ -282,15 +282,12 @@ def create_app() -> FastAPI:
     from app.api.auth import router as auth_router
     app.include_router(auth_router, prefix="/api/v1", tags=["Authentication"])
 
-    # F0 可视化: Nodes + Tags + Telemetry WS
+    # F0 可视化: Nodes + Tags
     from app.api.nodes import router as nodes_router
     app.include_router(nodes_router, prefix="/api/v1", tags=["Nodes"])
 
     from app.api.tags import router as tags_router
     app.include_router(tags_router, prefix="/api/v1", tags=["Tags"])
-
-    from app.api.websocket import router as ws_router
-    app.include_router(ws_router, prefix="/api/v1", tags=["Telemetry WS"])
 
     from app.api.committed_frames import router as committed_frames_router
     app.include_router(

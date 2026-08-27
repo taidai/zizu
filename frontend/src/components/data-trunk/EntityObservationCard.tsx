@@ -1,12 +1,19 @@
 import ReactECharts from 'echarts-for-react'
 import type { EntityInstance, EntityInstanceObservation } from '../../api/client'
-import { projectEntityValue } from './dataTrunkViewModel'
+import type { L2FrameItem } from '../../api/committedFrameStream'
 
 const QUALITY_STYLE: Record<number, string> = {
   192: 'border-green-200 bg-green-50 text-green-700',
   64: 'border-amber-200 bg-amber-50 text-amber-700',
   1: 'border-gray-300 bg-gray-100 text-gray-600',
   0: 'border-red-200 bg-red-50 text-red-700',
+}
+
+const QUALITY_LABEL: Record<number, string> = {
+  192: '正常',
+  64: '不确定',
+  1: '陈旧',
+  0: '无效',
 }
 
 function ageLabel(ageMs: number): string {
@@ -21,25 +28,40 @@ function revisionLabel(revisionId: string | null): string {
   return `转换版本 ${revisionId.slice(0, 8)}`
 }
 
+function formatTime(value: string | null): string {
+  return value ? new Date(value).toLocaleString('zh-CN') : '未记录'
+}
+
+function valueLabel(value: L2FrameItem['value']): string {
+  if (value === null) return '—'
+  if (Array.isArray(value)) return value.join('、')
+  return String(value)
+}
+
 export default function EntityObservationCard({
   descriptor,
   observation,
   history,
+  frameTime,
 }: {
   descriptor: EntityInstance
-  observation: EntityInstanceObservation | null
+  observation: L2FrameItem | null
   history: EntityInstanceObservation[]
+  frameTime: string | null
 }) {
-  const projected = projectEntityValue(observation || { value: null, quality: 1 })
+  const quality = observation?.quality ?? 1
+  const currentValue = valueLabel(observation?.value ?? null)
+  const currentUsable = quality !== 0 && quality !== 1 && observation?.value !== null
+  const ageMs = observation?.observed_at
+    ? Math.max(0, Date.now() - new Date(observation.observed_at).getTime())
+    : null
   const latestGood = [...history].reverse().find((item) => item.quality === 192)
   const numeric = history.some((item) => typeof item.value === 'number')
   const chartData = history.map((item) => [
     item.observed_at,
     (item.quality === 0 || item.quality === 1 || typeof item.value !== 'number') ? null : item.value,
   ])
-  const sourceDigest = typeof observation?.source_summary === 'object'
-    ? observation.source_summary?.digest
-    : observation?.source_digest
+  const sourceDigest = observation?.source_digest
 
   return (
     <article className="rounded-xl border border-gray-200 bg-white/60 p-3 shadow-sm shadow-gray-300/20">
@@ -51,15 +73,15 @@ export default function EntityObservationCard({
           <p className="mt-0.5 text-[10px] text-gray-500">{descriptor.definition_id}</p>
         </div>
         <span className={`shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-semibold ${QUALITY_STYLE[observation?.quality ?? 1]}`}>
-          {projected.qualityLabel}
+          {QUALITY_LABEL[quality] || `质量 ${quality}`}
         </span>
       </div>
 
       <div className="mt-3 flex items-baseline gap-1.5">
-        <span className="font-mono-value text-2xl font-semibold text-gray-900">{projected.currentValue}</span>
-        {projected.currentUsable && descriptor.unit && <span className="text-xs text-gray-500">{descriptor.unit}</span>}
+        <span className={`font-mono-value text-2xl font-semibold ${quality === 1 ? 'text-gray-400' : 'text-gray-900'}`}>{currentValue}</span>
+        {observation?.value !== null && descriptor.unit && <span className="text-xs text-gray-500">{descriptor.unit}</span>}
       </div>
-      {!projected.currentUsable && latestGood && (
+      {!currentUsable && quality !== 1 && latestGood && (
         <p className="mt-1 text-[10px] text-gray-500">
           最近正常值 {String(latestGood.value)}{descriptor.unit ? ` ${descriptor.unit}` : ''}（非当前值）
         </p>
@@ -100,10 +122,15 @@ export default function EntityObservationCard({
       ) : null}
 
       <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-gray-200 pt-2 text-[10px] text-gray-500">
-        <div><dt className="inline">数据年龄：</dt><dd className="inline">{observation ? ageLabel(observation.age_ms) : '等待数据'}</dd></div>
+        <div><dt className="inline">数据年龄：</dt><dd className="inline">{ageMs === null ? '等待数据' : ageLabel(ageMs)}</dd></div>
         <div><dt className="inline">统一配置：</dt><dd className="inline">{observation?.configuration_revision ?? '未记录'}</dd></div>
         <div><dt className="inline">加工来源：</dt><dd className="inline">{revisionLabel(observation?.processing_revision_id ?? null)}</dd></div>
         <div title={sourceDigest || undefined}><dt className="inline">来源证据：</dt><dd className="inline">{sourceDigest ? sourceDigest.slice(0, 10) : '未记录'}</dd></div>
+        <div><dt className="inline">数据时间：</dt><dd className="inline">{formatTime(observation?.observed_at ?? null)}</dd></div>
+        <div><dt className="inline">接收时间：</dt><dd className="inline">{formatTime(observation?.received_at ?? null)}</dd></div>
+        <div><dt className="inline">计算时间：</dt><dd className="inline">{formatTime(observation?.calculated_at ?? null)}</dd></div>
+        <div><dt className="inline">成帧时间：</dt><dd className="inline">{formatTime(frameTime)}</dd></div>
+        <div><dt className="inline">帧序号：</dt><dd className="inline">{observation?.frame_sequence ?? '—'}</dd></div>
       </dl>
     </article>
   )

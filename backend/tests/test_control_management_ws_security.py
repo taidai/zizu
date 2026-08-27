@@ -21,7 +21,10 @@ from app.api.auth import router as auth_router
 from app.api.entities import router as entities_router
 from app.api.nanomq import router as nanomq_router
 from app.api.neuron import router as neuron_router
-from app.api.websocket import router as websocket_router
+from app.api.committed_frames import (
+    get_committed_frame_stream,
+    router as websocket_router,
+)
 from app.main import create_app
 from app.api.security import get_identity
 from app.api import security as security_adapter
@@ -33,6 +36,25 @@ from app.services.identity import (
     hash_password,
 )
 from uuid import UUID
+
+
+WS_NODE_ID = UUID("00000000-0000-0000-0000-000000000099")
+
+
+class _BlockingFrameSubscription:
+    async def receive(self):
+        import asyncio
+
+        await asyncio.Event().wait()
+
+
+class _FrameStreamStub:
+    async def subscribe_after(self, scope, cursor):
+        self.last_subscription = (scope, cursor)
+        return _BlockingFrameSubscription()
+
+    async def unsubscribe(self, _subscription):
+        return None
 
 
 class ControlManagementAuthorizationPublicApiTest(unittest.IsolatedAsyncioTestCase):
@@ -311,6 +333,7 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
         app.include_router(auth_router, prefix="/api/v1")
         app.include_router(websocket_router, prefix="/api/v1")
         app.dependency_overrides[get_identity] = lambda: identity
+        app.dependency_overrides[get_committed_frame_stream] = _FrameStreamStub
 
         with TestClient(app, base_url="https://testserver") as client:
             login = client.post(
@@ -326,19 +349,19 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
             self.assertNotIn(ticket, repr(repository.ws_tickets))
             self.assertTrue(all(len(key) == 64 for key in repository.ws_tickets))
 
-            with client.websocket_connect("wss://testserver/api/v1/ws/telemetry") as websocket:
+            with client.websocket_connect("wss://testserver/api/v1/ws/data-frames") as websocket:
                 websocket.send_json({"authenticate": {"ticket": ticket}})
                 self.assertEqual(
                     websocket.receive_json(),
                     {"type": "authenticated"},
                 )
-                websocket.send_json({"subscribe": []})
+                websocket.send_json({"subscribe": {"node_id": str(WS_NODE_ID), "after": "cursor"}})
                 self.assertEqual(
                     websocket.receive_json(),
-                    {"type": "subscribed", "tag_count": 0},
+                    {"type": "subscribed", "node_id": str(WS_NODE_ID)},
                 )
 
-            with client.websocket_connect("wss://testserver/api/v1/ws/telemetry") as websocket:
+            with client.websocket_connect("wss://testserver/api/v1/ws/data-frames") as websocket:
                 websocket.send_json({"authenticate": {"ticket": ticket}})
                 with self.assertRaises(WebSocketDisconnect) as closed:
                     websocket.receive_json()
@@ -361,6 +384,7 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
         app.include_router(auth_router, prefix="/api/v1")
         app.include_router(websocket_router, prefix="/api/v1")
         app.dependency_overrides[get_identity] = lambda: identity
+        app.dependency_overrides[get_committed_frame_stream] = _FrameStreamStub
 
         with TestClient(app, base_url="https://testserver") as client:
             login = client.post(
@@ -371,7 +395,7 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
             issued = client.post("/api/v1/auth/ws-ticket", headers=headers)
 
             with client.websocket_connect(
-                "wss://testserver/api/v1/ws/telemetry"
+                "wss://testserver/api/v1/ws/data-frames"
             ) as websocket:
                 websocket.send_json(
                     {"authenticate": {"ticket": issued.json()["ticket"]}}
@@ -383,7 +407,7 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
                 logout = client.post("/api/v1/auth/logout", headers=headers)
                 self.assertEqual(logout.status_code, 204, logout.text)
 
-                websocket.send_json({"subscribe": []})
+                websocket.send_json({"subscribe": {"node_id": str(WS_NODE_ID), "after": "cursor"}})
                 with self.assertRaises(WebSocketDisconnect) as closed:
                     websocket.receive_json()
                 self.assertEqual(closed.exception.code, 4401)
@@ -405,6 +429,7 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
         app.include_router(auth_router, prefix="/api/v1")
         app.include_router(websocket_router, prefix="/api/v1")
         app.dependency_overrides[get_identity] = lambda: identity
+        app.dependency_overrides[get_committed_frame_stream] = _FrameStreamStub
 
         with TestClient(app, base_url="https://testserver") as client:
             login = client.post(
@@ -419,12 +444,12 @@ class WebSocketTicketPublicApiTest(unittest.TestCase):
             )
             ticket = issued.json()["ticket"]
 
-            with client.websocket_connect("ws://testserver/api/v1/ws/telemetry") as websocket:
+            with client.websocket_connect("ws://testserver/api/v1/ws/data-frames") as websocket:
                 websocket.send_json({"authenticate": {"ticket": ticket}})
                 with self.assertRaises(WebSocketDisconnect) as closed:
                     websocket.receive_json()
                 self.assertEqual(closed.exception.code, 4406)
 
-            with client.websocket_connect("wss://testserver/api/v1/ws/telemetry") as websocket:
+            with client.websocket_connect("wss://testserver/api/v1/ws/data-frames") as websocket:
                 websocket.send_json({"authenticate": {"ticket": ticket}})
                 self.assertEqual(websocket.receive_json(), {"type": "authenticated"})

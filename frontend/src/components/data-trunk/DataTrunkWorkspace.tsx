@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   DataTrunkApiError,
   DataTrunkResultUnknownError,
   applyPointProcessingPlan,
-  connectEntityObservationWS,
   createPointProcessingPlan,
   fetchEntityInstanceHistory,
   fetchEntityInstances,
@@ -21,6 +20,10 @@ import {
   type PointProcessingTemplate,
 } from '../../api/client'
 import {
+  connectCommittedFrameStream,
+  fetchCommittedFrameSnapshot,
+} from '../../api/committedFrameStream'
+import {
   clearDataTrunkApplyRetry,
   findDataTrunkApplyRetry,
   readDataTrunkApplyRetry,
@@ -29,6 +32,11 @@ import {
 import NodeTrunkOverview from './NodeTrunkOverview'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
 import { DATA_TRUNK_STEPS } from './dataTrunkViewModel'
+import {
+  applyFrameDelta,
+  replaceSnapshot,
+  type CommittedFrameProjection,
+} from './committedFrameProjection'
 
 export default function DataTrunkWorkspace({
   node,
@@ -46,7 +54,7 @@ export default function DataTrunkWorkspace({
   const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
   const [application, setApplication] = useState<PointProcessingApplication | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
-  const [observations, setObservations] = useState<Map<string, EntityInstanceObservation>>(new Map())
+  const [projection, setProjection] = useState<CommittedFrameProjection | null>(null)
   const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'plan' | 'apply' | 'formula' | null>(null)
@@ -69,14 +77,9 @@ export default function DataTrunkWorkspace({
       }
     }))
     const nextHistories = new Map(historyEntries)
-    const nextObservations = new Map<string, EntityInstanceObservation>()
-    for (const [entityId, items] of historyEntries) {
-      if (items.length > 0) nextObservations.set(entityId, items[items.length - 1])
-    }
     setTrunk(nextTrunk)
     setDescriptors(descriptorMap)
     setHistories(nextHistories)
-    setObservations(nextObservations)
     return nextTrunk
   }, [node.id])
 
@@ -125,20 +128,55 @@ export default function DataTrunkWorkspace({
     void loadWorkspace()
   }, [loadWorkspace])
 
-  const l2Ids = useMemo(() => trunk?.l2.map((item) => item.entity_instance_id) || [], [trunk])
-  useEffect(() => connectEntityObservationWS(
-    l2Ids,
-    (observation) => {
-      setObservations((current) => new Map(current).set(observation.entity_instance_id, observation))
-      setHistories((current) => {
-        const next = new Map(current)
-        const items = [...(next.get(observation.entity_instance_id) || []), observation]
-        next.set(observation.entity_instance_id, items.slice(-120))
-        return next
-      })
-    },
-    async () => { await loadRuntime() },
-  ), [l2Ids.join('|'), loadRuntime])
+  useEffect(() => {
+    let active = true
+    let generation = 0
+    let stopStream = () => {}
+    let controller: AbortController | null = null
+
+    const start = async () => {
+      const currentGeneration = ++generation
+      stopStream()
+      controller?.abort()
+      controller = new AbortController()
+      setProjection(null)
+      try {
+        const snapshot = await fetchCommittedFrameSnapshot(node.id, controller.signal)
+        if (!active || currentGeneration !== generation) return
+        setProjection(replaceSnapshot(null, snapshot))
+        stopStream = connectCommittedFrameStream({
+          nodeId: node.id,
+          cursor: snapshot.cursor,
+          onDelta: (delta) => {
+            if (!active || currentGeneration !== generation) return
+            setProjection((current) => {
+              if (!current || current.nodeId !== node.id) return current
+              try {
+                return applyFrameDelta(current, delta)
+              } catch {
+                void start()
+                return current
+              }
+            })
+          },
+          onResnapshotRequired: () => { void start() },
+          onError: (reason) => setError(reason.message),
+        })
+      } catch (reason) {
+        if (active && currentGeneration === generation && !(reason instanceof DOMException && reason.name === 'AbortError')) {
+          setError(reason instanceof Error ? reason.message : '读取实时帧失败')
+        }
+      }
+    }
+
+    void start()
+    return () => {
+      active = false
+      generation += 1
+      controller?.abort()
+      stopStream()
+    }
+  }, [node.id])
 
   const selectedTemplate = templates.find((item) => item.revision_id === selectedRevisionId) || null
   const installedTemplate = templates.find((item) => item.revision_id === trunk?.l1_summary.revision_id) || null
@@ -277,14 +315,14 @@ export default function DataTrunkWorkspace({
         trunk={trunk}
         installedTemplate={installedTemplate}
         descriptors={descriptors}
-        observations={observations}
+        projection={projection}
         histories={histories}
         readOnly={readOnly}
       />
 
       {!readOnly && (
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="rounded-xl border border-gray-200 bg-white/45 p-4"><h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3><div className="mt-3 grid grid-cols-2 gap-3"><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">L2 输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">统一配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.configuration_revision ?? observations.values().next().value?.configuration_revision ?? '未发布'}</div></div></div></div>
+          <div className="rounded-xl border border-gray-200 bg-white/45 p-4"><h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3><div className="mt-3 grid grid-cols-2 gap-3"><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">L2 输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">统一配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.configuration_revision ?? projection?.configurationRevision ?? '未发布'}</div></div></div></div>
           <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}

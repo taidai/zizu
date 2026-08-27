@@ -22,8 +22,6 @@ export { AlarmConfigurationResultUnknownError } from '../components/alarm-config
 export type { AlarmConditionValue } from '../components/alarm-configuration/alarmConfigurationContracts'
 
 const API_BASE = '/api/v1'
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/telemetry`
-const ENTITY_OBSERVATION_WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/entity-observations`
 
 /**
  * Single HTTP seam for the frontend. Authentication is resolved at request
@@ -197,14 +195,6 @@ export interface Category {
   name: string
   node_type: string
   description: string | null
-}
-
-export interface TelemetryUpdate {
-  tag_id: string
-  raw_value: number | null
-  eng_value: number | null
-  ts: string | null
-  quality: number
 }
 
 // ── REST API ──
@@ -650,52 +640,6 @@ export async function truncateTable(table: string, confirm: string): Promise<any
   return res.json()
 }
 
-
-// ── WebSocket ──
-
-export type TelemetryCallback = (updates: TelemetryUpdate[]) => void
-
-export function connectTelemetryWS(
-  onMessage: TelemetryCallback,
-  tagIds?: string[],
-): () => void {
-  let ws: WebSocket | null = null
-  let cancelled = false
-
-  void (async () => {
-    const issued = await apiFetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST' })
-    if (!issued.ok || cancelled) return
-    const { ticket } = await issued.json() as { ticket: string }
-    if (cancelled) return
-    ws = new WebSocket(WS_URL)
-
-    ws.onopen = () => {
-      ws?.send(JSON.stringify({ authenticate: { ticket } }))
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'authenticated') {
-          ws?.send(JSON.stringify({ subscribe: tagIds || [] }))
-        } else if (data.tags && Array.isArray(data.tags)) {
-          onMessage(data.tags)
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
-
-    ws.onerror = (err) => {
-      console.error('[WS] Error:', err)
-    }
-  })().catch((err) => console.error('[WS] Ticket failed:', err))
-
-  return () => {
-    cancelled = true
-    ws?.close()
-  }
-}
 
 // ── Node Config Update ──
 
@@ -1275,73 +1219,6 @@ export async function fetchEntityInstanceHistory(
   const response = await apiFetch(`${API_BASE}/entity-instances/${encodeURIComponent(entityInstanceId)}/history?range=${range}`)
   if (!response.ok) throw await dataTrunkError(response, `读取全局实体历史失败：${response.status}`)
   return (await response.json() as { items: EntityInstanceObservation[] }).items
-}
-
-export function connectEntityObservationWS(
-  entityInstanceIds: string[],
-  onObservation: (observation: EntityInstanceObservation) => void,
-  onReconnectRefresh: () => Promise<void>,
-): () => void {
-  let socket: WebSocket | null = null
-  let cancelled = false
-  let reconnectTimer: number | null = null
-  let attempt = 0
-  const seen = new Set<string>()
-  const seenOrder: string[] = []
-
-  const remember = (eventId: string): boolean => {
-    if (seen.has(eventId)) return false
-    seen.add(eventId)
-    seenOrder.push(eventId)
-    if (seenOrder.length > 1000) {
-      const oldest = seenOrder.shift()
-      if (oldest) seen.delete(oldest)
-    }
-    return true
-  }
-
-  const connect = async () => {
-    if (cancelled || entityInstanceIds.length === 0) return
-    if (attempt > 0) await onReconnectRefresh()
-    const issued = await apiFetch(`${API_BASE}/auth/ws-ticket`, { method: 'POST' })
-    if (!issued.ok || cancelled) return
-    const { ticket } = await issued.json() as { ticket: string }
-    if (cancelled) return
-    socket = new WebSocket(ENTITY_OBSERVATION_WS_URL)
-    socket.onopen = () => socket?.send(JSON.stringify({ authenticate: { ticket } }))
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as {
-          type?: string
-          event_id?: string | null
-          entity_instance_id?: string
-        }
-        if (payload.type === 'authenticated') {
-          socket?.send(JSON.stringify({ subscribe: entityInstanceIds }))
-        } else if (
-          payload.type === 'entity_observation'
-          && payload.event_id
-          && payload.entity_instance_id
-          && remember(payload.event_id)
-        ) {
-          onObservation(payload as unknown as EntityInstanceObservation)
-        }
-      } catch { /* Malformed stream frames do not alter the current projection. */ }
-    }
-    socket.onclose = (event) => {
-      socket = null
-      if (cancelled || event.code === 4401 || event.code === 4403) return
-      attempt += 1
-      reconnectTimer = window.setTimeout(() => { void connect().catch(() => {}) }, Math.min(5000, attempt * 1000))
-    }
-  }
-
-  void connect().catch(() => {})
-  return () => {
-    cancelled = true
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
-    socket?.close()
-  }
 }
 
 export interface NumericAlarmCondition extends AlarmCondition {

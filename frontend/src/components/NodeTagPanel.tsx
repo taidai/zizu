@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  fetchTags, updateTag, batchUpdateTags, deleteTag, createTag, fetchNodes, fetchAlarmCounts, connectTelemetryWS,
-  type Tag, type TelemetryUpdate, type TagCreateInput,
+  fetchTags, updateTag, batchUpdateTags, deleteTag, createTag, fetchNodes,
+  type Tag, type TagCreateInput,
 } from '../api/client'
+import {
+  connectCommittedFrameStream,
+  fetchCommittedFrameSnapshot,
+} from '../api/committedFrameStream'
+import {
+  applyFrameDelta,
+  replaceSnapshot,
+  type CommittedFrameProjection,
+} from './data-trunk/committedFrameProjection'
 import EditableCell from './EditableCell'
 import TrendChart from './TrendChart'
 import NodeHistoryPanel from './NodeHistoryPanel'
@@ -38,7 +47,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [totalPages, setTotalPages] = useState(1)
   const [sortBy, setSortBy] = useState('sort_order')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
-  const [realtimeValues, setRealtimeValues] = useState<Map<string, TelemetryUpdate>>(new Map())
+  const [projection, setProjection] = useState<CommittedFrameProjection | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [batchScale, setBatchScale] = useState('')
   const [batchOffset, setBatchOffset] = useState('')
@@ -89,19 +98,53 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   }, [loadTags])
 
   useEffect(() => {
-    const tagIds = tags.map((t) => t.id)
-    if (tagIds.length === 0) return
-    const cleanup = connectTelemetryWS((updates) => {
-      setRealtimeValues((prev) => {
-        const next = new Map(prev)
-        for (const u of updates) {
-          next.set(u.tag_id, u)
+    let active = true
+    let generation = 0
+    let stopStream = () => {}
+    let controller: AbortController | null = null
+
+    const start = async () => {
+      const currentGeneration = ++generation
+      stopStream()
+      controller?.abort()
+      controller = new AbortController()
+      setProjection(null)
+      try {
+        const snapshot = await fetchCommittedFrameSnapshot(nodeId, controller.signal)
+        if (!active || currentGeneration !== generation) return
+        setProjection(replaceSnapshot(null, snapshot))
+        stopStream = connectCommittedFrameStream({
+          nodeId,
+          cursor: snapshot.cursor,
+          onDelta: (delta) => {
+            if (!active || currentGeneration !== generation) return
+            setProjection((current) => {
+              if (!current || current.nodeId !== nodeId) return current
+              try {
+                return applyFrameDelta(current, delta)
+              } catch {
+                void start()
+                return current
+              }
+            })
+          },
+          onResnapshotRequired: () => { void start() },
+        })
+      } catch (reason) {
+        if (active && currentGeneration === generation && !(reason instanceof DOMException && reason.name === 'AbortError')) {
+          setProjection(null)
         }
-        return next
-      })
-    }, tagIds)
-    return cleanup
-  }, [tags])
+      }
+    }
+
+    void start()
+    return () => {
+      active = false
+      generation += 1
+      controller?.abort()
+      stopStream()
+    }
+  }, [nodeId])
 
   const handleSort = (column: string) => {
     if (sortBy === column) {
@@ -223,9 +266,8 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
     return d.toLocaleString('zh-CN')
   }
 
-  const isOnline = (tag: Tag) => {
-    if (tag.quality === undefined || tag.quality === null) return false
-    return tag.quality >= 192
+  const isOnline = (quality: number | null | undefined) => {
+    return quality !== undefined && quality !== null && quality >= 192
   }
 
   return (
@@ -491,9 +533,11 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
             </thead>
             <tbody>
               {tags.map((tag) => {
-                const rt = realtimeValues.get(tag.id)
-                const rawVal = rt?.raw_value ?? tag.raw_value
-                const engVal = rt?.eng_value ?? tag.eng_value
+                const rt = projection?.l0.get(tag.id)
+                const rawVal = rt?.value ?? tag.raw_value
+                const engVal = rt?.value ?? tag.eng_value
+                const quality = rt?.effective_quality ?? tag.quality
+                const latestTs = rt?.source_timestamp ?? tag.latest_ts
 
                 return (
                   <tr
@@ -509,7 +553,8 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                       />
                     </td>
                     <td className="px-3 py-2">
-                      
+                      <div className="font-medium text-gray-700">{tag.display_name || tag.name}</div>
+                      <div className="text-[10px] text-gray-400">{tag.name}</div>
                     </td>
                     <td className="px-3 py-2">
                       <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${
@@ -547,13 +592,13 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                     </td>
                     <td className="px-3 py-2 text-center">
                       <span
-                        className={`inline-block w-2 h-2 rounded-full mr-1 ${isOnline(tag) ? 'bg-green-500' : 'bg-gray-300'}`}
-                        title={isOnline(tag) ? '质量良好' : `quality=${tag.quality ?? '—'}`}
+                        className={`inline-block w-2 h-2 rounded-full mr-1 ${isOnline(quality) ? 'bg-green-500' : 'bg-gray-300'}`}
+                        title={isOnline(quality) ? '质量良好' : `quality=${quality ?? '—'}`}
                       />
-                      <span className="text-[11px] text-gray-500">{tag.quality ?? '—'}</span>
+                      <span className="text-[11px] text-gray-500">{quality ?? '—'}</span>
                     </td>
                     <td className="px-3 py-2 text-[11px] text-gray-500">
-                      {formatTs(tag.latest_ts)}
+                      {formatTs(latestTs)}
                     </td>
                     <td className="px-3 py-2 text-center text-[11px] text-gray-400 font-mono-value">
                       {!tag.enabled && <span className="text-red-500 mr-1">[已禁用]</span>}
