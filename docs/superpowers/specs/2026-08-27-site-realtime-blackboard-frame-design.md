@@ -1,6 +1,6 @@
 # 单站实时黑板与数据帧设计
 
-> **现行运行专项。** 平台总体边界汇总见待最终复核的[《ZiZu 配置型工业 IoT 平台核心架构总纲》](./2026-08-27-zizu-platform-core-architecture-design.md)；本文件只负责实时黑板、数据帧、两段事务、恢复和实时送达细节。
+> **现行运行专项。** 平台总体边界汇总见已确认的[《ZiZu 配置型工业 IoT 平台核心架构总纲》](./2026-08-27-zizu-platform-core-architecture-design.md)；本文件只负责实时黑板、数据帧、两段事务、恢复和实时送达细节。
 
 **状态：** 已确认的现行专项规格
 **日期：** 2026-08-27
@@ -202,8 +202,7 @@ PENDING 帧或旧控制意图却晚到并恢复业务驱动的情况。
 
 ```text
 frame_id
-site_id
-frame_sequence        -- 站内单调递增；现有 L2 commit_sequence 与它保持同一顺序
+frame_sequence        -- 单站数据库内单调递增；现有 L2 commit_sequence 与它保持同一顺序
 capture_beat          -- 每拍递增；包含未生成数据帧的空拍
 shot_at
 configuration_revision
@@ -215,7 +214,9 @@ created_at
 finished_at
 ```
 
-`(site_id, frame_sequence)` 唯一。帧固定配置修订，使恢复时不会拿新公式重算旧帧。
+`frame_sequence` 在当前单站数据库内全局唯一。现有产品没有 `t_sites`，一套运行数据库就是一个场站，
+因此首版不为帧虚构 `site_id` 或新建站点表；未来若引入一库多站，必须另行设计身份、隔离与迁移。
+帧固定配置修订，使恢复时不会拿新公式重算旧帧。
 
 ### 8.2 共享时序表
 

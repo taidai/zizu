@@ -1,5 +1,23 @@
 ---
 
+## Session 2026-08-27 — 核心总纲确认与数据帧底座实施计划
+
+- 维护者以 `AAAA` 完成四部分书面确认；
+  `docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md` 已转为 Accepted，并成为
+  唯一现行总体架构入口。README 与 2026-08-17/23/25/27 相关专项规格已统一状态说明，冲突时以总纲、
+  最新 Accepted ADR 与当前源码为准。
+- 新增 `docs/superpowers/plans/2026-08-27-data-frame-foundation-implementation.md`，只规划第一阶段“单站
+  实时黑板 → 事务 A → 固定修订完整 L1 → 事务 B → 终态帧 outbox”，拆为 8 个 TDD 任务；不在一次改动里
+  实现实时界面、告警/JDM/控制收口或部署。
+- 计划经三路独立复审收口：固定 caller-provided frame identity、事务 A 结果未知幂等、frame/outbox 双
+  fencing、终态不可变、FAILED durable failure fact、STALE 保值、严格帧序、配置 QUIESCED 对账、切换期
+  候选归类、真实压缩块迁移测试及 L0/L2/索引容量测量均已有明确测试和门禁。
+- 第一至第三阶段明确禁止单独形成生产候选；第四阶段完成光储充 EMS 纵向验收、有界保留、备份恢复与
+  独立部署计划后，才可另行申请部署 1 号机。本轮没有修改生产代码、没有构建镜像、没有连接或操作
+  1 号机。
+- 下一步由维护者选择：A（推荐）按计划使用 subagent-driven development 逐任务 RED/GREEN/复审；B 在
+  当前任务内顺序执行同一计划。
+
 ## Session 2026-08-26 — v0.4.85-rc.1 节点数据主干已部署到 1 号机
 
 - 已把硬切主线 `节点 → L0 原始点位 → L1 点位加工模板 → L2 全局实体 → 告警/JDM/控制/画面`
@@ -4461,7 +4479,7 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   `docs/adr/0014-site-realtime-blackboard-and-committed-frames.md`。当前只完成设计文档，尚未写实现计划或
   改生产代码；下一步先由用户复核书面规格，确认后再使用 writing-plans 拆分纵向 TDD 实施任务。
 
-### 2026-08-27 — ZiZu 平台核心架构总纲（待书面复核）
+### 2026-08-27 — ZiZu 平台核心架构总纲（已确认）
 
 - 用户确认新建唯一现行总纲、保留专项链接、标记旧规格冲突，并要求按新总纲重新出规格。
 - 新总纲统一了产品目标、真实节点树、L0/L1/L2 领域骨架、唯一配置路径、运行组件、实时黑板与数据
@@ -4471,6 +4489,5 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   尚未完成；统计实体仅保留目标语义、旧实现已删除；实时黑板、统一节拍和数据帧两段事务未实现。
 - 总纲：`docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md`。相关 2026-08-17、
   08-23、08-25、08-27 专项规格增加状态说明，README 顶部增加唯一架构入口；未改生产代码或部署。
-- 总纲在最终书面复核前保持 Proposed，不先覆盖 accepted ADR；复核后再改为唯一现行入口。
-- 下一步：完成规格自检和提交，请用户最终复核；确认后先为“数据帧底座”单独编写实施计划，不启动
-  一次性全平台重构。
+- 用户以 `AAAA` 完成最终书面复核；总纲转为 Accepted，并成为唯一现行总体架构入口。
+- 下一步：先为“数据帧底座”单独编写实施计划，不启动一次性全平台重构。
