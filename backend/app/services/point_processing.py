@@ -48,6 +48,13 @@ class PointProcessingError(ValueError):
         self.code = code
 
 
+def _requires_neuron_scan(template: PointProcessingTemplate | None) -> bool:
+    return template is not None and any(
+        item.source_kind == "l0" and item.source_contract is not None
+        for item in template.inputs
+    )
+
+
 @dataclass(frozen=True)
 class PointProcessingSource:
     source_id: UUID
@@ -306,11 +313,7 @@ class PointProcessingService:
         node_source_key = self._catalog.node_source_key(command.node_id)
         template = self._catalog.get_template(command.template_revision_id)
         scan = None
-        requires_scan = template is not None and any(
-            item.source_kind == "l0" and item.source_contract is not None
-            for item in template.inputs
-        )
-        if requires_scan:
+        if _requires_neuron_scan(template):
             if self._point_scanner is None or node_source_key is None:
                 raise PointProcessingError(
                     "NEURON_POINT_CATALOG_UNAVAILABLE",
@@ -568,11 +571,7 @@ class PointProcessingService:
         plan = self.get_plan(command.plan_id)
         template = self._catalog.get_template(plan.template_revision_id)
         verified_digest = None
-        if (
-            template is not None
-            and template.asset_id == "pcs.en9"
-            and self._point_scanner is not None
-        ):
+        if _requires_neuron_scan(template) and self._point_scanner is not None:
             node_source_key = self._catalog.node_source_key(plan.node_id)
             if node_source_key is None:
                 raise PointProcessingError(

@@ -367,6 +367,7 @@ class PointProcessingTest(unittest.TestCase):
     def test_meter_source_contract_uses_the_same_neuron_scan(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
         from app.services.point_processing import (
+            ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
             PointProcessingService,
@@ -388,14 +389,16 @@ class PointProcessingTest(unittest.TestCase):
                     "address": "1!416409",
                 }]
 
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={
+                METER_REVISION_ID: _assets()["meter.modbus-active-power"],
+            },
+            node_source_keys={NODE_ID: "tk_db"},
+        )
         service = PointProcessingService(
-            InMemoryPointProcessingRepository(),
-            InMemoryPointProcessingCatalog(
-                templates={
-                    METER_REVISION_ID: _assets()["meter.modbus-active-power"],
-                },
-                node_source_keys={NODE_ID: "tk_db"},
-            ),
+            repository,
+            catalog,
             point_scanner=NeuronPointCatalog(MeterNeuron()),
         )
 
@@ -410,6 +413,13 @@ class PointProcessingTest(unittest.TestCase):
         l0 = next(item for item in plan.items if item["kind"] == "l0_point")
         self.assertEqual("1!416409", l0["after"]["source_address"])
         self.assertEqual("INT", l0["after"]["value_data_type"])
+        application = service.apply(ApplyPointProcessingPlan(
+            plan.id,
+            plan.digest,
+            "install-meter",
+            "user:engineer",
+        ))
+        self.assertEqual(METER_REVISION_ID, application.revision_id)
 
     def test_en9_apply_rejects_point_catalog_changed_after_preview(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
