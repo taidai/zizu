@@ -39,13 +39,8 @@ from app.services.parser import parse_neuron_json
 from app.services.data_trunk import DataTrunk, RawObservationAdapter, TagMetadata
 from app.services.data_trunk_contracts import (
     DataTrunkError,
-    RawObservation,
 )
 from app.services.data_trunk_postgres import build_postgres_data_trunk
-
-
-MAX_INGEST_ATTEMPTS = 5
-INGEST_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 class DataPipeline:
@@ -65,7 +60,6 @@ class DataPipeline:
         self._rules: dict[str, TagNormalizationRule] = {}  # {tag_name: rule}
         self._node_id_map: dict[str, UUID] = {}            # {node_name: node_id}
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
-        self._entity_alarm_adapter = None
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
         self._raw_neuron_tag_map: dict[tuple[str, str, str], TagMetadata] = {}
@@ -75,18 +69,9 @@ class DataPipeline:
         self.metrics = PipelineMetrics()
         self._started_at: datetime | None = None
 
-        # ---- 批量写入缓冲 ----
-        self._data_trunk = data_trunk or build_postgres_data_trunk()
+        # ---- 数据帧运行时 ----
+        self._data_trunk = data_trunk
         self._raw_observation_adapter = RawObservationAdapter()
-        self._buffer: list[RawObservation] = []
-        self._buffer_lock = asyncio.Lock()
-        self._flush_lock = asyncio.Lock()  # 串行化 flush，避免连接池耗尽
-        self._flush_event = asyncio.Event()  # 缓冲区满或停更时唤醒 flush
-        self._stop_event = asyncio.Event()
-        self._flush_task: asyncio.Task | None = None
-        self._retry_prefix_ids: tuple[UUID, ...] = ()
-        self._retry_attempts = 0
-        self._retry_error_code = "DATA_TRUNK_UNAVAILABLE"
 
         # ---- tag 规则动态重载 ----
         self._reload_task: asyncio.Task | None = None
@@ -109,6 +94,9 @@ class DataPipeline:
             max_conn=settings.db_pool_max,
         )
 
+        if self._data_trunk is None:
+            self._data_trunk = await asyncio.to_thread(build_postgres_data_trunk)
+
         # Step 2: 加载归一化规则和 ID 映射
         await self._load_tag_rules()
 
@@ -116,10 +104,7 @@ class DataPipeline:
         self._mqtt = MqttClient(on_message_callback=self.on_message)
         await self._mqtt.start()
 
-        # Step 4: 启动批量写入 flush 后台任务
-        self._flush_task = asyncio.create_task(self._flush_loop())
-
-        # Step 5: 启动 tag 规则动态重载任务
+        # Step 4: 启动 tag 规则动态重载任务
         self._reload_task = asyncio.create_task(self._periodic_reload_rules())
 
         self.metrics.status = PipelineStatus.RUNNING
@@ -149,22 +134,12 @@ class DataPipeline:
             except asyncio.CancelledError:
                 pass
 
-        # 停止 flush task
-        self._stop_event.set()
-        self._flush_event.set()
-        if self._flush_task and not self._flush_task.done():
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-
-        # 最后一次 flush
-        async with self._flush_lock:
-            await self._do_flush()
-
         # 断开 MQTT
         if self._mqtt:
             await self._mqtt.stop()
+
+        if self._data_trunk is not None:
+            await asyncio.to_thread(self._data_trunk.close)
 
         # 关闭连接池
         if close_database:
@@ -232,48 +207,13 @@ class DataPipeline:
         for point in normalized.points:
             point.node_name = parsed.node_name
 
-        # ── Hook 3: 持久化 (缓冲写入) (~30 行) ──
-        async with self._buffer_lock:
-            self._buffer.extend(raw_observations)
-            if len(self._buffer) >= settings.pipeline_batch_size:
-                self._flush_event.set()
-
-        # ══════════════════════════════════════
-        # CE 三条路径 (按需激活, F0 阶段全部透传)
-        # ══════════════════════════════════════
-
-        # ── CE Path A: SymPy 公式计算 (F1 核心) ──
-        # 当前: no-op（无公式注册）
-        # F1 激活后: dispatch_logical_triggers(normalized)
-        # await self._ce_path_a_formula(normalized)
-
-        # ── CE Path B: CAGG 窗口聚合 (TSDB 内置) ──
-        # 当前: 已在 SQL 层自动运行 (CREATE MATERIALIZED VIEW WITH continuous)
-        # 无需任何 Python 代码干预
-
-        # ── CE Path C: 跨节点 SQL 聚合 (F3 汇总) ──
-        # 当前: no-op（无节点树）
-        # F3 激活后: APScheduler Job 每 10s 执行 GROUP BY
-
-    # ══════════════════════════════
-    # CE 路径预留 (F1/F3 激活后实现)
-    # ══════════════════════════════
-
-    async def _ce_path_a_formula(self, normalized: NormalizedMessage) -> None:
-        """
-        CE Path A: SymPy 公式计算 (F1 VirtualPointEngine)。
-
-        触发条件: 变化的 tag 是某个 LogicalTag formula 的 source。
-        实现: 在 Phase 2 S6 中补全。
-        """
-        # TODO Phase 2 S6:
-        # from app.services.virtual_point_engine import VirtualPointEngine
-        # virtual_points = await VirtualPointEngine.instance().evaluate(normalized)
-        # if virtual_points:
-        #     records = self._to_records_from_virtual(virtual_points)
-        #     async with self._buffer_lock:
-        #         self._buffer.extend(records)
-        pass
+        # ── Hook 3: 只进入内存黑板；MQTT 热路径不访问数据库 ──
+        try:
+            receipt = self._data_trunk.accept(raw_observations)
+            self.metrics.points_written_db += receipt.accepted_count
+        except DataTrunkError as error:
+            self.metrics.db_write_errors += 1
+            logger.warning("[Pipeline] L0 observation rejected: {}", error.code)
 
     # ══════════════════════════════
     # 辅助方法
@@ -344,7 +284,8 @@ class DataPipeline:
                                    t.source_type,
                                    t.source_path,
                                    n.source_catalog_key,
-                                   t.timestamp_trusted
+                                   t.timestamp_trusted,
+                                   t.source_sequence_trusted
                             FROM t_tags t
                             JOIN t_nodes n ON t.node_id = n.id
                             WHERE t.enabled = true AND n.enabled = true;
@@ -364,7 +305,7 @@ class DataPipeline:
                 (tag_name, node_name, tag_id, node_id, data_type,
                  scale_factor, offset, unit_from, unit_to, range_min, range_max,
                  source_type, source_path, node_source_catalog_key,
-                 timestamp_trusted) = row
+                 timestamp_trusted, source_sequence_trusted) = row
 
                 rule = TagNormalizationRule(
                     tag_name=tag_name,
@@ -389,6 +330,7 @@ class DataPipeline:
                     data_type=str(getattr(data_type, "value", data_type)),
                     unit=unit_from or unit_to,
                     timestamp_trusted=bool(timestamp_trusted),
+                    source_sequence_trusted=bool(source_sequence_trusted),
                 )
                 new_raw_node_tag_map[(node_name, tag_name)] = raw_metadata
 
@@ -430,23 +372,6 @@ class DataPipeline:
         except Exception as e:
             logger.warning("[Pipeline] On-demand reload failed: {}", e)
 
-    async def flush_now(self) -> None:
-        """Flush buffered protocol observations through the production store.
-
-        Besides controlled shutdown, this is the public seam used by protocol
-        simulator acceptance tests: they publish a real Neuron MQTT-shaped
-        message through ``on_message`` and then wait for durable visibility.
-        """
-        async with self._flush_lock:
-            await self._do_flush()
-
-    def buffer_observation_ids(self) -> tuple[UUID, ...]:
-        """Return the immutable retry prefix identity for diagnostics/tests."""
-        return tuple(item.observation_id for item in self._buffer)
-
-    def buffer_sequences(self) -> tuple[int | None, ...]:
-        return tuple(item.source_sequence for item in self._buffer)
-
     async def _periodic_reload_rules(self) -> None:
         """定时重载 tag 规则，让新导入点位无需重启即可生效。"""
         while True:
@@ -456,136 +381,11 @@ class DataPipeline:
             except Exception as e:
                 logger.warning("[Pipeline] Periodic reload rules failed: {}", e)
 
-    async def _flush_loop(self) -> None:
-        """后台 flush 循环：缓冲区满或超时则写入 DB。"""
-        while not self._stop_event.is_set():
-            async with self._buffer_lock:
-                has_backlog = bool(self._buffer)
-                if not has_backlog:
-                    self._flush_event.clear()
-            if not has_backlog:
-                try:
-                    await asyncio.wait_for(
-                        self._flush_event.wait(),
-                        timeout=settings.pipeline_flush_interval_sec,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-            if self._buffer:
-                async with self._flush_lock:
-                    await self._do_flush()
-
-    async def _do_flush(self) -> None:
-        """Persist a stable prefix and remove it only after a commit receipt."""
-        async with self._buffer_lock:
-            batch = tuple(self._buffer[: settings.pipeline_batch_size])
-        if not batch:
-            return
-        prefix_ids = tuple(item.observation_id for item in batch)
-        if prefix_ids != self._retry_prefix_ids:
-            self._retry_prefix_ids = prefix_ids
-            self._retry_attempts = 0
-            self._retry_error_code = "DATA_TRUNK_UNAVAILABLE"
-        if self._retry_attempts >= MAX_INGEST_ATTEMPTS:
-            await self._record_terminal_failure(batch)
-            return
-        try:
-            receipt = await asyncio.to_thread(self._data_trunk.ingest, batch)
-        except DataTrunkError as e:
-            self.metrics.db_write_errors += 1
-            self._retry_attempts += 1
-            self._retry_error_code = e.code
-            logger.error(
-                "[Pipeline] Data trunk write error ({}/{}; {} observations): {}",
-                self._retry_attempts,
-                MAX_INGEST_ATTEMPTS,
-                len(batch),
-                e.code,
-            )
-            if self._retry_attempts >= MAX_INGEST_ATTEMPTS:
-                await self._record_terminal_failure(batch)
-            else:
-                await asyncio.sleep(INGEST_RETRY_DELAYS[self._retry_attempts - 1])
-            return
-
-        async with self._buffer_lock:
-            committed_ids = tuple(item.observation_id for item in batch)
-            current_ids = tuple(
-                item.observation_id for item in self._buffer[: len(batch)]
-            )
-            if current_ids != committed_ids:
-                raise RuntimeError("pipeline buffer prefix changed during ingest")
-            del self._buffer[: len(batch)]
-            accepted_ids = set(receipt.accepted_l0_observation_ids)
-            if not accepted_ids and receipt.accepted_l0_count == len(batch):
-                accepted_ids = set(committed_ids)
-        self._reset_retry_state()
-        self.metrics.points_written_db += receipt.accepted_l0_count
-
-        try:
-            if accepted_ids:
-                await asyncio.to_thread(self._submit_installed_entity_alarms, set())
-        except Exception as e:
-            logger.error("[Pipeline] Unified alarm processing failed: {}", e)
-
-    async def _record_terminal_failure(
-        self,
-        batch: tuple[RawObservation, ...],
-    ) -> None:
-        try:
-            failure_reference = await asyncio.to_thread(
-                self._data_trunk.record_failure,
-                batch,
-                attempts=self._retry_attempts,
-                error_code=self._retry_error_code,
-            )
-        except DataTrunkError as exc:
-            self.metrics.db_write_errors += 1
-            logger.error(
-                "[Pipeline] Failure reference unavailable for {} observations: {}",
-                len(batch),
-                exc.code,
-            )
-            await asyncio.sleep(INGEST_RETRY_DELAYS[-1])
-            return
-        async with self._buffer_lock:
-            committed_ids = tuple(item.observation_id for item in batch)
-            current_ids = tuple(
-                item.observation_id for item in self._buffer[: len(batch)]
-            )
-            if current_ids != committed_ids:
-                raise RuntimeError("pipeline buffer prefix changed during failure record")
-            del self._buffer[: len(batch)]
-        logger.error(
-            "[Pipeline] Terminal ingestion failure recorded: {}",
-            failure_reference,
-        )
-        self._reset_retry_state()
-
-    def _reset_retry_state(self) -> None:
-        self._retry_prefix_ids = ()
-        self._retry_attempts = 0
-        self._retry_error_code = "DATA_TRUNK_UNAVAILABLE"
-
-    def _submit_installed_entity_alarms(
-        self,
-        excluded_entity_instance_ids: set[UUID],
-    ) -> None:
-        """Keep entity freshness and quality for installed sources absent from this batch."""
-        if self._entity_alarm_adapter is None:
-            from app.services.entity_alarm_adapter import (
-                build_postgres_entity_alarm_adapter,
-            )
-
-            self._entity_alarm_adapter = build_postgres_entity_alarm_adapter()
-        outcomes = self._entity_alarm_adapter.submit_all(
-            exclude_entity_instance_ids=excluded_entity_instance_ids,
-        )
-        if outcomes:
-            logger.debug(
-                "[Pipeline] Installed entity observations submitted: {}",
-                len(outcomes),
-            )
+    @property
+    def data_trunk(self) -> DataTrunk:
+        if self._data_trunk is None:
+            raise RuntimeError("data-frame runtime has not started")
+        return self._data_trunk
 
     @property
     def uptime_seconds(self) -> float:

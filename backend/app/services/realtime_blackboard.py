@@ -227,6 +227,30 @@ class RealtimeBlackboard:
                 raise _error("DATA_FRAME_GENERATION_MISMATCH")
             self._frozen = None
 
+    def restore(
+        self,
+        observations: Sequence[FramedRawObservation],
+        *,
+        configuration_revision: int,
+    ) -> None:
+        """Restore order/value baselines without marking required inputs seen."""
+        with self._lock:
+            if self._cells or self._frozen is not None:
+                raise _error("DATA_FRAME_RECOVERY_ALREADY_APPLIED")
+            for framed in observations:
+                observation = framed.observation
+                expected = self._active_input_contracts.get(observation.tag_id)
+                if expected is None or observation.source_order is None:
+                    raise _error("DATA_FRAME_RECOVERY_EVIDENCE_INVALID")
+                if observation.source_order.mode is not expected:
+                    raise _error("DATA_FRAME_RECOVERY_EVIDENCE_INVALID")
+                self._cells[observation.tag_id] = _Cell(
+                    observation=observation,
+                    accepted_beat=framed.accepted_beat,
+                    effective_quality=framed.effective_quality,
+                )
+            self._configuration_revision = configuration_revision
+
     def reset_revision(
         self,
         revision: int,

@@ -83,6 +83,18 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("business_metric_projection", source)
         self.assertNotIn("metric_projection.advance", source)
 
+    def test_main_starts_only_frame_runtime_loops(self) -> None:
+        from app import main
+
+        source = inspect.getsource(main.lifespan)
+        self.assertIn("data_frame_capture", source)
+        self.assertIn("data_frame_processor", source)
+        self.assertNotIn("data_trunk_freshness", source)
+        self.assertNotIn("data_trunk_typed_formulas", source)
+        self.assertNotIn("run_formula_tick", source)
+        self.assertNotIn("run_rule_tick", source)
+        self.assertNotIn("run_aggregation_tick", source)
+
 
 if __name__ == "__main__":
     unittest.main()

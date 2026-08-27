@@ -1,5 +1,7 @@
 """Postgres 公开交付主缝使用的无 lifespan HTTP 应用。"""
 from dataclasses import dataclass
+from datetime import UTC, datetime
+import asyncio
 import json
 
 from fastapi import FastAPI
@@ -67,7 +69,14 @@ async def publish_neuron_observation(payload: dict) -> dict:
             payload=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
     )
-    await _protocol_pipeline.flush_now()
+    await asyncio.to_thread(
+        _protocol_pipeline.data_trunk.capture_tick,
+        datetime.now(UTC),
+    )
+    await asyncio.to_thread(
+        _protocol_pipeline.data_trunk.process_next,
+        datetime.now(UTC),
+    )
     await _protocol_outbox.run_once()
     return {
         "messages_received": (

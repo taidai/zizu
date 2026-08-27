@@ -169,6 +169,27 @@ class PostgresFrameRepository:
         self._state_heartbeat_seconds = state_heartbeat_seconds
         self._processing_owner = uuid4()
 
+    def current_configuration_revision(self) -> int:
+        try:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_revision FROM t_configuration_state "
+                    "WHERE singleton=TRUE"
+                )
+                row = cursor.fetchone()
+                connection.commit()
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_CONFIGURATION_UNAVAILABLE",
+                "DATA_FRAME_CONFIGURATION_UNAVAILABLE",
+            ) from exc
+        if row is None:
+            raise DataTrunkError(
+                "DATA_FRAME_CONFIGURATION_MISSING",
+                "DATA_FRAME_CONFIGURATION_MISSING",
+            )
+        return int(row[0])
+
     def acquire_writer(self) -> FrameWriterLease:
         manager = self._connection()
         connection = manager.__enter__()
@@ -3266,4 +3287,34 @@ PostgresDataTrunkRepository = PostgresFrameRepository
 
 
 def build_postgres_data_trunk() -> DataTrunk:
-    return DataTrunk(PostgresDataTrunkRepository())
+    from app.services.data_trunk_conversion import evaluate_processing
+    from app.services.frame_processor import FrameProcessor
+    from app.services.realtime_blackboard import RealtimeBlackboard
+
+    repository = PostgresFrameRepository()
+    writer_lease = repository.acquire_writer()
+    try:
+        recovery = repository.restore_blackboard()
+        blackboard = RealtimeBlackboard(
+            active_input_contracts=recovery.active_input_contracts,
+            required_tag_ids=recovery.required_tag_ids,
+            capture_beat=recovery.capture_beat,
+        )
+        blackboard.restore(
+            recovery.observations,
+            configuration_revision=recovery.configuration_revision,
+        )
+        processor = FrameProcessor(
+            repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        )
+        return DataTrunk(
+            repository,
+            blackboard=blackboard,
+            processor=processor,
+            writer_lease=writer_lease,
+        )
+    except Exception:
+        writer_lease.close()
+        raise

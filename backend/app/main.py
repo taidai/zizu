@@ -33,17 +33,8 @@ def get_pipeline():
     """Return the pipeline instance (or None if not started)."""
     return _pipeline
 
-# F1/F2/F3 调度任务列表
-_scheduler_tasks = []
 _data_trunk_tasks = []
 _data_trunk_stop = None
-_outbox_dispatcher = None
-# 聚合 tick 间隔 (秒)
-AGGREGATION_INTERVAL_SEC = 60
-# F1 公式 tick 间隔 (秒)，比聚合更频繁，保证虚拟点先产出
-FORMULA_INTERVAL_SEC = 30
-# F2 规则与固定 EMS 策略 tick 间隔 (秒)
-RULE_INTERVAL_SEC = 60
 
 
 def _load_version() -> str:
@@ -64,8 +55,8 @@ APP_VERSION = _load_version()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan — 启停 F0 数据管道 + F3 聚合调度器。"""
-    global _pipeline, _scheduler_tasks
-    global _data_trunk_tasks, _data_trunk_stop, _outbox_dispatcher
+    global _pipeline
+    global _data_trunk_tasks, _data_trunk_stop
     import asyncio
 
     # ---- Startup ----
@@ -169,149 +160,69 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error("[Main] Shutting down — no MQTT ingestion without pipeline")
         raise  # fail-fast: 管道是核心组件，死了就不该假装活着
 
-    # L2 freshness and committed outbox delivery share the production DB seam.
+    # One capture cadence and one ordered processor are the only data writers.
     _data_trunk_tasks = []
     _data_trunk_stop = asyncio.Event()
-    try:
-        from app.api.websocket import get_entity_observation_broadcaster
-        from app.services.data_trunk_outbox import (
-            OutboxDispatcher,
-            PostgresOutboxRepository,
-        )
-        from app.services.data_trunk_postgres import PostgresDataTrunkRepository
-        from app.services.data_trunk import DataTrunk
+    runtime = _pipeline.data_trunk
 
-        freshness_repository = PostgresDataTrunkRepository()
-        formula_trunk = DataTrunk(freshness_repository)
-        _outbox_dispatcher = OutboxDispatcher(
-            PostgresOutboxRepository(),
-            get_entity_observation_broadcaster(),
-        )
+    async def _wait_or_stop(seconds: float) -> None:
+        try:
+            await asyncio.wait_for(_data_trunk_stop.wait(), timeout=seconds)
+        except TimeoutError:
+            pass
 
-        async def _wait_or_stop(seconds: float) -> None:
+    async def _data_frame_capture_loop() -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time()
+        while not _data_trunk_stop.is_set():
             try:
-                await asyncio.wait_for(_data_trunk_stop.wait(), timeout=seconds)
-            except TimeoutError:
-                pass
+                await asyncio.to_thread(
+                    runtime.capture_tick,
+                    datetime.now(timezone.utc),
+                )
+            except Exception as error:
+                logger.warning("[DataFrame] capture tick failed: {}", error)
+            deadline += 1.0
+            await _wait_or_stop(max(0.0, deadline - loop.time()))
 
-        async def _freshness_loop() -> None:
-            while not _data_trunk_stop.is_set():
-                try:
-                    await asyncio.to_thread(
-                        formula_trunk.advance_freshness,
-                        datetime.now(timezone.utc),
-                    )
-                except Exception as error:
-                    logger.warning("[DataTrunk] freshness tick failed: {}", error)
-                await _wait_or_stop(5.0)
-
-        async def _outbox_loop() -> None:
-            while not _data_trunk_stop.is_set():
-                try:
-                    await _outbox_dispatcher.run_once()
-                except Exception as error:
-                    logger.warning("[DataTrunk] outbox tick failed: {}", error)
+    async def _data_frame_processor_loop() -> None:
+        while not _data_trunk_stop.is_set():
+            try:
+                terminal = await asyncio.to_thread(
+                    runtime.process_next,
+                    datetime.now(timezone.utc),
+                )
+            except Exception as error:
+                logger.warning("[DataFrame] processor tick failed: {}", error)
+                terminal = None
+            if terminal is None:
                 await _wait_or_stop(0.25)
 
-        async def _typed_formula_loop() -> None:
-            while not _data_trunk_stop.is_set():
-                try:
-                    await asyncio.to_thread(formula_trunk.evaluate_due_formulas)
-                except Exception as error:
-                    logger.warning(
-                        "[DataTrunk] typed formula tick failed: {}",
-                        error,
-                    )
-                await _wait_or_stop(1.0)
-
-        _data_trunk_tasks = [
-            asyncio.create_task(_freshness_loop(), name="data_trunk_freshness"),
-            asyncio.create_task(_outbox_loop(), name="data_trunk_outbox"),
-            asyncio.create_task(
-                _typed_formula_loop(),
-                name="data_trunk_typed_formulas",
-            ),
-        ]
-        logger.success(
-            "[Main] L2 freshness, typed formulas and outbox dispatch started ✅"
-        )
-    except Exception as error:
-        from app.core.config import settings
-
-        if settings.deployment_mode == "production":
-            raise RuntimeError("L2 runtime services failed to start") from error
-        logger.warning(
-            "[Main] L2 runtime services unavailable (development): {}",
-            error,
-        )
-
-    # Phase 2 S12/S6/S7: 启动 F1/F2/F3 调度器（原生 asyncio，不依赖 APScheduler）
-    # 非致命：调度器失败不影响 F0 采集主链路
-    _scheduler_tasks = []
-    try:
-        from app.services.aggregator import run_aggregation_tick
-        from app.services.formula_engine import run_formula_tick
-        from app.services.rule_engine import run_rule_tick
-
-        async def _periodic_task(name: str, interval: int, fn) -> None:
-            while True:
-                await asyncio.sleep(interval)
-                try:
-                    await asyncio.to_thread(fn)
-                except Exception as e:
-                    logger.warning("[Scheduler] {} tick failed: {}", name, e)
-
-        _scheduler_tasks.append(
-            asyncio.create_task(
-                _periodic_task("aggregation", AGGREGATION_INTERVAL_SEC, run_aggregation_tick),
-                name="f3_aggregation",
-            )
-        )
-        _scheduler_tasks.append(
-            asyncio.create_task(
-                _periodic_task("formula", FORMULA_INTERVAL_SEC, run_formula_tick),
-                name="f1_formula",
-            )
-        )
-        _scheduler_tasks.append(
-            asyncio.create_task(
-                _periodic_task("rules", RULE_INTERVAL_SEC, run_rule_tick),
-                name="f2_rules",
-            )
-        )
-        logger.success(
-            "[Main] F1/F2/F3 schedulers started (formula={}s, rules={}s, agg={}s) ✅",
-            FORMULA_INTERVAL_SEC, RULE_INTERVAL_SEC, AGGREGATION_INTERVAL_SEC,
-        )
-    except Exception as e:
-        logger.error("[Main] F1/F2/F3 scheduler start failed (non-fatal): {}", e)
+    _data_trunk_tasks = [
+        asyncio.create_task(
+            _data_frame_capture_loop(), name="data_frame_capture"
+        ),
+        asyncio.create_task(
+            _data_frame_processor_loop(), name="data_frame_processor"
+        ),
+    ]
+    logger.success("[Main] data-frame capture and processor started ✅")
 
     yield
 
     # ---- Shutdown ----
     logger.info("ZiZu IoT Platform shutting down...")
-    for _task in _scheduler_tasks:
-        if not _task.done():
-            _task.cancel()
-    if _scheduler_tasks:
-        await asyncio.gather(*_scheduler_tasks, return_exceptions=True)
-        logger.info("[Main] F1/F2/F3 schedulers stopped")
-    if _pipeline:
-        await _pipeline.stop(close_database=False)
-        logger.info("[Main] F0 data pipeline stopped")
     if _data_trunk_stop is not None:
         _data_trunk_stop.set()
     if _data_trunk_tasks:
         await asyncio.gather(*_data_trunk_tasks, return_exceptions=True)
-    if _outbox_dispatcher is not None:
-        try:
-            await _outbox_dispatcher.run_once()
-        except Exception as error:
-            logger.warning("[DataTrunk] final outbox dispatch failed: {}", error)
+    if _pipeline:
+        await _pipeline.stop(close_database=False)
+        logger.info("[Main] F0 data pipeline stopped")
     from app.services.telemetry_store import close_db_pool
 
     close_db_pool()
-    logger.info("[Main] L2 freshness and outbox dispatch stopped")
+    logger.info("[Main] data-frame runtime stopped")
 
 
 def create_app() -> FastAPI:

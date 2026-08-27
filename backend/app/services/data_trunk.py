@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from app.models.schemas import ParsedMessage
 from app.services.data_trunk_contracts import (
     BlackboardRecovery,
+    AcceptReceipt,
     CommitReceipt,
     DataTrunkError,
     FrozenFrameCandidate,
@@ -22,11 +23,13 @@ from app.services.data_trunk_contracts import (
     L2Observation,
     PendingFrame,
     RawObservation,
+    SourceOrder,
     TrunkQuality,
     TypedValue,
+    TerminalFrame,
     ValueKind,
 )
-from app.services.data_trunk_conversion import evaluate_processing
+from app.services.realtime_blackboard import RealtimeBlackboard
 
 
 class ConversionEvaluator(Protocol):
@@ -48,6 +51,8 @@ class DataTrunkRepository(Protocol):
     def restore_blackboard(self) -> BlackboardRecovery: ...
 
     def commit_pending(self, candidate: FrozenFrameCandidate) -> PendingFrame: ...
+
+    def current_configuration_revision(self) -> int: ...
 
     def transact(
         self,
@@ -71,74 +76,46 @@ class DataTrunkRepository(Protocol):
     def mark_expired_outputs_stale(self, now: datetime) -> tuple[UUID, ...]: ...
 
 
-class ProjectionObserver(Protocol):
-    def observe_committed(self, event_ids: tuple[UUID, ...]) -> object: ...
-
-
 class DataTrunk:
-    """隐藏转换查找、时序推进、来源图、outbox 与事务顺序。"""
+    """The only public runtime seam: accept, capture, then process."""
 
     def __init__(
         self,
         repository: DataTrunkRepository,
         *,
-        projection_observer: ProjectionObserver | None = None,
+        blackboard: RealtimeBlackboard,
+        processor: Any,
+        writer_lease: object | None = None,
     ) -> None:
         self._repository = repository
-        self._projection_observer = projection_observer
+        self._blackboard = blackboard
+        self._processor = processor
+        self._writer_lease = writer_lease
 
-    def ingest(self, raw_observations: Sequence[RawObservation]) -> CommitReceipt:
+    def accept(self, raw_observations: Sequence[RawObservation]) -> AcceptReceipt:
         batch = tuple(raw_observations)
-        if not batch:
-            raise DataTrunkError(
-                "DATA_TRUNK_BATCH_EMPTY",
-                "Raw observation batch is empty",
-            )
-        receipt = self._repository.transact(batch, evaluate_processing)
-        self._notify_projection(receipt.l2_event_ids)
-        return receipt
+        return self._blackboard.accept_many(batch)
 
-    def record_failure(
-        self,
-        raw_observations: Sequence[RawObservation],
-        *,
-        attempts: int,
-        error_code: str,
-    ) -> UUID:
-        """Persist a safe terminal retry reference; never stores raw values."""
-        batch = tuple(raw_observations)
-        if not batch or attempts < 1:
-            raise DataTrunkError(
-                "DATA_TRUNK_FAILURE_INVALID",
-                "Failure reference requires observations and attempts",
-            )
-        return self._repository.record_failure(
-            batch,
-            attempts=attempts,
-            error_code=error_code,
+    def capture_tick(self, now: datetime) -> PendingFrame | None:
+        candidate = self._blackboard.tick(
+            now,
+            configuration_revision=(
+                self._repository.current_configuration_revision()
+            ),
         )
+        if candidate is None:
+            return None
+        pending = self._repository.commit_pending(candidate)
+        self._blackboard.acknowledge(candidate.generation)
+        return pending
 
-    def evaluate_due_formulas(self) -> tuple[UUID, ...]:
-        """Evaluate installed typed formulas that reached their configured cadence."""
-        event_ids = self._repository.evaluate_due_formulas(evaluate_processing)
-        self._notify_projection(event_ids)
-        return event_ids
+    def process_next(self, now: datetime) -> TerminalFrame | None:
+        return self._processor.process_next(now)
 
-    def advance_freshness(self, now: datetime) -> tuple[UUID, ...]:
-        """Commit due STALE events, then route their IDs through one observer seam."""
-        event_ids = self._repository.mark_expired_outputs_stale(now)
-        self._notify_projection(event_ids)
-        return event_ids
-
-    def _notify_projection(self, event_ids: tuple[UUID, ...]) -> None:
-        if self._projection_observer is None or not event_ids:
-            return
-        try:
-            self._projection_observer.observe_committed(event_ids)
-        except Exception:
-            # The database transaction has already committed.  Projection is a
-            # recoverable wake-up path and its one-second scan will catch up.
-            return
+    def close(self) -> None:
+        if self._writer_lease is not None:
+            self._writer_lease.close()
+            self._writer_lease = None
 
 
 class InMemoryDataTrunkRepository:
@@ -260,10 +237,15 @@ class TagMetadata:
     data_type: str
     unit: str | None
     timestamp_trusted: bool
+    source_sequence_trusted: bool = False
 
 
 class RawObservationAdapter:
     """Translate parsed protocol values into deterministic canonical L0 facts."""
+
+    def __init__(self) -> None:
+        self._receive_ordinal = 0
+        self._ordinal_lock = RLock()
 
     def from_parsed(
         self,
@@ -288,6 +270,25 @@ class RawObservationAdapter:
                 source_sequence,
                 value,
             )
+            with self._ordinal_lock:
+                self._receive_ordinal += 1
+                receive_ordinal = self._receive_ordinal
+            if metadata.source_sequence_trusted:
+                if source_sequence is None:
+                    continue
+                source_order = SourceOrder.sequence(source_sequence)
+            elif metadata.timestamp_trusted:
+                source_order = SourceOrder.observed_at(
+                    parsed.timestamp,
+                    receive_ordinal,
+                    digest,
+                )
+            else:
+                source_order = SourceOrder.received_at(
+                    received_at,
+                    receive_ordinal,
+                    digest,
+                )
             observations.append(
                 RawObservation(
                     observation_id=uuid5(NAMESPACE_URL, f"zizu:l0:{digest}"),
@@ -308,6 +309,7 @@ class RawObservationAdapter:
                         or not metadata.timestamp_trusted
                         else "observed_at"
                     ),
+                    source_order=source_order,
                 )
             )
         return tuple(observations)
