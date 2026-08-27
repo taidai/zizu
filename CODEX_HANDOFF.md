@@ -1,5 +1,22 @@
 ---
 
+## Session 2026-08-27 — v0.4.85-rc.7 已部署并通过1号机验收
+
+- 现场发现 committed-frame 快照通过 `connection.set_session(readonly=True)` 污染共享 psycopg2
+  连接池；连续读取 5 个节点后，processor/outbox 的 `SELECT FOR UPDATE` 被 PostgreSQL 拒绝，登录返回
+  503。修复为单次 `REPEATABLE READ READ ONLY` 事务，成功提交、异常回滚，不改变池连接的后续可写性。
+- 新增回归测试并完成门禁：后端 277 项通过、114 skip；脚本 37 项、前端 11 项通过；TypeScript、
+  Vite build、13 项发布契约及真实 PostgreSQL 5 项均通过。提交 `8838372` 已推送。
+- GitHub Actions `33083624288` 成功；1号机固定 ARM64 镜像为
+  `ghcr.io/taidai/zizu@sha256:e7fd5f92a37a0ab2d44ff3e842816c8724affa2b327f74ff07ffd054741f4303`。
+- 1号机最终状态：`0.4.85-rc.7`、Schema 048、healthy、restart 0、host network、`/dev/mqueue`
+  tmpfs、unless-stopped。页面/健康/二次登录均 200；6 个节点连续快照后无只读/claim/outbox 错误；
+  储能电表显示 55 个 L0，变流器显示 42 个 L0 与 2 个 L2；WebSocket 完成认证和订阅。
+- 未启用 TLS/Caddy、未执行策略或设备写入、未删除业务历史。本轮仅重建 backend；部署临时脚本已从
+  1号机 `/tmp` 删除。完整记录见 `docs/deploy-1号机-v0.4.85-rc.7-http.md`。
+
+---
+
 ## Session 2026-08-27 — rc.5 现场类型契约问题与 rc.6 修复
 
 - rc.5 / Schema 048 已切到 1 号机且容器 healthy，但首个数据帧暴露真实兼容问题：配置为 INT 的
