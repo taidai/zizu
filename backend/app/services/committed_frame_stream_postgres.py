@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -20,6 +20,21 @@ from app.services.data_trunk_outbox import FrameOutboxEvent
 
 
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
+
+
+@contextmanager
+def _snapshot_cursor(connection):
+    """Keep repeatable-read/read-only settings inside one transaction only."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+            )
+            yield cursor
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 class PostgresCommittedFrameStreamRepository:
@@ -40,44 +55,38 @@ class PostgresCommittedFrameStreamRepository:
 
     def read_snapshot(self, scope: FrameScope) -> FrameSnapshot:
         try:
-            with self._connection() as connection:
-                connection.set_session(
-                    isolation_level="REPEATABLE READ",
-                    readonly=True,
+            with self._connection() as connection, _snapshot_cursor(connection) as cursor:
+                self._require_active_node(cursor, scope.node_id)
+                cursor.execute(
+                    """
+                    SELECT frame_sequence,COALESCE(finished_at,shot_at),
+                           configuration_revision
+                    FROM t_data_frames
+                    WHERE status IN ('COMPLETE','FAILED')
+                    ORDER BY frame_sequence DESC
+                    LIMIT 1
+                    """
                 )
-                with connection.cursor() as cursor:
-                    self._require_active_node(cursor, scope.node_id)
+                head = cursor.fetchone()
+                if head is None:
                     cursor.execute(
-                        """
-                        SELECT frame_sequence,COALESCE(finished_at,shot_at),
-                               configuration_revision
-                        FROM t_data_frames
-                        WHERE status IN ('COMPLETE','FAILED')
-                        ORDER BY frame_sequence DESC
-                        LIMIT 1
-                        """
+                        "SELECT current_revision FROM t_configuration_state "
+                        "WHERE singleton=TRUE"
                     )
-                    head = cursor.fetchone()
-                    if head is None:
-                        cursor.execute(
-                            "SELECT current_revision FROM t_configuration_state "
-                            "WHERE singleton=TRUE"
-                        )
-                        revision_row = cursor.fetchone()
-                        frame_sequence = 0
-                        frame_time = None
-                        configuration_revision = (
-                            0 if revision_row is None else int(revision_row[0])
-                        )
-                    else:
-                        frame_sequence = int(head[0])
-                        frame_time = _optional_iso(head[1])
-                        configuration_revision = int(head[2])
-                    if self._on_snapshot_head_read is not None:
-                        self._on_snapshot_head_read()
-                    l0 = self._read_l0(cursor, scope.node_id, frame_sequence)
-                    l2 = self._read_l2(cursor, scope.node_id, frame_sequence)
-                connection.commit()
+                    revision_row = cursor.fetchone()
+                    frame_sequence = 0
+                    frame_time = None
+                    configuration_revision = (
+                        0 if revision_row is None else int(revision_row[0])
+                    )
+                else:
+                    frame_sequence = int(head[0])
+                    frame_time = _optional_iso(head[1])
+                    configuration_revision = int(head[2])
+                if self._on_snapshot_head_read is not None:
+                    self._on_snapshot_head_read()
+                l0 = self._read_l0(cursor, scope.node_id, frame_sequence)
+                l2 = self._read_l2(cursor, scope.node_id, frame_sequence)
         except FrameStreamError:
             raise
         except Exception as exc:
@@ -121,27 +130,21 @@ class PostgresCommittedFrameStreamRepository:
         ):
             raise FrameStreamError("FRAME_CURSOR_TOO_OLD")
         try:
-            with self._connection() as connection:
-                connection.set_session(
-                    isolation_level="REPEATABLE READ",
-                    readonly=True,
+            with self._connection() as connection, _snapshot_cursor(connection) as cursor:
+                self._require_active_node(cursor, scope.node_id)
+                tag_ids, entity_ids = self._scope_ids(cursor, scope.node_id)
+                cursor.execute(
+                    """
+                    SELECT payload
+                    FROM t_data_frame_outbox
+                    WHERE published_at IS NOT NULL
+                      AND frame_sequence > %s
+                      AND frame_sequence <= %s
+                    ORDER BY frame_sequence
+                    """,
+                    (sequence, high_watermark),
                 )
-                with connection.cursor() as cursor:
-                    self._require_active_node(cursor, scope.node_id)
-                    tag_ids, entity_ids = self._scope_ids(cursor, scope.node_id)
-                    cursor.execute(
-                        """
-                        SELECT payload
-                        FROM t_data_frame_outbox
-                        WHERE published_at IS NOT NULL
-                          AND frame_sequence > %s
-                          AND frame_sequence <= %s
-                        ORDER BY frame_sequence
-                        """,
-                        (sequence, high_watermark),
-                    )
-                    payloads = tuple(row[0] for row in cursor.fetchall())
-                connection.commit()
+                payloads = tuple(row[0] for row in cursor.fetchall())
         except FrameStreamError:
             raise
         except Exception as exc:

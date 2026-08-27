@@ -30,6 +30,68 @@ from tests import test_committed_frame_payload_migration_postgres as payload_mig
 NOW = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
 
 
+class _SnapshotCursor:
+    def __init__(self) -> None:
+        self.sql = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def execute(self, sql, _parameters=None) -> None:
+        self.sql = " ".join(str(sql).split())
+
+    def fetchone(self):
+        if self.sql.startswith("SELECT 1 FROM t_nodes"):
+            return (1,)
+        if self.sql.startswith("SELECT current_revision"):
+            return (0,)
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _ReusableConnection:
+    def __init__(self) -> None:
+        self.readonly = False
+        self.commits = 0
+        self.rollbacks = 0
+
+    def set_session(self, *, isolation_level, readonly) -> None:
+        del isolation_level
+        self.readonly = readonly
+
+    def cursor(self):
+        return _SnapshotCursor()
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
+    def test_snapshot_does_not_return_a_read_only_connection_to_the_pool(self) -> None:
+        connection = _ReusableConnection()
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        repository = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        )
+
+        repository.read_snapshot(FrameScope.for_node(uuid4()))
+
+        self.assertFalse(connection.readonly)
+        self.assertEqual(1, connection.commits)
+
+
 @unittest.skipUnless(
     os.environ.get("ZIZU_POSTGRES_TEST") == "1",
     "set ZIZU_POSTGRES_TEST=1 to run committed-frame stream tests",
