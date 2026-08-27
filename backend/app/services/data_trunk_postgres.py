@@ -88,6 +88,7 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_point_processing_formula_runs') IS NULL
                      OR to_regclass('public.t_data_frames') IS NULL
                      OR to_regclass('public.t_data_frame_outbox') IS NULL
+                     OR to_regclass('public.t_committed_frame_consumers') IS NULL
                      OR to_regclass('public.l2_agg_1h') IS NULL
                      OR to_regclass('public.l2_agg_1d') IS NULL
                      OR to_regclass('zizu_internal.retention_guard') IS NULL
@@ -153,8 +154,12 @@ def verify_data_trunk_contract_gate(
                     SELECT 1 FROM pg_indexes
                     WHERE schemaname='public'
                       AND indexname='ix_telemetry_tag_frame_sequence'
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname='public'
+                      AND indexname='uq_committed_frame_consumer_sequence'
                   ) THEN
-                    RAISE EXCEPTION 'schema 046 frame indexes are incomplete'
+                    RAISE EXCEPTION 'schema 049 frame indexes are incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF to_regprocedure('public.guard_data_frame_transition()') IS NULL

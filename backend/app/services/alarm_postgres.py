@@ -272,6 +272,42 @@ class _PostgresAlarmTransaction:
                 (str(definition_id), str(entity_instance_id)),
             )
 
+    def begin_committed_frame(
+        self,
+        consumer_key: str,
+        frame_id: UUID,
+        frame_sequence: int,
+        configuration_revision: int,
+    ) -> bool:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                "SELECT current_revision FROM t_configuration_state "
+                "WHERE singleton=TRUE FOR SHARE"
+            )
+            row = cur.fetchone()
+            current_revision = None if row is None else int(row[0])
+            if current_revision != configuration_revision:
+                raise AlarmRuntimeError(
+                    "ALARM_FRAME_CONFIGURATION_MISMATCH",
+                    "Alarm frame does not belong to the active configuration",
+                )
+            cur.execute(
+                """
+                INSERT INTO t_committed_frame_consumers
+                  (consumer_key,frame_id,frame_sequence,configuration_revision)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (consumer_key,frame_id) DO NOTHING
+                RETURNING frame_id
+                """,
+                (
+                    consumer_key,
+                    frame_id,
+                    frame_sequence,
+                    configuration_revision,
+                ),
+            )
+            return cur.fetchone() is not None
+
     def find_open(self, definition_id: UUID, entity_instance_id: UUID) -> AlarmEvent | None:
         with self._connection.cursor() as cur:
             cur.execute(

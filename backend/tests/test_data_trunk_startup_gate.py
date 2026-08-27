@@ -61,6 +61,8 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("t_point_processing_formula_runs", calls[0])
         self.assertIn("t_data_frames", calls[0])
         self.assertIn("t_data_frame_outbox", calls[0])
+        self.assertIn("t_committed_frame_consumers", calls[0])
+        self.assertIn("uq_committed_frame_consumer_sequence", calls[0])
         self.assertIn("t_l2_stream_outbox", calls[0])
         self.assertIn("frame_sequence", calls[0])
         self.assertIn("processing_token", calls[0])
