@@ -1,5 +1,23 @@
 ---
 
+## Session 2026-08-28 — v0.4.85-rc.10 告警 committed L2 收口（待部署）
+
+- 阶段三“上层收口”第一切片已完成：一条有序 `CommittedFrameFanout` 先把终态帧交给
+  `CommittedL2AlarmConsumer`，告警只读取 `l2_changes`，整帧事件/转换/通知/消费收据在同一事务提交；
+  重放同一帧幂等，配置修订不一致、缺时间戳及坏定义均 fail closed。
+- 新增 Schema 049 `t_committed_frame_consumers`，主键防同帧重复，唯一索引防序号串帧，外键随保留期
+  帧级联清理；启动门禁逐项验证表、索引、主键、消费者类型、序号/修订检查和帧外键。
+- 告警配置 apply 已接入既有 `ConfigurationRuntimeGate`：发布前排空旧帧/outbox，失败取消，成功后重建
+  活动修订并进入 WARMING。生产启动已把告警消费者与 committed frame 实时流串到同一 outbox 头。
+- 已硬删除 `tag_mqtt_alarm_adapter.py`、`entity_alarm_adapter.py`、`alarm_processor.py`、
+  `tag_alarm_engine.py` 及旧实体告警契约测试；恢复依据为本分支提交历史。JDM 的暂存告警动作保留到下一
+  独立切片，不在本轮混改。
+- 新鲜验证：后端 discovery 288 项通过、116 项环境型 skip；隔离 Timescale/PostgreSQL 16 专项 3 项
+  通过且 0 skip；前端 `tsc -b && vite build` 成功（8184 modules）。尚未构建/推送最终 ARM64 镜像，
+  尚未连接或修改 1 号机；未执行自动策略、控制或设备写入。
+
+---
+
 ## Session 2026-08-27 — v0.4.85-rc.7 已部署并通过1号机验收
 
 - 现场发现 committed-frame 快照通过 `connection.set_session(readonly=True)` 污染共享 psycopg2

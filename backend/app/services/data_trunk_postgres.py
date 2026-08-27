@@ -177,8 +177,19 @@ def verify_data_trunk_contract_gate(
                      ) OR NOT EXISTS (
                        SELECT 1 FROM pg_constraint
                        WHERE conname='chk_data_frame_outbox_claim'
+                     ) OR (
+                       SELECT count(*) FROM pg_constraint
+                       WHERE conrelid='public.t_committed_frame_consumers'::regclass
+                         AND conname IN (
+                           't_committed_frame_consumers_pkey',
+                           'chk_committed_frame_consumer_key',
+                           'chk_committed_frame_consumer_sequence',
+                           'chk_committed_frame_consumer_revision',
+                           'fk_committed_frame_consumer_frame'
+                         )
+                     ) <> 5
                      ) THEN
-                    RAISE EXCEPTION 'schema 048 frame fencing is incomplete'
+                    RAISE EXCEPTION 'schema 049 frame fencing is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF (

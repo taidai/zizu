@@ -24,6 +24,8 @@ class CommittedFrameConsumersMigrationSourceTest(unittest.TestCase):
         self.assertIn("PRIMARY KEY (consumer_key,frame_id)", sql)
         self.assertIn("uq_committed_frame_consumer_sequence", sql)
         self.assertIn("REFERENCES public.t_data_frames(frame_id)", sql)
+        self.assertIn("chk_committed_frame_consumer_key", sql)
+        self.assertIn("fk_committed_frame_consumer_frame", sql)
         self.assertIn("SCHEMA_049_PARTIAL_STRUCTURE", sql)
 
 
@@ -44,6 +46,11 @@ class CommittedFrameConsumersMigrationPostgresTest(unittest.TestCase):
             "user": os.environ["DB_USER"],
             "password": os.environ["DB_PASSWORD"],
         }
+        with psycopg2.connect(**cls.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DROP TABLE IF EXISTS t_committed_frame_consumers CASCADE"
+                )
         retention_migration.FrameRetentionMigrationPostgresTest.connection_kwargs = (
             cls.connection_kwargs
         )
