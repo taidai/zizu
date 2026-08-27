@@ -163,6 +163,13 @@ class BlackboardState(str, Enum):
     READY = "READY"
 
 
+class FrameStatus(str, Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
 @dataclass(frozen=True)
 class FramedRawObservation:
     observation: RawObservation
@@ -180,6 +187,25 @@ class FrozenFrameCandidate:
     configuration_revision: int
     cells: Mapping[UUID, FramedRawObservation]
     changed_l0: tuple[FramedRawObservation, ...]
+
+
+@dataclass(frozen=True)
+class PendingFrame:
+    frame_id: UUID
+    frame_sequence: int
+    capture_beat: int
+    shot_at: datetime
+    configuration_revision: int
+    status: FrameStatus
+
+
+@dataclass(frozen=True)
+class BlackboardRecovery:
+    capture_beat: int
+    configuration_revision: int
+    active_input_contracts: Mapping[UUID, SourceOrderMode]
+    required_tag_ids: frozenset[UUID]
+    observations: tuple[FramedRawObservation, ...]
 
 
 @dataclass(frozen=True)

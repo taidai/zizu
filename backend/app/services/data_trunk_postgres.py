@@ -7,6 +7,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -14,19 +15,26 @@ from psycopg2.extras import Json, execute_values
 
 from app.services.data_trunk import ConversionEvaluator, DataTrunk
 from app.services.data_trunk_contracts import (
+    BlackboardRecovery,
     BooleanCodeInput,
     BooleanSetTransform,
     CommitReceipt,
     DataTrunkError,
     EnumTransform,
     FaultCodeTransform,
+    FrameStatus,
+    FramedRawObservation,
+    FrozenFrameCandidate,
     FormulaSource,
     FormulaTransform,
     CompiledFormula,
     InputReference,
     InstalledPointProcessing,
     L2Observation,
+    PendingFrame,
     RawObservation,
+    SourceOrder,
+    SourceOrderMode,
     TrunkQuality,
     TypedValue,
     ValueKind,
@@ -109,7 +117,33 @@ class _FreshnessCandidate:
     source_digest: str
 
 
-class PostgresDataTrunkRepository:
+class FrameWriterLease:
+    """A process-lifetime PostgreSQL advisory lock on its dedicated session."""
+
+    def __init__(
+        self,
+        connection,
+        release_connection: Callable[[Any], None],
+    ) -> None:
+        self._connection = connection
+        self._release_connection = release_connection
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_unlock("
+                    "hashtextextended('zizu:data-frame-writer', 0))"
+                )
+        finally:
+            self._closed = True
+            self._release_connection(self._connection)
+
+
+class PostgresFrameRepository:
     def __init__(
         self,
         *,
@@ -128,6 +162,381 @@ class PostgresDataTrunkRepository:
         if state_heartbeat_seconds <= 0:
             raise ValueError("state heartbeat must be positive")
         self._state_heartbeat_seconds = state_heartbeat_seconds
+
+    def acquire_writer(self) -> FrameWriterLease:
+        manager = self._connection()
+        connection = manager.__enter__()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_try_advisory_lock("
+                    "hashtextextended('zizu:data-frame-writer', 0))"
+                )
+                acquired = bool(cursor.fetchone()[0])
+            if not acquired:
+                raise DataTrunkError(
+                    "DATA_FRAME_WRITER_ALREADY_ACTIVE",
+                    "DATA_FRAME_WRITER_ALREADY_ACTIVE",
+                )
+        except Exception:
+            manager.__exit__(None, None, None)
+            raise
+
+        def release(_connection) -> None:
+            manager.__exit__(None, None, None)
+
+        return FrameWriterLease(connection, release)
+
+    def restore_blackboard(self) -> BlackboardRecovery:
+        try:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_revision FROM t_configuration_state "
+                    "WHERE singleton=TRUE"
+                )
+                revision_row = cursor.fetchone()
+                if revision_row is None:
+                    raise DataTrunkError(
+                        "DATA_FRAME_CONFIGURATION_MISSING",
+                        "DATA_FRAME_CONFIGURATION_MISSING",
+                    )
+                cursor.execute(
+                    "SELECT COALESCE(max(capture_beat),0) FROM t_data_frames"
+                )
+                capture_beat = int(cursor.fetchone()[0])
+                cursor.execute(
+                    """
+                    SELECT DISTINCT binding.l0_tag_id, input.required,
+                           input.stable_source_key,
+                           COALESCE(tag.value_data_type, tag.data_type),
+                           tag.unit,
+                           CASE
+                             WHEN tag.source_sequence_trusted THEN 'sequence'
+                             WHEN tag.timestamp_trusted THEN 'observed_at'
+                             ELSE 'received_at'
+                           END AS source_order_mode
+                    FROM t_point_processing_input_bindings AS binding
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id = binding.installed_processing_id
+                     AND installed.current = TRUE
+                    JOIN t_point_processing_inputs AS input
+                      ON input.id = binding.input_id
+                    JOIN t_tags AS tag ON tag.id = binding.l0_tag_id
+                    WHERE binding.source_kind = 'l0' AND tag.enabled = TRUE
+                    ORDER BY binding.l0_tag_id
+                    """
+                )
+                contracts = cursor.fetchall()
+                contract_by_tag = {
+                    UUID(str(row[0])): row for row in contracts
+                }
+                observations: list[FramedRawObservation] = []
+                if contract_by_tag:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT ON (telemetry.tag_id)
+                          telemetry.observation_id, telemetry.node_id,
+                          telemetry.tag_id, telemetry.ts,
+                          telemetry.source_digest,
+                          telemetry.source_message_id,
+                          telemetry.source_sequence,
+                          telemetry.raw_unit, telemetry.raw_value_float,
+                          telemetry.raw_value_int, telemetry.raw_value_bool,
+                          telemetry.raw_value_text, telemetry.quality,
+                          telemetry.event_time_basis,
+                          telemetry.event_received_at,
+                          telemetry.accepted_beat,
+                          telemetry.source_order_mode,
+                          telemetry.source_receive_ordinal
+                        FROM t_telemetry AS telemetry
+                        WHERE telemetry.tag_id = ANY(%s::uuid[])
+                          AND telemetry.frame_sequence IS NOT NULL
+                        ORDER BY telemetry.tag_id,
+                                 telemetry.frame_sequence DESC, telemetry.ts DESC
+                        """,
+                        ([str(tag_id) for tag_id in contract_by_tag],),
+                    )
+                    for row in cursor.fetchall():
+                        tag_id = UUID(str(row[2]))
+                        contract = contract_by_tag[tag_id]
+                        mode = SourceOrderMode(str(row[16]))
+                        ordinal = int(row[17] or 0)
+                        if mode is SourceOrderMode.SEQUENCE:
+                            if row[6] is None:
+                                raise DataTrunkError(
+                                    "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+                                    "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+                                )
+                            order = SourceOrder.sequence(int(row[6]))
+                        elif mode is SourceOrderMode.OBSERVED_AT:
+                            order = SourceOrder.observed_at(
+                                row[3], ordinal, str(row[4]).strip()
+                            )
+                        else:
+                            order = SourceOrder.received_at(
+                                row[14], ordinal, str(row[4]).strip()
+                            )
+                        value = _raw_value_from_columns(
+                            str(contract[3]), row[8], row[9], row[10], row[11]
+                        )
+                        raw = RawObservation(
+                            observation_id=UUID(str(row[0])),
+                            node_id=UUID(str(row[1])),
+                            tag_id=tag_id,
+                            source_key=str(contract[2]),
+                            value=value,
+                            raw_unit=row[7],
+                            quality=TrunkQuality(int(row[12])),
+                            source_timestamp=row[3],
+                            received_at=row[14],
+                            source_message_id=row[5],
+                            source_sequence=row[6],
+                            source_digest=str(row[4]).strip(),
+                            event_time_basis=str(row[13]),
+                            source_order=order,
+                        )
+                        observations.append(
+                            FramedRawObservation(
+                                observation=raw,
+                                accepted_beat=int(row[15]),
+                                effective_quality=TrunkQuality(int(row[12])),
+                            )
+                        )
+                connection.commit()
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_RECOVERY_FAILED",
+                "DATA_FRAME_RECOVERY_FAILED",
+            ) from exc
+        return BlackboardRecovery(
+            capture_beat=capture_beat,
+            configuration_revision=int(revision_row[0]),
+            active_input_contracts=MappingProxyType(
+                {
+                    tag_id: SourceOrderMode(str(row[5]))
+                    for tag_id, row in contract_by_tag.items()
+                }
+            ),
+            required_tag_ids=frozenset(
+                tag_id for tag_id, row in contract_by_tag.items() if bool(row[1])
+            ),
+            observations=tuple(
+                sorted(observations, key=lambda item: str(item.observation.tag_id))
+            ),
+        )
+
+    def commit_pending(self, candidate: FrozenFrameCandidate) -> PendingFrame:
+        pending: PendingFrame | None = None
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock("
+                            "hashtextextended('zizu:data-frame-capture', 0))"
+                        )
+                        cursor.execute(
+                            "SELECT current_revision FROM t_configuration_state "
+                            "WHERE singleton=TRUE FOR SHARE"
+                        )
+                        row = cursor.fetchone()
+                        current_revision = None if row is None else int(row[0])
+                        if current_revision != candidate.configuration_revision:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CONFIGURATION_STALE",
+                                "DATA_FRAME_CONFIGURATION_STALE",
+                            )
+                        cursor.execute(
+                            """
+                            SELECT frame_id, frame_sequence, candidate_digest,
+                                   capture_beat, shot_at,
+                                   configuration_revision, status
+                            FROM t_data_frames
+                            WHERE frame_id=%s OR capture_beat=%s
+                            ORDER BY frame_sequence
+                            FOR UPDATE
+                            """,
+                            (str(candidate.frame_id), candidate.capture_beat),
+                        )
+                        existing = cursor.fetchall()
+                        if existing:
+                            if len(existing) != 1 or not self._same_candidate(
+                                existing[0], candidate
+                            ):
+                                raise DataTrunkError(
+                                    "DATA_FRAME_CANDIDATE_CONFLICT",
+                                    "DATA_FRAME_CANDIDATE_CONFLICT",
+                                )
+                            pending = self._pending_from_row(existing[0])
+                        else:
+                            cursor.execute(
+                                """
+                                INSERT INTO t_data_frames
+                                  (frame_id, candidate_digest, capture_beat,
+                                   shot_at, configuration_revision, status)
+                                VALUES (%s,%s,%s,%s,%s,'PENDING')
+                                RETURNING frame_id, frame_sequence,
+                                          candidate_digest, capture_beat,
+                                          shot_at, configuration_revision, status
+                                """,
+                                (
+                                    str(candidate.frame_id),
+                                    candidate.candidate_digest,
+                                    candidate.capture_beat,
+                                    candidate.shot_at,
+                                    candidate.configuration_revision,
+                                ),
+                            )
+                            inserted = cursor.fetchone()
+                            pending = self._pending_from_row(inserted)
+                            self._insert_frame_l0(
+                                cursor,
+                                pending=pending,
+                                observations=candidate.changed_l0,
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_COMMIT_FAILED",
+                "DATA_FRAME_COMMIT_FAILED",
+            ) from exc
+
+        try:
+            self._fault_hook("frame_commit")
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_COMMIT_RESULT_UNKNOWN",
+                "DATA_FRAME_COMMIT_RESULT_UNKNOWN",
+            ) from exc
+        if pending is None:  # pragma: no cover - database contract guard
+            raise DataTrunkError(
+                "DATA_FRAME_COMMIT_FAILED",
+                "DATA_FRAME_COMMIT_FAILED",
+            )
+        return pending
+
+    @staticmethod
+    def _same_candidate(row, candidate: FrozenFrameCandidate) -> bool:
+        return (
+            UUID(str(row[0])) == candidate.frame_id
+            and str(row[2]).strip() == candidate.candidate_digest
+            and int(row[3]) == candidate.capture_beat
+            and int(row[5]) == candidate.configuration_revision
+        )
+
+    @staticmethod
+    def _pending_from_row(row) -> PendingFrame:
+        status = FrameStatus(str(row[6]))
+        if status is not FrameStatus.PENDING:
+            raise DataTrunkError(
+                "DATA_FRAME_CANDIDATE_CONFLICT",
+                "DATA_FRAME_CANDIDATE_CONFLICT",
+            )
+        return PendingFrame(
+            frame_id=UUID(str(row[0])),
+            frame_sequence=int(row[1]),
+            capture_beat=int(row[3]),
+            shot_at=row[4],
+            configuration_revision=int(row[5]),
+            status=status,
+        )
+
+    @staticmethod
+    def _insert_frame_l0(
+        cursor,
+        *,
+        pending: PendingFrame,
+        observations: tuple[FramedRawObservation, ...],
+    ) -> None:
+        if not observations:
+            return
+        rows = []
+        for framed in observations:
+            observation = framed.observation
+            order = observation.source_order
+            if order is None:
+                raise DataTrunkError(
+                    "DATA_FRAME_SOURCE_ORDER_REQUIRED",
+                    "DATA_FRAME_SOURCE_ORDER_REQUIRED",
+                )
+            compatibility, raw = _raw_columns(observation.value)
+            receive_ordinal = (
+                None if order.mode is SourceOrderMode.SEQUENCE else order.secondary
+            )
+            rows.append(
+                (
+                    str(observation.observation_id),
+                    str(observation.node_id),
+                    str(observation.tag_id),
+                    observation.source_timestamp,
+                    observation.source_digest,
+                    observation.source_message_id,
+                    observation.source_sequence,
+                    *compatibility,
+                    int(framed.effective_quality),
+                    observation.raw_unit,
+                    *raw,
+                    observation.event_time_basis,
+                    observation.received_at,
+                    str(pending.frame_id),
+                    pending.frame_sequence,
+                    framed.accepted_beat,
+                    order.mode.value,
+                    receive_ordinal,
+                )
+            )
+        execute_values(
+            cursor,
+            """
+            WITH input (
+              observation_id,node_id,tag_id,observed_at,source_digest,
+              source_message_id,source_sequence,value_float,value_int,
+              value_bool,value_str,quality,raw_unit,raw_value_float,
+              raw_value_int,raw_value_bool,raw_value_text,event_time_basis,
+              event_received_at,frame_id,frame_sequence,accepted_beat,
+              source_order_mode,source_receive_ordinal
+            ) AS (VALUES %s), accepted AS (
+              INSERT INTO t_l0_observation_dedup
+                (observation_id,tag_id,observed_at,source_digest,
+                 source_message_id,source_sequence)
+              SELECT observation_id,tag_id,observed_at,source_digest,
+                     source_message_id,source_sequence FROM input
+              ON CONFLICT (source_digest) DO NOTHING
+              RETURNING observation_id
+            )
+            INSERT INTO t_telemetry
+              (ts,node_id,tag_id,value_float,value_int,value_bool,value_str,
+               is_virtual,quality,observation_id,source_message_id,
+               source_sequence,source_digest,raw_unit,raw_value_float,
+               raw_value_int,raw_value_bool,raw_value_text,event_time_basis,
+               event_received_at,frame_id,frame_sequence,accepted_beat,
+               source_order_mode,source_receive_ordinal)
+            SELECT observed_at,node_id,tag_id,value_float,value_int,value_bool,
+                   value_str,FALSE,quality,input.observation_id,
+                   source_message_id,source_sequence,source_digest,raw_unit,
+                   raw_value_float,raw_value_int,raw_value_bool,raw_value_text,
+                   event_time_basis,event_received_at,frame_id,frame_sequence,
+                   accepted_beat,source_order_mode,source_receive_ordinal
+            FROM input JOIN accepted USING(observation_id)
+            """,
+            rows,
+            template=(
+                "(%s::uuid,%s::uuid,%s::uuid,%s::timestamptz,%s::char(64),"
+                "%s::text,%s::bigint,%s::double precision,%s::bigint,"
+                "%s::boolean,%s::text,%s::smallint,%s::text,"
+                "%s::double precision,%s::bigint,%s::boolean,%s::text,"
+                "%s::text,%s::timestamptz,%s::uuid,%s::bigint,%s::bigint,"
+                "%s::text,%s::bigint)"
+            ),
+            page_size=len(rows),
+        )
 
     def transact(
         self,
@@ -1813,6 +2222,35 @@ def _raw_columns(
     return columns, columns
 
 
+def _raw_value_from_columns(
+    data_type: str,
+    raw_float: float | None,
+    raw_int: int | None,
+    raw_bool: bool | None,
+    raw_text: str | None,
+) -> TypedValue:
+    kind = ValueKind(data_type.upper())
+    if kind is ValueKind.FLOAT:
+        value = raw_float
+    elif kind is ValueKind.INT:
+        value = raw_int
+    elif kind is ValueKind.BOOL:
+        value = raw_bool
+    elif kind in {ValueKind.STRING, ValueKind.ENUM}:
+        value = raw_text
+    else:
+        raise DataTrunkError(
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+        )
+    if value is None:
+        raise DataTrunkError(
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+        )
+    return TypedValue(kind, value)
+
+
 def _l2_columns(
     value: TypedValue,
 ) -> tuple[
@@ -1854,6 +2292,10 @@ def _decimal_text(value: Decimal) -> str:
     if value.is_zero():
         return "0"
     return format(value.normalize(), "f")
+
+
+# Transitional import name for callers removed by the final hard-cut task.
+PostgresDataTrunkRepository = PostgresFrameRepository
 
 
 def build_postgres_data_trunk() -> DataTrunk:

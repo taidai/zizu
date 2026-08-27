@@ -13,11 +13,14 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from app.models.schemas import ParsedMessage
 from app.services.data_trunk_contracts import (
+    BlackboardRecovery,
     CommitReceipt,
     DataTrunkError,
+    FrozenFrameCandidate,
     InputReference,
     InstalledPointProcessing,
     L2Observation,
+    PendingFrame,
     RawObservation,
     TrunkQuality,
     TypedValue,
@@ -38,6 +41,12 @@ class ConversionEvaluator(Protocol):
 
 
 class DataTrunkRepository(Protocol):
+    def acquire_writer(self) -> object: ...
+
+    def restore_blackboard(self) -> BlackboardRecovery: ...
+
+    def commit_pending(self, candidate: FrozenFrameCandidate) -> PendingFrame: ...
+
     def transact(
         self,
         raw_observations: tuple[RawObservation, ...],
