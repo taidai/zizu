@@ -29,7 +29,7 @@ const ENTITY_OBSERVATION_WS_URL = `${window.location.protocol === 'https:' ? 'ws
  * Single HTTP seam for the frontend. Authentication is resolved at request
  * time so a restored or replaced session is used without rebuilding clients.
  */
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const session = getAuthSession()
   const requestToken = session?.accessToken
   const headers = new Headers(init.headers)
