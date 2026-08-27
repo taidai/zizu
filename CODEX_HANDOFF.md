@@ -1,5 +1,22 @@
 ---
 
+## Session 2026-08-27 — 提交后数据帧实时流设计（待书面复核）
+
+- 用户确认实时界面采用一个统一 committed frame 通道：节点首次打开以 REST 取得当前节点完整 L0/L2
+  终态快照和游标，随后 WebSocket 只接收该游标后的原子帧增量；断线在一小时/5000 帧内补发，过旧
+  自动重读快照。
+- 后端收口为 `CommittedFrameStream` 深模块，只暴露 `read_snapshot(scope)` 与
+  `subscribe_after(scope,cursor)`；快照、durable replay、live buffer、scope 过滤、排序、去重和过期判断
+  均在模块内部完成。送达语义为 ordered at-least-once，不增加客户端逐帧 ACK。
+- 每帧 outbox 增加不可变、版本化的 delta payload，只保存本帧变化而非全站快照，避免重连时逐帧回扫
+  L0/L2 历史。旧 L0 1.5 秒轮询与旧 L2 独立 WebSocket 将在新链路验收后硬删除。
+- 固定 L0/L2 秒级明细 7 天、无长期证据引用的帧 7 天、已发布 outbox 一小时或 5000 帧；普通会话的
+  append-only/终态不可删门禁继续生效，仅受控维护路径可按引用顺序清理。
+- 正式规格：`docs/superpowers/specs/2026-08-27-committed-frame-realtime-stream-design.md`。当前仅写规格，
+  尚未写实施计划、改生产代码、构建镜像或连接 1 号机；下一步先由用户复核书面规格。
+
+---
+
 ## Session 2026-08-27 — 数据帧底座第一阶段完成（未发布、未部署）
 
 - 已按最新总纲完成唯一运行主线：MQTT 只写内存黑板，统一 1 秒节拍冻结帧；事务 A 持久化 PENDING
