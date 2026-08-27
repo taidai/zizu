@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "zizu.point-processing/v1alpha1",
+  "id": "meter.modbus-active-power",
+  "kind": "point_processing_template",
+  "displayName": "Modbus 电表总有功功率",
+  "deviceCategory": "METER",
+  "brand": "GENERIC",
+  "model": "METER-416409",
+  "revision": 1,
+  "status": "active",
+  "inputs": [
+    {
+      "id": "active_power_raw",
+      "sourceKind": "l0",
+      "sourceKey": "总有功功率",
+      "aliases": [
+        "1!416409"
+      ],
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "required": true,
+      "sourceContract": {
+        "group": "data",
+        "address": "1!416409",
+        "wireDataType": "INT16",
+        "decimal": 0.0,
+        "readOnly": true
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "id": "active_power",
+      "entityDefinition": "grid.activePower",
+      "dataType": "FLOAT",
+      "unit": "kW",
+      "freshness": "10s",
+      "transform": {
+        "kind": "numeric",
+        "input": "active_power_raw",
+        "scale": 1.0,
+        "offset": 0,
+        "minimum": -100000.0,
+        "maximum": 100000.0
+      }
+    }
+  ]
+}

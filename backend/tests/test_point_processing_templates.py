@@ -57,6 +57,14 @@ def template_json() -> dict:
 
 
 class PointProcessingTemplateTest(unittest.TestCase):
+    def test_meter_template_is_a_supported_device_category(self) -> None:
+        raw = template_json()
+        raw["deviceCategory"] = "METER"
+
+        parsed = parse_point_processing_template(raw)
+
+        self.assertEqual("METER", parsed.device_category)
+
     def test_canonical_content_round_trips(self) -> None:
         raw = template_json()
         parsed = parse_point_processing_template(raw)
@@ -80,11 +88,27 @@ class PointProcessingTemplateTest(unittest.TestCase):
             registry.export_template(first.revision_id),
         )
 
+    def test_reference_meter_template_maps_total_power_to_grid_entity(self) -> None:
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "reference-point-processings"
+            / "meter-modbus-active-power.zizu-point-processing.json"
+        )
+
+        parsed = parse_point_processing_template(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+
+        self.assertEqual("METER", parsed.device_category)
+        self.assertEqual("1!416409", parsed.inputs[0].source_contract["address"])
+        self.assertEqual("grid.activePower", parsed.outputs[0].entity_definition_id)
+        self.assertEqual("kW", parsed.outputs[0].unit)
+
     def test_reference_templates_are_canonical_single_json_files(self) -> None:
         directory = Path(__file__).resolve().parents[2] / "reference-point-processings"
         paths = sorted(directory.glob("*.zizu-point-processing.json"))
 
-        self.assertEqual(4, len(paths))
+        self.assertEqual(5, len(paths))
         for path in paths:
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(

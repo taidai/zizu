@@ -15,7 +15,7 @@ from app.services.data_trunk_contracts import FormulaSource, ValueKind
 from app.services.point_processing_formula import FormulaCompileError, compile_formula
 _SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
-_DEVICE_CATEGORIES = {"SITE", "ENERGY", "ESS", "PV", "GRID", "EVSE", "PCS"}
+_DEVICE_CATEGORIES = {"SITE", "ENERGY", "ESS", "PV", "GRID", "METER", "EVSE", "PCS"}
 _OUTPUT_TYPES = {
     "numeric": "FLOAT",
     "enum": "ENUM",
