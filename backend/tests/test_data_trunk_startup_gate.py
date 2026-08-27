@@ -97,6 +97,8 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         source = inspect.getsource(main.lifespan)
         self.assertIn("data_frame_capture", source)
         self.assertIn("data_frame_processor", source)
+        self.assertIn("data_frame_outbox", source)
+        self.assertIn("register_committed_frame_consumer", source)
         self.assertNotIn("data_trunk_freshness", source)
         self.assertNotIn("data_trunk_typed_formulas", source)
         self.assertNotIn("run_formula_tick", source)

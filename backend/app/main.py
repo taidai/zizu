@@ -164,6 +164,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _data_trunk_tasks = []
     _data_trunk_stop = asyncio.Event()
     runtime = _pipeline.data_trunk
+    from app.api.committed_frames import get_committed_frame_stream
+    from app.services.data_trunk_outbox import (
+        FrameOutboxDispatcher,
+        PostgresFrameOutboxRepository,
+    )
+
+    committed_frame_stream = get_committed_frame_stream()
+    frame_outbox_dispatcher = FrameOutboxDispatcher(
+        PostgresFrameOutboxRepository(),
+        committed_frame_stream,
+    )
+    runtime.configuration_gate.register_committed_frame_consumer()
 
     async def _wait_or_stop(seconds: float) -> None:
         try:
@@ -198,6 +210,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if terminal is None:
                 await _wait_or_stop(0.25)
 
+    async def _data_frame_outbox_loop() -> None:
+        while not _data_trunk_stop.is_set():
+            try:
+                published = await frame_outbox_dispatcher.run_once()
+            except Exception as error:
+                logger.warning("[DataFrame] outbox tick failed: {}", error)
+                published = 0
+            if published == 0:
+                await _wait_or_stop(0.25)
+
     _data_trunk_tasks = [
         asyncio.create_task(
             _data_frame_capture_loop(), name="data_frame_capture"
@@ -205,8 +227,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(
             _data_frame_processor_loop(), name="data_frame_processor"
         ),
+        asyncio.create_task(
+            _data_frame_outbox_loop(), name="data_frame_outbox"
+        ),
     ]
-    logger.success("[Main] data-frame capture and processor started ✅")
+    logger.success("[Main] data-frame capture, processor and outbox started ✅")
 
     yield
 
@@ -266,6 +291,13 @@ def create_app() -> FastAPI:
 
     from app.api.websocket import router as ws_router
     app.include_router(ws_router, prefix="/api/v1", tags=["Telemetry WS"])
+
+    from app.api.committed_frames import router as committed_frames_router
+    app.include_router(
+        committed_frames_router,
+        prefix="/api/v1",
+        tags=["Committed Data Frames"],
+    )
 
     from app.api.telemetry import router as telemetry_router
     app.include_router(telemetry_router, prefix="/api/v1", tags=["Telemetry"])
