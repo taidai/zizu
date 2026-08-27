@@ -101,6 +101,8 @@ class PointProcessingTemplateTest(unittest.TestCase):
 
         self.assertEqual("METER", parsed.device_category)
         self.assertEqual("1!416409", parsed.inputs[0].source_contract["address"])
+        self.assertEqual("INT", parsed.inputs[0].data_type)
+        self.assertEqual("kW", parsed.inputs[0].unit)
         self.assertEqual("grid.activePower", parsed.outputs[0].entity_definition_id)
         self.assertEqual("kW", parsed.outputs[0].unit)
 

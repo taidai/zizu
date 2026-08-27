@@ -16,7 +16,7 @@
       "aliases": [
         "1!416409"
       ],
-      "dataType": "FLOAT",
+      "dataType": "INT",
       "unit": "kW",
       "required": true,
       "sourceContract": {
