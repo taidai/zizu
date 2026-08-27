@@ -67,6 +67,11 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("claim_token", calls[0])
         self.assertIn("ix_data_frames_claim", calls[0])
         self.assertIn("ix_data_frame_outbox_pending", calls[0])
+        self.assertIn("payload_version", calls[0])
+        self.assertIn("ix_data_frame_outbox_replay", calls[0])
+        self.assertIn("l2_agg_1h", calls[0])
+        self.assertIn("zizu_internal.retention_guard", calls[0])
+        self.assertIn("prune_committed_frame_history", calls[0])
         self.assertIn("column_name = 'node_id'", calls[0])
         self.assertNotIn("t_cross_node_processing_acceptance_reports", calls[0])
         self.assertIn("assert_entity_instance_single_source(id)", calls[1])
@@ -120,6 +125,13 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             data_frame_release_readiness_blockers(
                 committed_frame_consumer=False,
                 retention_policy_resolved=False,
+            ),
+        )
+        self.assertEqual(
+            frozenset(),
+            data_frame_release_readiness_blockers(
+                committed_frame_consumer=True,
+                retention_policy_resolved=True,
             ),
         )
 

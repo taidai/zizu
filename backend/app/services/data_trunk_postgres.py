@@ -88,8 +88,11 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_point_processing_formula_runs') IS NULL
                      OR to_regclass('public.t_data_frames') IS NULL
                      OR to_regclass('public.t_data_frame_outbox') IS NULL
+                     OR to_regclass('public.l2_agg_1h') IS NULL
+                     OR to_regclass('public.l2_agg_1d') IS NULL
+                     OR to_regclass('zizu_internal.retention_guard') IS NULL
                      OR to_regclass('public.t_l2_stream_outbox') IS NOT NULL THEN
-                    RAISE EXCEPTION 'schema 046 data frame contract is incomplete'
+                    RAISE EXCEPTION 'schema 048 data frame contract is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF NOT EXISTS (
@@ -114,6 +117,8 @@ def verify_data_trunk_contract_gate(
                       ('t_data_frames','frame_sequence'),
                       ('t_data_frames','processing_token'),
                       ('t_data_frame_outbox','claim_token'),
+                      ('t_data_frame_outbox','payload_version'),
+                      ('t_data_frame_outbox','payload'),
                       ('t_telemetry','frame_id'),
                       ('t_telemetry','frame_sequence'),
                       ('t_telemetry','accepted_beat'),
@@ -143,21 +148,40 @@ def verify_data_trunk_contract_gate(
                   ) OR NOT EXISTS (
                     SELECT 1 FROM pg_indexes
                     WHERE schemaname='public'
+                      AND indexname='ix_data_frame_outbox_replay'
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname='public'
                       AND indexname='ix_telemetry_tag_frame_sequence'
                   ) THEN
                     RAISE EXCEPTION 'schema 046 frame indexes are incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF to_regprocedure('public.guard_data_frame_transition()') IS NULL
+                     OR to_regprocedure(
+                       'public.prune_committed_frame_history(integer,jsonb)'
+                     ) IS NULL
                      OR NOT EXISTS (
                        SELECT 1 FROM pg_trigger
                        WHERE tgname='trg_guard_data_frame_transition'
                          AND NOT tgisinternal
                      ) OR NOT EXISTS (
+                       SELECT 1 FROM pg_trigger
+                       WHERE tgname='trg_guard_data_frame_outbox_payload'
+                         AND NOT tgisinternal
+                     ) OR NOT EXISTS (
                        SELECT 1 FROM pg_constraint
                        WHERE conname='chk_data_frame_outbox_claim'
                      ) THEN
-                    RAISE EXCEPTION 'schema 046 frame fencing is incomplete'
+                    RAISE EXCEPTION 'schema 048 frame fencing is incomplete'
+                      USING ERRCODE = '55000';
+                  END IF;
+                  IF (
+                    SELECT count(*) FROM timescaledb_information.jobs
+                    WHERE proc_schema='public'
+                      AND proc_name='prune_committed_frame_history'
+                  ) <> 1 THEN
+                    RAISE EXCEPTION 'schema 048 retention job is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                 END;
