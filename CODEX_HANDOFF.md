@@ -1,5 +1,29 @@
 ---
 
+## Session 2026-08-27 — 1 号机磁盘恢复、旧数据清空与 rc.4 部署
+
+- 根因不是 inode，而是现场仍停在 Schema 044：`t_l0_observation_dedup` 约 2.824GB、7,779,560 行，
+  且缺少 6 小时去重缓存清理 job，导致 `/userdata` 99%（仅余 131MB）。已精确删除 19 个旧应用快照、
+  2 个旧 tar、4 个未使用 image，以及 6 套已被新备份替代的旧 DB dump；没有使用 broad prune。
+- 已创建并验证 Schema 044 完整备份
+  `/opt/zizu-backups/pre-v0.4.85-rc.4-schema044/omnithings.dump`，633,910,143 bytes，SHA-256
+  `5a7214a366ac52c271963649afc0613e8c144d357fc6c649c6f0ecf63379fce1`；`sha256sum --check` 与
+  `pg_restore -l` 均通过。rc7 dump 与 NanoMQ 备份继续保留。
+- migration 045 单次执行 `applied=['045'] / errors=0`，随后维护者要求清空旧数据：L0 历史/latest/dedup、
+  L2 历史/来源/latest/outbox、runtime health、ingestion failures 和 5min/1h/1d 连续汇总在启动前均为
+  0；append-only 触发器与 L2 两条复合外键已在同一事务内原样恢复。
+- 配置没有被清除：节点 6、点位 97、已安装点位加工 1、全局实体实例 2、告警定义 1、用户 2。
+  rc.4 启动后新 L0 与 L2 数据均已重新产生。
+- 当前 backend 为 `0.4.85-rc.4`，ARM64 固定摘要
+  `ghcr.io/taidai/zizu@sha256:5ab0368078e03b1d7d87aae32ea570242bd6791359d39f05a8cbcb3dce9b7e23`；
+  healthy、restart count 0，保留 host network、`/dev/mqueue` tmpfs、unless-stopped 与既有数据卷。
+  公网首页和健康接口均为 200；五项 Schema 045 存储治理 job 均存在且最后执行成功。
+- 最终 `/dev/root` 65%（5.4GB 可用），`/userdata` 50%（6.1GB 可用）。仍为 development HTTP
+  测试站；未启动 Caddy/TLS，未执行策略、控制或设备写入。完整证据见
+  `docs/deploy-1号机-v0.4.85-rc.4-http.md`。
+
+---
+
 ## Session 2026-08-27 — 核心总纲确认与数据帧底座实施计划
 
 - 维护者以 `AAAA` 完成四部分书面确认；
