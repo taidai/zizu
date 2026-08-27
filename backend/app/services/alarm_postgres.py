@@ -64,6 +64,23 @@ class PostgresAlarmDefinitionCatalog:
     def all_definitions(self) -> tuple[AlarmDefinition, ...]:
         return self._definitions("", ())
 
+    def all_versions(self) -> tuple[AlarmDefinition, ...]:
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id,asset_id,definition_version,entity_instance_id,
+                           entity_definition_id,trigger_condition,
+                           trigger_duration_seconds,recovery_condition,
+                           recovery_duration_seconds,severity,
+                           notification_throttle_seconds
+                    FROM t_alarm_definitions
+                    ORDER BY entity_instance_id,asset_id,id
+                    """
+                )
+                rows = cur.fetchall()
+        return tuple(AlarmDefinition(*row) for row in rows)
+
     @staticmethod
     def _definitions(where: str, parameters: tuple[Any, ...]) -> tuple[AlarmDefinition, ...]:
         with _connection() as conn:

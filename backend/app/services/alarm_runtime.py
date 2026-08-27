@@ -112,6 +112,12 @@ class AlarmOutcome:
     audit_event_id: UUID | None = None
 
 
+@dataclass(frozen=True)
+class AlarmEvaluation:
+    definition: AlarmDefinition
+    observation: AlarmObservation
+
+
 class AlarmDefinitionCatalog(Protocol):
     def get(self, definition_id: UUID) -> AlarmDefinition | None: ...
 
@@ -119,11 +125,21 @@ class AlarmDefinitionCatalog(Protocol):
 
     def all_definitions(self) -> tuple[AlarmDefinition, ...]: ...
 
+    def all_versions(self) -> tuple[AlarmDefinition, ...]: ...
+
 
 class AlarmRepository(Protocol):
     def transaction(self) -> Any: ...
 
     def lock_stream(self, definition_id: UUID, entity_instance_id: UUID) -> None: ...
+
+    def begin_committed_frame(
+        self,
+        consumer_key: str,
+        frame_id: UUID,
+        frame_sequence: int,
+        configuration_revision: int,
+    ) -> bool: ...
 
     def find_open(
         self,
@@ -177,6 +193,9 @@ class InMemoryAlarmDefinitionCatalog:
             for definition_id in self._current_by_asset_entity.values()
         )
 
+    def all_versions(self) -> tuple[AlarmDefinition, ...]:
+        return tuple(self._definitions.values())
+
     def install_definitions(self, plan, transaction: Any | None = None) -> tuple[UUID, ...]:
         del transaction
         definitions = tuple(plan.definitions)
@@ -207,10 +226,50 @@ class InMemoryAlarmRepository:
         self._events: dict[UUID, AlarmEvent] = {}
         self._transitions: list[AlarmTransition] = []
         self._notifications: list[AlarmNotification] = []
+        self._consumed_frames: dict[tuple[str, UUID], tuple[int, int]] = {}
 
     @contextmanager
     def transaction(self):
-        yield self
+        snapshot = (
+            dict(self._events),
+            list(self._transitions),
+            list(self._notifications),
+            dict(self._consumed_frames),
+        )
+        try:
+            yield self
+        except Exception:
+            (
+                self._events,
+                self._transitions,
+                self._notifications,
+                self._consumed_frames,
+            ) = snapshot
+            raise
+
+    def begin_committed_frame(
+        self,
+        consumer_key: str,
+        frame_id: UUID,
+        frame_sequence: int,
+        configuration_revision: int,
+    ) -> bool:
+        key = (consumer_key, frame_id)
+        if key in self._consumed_frames:
+            return False
+        if any(
+            candidate_consumer == consumer_key and sequence == frame_sequence
+            for (candidate_consumer, _), (sequence, _) in self._consumed_frames.items()
+        ):
+            raise AlarmRuntimeError(
+                "ALARM_FRAME_SEQUENCE_CONFLICT",
+                "Alarm consumer frame sequence belongs to another frame",
+            )
+        self._consumed_frames[key] = (frame_sequence, configuration_revision)
+        return True
+
+    def has_consumed_frame(self, consumer_key: str, frame_id: UUID) -> bool:
+        return (consumer_key, frame_id) in self._consumed_frames
 
     def find_open(
         self,
@@ -302,93 +361,127 @@ class AlarmRuntime:
 
     def submit(self, observation: AlarmObservation) -> AlarmOutcome:
         definition = self._definition_for(observation)
-        observed_at = _utc(observation.observed_at)
         with self._repository.transaction() as repository:
-            repository.lock_stream(
-                observation.definition_id,
-                observation.entity_instance_id,
-            )
-            event = repository.find_open(
-                observation.definition_id,
-                observation.entity_instance_id,
-            )
-            condition = (
-                _matches(definition.trigger, observation.value)
-                and observation.quality == GOOD_QUALITY
+            return self._submit_with_definition(repository, definition, observation)
+
+    def submit_frame(
+        self,
+        *,
+        frame_id: UUID,
+        frame_sequence: int,
+        configuration_revision: int,
+        evaluations: tuple[AlarmEvaluation, ...],
+    ) -> tuple[AlarmOutcome, ...]:
+        with self._repository.transaction() as repository:
+            if not repository.begin_committed_frame(
+                "alarm",
+                frame_id,
+                frame_sequence,
+                configuration_revision,
+            ):
+                return ()
+            return tuple(
+                self._submit_with_definition(
+                    repository,
+                    evaluation.definition,
+                    evaluation.observation,
+                )
+                for evaluation in evaluations
             )
 
-            if event is None:
-                if not condition:
-                    return AlarmOutcome(None, "normal", None, "ALARM_NORMAL", False)
-                pending = AlarmEvent(
-                    id=uuid4(),
-                    definition_id=definition.id,
-                    definition_version=definition.version,
-                    entity_instance_id=definition.entity_instance_id,
-                    state="pending",
-                    severity=definition.severity,
-                    pending_at=observed_at,
-                    first_observation=_evidence(observation),
-                    last_observation=_evidence(observation),
+    def _submit_with_definition(
+        self,
+        repository: AlarmRepository,
+        definition: AlarmDefinition,
+        observation: AlarmObservation,
+    ) -> AlarmOutcome:
+        self._validate_definition_observation(definition, observation)
+        observed_at = _utc(observation.observed_at)
+        repository.lock_stream(
+            observation.definition_id,
+            observation.entity_instance_id,
+        )
+        event = repository.find_open(
+            observation.definition_id,
+            observation.entity_instance_id,
+        )
+        condition = (
+            _matches(definition.trigger, observation.value)
+            and observation.quality == GOOD_QUALITY
+        )
+
+        if event is None:
+            if not condition:
+                return AlarmOutcome(None, "normal", None, "ALARM_NORMAL", False)
+            pending = AlarmEvent(
+                id=uuid4(),
+                definition_id=definition.id,
+                definition_version=definition.version,
+                entity_instance_id=definition.entity_instance_id,
+                state="pending",
+                severity=definition.severity,
+                pending_at=observed_at,
+                first_observation=_evidence(observation),
+                last_observation=_evidence(observation),
+            )
+            repository.save_event(pending)
+            repository.append_transition(
+                AlarmTransition(
+                    pending.id,
+                    None,
+                    "pending",
+                    observed_at,
+                    "ALARM_TRIGGER_PENDING",
+                    _evidence(observation),
                 )
-                repository.save_event(pending)
+            )
+            if definition.trigger_duration_seconds <= 0:
+                active = replace(
+                    pending,
+                    state="active_unacknowledged",
+                    active_at=observed_at,
+                )
+                repository.save_event(active)
                 repository.append_transition(
                     AlarmTransition(
-                        pending.id,
-                        None,
+                        active.id,
                         "pending",
+                        active.state,
                         observed_at,
-                        "ALARM_TRIGGER_PENDING",
+                        "ALARM_ACTIVATED",
                         _evidence(observation),
                     )
                 )
-                if definition.trigger_duration_seconds <= 0:
-                    active = replace(
-                        pending,
-                        state="active_unacknowledged",
-                        active_at=observed_at,
-                    )
-                    repository.save_event(active)
-                    repository.append_transition(
-                        AlarmTransition(
-                            active.id,
-                            "pending",
-                            active.state,
-                            observed_at,
-                            "ALARM_ACTIVATED",
-                            _evidence(observation),
-                        )
-                    )
-                    notified = self._notify_if_allowed(
-                        repository,
-                        active,
-                        definition,
-                        observed_at,
-                    )
-                    return AlarmOutcome(
-                        active.id,
-                        active.state,
-                        {"from": "pending", "to": active.state},
-                        "ALARM_ACTIVATED",
-                        notified,
-                    )
-                return AlarmOutcome(
-                    pending.id,
-                    pending.state,
-                    None,
-                    "ALARM_TRIGGER_PENDING",
-                    False,
-                )
-
-            if event.state == "pending":
-                return self._advance_pending(
+                notified = self._notify_if_allowed(
                     repository,
-                    event,
+                    active,
                     definition,
-                    observation,
-                    condition,
+                    observed_at,
                 )
-            return self._advance_active(repository, event, definition, observation)
+                return AlarmOutcome(
+                    active.id,
+                    active.state,
+                    {"from": "pending", "to": active.state},
+                    "ALARM_ACTIVATED",
+                    notified,
+                )
+            return AlarmOutcome(
+                pending.id,
+                pending.state,
+                None,
+                "ALARM_TRIGGER_PENDING",
+                False,
+            )
+
+        if event.state == "pending":
+            return self._advance_pending(
+                repository,
+                event,
+                definition,
+                observation,
+                condition,
+            )
+        return self._advance_active(repository, event, definition, observation)
 
     def acknowledge(self, command: AcknowledgeAlarm) -> AlarmOutcome:
         with self._repository.transaction() as repository:
@@ -595,12 +688,24 @@ class AlarmRuntime:
         definition = self._definitions.get(observation.definition_id)
         if definition is None:
             raise AlarmRuntimeError("ALARM_DEFINITION_NOT_FOUND", "Alarm definition was not found")
+        self._validate_definition_observation(definition, observation)
+        return definition
+
+    @staticmethod
+    def _validate_definition_observation(
+        definition: AlarmDefinition,
+        observation: AlarmObservation,
+    ) -> None:
         if definition.entity_instance_id != observation.entity_instance_id:
             raise AlarmRuntimeError(
                 "ALARM_ENTITY_INSTANCE_MISMATCH",
                 "Alarm observation does not match the definition entity instance",
             )
-        return definition
+        if definition.id != observation.definition_id:
+            raise AlarmRuntimeError(
+                "ALARM_DEFINITION_MISMATCH",
+                "Alarm observation does not match the supplied definition",
+            )
 
 
 def _utc(value: datetime) -> datetime:
