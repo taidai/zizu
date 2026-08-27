@@ -5,10 +5,12 @@ from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import MappingProxyType
 import unittest
+import time
 from uuid import UUID
 
 from app.services.data_trunk import DataTrunk
 from app.services.data_trunk_contracts import (
+    BlackboardRecovery,
     FrameStatus,
     PendingFrame,
     RawObservation,
@@ -62,6 +64,23 @@ class _Repository:
             status=FrameStatus.PENDING,
         )
 
+    def unfinished_frame_count(self) -> int:
+        return 0
+
+    def unpublished_frame_outbox_count(self) -> int:
+        return 0
+
+    def restore_blackboard(self) -> BlackboardRecovery:
+        return BlackboardRecovery(
+            capture_beat=0,
+            configuration_revision=1,
+            active_input_contracts=MappingProxyType(
+                {TAG_ID: SourceOrderMode.SEQUENCE}
+            ),
+            required_tag_ids=frozenset({TAG_ID}),
+            observations=(),
+        )
+
 
 class _Processor:
     def process_next(self, _now):
@@ -82,6 +101,24 @@ def _runtime(repository=None) -> DataTrunk:
 
 
 class DataFrameRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_configuration_publish_without_consumer_fails_immediately(self) -> None:
+        gate = _runtime().configuration_gate
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+            Exception, "COMMITTED_FRAME_CONSUMER_MISSING"
+        ):
+            gate.begin_configuration_publish(0)
+        self.assertLess(time.monotonic() - started, 0.1)
+
+    async def test_quiesced_revision_reconciles_from_database_truth(self) -> None:
+        runtime = _runtime()
+        gate = runtime.configuration_gate
+        gate.register_committed_frame_consumer()
+        gate.begin_configuration_publish(0)
+        self.assertIsNone(runtime.capture_tick(NOW))
+        revision = gate.reconcile_configuration_runtime()
+        self.assertEqual(1, revision.revision)
+
     async def test_sixty_empty_ticks_after_stale_transition_create_no_more_frames(self) -> None:
         repository = _Repository()
         runtime = _runtime(repository)

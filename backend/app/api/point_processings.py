@@ -1,6 +1,7 @@
 """Authenticated REST adapter for L1 point-processing planning and apply."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Any, NoReturn
@@ -262,13 +263,12 @@ async def apply_point_processing_plan(
     service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
-        return service.apply(
-            ApplyPointProcessingPlan(
-                plan_id=plan_id,
-                plan_digest=body.plan_digest,
-                idempotency_key=idempotency_key,
-                actor=principal.actor,
-            )
-        ).public_dict()
+        command = ApplyPointProcessingPlan(
+            plan_id=plan_id,
+            plan_digest=body.plan_digest,
+            idempotency_key=idempotency_key,
+            actor=principal.actor,
+        )
+        return (await asyncio.to_thread(service.apply, command)).public_dict()
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)

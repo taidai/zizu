@@ -30,6 +30,7 @@ from app.services.data_trunk_contracts import (
     ValueKind,
 )
 from app.services.realtime_blackboard import RealtimeBlackboard
+from app.services.configuration_revision import ConfigurationRuntimeGate
 
 
 class ConversionEvaluator(Protocol):
@@ -91,26 +92,43 @@ class DataTrunk:
         self._blackboard = blackboard
         self._processor = processor
         self._writer_lease = writer_lease
+        self._configuration_gate = ConfigurationRuntimeGate(
+            repository, blackboard
+        )
 
     def accept(self, raw_observations: Sequence[RawObservation]) -> AcceptReceipt:
         batch = tuple(raw_observations)
         return self._blackboard.accept_many(batch)
 
     def capture_tick(self, now: datetime) -> PendingFrame | None:
-        candidate = self._blackboard.tick(
-            now,
-            configuration_revision=(
-                self._repository.current_configuration_revision()
-            ),
-        )
-        if candidate is None:
+        if not self._configuration_gate.enter_capture():
             return None
-        pending = self._repository.commit_pending(candidate)
-        self._blackboard.acknowledge(candidate.generation)
-        return pending
+        try:
+            candidate = self._blackboard.tick(
+                now,
+                configuration_revision=(
+                    self._repository.current_configuration_revision()
+                ),
+            )
+            if candidate is None:
+                return None
+            pending = self._repository.commit_pending(candidate)
+            self._blackboard.acknowledge(candidate.generation)
+            return pending
+        finally:
+            self._configuration_gate.leave_capture()
 
     def process_next(self, now: datetime) -> TerminalFrame | None:
-        return self._processor.process_next(now)
+        if not self._configuration_gate.enter_processor():
+            return None
+        try:
+            return self._processor.process_next(now)
+        finally:
+            self._configuration_gate.leave_processor()
+
+    @property
+    def configuration_gate(self) -> ConfigurationRuntimeGate:
+        return self._configuration_gate
 
     def close(self) -> None:
         if self._writer_lease is not None:

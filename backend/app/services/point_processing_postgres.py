@@ -1862,10 +1862,20 @@ def build_postgres_point_processing() -> PointProcessingService:
     from app.services.neuron_client import get_neuron_client
     from app.services.neuron_point_processing_catalog import NeuronPointCatalog
 
+    runtime_gate = None
+    try:
+        from app.main import get_pipeline
+
+        pipeline = get_pipeline()
+        if pipeline is not None:
+            runtime_gate = pipeline.data_trunk.configuration_gate
+    except (ImportError, RuntimeError):
+        runtime_gate = None
     return PointProcessingService(
         PostgresPointProcessingRepository(),
         PostgresPointProcessingCatalog(),
         point_scanner=NeuronPointCatalog(get_neuron_client()),
+        runtime_gate=runtime_gate,
     )
 
 

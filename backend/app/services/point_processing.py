@@ -14,6 +14,7 @@ from app.services.data_trunk_contracts import (
     BooleanCodeInput,
     BooleanSetTransform,
     CompiledFormula,
+    DataTrunkError,
     EnumTransform,
     FaultCodeTransform,
     FormulaSource,
@@ -294,10 +295,12 @@ class PointProcessingService:
         catalog: PointProcessingCatalog,
         *,
         point_scanner: PointScanner | None = None,
+        runtime_gate: Any | None = None,
     ) -> None:
         self._repository = repository
         self._catalog = catalog
         self._point_scanner = point_scanner
+        self._runtime_gate = runtime_gate
 
     def preview(self, command: PreviewPointProcessing) -> PointProcessingPlan:
         node_source_key = self._catalog.node_source_key(command.node_id)
@@ -579,12 +582,34 @@ class PointProcessingService:
                     "NEURON_POINT_CATALOG_UNAVAILABLE",
                     "Neuron point catalog could not be rescanned",
                 ) from exc
-        return self._repository.apply_plan(
-            command,
-            self._catalog,
-            transaction=transaction,
-            verified_source_catalog_digest=verified_digest,
-        )
+        if self._runtime_gate is None:
+            return self._repository.apply_plan(
+                command,
+                self._catalog,
+                transaction=transaction,
+                verified_source_catalog_digest=verified_digest,
+            )
+        try:
+            self._runtime_gate.begin_configuration_publish(
+                plan.base_configuration_revision
+            )
+        except DataTrunkError as exc:
+            raise PointProcessingError(exc.code, str(exc)) from exc
+        try:
+            application = self._repository.apply_plan(
+                command,
+                self._catalog,
+                transaction=transaction,
+                verified_source_catalog_digest=verified_digest,
+            )
+        except PointProcessingError:
+            self._runtime_gate.cancel_configuration_publish()
+            raise
+        try:
+            self._runtime_gate.reconcile_configuration_runtime()
+        except DataTrunkError as exc:
+            raise PointProcessingError(exc.code, str(exc)) from exc
+        return application
 
 
 class InMemoryPointProcessingCatalog:

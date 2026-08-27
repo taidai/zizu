@@ -26,6 +26,7 @@ from app.services.data_trunk_contracts import (
     ValueKind,
 )
 from app.services.data_trunk_postgres import PostgresFrameRepository
+from app.services.data_trunk_outbox import PostgresFrameOutboxRepository
 from app.services.data_trunk_conversion import evaluate_processing
 from app.services.frame_processor import FrameProcessor
 from tests import test_data_frames_migration_postgres as frame_migration
@@ -338,6 +339,29 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (str(pending.frame_id),),
             )
             self.assertEqual(("COMPLETE",), cursor.fetchone())
+
+    def test_terminal_frame_outbox_rebuilds_atomic_event_and_acks_token(self) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=108))
+        FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: NOW,
+        ).process_next(NOW)
+        outbox = PostgresFrameOutboxRepository(
+            connection_factory=self._connection_factory(),
+        )
+
+        claim = outbox.claim_unpublished(datetime.now(UTC))
+
+        self.assertIsNotNone(claim)
+        assert claim is not None
+        self.assertEqual(pending.frame_id, claim.event.frame_id)
+        self.assertEqual("COMPLETE", claim.event.status.value)
+        self.assertEqual(1, len(claim.event.l0_changes))
+        self.assertEqual(self.tag_id, claim.event.l0_changes[0].tag_id)
+        self.assertEqual(108.0, claim.event.l0_changes[0].value.value)
+        outbox.mark_published(claim.event.frame_id, claim.claim_token)
+        self.assertIsNone(outbox.claim_unpublished(datetime.now(UTC)))
 
     def test_transaction_b_rolls_back_all_publication_on_fault(self) -> None:
         def fault(stage: str) -> None:

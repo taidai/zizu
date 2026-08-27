@@ -190,6 +190,30 @@ class PostgresFrameRepository:
             )
         return int(row[0])
 
+    def unfinished_frame_count(self) -> int:
+        return self._count(
+            "SELECT count(*) FROM t_data_frames "
+            "WHERE status IN ('PENDING','PROCESSING')"
+        )
+
+    def unpublished_frame_outbox_count(self) -> int:
+        return self._count(
+            "SELECT count(*) FROM t_data_frame_outbox WHERE published_at IS NULL"
+        )
+
+    def _count(self, statement: str) -> int:
+        try:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(statement)
+                value = int(cursor.fetchone()[0])
+                connection.commit()
+                return value
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_RUNTIME_STATE_UNAVAILABLE",
+                "DATA_FRAME_RUNTIME_STATE_UNAVAILABLE",
+            ) from exc
+
     def acquire_writer(self) -> FrameWriterLease:
         manager = self._connection()
         connection = manager.__enter__()
