@@ -1,22 +1,36 @@
 """Claim one frozen frame, evaluate the full L1 DAG, and commit it atomically."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from app.services.data_trunk import ConversionEvaluator
 from app.services.data_trunk_contracts import (
     ClaimedFrame,
     BudgetTerminalizationClaim,
     DataTrunkError,
     FrameFailure,
     InputReference,
+    InstalledPointProcessing,
     L2Observation,
     ProcessingSnapshot,
+    RawObservation,
     TerminalFrame,
 )
+
+
+class ConversionEvaluator(Protocol):
+    def __call__(
+        self,
+        *,
+        installed: tuple[InstalledPointProcessing, ...],
+        current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+        configuration_revision: int,
+        calculated_at: datetime,
+        frame_id: UUID | None = None,
+        frame_sequence: int = 0,
+    ) -> tuple[L2Observation, ...]: ...
 
 
 class FrameRepository(Protocol):

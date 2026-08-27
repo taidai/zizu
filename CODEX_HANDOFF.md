@@ -1,5 +1,31 @@
 ---
 
+## Session 2026-08-27 — 数据帧底座第一阶段完成（未发布、未部署）
+
+- 已按最新总纲完成唯一运行主线：MQTT 只写内存黑板，统一 1 秒节拍冻结帧；事务 A 持久化 PENDING
+  帧与变化 L0，顺序 processor 在固定配置修订上执行完整 L1 DAG，事务 B 原子提交 L0 latest、L2
+  history/latest、来源证据和一条终态帧 outbox。提交依次为 `d7919c9`、`f83d311`、`f277eb7`、
+  `a0f245d`、`e28ef81`、`1c28f55`、`df2a218`，最终硬切清理提交见本节之后的新提交。
+- Schema 046 已实现并在独立 TimescaleDB/PostgreSQL 16 测试库验证：单 writer、事务 A 幂等、事务 B
+  回滚、租约 fencing、三次失败形成唯一 durable failure、STALE 保值、终态不可变、逐帧 outbox 与
+  配置修订排空门禁均有真实数据库证据。startup gate 会拒绝缺表、旧 outbox、帧列/索引/令牌不完整的
+  Schema。
+- 旧单条 `ingest/transact`、独立 freshness/公式轮询、旧 latest 写入和旧逐实体 outbox 生产仓储入口已
+  移除；MQTT、测试模拟器和主生命周期统一只走 `accept → capture_tick → process_next`。点位加工 apply
+  已移到线程执行，并在真实 consumer 缺失时立即返回 `COMMITTED_FRAME_CONSUMER_MISSING`，不做 5 秒
+  假等待、不写配置。
+- 新鲜验证：核心纯测试 61/61；完整后端 260/260（107 项为仓库原有环境型 skip）；显式数据帧
+  PostgreSQL 13/13 且 0 skip；Schema 046 迁移 9/9 且 0 skip；本轮完整 PostgreSQL 大组中其余 35 项
+  通过，数据帧时钟回归修复后单组重跑全绿；scripts 37/37；compileall 与 `git diff --check` 通过。
+- 第一阶段明确**不能发布**，阻塞项恰好是：`COMMITTED_FRAME_CONSUMER_MISSING` 与
+  `DATA_FRAME_RETENTION_POLICY_UNRESOLVED`。为提高开发速度，本轮没有做缺乏真实 consumer 前提的
+  10 万点容量表演压测；容量与有界保留仍保持 fail-closed，不能靠超时删除未发布 outbox。
+- 没有修改前端、没有构建/推送镜像、没有连接或部署 1 号机。下一阶段只做实时界面闭环：REST 完整
+  终态快照 + 帧游标 + WebSocket 原子帧增量 + 游标过旧重读，并在完成后解除第一个 blocker；随后再将
+  告警/JDM/控制/画面统一收口到 committed L2。
+
+---
+
 ## Session 2026-08-27 — 1 号机磁盘恢复、旧数据清空与 rc.4 部署
 
 - 根因不是 inode，而是现场仍停在 Schema 044：`t_l0_observation_dedup` 约 2.824GB、7,779,560 行，

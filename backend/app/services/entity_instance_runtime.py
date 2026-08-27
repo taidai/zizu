@@ -97,8 +97,8 @@ class InMemoryNeuronProtocolSimulator:
                 source_sequence=None,
             )
             if raw_observations:
-                receipt = self._data_trunk.ingest(raw_observations)
-                trunk_published = receipt.accepted_l0_count
+                receipt = self._data_trunk.accept(raw_observations)
+                trunk_published = receipt.accepted_count
         normalized = normalize(parsed)
         published = 0
         for point in normalized.points:

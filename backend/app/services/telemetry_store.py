@@ -129,7 +129,7 @@ async def batch_insert_telemetry(
     records: list[TelemetryRecord],
 ) -> int:
     """
-    Legacy test/helper write; production pipeline must use DataTrunk.ingest().
+    Legacy test/helper write; production pipeline must use the data-frame runtime.
 
     批量写入遥测记录到 Hypertable。
 
@@ -330,7 +330,7 @@ ON CONFLICT (node_id, tag_id) DO UPDATE SET
 
 async def upsert_telemetry_latest(records: list[TelemetryRecord]) -> int:
     """
-    Legacy test/helper write; production pipeline must use DataTrunk.ingest().
+    Legacy test/helper write; production pipeline must use the data-frame runtime.
 
     将遥测记录 upsert 到 t_telemetry_latest 缓存表。
     每个 (node_id, tag_id) 只保留最新一行。

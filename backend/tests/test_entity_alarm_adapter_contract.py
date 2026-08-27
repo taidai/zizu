@@ -22,7 +22,7 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
             migration,
         )
 
-    def test_pipeline_uses_installed_entity_alarm_adapter_not_legacy_engine(self) -> None:
+    def test_pipeline_has_no_alarm_side_write_before_committed_l2(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
             / "app"
@@ -44,7 +44,8 @@ class EntityAlarmAdapterContractTest(unittest.TestCase):
         }
         self.assertNotIn("process_entity_alarms", imported)
         self.assertNotIn("process_entity_alarms", called)
-        self.assertIn("_submit_installed_entity_alarms", source)
+        self.assertNotIn("_submit_installed_entity_alarms", source)
+        self.assertIn("self._data_trunk.accept", source)
         self.assertNotIn("_submit_unified_tag_alarms", source)
 
     def test_open_event_keeps_its_immutable_definition_after_an_upgrade(self) -> None:

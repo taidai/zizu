@@ -314,8 +314,8 @@ class DataFramesPostgresTest(unittest.TestCase):
         terminal = FrameProcessor(
             self.repository,
             evaluator=evaluate_processing,
-            clock=lambda: NOW,
-        ).process_next(NOW)
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
 
         self.assertEqual(pending.frame_id, terminal.frame_id)
         self.assertEqual("COMPLETE", terminal.status.value)
@@ -345,13 +345,14 @@ class DataFramesPostgresTest(unittest.TestCase):
         FrameProcessor(
             self.repository,
             evaluator=evaluate_processing,
-            clock=lambda: NOW,
-        ).process_next(NOW)
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
         outbox = PostgresFrameOutboxRepository(
             connection_factory=self._connection_factory(),
         )
 
-        claim = outbox.claim_unpublished(datetime.now(UTC))
+        claim_at = datetime.now(UTC) + timedelta(seconds=1)
+        claim = outbox.claim_unpublished(claim_at)
 
         self.assertIsNotNone(claim)
         assert claim is not None
@@ -361,7 +362,7 @@ class DataFramesPostgresTest(unittest.TestCase):
         self.assertEqual(self.tag_id, claim.event.l0_changes[0].tag_id)
         self.assertEqual(108.0, claim.event.l0_changes[0].value.value)
         outbox.mark_published(claim.event.frame_id, claim.claim_token)
-        self.assertIsNone(outbox.claim_unpublished(datetime.now(UTC)))
+        self.assertIsNone(outbox.claim_unpublished(claim_at))
 
     def test_transaction_b_rolls_back_all_publication_on_fault(self) -> None:
         def fault(stage: str) -> None:
@@ -376,8 +377,8 @@ class DataFramesPostgresTest(unittest.TestCase):
             FrameProcessor(
                 repository,
                 evaluator=evaluate_processing,
-                clock=lambda: NOW,
-            ).process_next(NOW)
+                clock=lambda: datetime.now(UTC),
+            ).process_next(datetime.now(UTC))
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT status FROM t_data_frames WHERE frame_id=%s",
@@ -625,8 +626,8 @@ class DataFramesPostgresTest(unittest.TestCase):
         terminal = FrameProcessor(
             self.repository,
             evaluator=evaluate_processing,
-            clock=lambda: NOW,
-        ).process_next(NOW)
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
         self.assertEqual("COMPLETE", terminal.status.value)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(

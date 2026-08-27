@@ -59,6 +59,14 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("t_point_processing_selector_members", calls[0])
         self.assertIn("t_point_processing_dependencies", calls[0])
         self.assertIn("t_point_processing_formula_runs", calls[0])
+        self.assertIn("t_data_frames", calls[0])
+        self.assertIn("t_data_frame_outbox", calls[0])
+        self.assertIn("t_l2_stream_outbox", calls[0])
+        self.assertIn("frame_sequence", calls[0])
+        self.assertIn("processing_token", calls[0])
+        self.assertIn("claim_token", calls[0])
+        self.assertIn("ix_data_frames_claim", calls[0])
+        self.assertIn("ix_data_frame_outbox_pending", calls[0])
         self.assertIn("column_name = 'node_id'", calls[0])
         self.assertNotIn("t_cross_node_processing_acceptance_reports", calls[0])
         self.assertIn("assert_entity_instance_single_source(id)", calls[1])
@@ -94,6 +102,39 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("run_formula_tick", source)
         self.assertNotIn("run_rule_tick", source)
         self.assertNotIn("run_aggregation_tick", source)
+
+    def test_first_stage_release_blockers_are_explicit(self) -> None:
+        from app.services.data_trunk_postgres import (
+            data_frame_release_readiness_blockers,
+        )
+
+        self.assertEqual(
+            frozenset(
+                {
+                    "COMMITTED_FRAME_CONSUMER_MISSING",
+                    "DATA_FRAME_RETENTION_POLICY_UNRESOLVED",
+                }
+            ),
+            data_frame_release_readiness_blockers(
+                committed_frame_consumer=False,
+                retention_policy_resolved=False,
+            ),
+        )
+
+    def test_production_source_has_no_legacy_runtime_path(self) -> None:
+        from app.services.data_trunk import DataTrunk
+        from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.pipeline import DataPipeline
+
+        pipeline_source = inspect.getsource(DataPipeline)
+        trunk_source = inspect.getsource(DataTrunk)
+        postgres_source = inspect.getsource(PostgresFrameRepository)
+        self.assertNotIn("_buffer", pipeline_source)
+        self.assertNotIn("flush_now", pipeline_source)
+        self.assertNotIn("evaluate_due_formulas", trunk_source)
+        self.assertNotIn("mark_expired_outputs_stale", trunk_source)
+        self.assertNotIn("t_l2_stream_outbox", postgres_source)
+        self.assertNotIn("_select_history_observations", postgres_source)
 
 
 if __name__ == "__main__":

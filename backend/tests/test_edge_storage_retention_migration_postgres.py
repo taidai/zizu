@@ -1118,101 +1118,20 @@ class EdgeStorageRetentionMigrationPostgresTest(unittest.TestCase):
                 finally:
                     blocker.close()
 
-    def test_045_expired_cache_replay_does_not_duplicate_l0_l2_or_outbox(self) -> None:
-        from app.services.data_trunk import DataTrunk
-        from app.services.data_trunk_contracts import (
-            RawObservation,
-            TrunkQuality,
-            TypedValue,
-            ValueKind,
-        )
-        from app.services.data_trunk_postgres import PostgresDataTrunkRepository
-        from app.services.telemetry_store import (
-            close_db_pool,
-            get_connection,
-            init_db_pool,
-        )
-
+    def test_045_leaves_frame_hard_cut_to_schema_046(self) -> None:
         with psycopg2.connect(**self.connection_kwargs) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
                 self._apply_045(cursor)
-
-        init_db_pool(1, 4)
-        try:
-            tag_ids = self._publish_brand_a()
-            observed_at = datetime.now(UTC) - timedelta(minutes=5)
-            tag_id = tag_ids["ActivePowerRaw"]
-            first = RawObservation(
-                observation_id=uuid5(NAMESPACE_URL, "test/retention/l0/first"),
-                node_id=NODE_ID,
-                tag_id=tag_id,
-                source_key="ActivePowerRaw",
-                value=TypedValue(ValueKind.FLOAT, 1000.0),
-                raw_unit="W",
-                quality=TrunkQuality.GOOD,
-                source_timestamp=observed_at,
-                received_at=observed_at,
-                source_message_id="retention-message-1",
-                source_sequence=1,
-                source_digest="e" * 64,
-                event_time_basis="observed_at",
-            )
-            trunk = DataTrunk(
-                PostgresDataTrunkRepository(clock=lambda: observed_at)
-            )
-            accepted = trunk.ingest((first,))
-            self.assertEqual(1, accepted.accepted_l0_count)
-            self.assertEqual(1, len(accepted.l2_event_ids))
-
-            with get_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "DELETE FROM t_l0_observation_dedup "
-                        "WHERE source_digest=%s",
-                        ("e" * 64,),
-                    )
-                connection.commit()
-
-            replay_observation = RawObservation(
-                observation_id=uuid5(NAMESPACE_URL, "test/retention/l0/replay"),
-                node_id=first.node_id,
-                tag_id=first.tag_id,
-                source_key=first.source_key,
-                value=first.value,
-                raw_unit=first.raw_unit,
-                quality=first.quality,
-                source_timestamp=first.source_timestamp,
-                received_at=first.received_at + timedelta(hours=7),
-                source_message_id="retention-message-replay",
-                source_sequence=2,
-                source_digest=first.source_digest,
-                event_time_basis=first.event_time_basis,
-            )
-            replay = trunk.ingest((replay_observation,))
-            self.assertEqual(0, replay.accepted_l0_count)
-            self.assertEqual(1, replay.duplicate_l0_count)
-            self.assertEqual((), replay.l2_event_ids)
-
-            with get_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT count(*) FROM t_telemetry "
-                        "WHERE source_digest=%s",
-                        ("e" * 64,),
-                    )
-                    self.assertEqual(1, cursor.fetchone()[0])
-                    cursor.execute(
-                        "SELECT count(*) FROM t_l2_observation_sources "
-                        "WHERE source_digest=%s",
-                        ("e" * 64,),
-                    )
-                    self.assertEqual(1, cursor.fetchone()[0])
-                    cursor.execute("SELECT count(*) FROM t_l2_stream_outbox")
-                    self.assertEqual(1, cursor.fetchone()[0])
-        finally:
-            close_db_pool()
-
+                cursor.execute(
+                    "SELECT to_regclass('public.t_l2_stream_outbox'),"
+                    "to_regclass('public.t_data_frames'),"
+                    "to_regclass('public.t_data_frame_outbox')"
+                )
+                self.assertEqual(
+                    ("t_l2_stream_outbox", None, None),
+                    cursor.fetchone(),
+                )
     def _publish_brand_a(self) -> dict[str, UUID]:
         from app.services.point_processing import (
             ApplyPointProcessingPlan,
