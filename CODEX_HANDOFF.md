@@ -1,5 +1,18 @@
 ---
 
+## Session 2026-08-27 — rc.5 现场类型契约问题与 rc.6 修复
+
+- rc.5 / Schema 048 已切到 1 号机且容器 healthy，但首个数据帧暴露真实兼容问题：配置为 INT 的
+  Neuron 点位以 JSON `0.0` 上报，旧 `RawObservationAdapter` 按外形写为 FLOAT，processor 按 INT
+  契约恢复时稳定报 `DATA_FRAME_RECOVERY_EVIDENCE_INVALID`，因此 rc.5 不作为完成版本。
+- 根因已由现场行证据确认：tag `交流总有功功率` 的 `data_type/value_data_type=INT`，帧 1 却写入
+  `raw_value_float=0`。新增 RED/GREEN 测试，入口现在把有限、整数形式的 float 转为 64 位 INT，
+  非整数 float 对 INT 契约直接拒绝，不改数据库类型掩盖问题。
+- 下一候选改为 `0.4.85-rc.6`；发布后将停止 rc.5，精确删除唯一未提交的 PROCESSING 帧及其 L0
+  暂存行，再以相同 Schema 048 和原容器约束启动 rc.6。已提交终态、L2 历史、配置和告警不删除。
+
+---
+
 ## Session 2026-08-27 — committed frame 实时流实现完成，准备 rc.5 部署
 
 - 已实现统一实时读取：REST 完整快照 + 当前节点游标 + WebSocket 原子帧增量；L0 原始点位与 L2

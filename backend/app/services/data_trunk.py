@@ -189,6 +189,22 @@ class RawObservationAdapter:
 
 def _raw_typed_value(raw_value, data_type: str) -> TypedValue | None:
     kind = data_type.upper()
+    if kind == "INT":
+        if isinstance(raw_value, bool):
+            return None
+        if isinstance(raw_value, int):
+            integer = raw_value
+        elif (
+            isinstance(raw_value, float)
+            and math.isfinite(raw_value)
+            and raw_value.is_integer()
+        ):
+            integer = int(raw_value)
+        else:
+            return None
+        if not -(1 << 63) <= integer <= (1 << 63) - 1:
+            return None
+        return TypedValue(ValueKind.INT, integer)
     if isinstance(raw_value, bool):
         return TypedValue(ValueKind.BOOL, raw_value)
     if isinstance(raw_value, int):
