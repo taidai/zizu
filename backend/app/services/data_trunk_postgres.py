@@ -16,6 +16,7 @@ from psycopg2.extras import Json, execute_values
 from app.services.data_trunk import ConversionEvaluator, DataTrunk
 from app.services.data_trunk_contracts import (
     BlackboardRecovery,
+    BudgetTerminalizationClaim,
     BooleanCodeInput,
     BooleanSetTransform,
     ClaimedFrame,
@@ -24,6 +25,7 @@ from app.services.data_trunk_contracts import (
     EnumTransform,
     FaultCodeTransform,
     FrameStatus,
+    FrameFailure,
     FramedRawObservation,
     FrozenFrameCandidate,
     FormulaSource,
@@ -426,7 +428,10 @@ class PostgresFrameRepository:
             )
         return pending
 
-    def claim_next(self, now: datetime) -> ClaimedFrame | None:
+    def claim_next(
+        self,
+        now: datetime,
+    ) -> ClaimedFrame | BudgetTerminalizationClaim | None:
         token = uuid4()
         lease_until = now + timedelta(seconds=30)
         try:
@@ -434,34 +439,59 @@ class PostgresFrameRepository:
                 try:
                     with connection.cursor() as cursor:
                         cursor.execute(
-                            """
-                            WITH candidate AS (
-                              SELECT frame_id
-                              FROM t_data_frames
-                              WHERE status='PENDING' AND attempt_count < 3
-                              ORDER BY frame_sequence
-                              FOR UPDATE SKIP LOCKED
-                              LIMIT 1
-                            )
-                            UPDATE t_data_frames AS frame
-                            SET status='PROCESSING',
-                                attempt_count=frame.attempt_count+1,
-                                processing_owner=%s,
-                                processing_token=%s,
-                                lease_until=%s
-                            FROM candidate
-                            WHERE frame.frame_id=candidate.frame_id
-                            RETURNING frame.frame_id,frame.frame_sequence,
-                                      frame.capture_beat,frame.shot_at,
-                                      frame.configuration_revision,
-                                      frame.attempt_count,
-                                      frame.processing_owner,
-                                      frame.processing_token,
-                                      frame.lease_until,frame.created_at
-                            """,
-                            (str(self._processing_owner), str(token), lease_until),
+                            "SELECT pg_advisory_xact_lock("
+                            "hashtextextended('zizu:data-frame-processor',0))"
                         )
-                        row = cursor.fetchone()
+                        cursor.execute(
+                            """
+                            SELECT frame_id,frame_sequence,capture_beat,shot_at,
+                                   configuration_revision,attempt_count,
+                                   processing_owner,processing_token,lease_until,
+                                   created_at,status
+                            FROM t_data_frames
+                            WHERE status IN ('PENDING','PROCESSING')
+                            ORDER BY frame_sequence
+                            LIMIT 1
+                            FOR UPDATE
+                            """,
+                        )
+                        head = cursor.fetchone()
+                        row = None
+                        terminalization = False
+                        if head is not None:
+                            if head[10] == "PROCESSING" and head[8] > now:
+                                connection.commit()
+                                return None
+                            terminalization = (
+                                int(head[5]) >= 3
+                                or (now - head[9]).total_seconds() >= 60
+                            )
+                            next_attempt = (
+                                int(head[5])
+                                if terminalization
+                                else int(head[5]) + 1
+                            )
+                            cursor.execute(
+                                """
+                                UPDATE t_data_frames
+                                SET status='PROCESSING',attempt_count=%s,
+                                    processing_owner=%s,processing_token=%s,
+                                    lease_until=%s
+                                WHERE frame_id=%s
+                                RETURNING frame_id,frame_sequence,capture_beat,
+                                          shot_at,configuration_revision,
+                                          attempt_count,processing_owner,
+                                          processing_token,lease_until,created_at
+                                """,
+                                (
+                                    next_attempt,
+                                    str(self._processing_owner),
+                                    str(token),
+                                    lease_until,
+                                    str(head[0]),
+                                ),
+                            )
+                            row = cursor.fetchone()
                     connection.commit()
                 except Exception:
                     connection.rollback()
@@ -473,7 +503,7 @@ class PostgresFrameRepository:
             ) from exc
         if row is None:
             return None
-        return ClaimedFrame(
+        claim_fields = dict(
             frame_id=UUID(str(row[0])),
             frame_sequence=int(row[1]),
             capture_beat=int(row[2]),
@@ -485,6 +515,27 @@ class PostgresFrameRepository:
             lease_until=row[8],
             created_at=row[9],
         )
+        if terminalization:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT output_binding.entity_instance_id
+                    FROM t_installed_point_processings AS installed
+                    JOIN t_point_processing_output_bindings AS output_binding
+                      ON output_binding.installed_processing_id=installed.id
+                    WHERE installed.current=TRUE
+                      AND installed.configuration_revision <= %s
+                    ORDER BY output_binding.entity_instance_id
+                    """,
+                    (claim_fields["configuration_revision"],),
+                )
+                affected = frozenset(UUID(str(item[0])) for item in cursor.fetchall())
+                connection.commit()
+            return BudgetTerminalizationClaim(
+                **claim_fields,
+                affected_l2=affected,
+            )
+        return ClaimedFrame(**claim_fields)
 
     def load_processing_snapshot(self, claimed: ClaimedFrame) -> ProcessingSnapshot:
         try:
@@ -560,10 +611,16 @@ class PostgresFrameRepository:
                         event_time_basis=str(row[16]),
                         source_order=order,
                     )
+                    effective_quality = TrunkQuality(int(row[10]))
+                    if claimed.capture_beat - int(row[17]) >= 3:
+                        effective_quality = min(
+                            effective_quality,
+                            TrunkQuality.STALE,
+                        )
                     cells[tag_id] = FramedRawObservation(
                         observation=raw,
                         accepted_beat=int(row[17]),
-                        effective_quality=TrunkQuality(int(row[10])),
+                        effective_quality=effective_quality,
                     )
                 legacy_snapshot = self._load_conversion_snapshot(
                     cursor,
@@ -971,6 +1028,275 @@ class PostgresFrameRepository:
             ),
             page_size=len(rows),
         )
+
+    def retry_or_fail(
+        self,
+        claimed: ClaimedFrame,
+        failure: FrameFailure,
+        now: datetime,
+    ) -> TerminalFrame | None:
+        if claimed.attempt_count < 3 and (now - claimed.created_at).total_seconds() < 60:
+            try:
+                with self._connection() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE t_data_frames
+                            SET status='PENDING',processing_owner=NULL,
+                                processing_token=NULL,lease_until=NULL,
+                                finished_at=NULL,failure_code=NULL
+                            WHERE frame_id=%s AND status='PROCESSING'
+                              AND processing_owner=%s AND processing_token=%s
+                              AND attempt_count=%s AND lease_until > %s
+                            """,
+                            (
+                                str(claimed.frame_id),
+                                str(claimed.processing_owner),
+                                str(claimed.processing_token),
+                                claimed.attempt_count,
+                                now,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CLAIM_LOST",
+                                "DATA_FRAME_CLAIM_LOST",
+                            )
+                    connection.commit()
+            except DataTrunkError:
+                raise
+            except Exception as exc:
+                raise DataTrunkError(
+                    "DATA_FRAME_RETRY_FAILED",
+                    "DATA_FRAME_RETRY_FAILED",
+                ) from exc
+            return None
+        return self._fail_claim(claimed, failure, now)
+
+    def fail_budget(
+        self,
+        claimed: BudgetTerminalizationClaim,
+        now: datetime,
+    ) -> TerminalFrame:
+        return self._fail_claim(
+            claimed,
+            FrameFailure(
+                "FRAME_PROCESSING_FAILED",
+                claimed.affected_l2,
+            ),
+            now,
+        )
+
+    def _fail_claim(
+        self,
+        claimed: ClaimedFrame | BudgetTerminalizationClaim,
+        failure: FrameFailure,
+        now: datetime,
+    ) -> TerminalFrame:
+        snapshot = self.load_processing_snapshot(claimed)
+        try:
+            with self._connection() as connection:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT candidate_digest FROM t_data_frames
+                            WHERE frame_id=%s AND status='PROCESSING'
+                              AND processing_owner=%s AND processing_token=%s
+                              AND attempt_count=%s AND lease_until > %s
+                            FOR UPDATE
+                            """,
+                            (
+                                str(claimed.frame_id),
+                                str(claimed.processing_owner),
+                                str(claimed.processing_token),
+                                claimed.attempt_count,
+                                now,
+                            ),
+                        )
+                        frame_row = cursor.fetchone()
+                        if frame_row is None:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CLAIM_LOST",
+                                "DATA_FRAME_CLAIM_LOST",
+                            )
+                        candidate_digest = str(frame_row[0]).strip()
+                        self._advance_frame_l0_latest(
+                            cursor,
+                            claimed.frame_sequence,
+                            tuple(snapshot.l0_by_tag.values()),
+                        )
+                        stale_outputs = self._failure_stale_outputs(
+                            cursor,
+                            claimed,
+                            failure.failed_entity_ids,
+                            now,
+                        )
+                        self._ensure_runtime(cursor)
+                        self._insert_frame_l2(cursor, stale_outputs)
+                        self._advance_frame_l2_latest(cursor, stale_outputs)
+                        self._insert_sources(cursor, stale_outputs)
+                        failure_id = uuid5(
+                            NAMESPACE_URL,
+                            f"zizu:data-frame-failure:{claimed.frame_id}",
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO t_ingestion_failures
+                              (id,source_digest,stage,safe_summary,attempts,frame_id)
+                            VALUES(%s,%s,'frame',%s,%s,%s)
+                            ON CONFLICT (frame_id) WHERE frame_id IS NOT NULL
+                            DO NOTHING
+                            """,
+                            (
+                                str(failure_id),
+                                candidate_digest,
+                                Json(
+                                    {
+                                        "code": failure.code,
+                                        "configurationRevision": (
+                                            claimed.configuration_revision
+                                        ),
+                                        "frameSequence": claimed.frame_sequence,
+                                        "affectedEntityIds": sorted(
+                                            map(str, failure.failed_entity_ids)
+                                        ),
+                                    }
+                                ),
+                                claimed.attempt_count,
+                                str(claimed.frame_id),
+                            ),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO t_data_frame_outbox
+                              (frame_id,frame_sequence,terminal_status)
+                            VALUES(%s,%s,'FAILED')
+                            """,
+                            (str(claimed.frame_id), claimed.frame_sequence),
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE t_data_frames
+                            SET status='FAILED',failure_code=%s,
+                                processing_owner=NULL,processing_token=NULL,
+                                lease_until=NULL,finished_at=%s
+                            WHERE frame_id=%s AND processing_owner=%s
+                              AND processing_token=%s AND attempt_count=%s
+                            """,
+                            (
+                                failure.code,
+                                now,
+                                str(claimed.frame_id),
+                                str(claimed.processing_owner),
+                                str(claimed.processing_token),
+                                claimed.attempt_count,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise DataTrunkError(
+                                "DATA_FRAME_CLAIM_LOST",
+                                "DATA_FRAME_CLAIM_LOST",
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        except DataTrunkError:
+            raise
+        except Exception as exc:
+            raise DataTrunkError(
+                "DATA_FRAME_FAIL_FAILED",
+                "DATA_FRAME_FAIL_FAILED",
+            ) from exc
+        return TerminalFrame(
+            frame_id=claimed.frame_id,
+            frame_sequence=claimed.frame_sequence,
+            configuration_revision=claimed.configuration_revision,
+            status=FrameStatus.FAILED,
+            finished_at=now,
+        )
+
+    @staticmethod
+    def _failure_stale_outputs(
+        cursor,
+        claimed: ClaimedFrame | BudgetTerminalizationClaim,
+        affected_ids: frozenset[UUID],
+        now: datetime,
+    ) -> tuple[L2Observation, ...]:
+        if not affected_ids:
+            return ()
+        cursor.execute(
+            """
+            SELECT output_binding.entity_instance_id,
+                   output.entity_definition_id,output.data_type,output.unit,
+                   installed.revision_id,
+                   latest.event_id,latest.observed_at,latest.received_at,
+                   latest.calculated_at,latest.value_float,latest.value_int,
+                   latest.value_numeric,latest.value_bool,latest.value_text,
+                   latest.value_codes,latest.source_digest
+            FROM t_point_processing_output_bindings AS output_binding
+            JOIN t_installed_point_processings AS installed
+              ON installed.id=output_binding.installed_processing_id
+            JOIN t_point_processing_outputs AS output
+              ON output.id=output_binding.output_id
+            LEFT JOIN t_l2_latest AS latest
+              ON latest.entity_instance_id=output_binding.entity_instance_id
+            WHERE installed.current=TRUE
+              AND installed.configuration_revision <= %s
+              AND output_binding.entity_instance_id=ANY(%s::uuid[])
+            ORDER BY output_binding.entity_instance_id
+            """,
+            (
+                claimed.configuration_revision,
+                [str(item) for item in sorted(affected_ids, key=str)],
+            ),
+        )
+        outputs: list[L2Observation] = []
+        for row in cursor.fetchall():
+            entity_id = UUID(str(row[0]))
+            has_baseline = row[5] is not None
+            value = (
+                _l2_value_from_columns(
+                    str(row[2]), row[9], row[10], row[11], row[12], row[13], row[14]
+                )
+                if has_baseline
+                else TypedValue(ValueKind(str(row[2])), None)
+            )
+            source_ids = (UUID(str(row[5])),) if has_baseline else ()
+            digest = hashlib.sha256(
+                f"{claimed.frame_id}:{entity_id}:{row[15] or ''}".encode()
+            ).hexdigest()
+            outputs.append(
+                L2Observation(
+                    event_id=uuid5(
+                        NAMESPACE_URL,
+                        f"zizu:failed-frame-l2:{claimed.frame_id}:{entity_id}",
+                    ),
+                    entity_instance_id=entity_id,
+                    definition_id=str(row[1]),
+                    value=value,
+                    unit=row[3],
+                    quality=TrunkQuality.STALE,
+                    reason=(
+                        "FRAME_PROCESSING_FAILED"
+                        if has_baseline
+                        else "FRAME_PROCESSING_FAILED_NO_BASELINE"
+                    ),
+                    observed_at=now,
+                    received_at=now,
+                    calculated_at=now,
+                    processing_revision_id=UUID(str(row[4])),
+                    configuration_revision=claimed.configuration_revision,
+                    source_observation_ids=source_ids,
+                    source_digest=digest,
+                    source_order_key=f"FRAME:{claimed.frame_sequence}:{digest}",
+                    event_time_basis="calculated_at",
+                    frame_id=claimed.frame_id,
+                    frame_sequence=claimed.frame_sequence,
+                )
+            )
+        return tuple(outputs)
 
     @staticmethod
     def _same_candidate(row, candidate: FrozenFrameCandidate) -> bool:
@@ -2895,6 +3221,34 @@ def _l2_columns(
         "POINT_PROCESSING_VALUE_INVALID",
         "Unsupported L2 typed value",
     )
+
+
+def _l2_value_from_columns(
+    data_type: str,
+    value_float,
+    value_int,
+    value_numeric,
+    value_bool,
+    value_text,
+    value_codes,
+) -> TypedValue:
+    kind = ValueKind(data_type)
+    if kind is ValueKind.FLOAT:
+        value = value_numeric if value_numeric is not None else value_float
+    elif kind is ValueKind.INT:
+        value = value_numeric if value_numeric is not None else value_int
+    elif kind is ValueKind.BOOL:
+        value = value_bool
+    elif kind in {ValueKind.STRING, ValueKind.ENUM}:
+        value = value_text
+    else:
+        value = None if value_codes is None else tuple(value_codes)
+    if value is None:
+        raise DataTrunkError(
+            "DATA_FRAME_FAILURE_BASELINE_INVALID",
+            "DATA_FRAME_FAILURE_BASELINE_INVALID",
+        )
+    return TypedValue(kind, value)
 
 
 def _normalized_l2_columns(values: tuple[object, ...]) -> tuple[object, ...]:

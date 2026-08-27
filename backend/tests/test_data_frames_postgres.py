@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import os
@@ -14,8 +15,10 @@ import psycopg2
 
 from app.services.data_trunk_contracts import (
     DataTrunkError,
+    FrameFailure,
     FramedRawObservation,
     FrozenFrameCandidate,
+    InputReference,
     RawObservation,
     SourceOrder,
     TrunkQuality,
@@ -363,6 +366,94 @@ class DataFramesPostgresTest(unittest.TestCase):
             )
             self.assertEqual((0,), cursor.fetchone())
 
+    def test_expired_processing_lease_is_reclaimed_and_old_token_is_fenced(self) -> None:
+        self.repository.commit_pending(self._candidate(capture_beat=109))
+        first = self.repository.claim_next(NOW)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "UPDATE t_data_frames SET lease_until=clock_timestamp()-interval '1 second' "
+                "WHERE frame_id=%s",
+                (str(first.frame_id),),
+            )
+            cursor.execute("SET session_replication_role=origin")
+        other = PostgresFrameRepository(connection_factory=self._connection_factory())
+        second = other.claim_next(datetime.now(UTC))
+        self.assertEqual(first.frame_id, second.frame_id)
+        self.assertEqual(2, second.attempt_count)
+        self.assertNotEqual(first.processing_token, second.processing_token)
+        with self.assertRaisesRegex(DataTrunkError, "DATA_FRAME_CLAIM_LOST"):
+            self.repository.complete(
+                first,
+                self.repository.load_processing_snapshot(first),
+                (),
+            )
+
+    def test_retry_clears_claim_and_third_failure_is_durable(self) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=110))
+        failure = FrameFailure("FRAME_PROCESSING_FAILED", frozenset())
+        for expected_attempt in (1, 2):
+            claimed = self.repository.claim_next(datetime.now(UTC))
+            self.assertEqual(expected_attempt, claimed.attempt_count)
+            self.assertIsNone(
+                self.repository.retry_or_fail(claimed, failure, datetime.now(UTC))
+            )
+        third = self.repository.claim_next(datetime.now(UTC))
+        terminal = self.repository.retry_or_fail(
+            third, failure, datetime.now(UTC)
+        )
+        self.assertEqual("FAILED", terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,attempt_count,processing_owner,processing_token,lease_until "
+                "FROM t_data_frames WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            self.assertEqual(("FAILED", 3, None, None, None), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_ingestion_failures WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            self.assertEqual((1,), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_data_frame_outbox WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            self.assertEqual((1,), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_telemetry WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            self.assertEqual((1,), cursor.fetchone())
+
+    def test_old_pending_head_is_terminalized_before_next_frame(self) -> None:
+        old_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO t_data_frames
+                  (frame_id,candidate_digest,capture_beat,shot_at,
+                   configuration_revision,status,attempt_count,created_at)
+                VALUES(%s,%s,120,%s,0,'PENDING',1,%s)
+                """,
+                (
+                    str(old_id),
+                    "e" * 64,
+                    NOW,
+                    datetime.now(UTC) - timedelta(seconds=61),
+                ),
+            )
+        next_pending = self.repository.commit_pending(
+            self._candidate(capture_beat=121)
+        )
+        budget = self.repository.claim_next(datetime.now(UTC))
+        self.assertEqual(old_id, budget.frame_id)
+        self.assertEqual(1, budget.attempt_count)
+        terminal = self.repository.fail_budget(budget, datetime.now(UTC))
+        self.assertEqual("FAILED", terminal.status.value)
+        next_claim = self.repository.claim_next(datetime.now(UTC))
+        self.assertEqual(next_pending.frame_id, next_claim.frame_id)
+
     def test_z_transaction_b_persists_every_installed_l1_output_once(self) -> None:
         reference_root = (
             Path(__file__).resolve().parents[2]
@@ -467,8 +558,42 @@ class DataFramesPostgresTest(unittest.TestCase):
         finally:
             close_db_pool()
 
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT output_binding.entity_instance_id "
+                "FROM t_point_processing_output_bindings AS output_binding "
+                "JOIN t_installed_point_processings AS installed "
+                "ON installed.id=output_binding.installed_processing_id "
+                "WHERE installed.current=TRUE ORDER BY 1"
+            )
+            affected = frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+        first_failed = self.repository.commit_pending(
+            self._multi_candidate(
+                capture_beat=108,
+                configuration_revision=applied.configuration_revision,
+                tag_specs=tag_specs,
+            )
+        )
+        failure = FrameFailure("FRAME_PROCESSING_FAILED", affected)
+        for _ in range(2):
+            claim = self.repository.claim_next(datetime.now(UTC))
+            self.repository.retry_or_fail(claim, failure, datetime.now(UTC))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        failed_terminal = self.repository.retry_or_fail(
+            claim, failure, datetime.now(UTC)
+        )
+        self.assertEqual("FAILED", failed_terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER (WHERE "
+                "num_nonnulls(value_float,value_int,value_numeric,value_bool,value_text,value_codes)=0) "
+                "FROM t_l2_observations WHERE frame_id=%s AND quality=1",
+                (str(first_failed.frame_id),),
+            )
+            self.assertEqual((4, 4), cursor.fetchone())
+
         candidate = self._multi_candidate(
-            capture_beat=108,
+            capture_beat=111,
             configuration_revision=applied.configuration_revision,
             tag_specs=tag_specs,
         )
@@ -496,6 +621,76 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (str(pending.frame_id),),
             )
             self.assertEqual((1,), cursor.fetchone())
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_telemetry")
+            history_before_stale = cursor.fetchone()[0]
+        stale_candidate = replace(
+            candidate,
+            frame_id=uuid4(),
+            candidate_digest=hashlib.sha256(b"pure-stale-frame").hexdigest(),
+            generation=114,
+            capture_beat=114,
+            changed_l0=(),
+        )
+        stale_pending = self.repository.commit_pending(stale_candidate)
+        stale_claim = self.repository.claim_next(datetime.now(UTC))
+        stale_snapshot = self.repository.load_processing_snapshot(stale_claim)
+        self.assertTrue(
+            all(
+                cell.effective_quality is TrunkQuality.STALE
+                for cell in stale_snapshot.l0_by_tag.values()
+            )
+        )
+        # The frame is already claimed for snapshot evidence; commit that exact claim.
+        stale_outputs = []
+        current_inputs = stale_snapshot.current_inputs()
+        for entity_id in stale_snapshot.topological_output_ids:
+            installed = stale_snapshot.installed_by_entity_id[entity_id]
+            output = evaluate_processing(
+                installed=(installed,),
+                current_inputs=current_inputs,
+                configuration_revision=stale_claim.configuration_revision,
+                calculated_at=datetime.now(UTC),
+                frame_id=stale_claim.frame_id,
+                frame_sequence=stale_claim.frame_sequence,
+            )[0]
+            stale_outputs.append(output)
+            current_inputs[InputReference.l2(entity_id)] = output
+        stale_terminal = self.repository.complete(
+            stale_claim, stale_snapshot, tuple(stale_outputs)
+        )
+        self.assertEqual(stale_pending.frame_id, stale_terminal.frame_id)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_telemetry")
+            self.assertEqual(history_before_stale, cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT count(*) FROM t_telemetry_latest "
+                "WHERE frame_sequence=%s AND quality=1",
+                (stale_pending.frame_sequence,),
+            )
+            self.assertEqual((3,), cursor.fetchone())
+
+        preserved_failure = self.repository.commit_pending(
+            self._multi_candidate(
+                capture_beat=115,
+                configuration_revision=applied.configuration_revision,
+                tag_specs=tag_specs,
+            )
+        )
+        for _ in range(2):
+            claim = self.repository.claim_next(datetime.now(UTC))
+            self.repository.retry_or_fail(claim, failure, datetime.now(UTC))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        self.repository.retry_or_fail(claim, failure, datetime.now(UTC))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER (WHERE "
+                "num_nonnulls(value_float,value_int,value_numeric,value_bool,value_text,value_codes)=1) "
+                "FROM t_l2_observations WHERE frame_id=%s AND quality=1",
+                (str(preserved_failure.frame_id),),
+            )
+            self.assertEqual((4, 4), cursor.fetchone())
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from app.services.data_trunk_contracts import (
     TrunkQuality,
     TypedValue,
 )
-from app.services.frame_processor import FrameProcessor
+from app.services.frame_processor import FrameProcessor, downstream_closure
 
 
 NOW = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
@@ -65,6 +65,7 @@ class _Repository:
             dependency_edges=((FIRST_ENTITY, SECOND_ENTITY),),
         )
         self.outputs: tuple[L2Observation, ...] = ()
+        self.failure = None
 
     def claim_next(self, now: datetime) -> ClaimedFrame | None:
         return self.claimed
@@ -82,8 +83,22 @@ class _Repository:
             finished_at=NOW,
         )
 
+    def retry_or_fail(self, claimed, failure, now):
+        self.failure = failure
+        return None
+
 
 class FrameProcessorTest(unittest.TestCase):
+    def test_downstream_closure_includes_transitive_dependents(self) -> None:
+        third = UUID("00000000-0000-0000-0000-000000000103")
+        self.assertEqual(
+            frozenset({FIRST_ENTITY, SECOND_ENTITY, third}),
+            downstream_closure(
+                frozenset({FIRST_ENTITY}),
+                ((FIRST_ENTITY, SECOND_ENTITY), (SECOND_ENTITY, third)),
+            ),
+        )
+
     def test_evaluates_each_active_output_once_in_dag_order(self) -> None:
         repository = _Repository()
         evaluated: list[UUID] = []
@@ -137,6 +152,24 @@ class FrameProcessorTest(unittest.TestCase):
             clock=lambda: NOW,
         )
         self.assertIsNone(processor.process_next())
+
+    def test_evaluation_failure_targets_transitive_downstream_for_retry(self) -> None:
+        repository = _Repository()
+
+        def fail(**_kwargs):
+            raise RuntimeError("formula failed")
+
+        result = FrameProcessor(
+            repository,
+            evaluator=fail,
+            clock=lambda: NOW,
+        ).process_next(NOW)
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            frozenset({FIRST_ENTITY, SECOND_ENTITY}),
+            repository.failure.failed_entity_ids,
+        )
 
 
 if __name__ == "__main__":

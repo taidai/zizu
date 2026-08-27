@@ -214,6 +214,27 @@ class ClaimedFrame:
 
 
 @dataclass(frozen=True)
+class BudgetTerminalizationClaim:
+    frame_id: UUID
+    frame_sequence: int
+    capture_beat: int
+    shot_at: datetime
+    configuration_revision: int
+    attempt_count: int
+    processing_owner: UUID
+    processing_token: UUID
+    lease_until: datetime
+    created_at: datetime
+    affected_l2: frozenset[UUID]
+
+
+@dataclass(frozen=True)
+class FrameFailure:
+    code: str
+    failed_entity_ids: frozenset[UUID]
+
+
+@dataclass(frozen=True)
 class BlackboardRecovery:
     capture_beat: int
     configuration_revision: int

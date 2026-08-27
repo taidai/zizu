@@ -243,7 +243,11 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
   IF OLD.status = 'PENDING' AND NEW.status = 'PROCESSING'
-     AND NEW.attempt_count = OLD.attempt_count + 1 THEN
+     AND (
+       NEW.attempt_count = OLD.attempt_count + 1
+       OR (clock_timestamp() - OLD.created_at >= interval '60 seconds'
+           AND NEW.attempt_count = OLD.attempt_count)
+     ) THEN
     RETURN NEW;
   END IF;
   IF OLD.status = 'PROCESSING' AND NEW.status = 'PENDING'
@@ -256,8 +260,17 @@ BEGIN
   IF OLD.status = 'PROCESSING' AND NEW.status = 'PROCESSING'
      AND OLD.lease_until <= clock_timestamp()
      AND NEW.processing_token IS DISTINCT FROM OLD.processing_token
-     AND NEW.attempt_count = OLD.attempt_count + 1 THEN
+     AND (
+       NEW.attempt_count = OLD.attempt_count + 1
+       OR (OLD.attempt_count >= 3
+           AND NEW.attempt_count = OLD.attempt_count)
+     ) THEN
     RETURN NEW;
+  END IF;
+  IF OLD.status = 'PROCESSING' AND NEW.status = 'PROCESSING'
+     AND NEW.processing_token IS NOT DISTINCT FROM OLD.processing_token THEN
+    RAISE EXCEPTION 'DATA_FRAME_LEASE_RENEWAL_FORBIDDEN: fixed lease cannot renew'
+      USING ERRCODE = '55000';
   END IF;
   IF OLD.status = 'PROCESSING' AND NEW.status IN ('COMPLETE','FAILED')
      AND NEW.attempt_count = OLD.attempt_count THEN
@@ -392,10 +405,10 @@ BEGIN
   IF NEW.quality <> 1 OR value_count <> 0 THEN
     RETURN NULL;
   END IF;
-  sequence_value := CASE
-    WHEN TG_TABLE_NAME = 't_l2_observations' THEN NEW.commit_sequence
-    ELSE NEW.frame_sequence
-  END;
+  sequence_value := COALESCE(
+    (to_jsonb(NEW)->>'commit_sequence')::bigint,
+    (to_jsonb(NEW)->>'frame_sequence')::bigint
+  );
   SELECT count(*) INTO failed_frame_count
   FROM public.t_data_frames
   WHERE frame_sequence = sequence_value AND status = 'FAILED';
