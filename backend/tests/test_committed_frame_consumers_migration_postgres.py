@@ -59,35 +59,40 @@ class CommittedFrameConsumersMigrationPostgresTest(unittest.TestCase):
             cursor.execute(MIGRATION_049.read_text(encoding="utf-8"))
             connection.commit()
             cursor.execute(
+                "SELECT current_revision FROM t_configuration_state "
+                "WHERE singleton=TRUE"
+            )
+            configuration_revision = int(cursor.fetchone()[0])
+            cursor.execute(
                 "INSERT INTO t_data_frames"
                 "(frame_id,candidate_digest,capture_beat,shot_at,configuration_revision,"
                 " status,attempt_count,finished_at) "
-                "VALUES(%s,%s,1,clock_timestamp(),7,'COMPLETE',1,clock_timestamp()) "
+                "VALUES(%s,%s,1,clock_timestamp(),%s,'COMPLETE',1,clock_timestamp()) "
                 "RETURNING frame_id,frame_sequence",
-                (str(uuid4()), "a" * 64),
+                (str(uuid4()), "a" * 64, configuration_revision),
             )
             frame_id, sequence = cursor.fetchone()
             cursor.execute(
                 "INSERT INTO t_committed_frame_consumers"
                 "(consumer_key,frame_id,frame_sequence,configuration_revision) "
-                "VALUES('alarm',%s,%s,7)",
-                (frame_id, sequence),
+                "VALUES('alarm',%s,%s,%s)",
+                (frame_id, sequence, configuration_revision),
             )
             cursor.execute(
                 "INSERT INTO t_data_frames"
                 "(frame_id,candidate_digest,capture_beat,shot_at,configuration_revision,"
                 " status,attempt_count,finished_at) "
-                "VALUES(%s,%s,2,clock_timestamp(),7,'COMPLETE',1,clock_timestamp()) "
+                "VALUES(%s,%s,2,clock_timestamp(),%s,'COMPLETE',1,clock_timestamp()) "
                 "RETURNING frame_id",
-                (str(uuid4()), "b" * 64),
+                (str(uuid4()), "b" * 64, configuration_revision),
             )
             other_frame_id = cursor.fetchone()[0]
             with self.assertRaises(psycopg2.errors.UniqueViolation):
                 cursor.execute(
                     "INSERT INTO t_committed_frame_consumers"
                     "(consumer_key,frame_id,frame_sequence,configuration_revision) "
-                    "VALUES('alarm',%s,%s,7)",
-                    (other_frame_id, sequence),
+                    "VALUES('alarm',%s,%s,%s)",
+                    (other_frame_id, sequence, configuration_revision),
                 )
 
 
