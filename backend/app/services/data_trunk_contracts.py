@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, IntEnum
 import math
@@ -26,6 +26,87 @@ class ValueKind(str, Enum):
     STRING = "STRING"
     ENUM = "ENUM"
     CODE_SET = "CODE_SET"
+
+
+class SourceOrderMode(str, Enum):
+    SEQUENCE = "sequence"
+    OBSERVED_AT = "observed_at"
+    RECEIVED_AT = "received_at"
+
+
+def _utc_epoch_microseconds(value: datetime) -> int:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("source order timestamp must be timezone-aware")
+    normalized = value.astimezone(UTC)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = normalized - epoch
+    return (
+        delta.days * 86_400_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+
+
+@dataclass(frozen=True)
+class SourceOrder:
+    mode: SourceOrderMode
+    primary: int
+    secondary: int
+    tie_breaker: str
+
+    @classmethod
+    def sequence(cls, value: int) -> "SourceOrder":
+        return cls(SourceOrderMode.SEQUENCE, value, 0, "")
+
+    @classmethod
+    def observed_at(
+        cls,
+        value: datetime,
+        receive_ordinal: int,
+        tie_breaker: str = "",
+    ) -> "SourceOrder":
+        return cls(
+            SourceOrderMode.OBSERVED_AT,
+            _utc_epoch_microseconds(value),
+            receive_ordinal,
+            tie_breaker,
+        )
+
+    @classmethod
+    def received_at(
+        cls,
+        value: datetime,
+        receive_ordinal: int,
+        tie_breaker: str = "",
+    ) -> "SourceOrder":
+        return cls(
+            SourceOrderMode.RECEIVED_AT,
+            _utc_epoch_microseconds(value),
+            receive_ordinal,
+            tie_breaker,
+        )
+
+    def __post_init__(self) -> None:
+        if self.secondary < 0:
+            raise ValueError("source receive ordinal must not be negative")
+        if self.mode is SourceOrderMode.SEQUENCE and (
+            self.secondary != 0 or self.tie_breaker
+        ):
+            raise ValueError("sequence source order cannot carry a tie breaker")
+
+    def is_after(self, previous: "SourceOrder") -> bool:
+        if self.mode is not previous.mode:
+            raise DataTrunkError(
+                "DATA_FRAME_SOURCE_ORDER_MODE_MISMATCH",
+                "DATA_FRAME_SOURCE_ORDER_MODE_MISMATCH",
+            )
+        if self.mode is SourceOrderMode.SEQUENCE:
+            return self.primary > previous.primary
+        return (self.primary, self.secondary, self.tie_breaker) > (
+            previous.primary,
+            previous.secondary,
+            previous.tie_breaker,
+        )
 
 
 @dataclass(frozen=True)
@@ -70,10 +151,41 @@ class RawObservation:
     source_sequence: int | None
     source_digest: str
     event_time_basis: str
+    source_order: SourceOrder | None = None
 
     def __post_init__(self) -> None:
         if self.event_time_basis not in {"unknown", "observed_at", "received_at"}:
             raise ValueError("raw observation event time basis is invalid")
+
+
+class BlackboardState(str, Enum):
+    WARMING = "WARMING"
+    READY = "READY"
+
+
+@dataclass(frozen=True)
+class FramedRawObservation:
+    observation: RawObservation
+    accepted_beat: int
+    effective_quality: TrunkQuality
+
+
+@dataclass(frozen=True)
+class FrozenFrameCandidate:
+    frame_id: UUID
+    candidate_digest: str
+    generation: int
+    capture_beat: int
+    shot_at: datetime
+    configuration_revision: int
+    cells: Mapping[UUID, FramedRawObservation]
+    changed_l0: tuple[FramedRawObservation, ...]
+
+
+@dataclass(frozen=True)
+class AcceptReceipt:
+    accepted_count: int
+    dropped_count: int
 
 
 @dataclass(frozen=True)
