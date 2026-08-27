@@ -9,6 +9,7 @@ from app.services.alarm_configuration import (
     AlarmRule,
     AlarmRuleSetRevision,
     EntitySelection,
+    ApplyAlarmConfigurationPlan,
     PlanAlarmConfiguration,
     ResolvedAlarmEntity,
     canonical_digest,
@@ -29,6 +30,7 @@ class _Repository:
             uuid4(), "pcs-power", "PCS 功率", 1, (rule,), canonical_digest(rule)
         )
         self.saved = None
+        self.applied = object()
 
     def get_rule_set_revision(self, rule_set_id, revision):
         return self.rule_set if (rule_set_id, revision) == (self.rule_set.rule_set_id, 1) else None
@@ -49,6 +51,26 @@ class _Repository:
     def save_plan(self, plan):
         self.saved = plan
         return plan
+
+    def get_plan(self, plan_id):
+        return self.saved if self.saved is not None and self.saved.id == plan_id else None
+
+    def apply_plan(self, plan, *, idempotency_key, actor):
+        return self.applied
+
+
+class _RuntimeGate:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def begin_configuration_publish(self, revision):
+        self.calls.append(("begin", revision))
+
+    def cancel_configuration_publish(self):
+        self.calls.append(("cancel",))
+
+    def reconcile_configuration_runtime(self):
+        self.calls.append(("reconcile",))
 
 
 class AlarmConfigurationL2Test(unittest.TestCase):
@@ -77,6 +99,29 @@ class AlarmConfigurationL2Test(unittest.TestCase):
                     "operator:test",
                 )
             )
+
+    def test_apply_drains_old_frames_then_reconciles_new_revision(self) -> None:
+        repository = _Repository()
+        plan = AlarmConfiguration(repository).plan(
+            PlanAlarmConfiguration(
+                EntitySelection(node_ids=(repository.node_id,)),
+                repository.rule_set.rule_set_id,
+                1,
+                "operator:test",
+            )
+        )
+        gate = _RuntimeGate()
+        result = AlarmConfiguration(repository, runtime_gate=gate).apply(
+            ApplyAlarmConfigurationPlan(
+                plan.id,
+                plan.digest,
+                "alarm-apply-1",
+                "operator:test",
+            )
+        )
+
+        self.assertIs(repository.applied, result)
+        self.assertEqual([("begin", 7), ("reconcile",)], gate.calls)
 
 
 if __name__ == "__main__":

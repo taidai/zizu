@@ -34,8 +34,10 @@ _configuration: AlarmConfiguration | None = None
 def get_alarm_configuration() -> AlarmConfiguration:
     global _configuration
     if _configuration is None:
-        from app.services.alarm_configuration_postgres import PostgresAlarmConfigurationRepository
-        _configuration = AlarmConfiguration(PostgresAlarmConfigurationRepository())
+        from app.services.alarm_configuration_postgres import (
+            build_postgres_alarm_configuration,
+        )
+        _configuration = build_postgres_alarm_configuration()
     return _configuration
 
 

@@ -13,6 +13,8 @@ import math
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
+from app.services.data_trunk_contracts import DataTrunkError
+
 
 Severity = Literal["CRITICAL", "MAJOR", "WARNING", "INFO"]
 
@@ -186,8 +188,14 @@ def validate_rules(rules: tuple[AlarmRule, ...]) -> None:
 
 
 class AlarmConfiguration:
-    def __init__(self, repository: AlarmConfigurationRepository) -> None:
+    def __init__(
+        self,
+        repository: AlarmConfigurationRepository,
+        *,
+        runtime_gate: Any | None = None,
+    ) -> None:
         self.repository = repository
+        self._runtime_gate = runtime_gate
 
     def create_rule_set(self, *, key: str, name: str, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision:
         validate_rules(rules)
@@ -255,7 +263,32 @@ class AlarmConfiguration:
             raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
         if plan.status == "blocked":
             raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
-        return self.repository.apply_plan(plan, idempotency_key=command.idempotency_key, actor=command.actor)
+        if self._runtime_gate is None:
+            return self.repository.apply_plan(
+                plan,
+                idempotency_key=command.idempotency_key,
+                actor=command.actor,
+            )
+        try:
+            self._runtime_gate.begin_configuration_publish(
+                plan.base_configuration_revision
+            )
+        except DataTrunkError as exc:
+            raise AlarmConfigurationError(exc.code) from exc
+        try:
+            result = self.repository.apply_plan(
+                plan,
+                idempotency_key=command.idempotency_key,
+                actor=command.actor,
+            )
+        except Exception:
+            self._runtime_gate.cancel_configuration_publish()
+            raise
+        try:
+            self._runtime_gate.reconcile_configuration_runtime()
+        except DataTrunkError as exc:
+            raise AlarmConfigurationError(exc.code) from exc
+        return result
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

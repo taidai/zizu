@@ -166,14 +166,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runtime = _pipeline.data_trunk
     from app.api.committed_frames import get_committed_frame_stream
     from app.services.data_trunk_outbox import (
+        CommittedFrameFanout,
         FrameOutboxDispatcher,
         PostgresFrameOutboxRepository,
     )
+    from app.services.committed_l2_alarm_consumer import (
+        build_postgres_committed_l2_alarm_consumer,
+    )
 
     committed_frame_stream = get_committed_frame_stream()
+    committed_frame_fanout = CommittedFrameFanout(
+        (
+            build_postgres_committed_l2_alarm_consumer(),
+            committed_frame_stream,
+        )
+    )
     frame_outbox_dispatcher = FrameOutboxDispatcher(
         PostgresFrameOutboxRepository(),
-        committed_frame_stream,
+        committed_frame_fanout,
     )
     runtime.configuration_gate.register_committed_frame_consumer()
 

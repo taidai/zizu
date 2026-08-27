@@ -12,6 +12,7 @@ import psycopg2
 from psycopg2.extras import Json, register_uuid
 
 from app.services.alarm_configuration import (
+    AlarmConfiguration,
     AlarmConfigurationError,
     AlarmConfigurationPlan,
     AlarmConfigurationPlanItem,
@@ -334,4 +335,25 @@ def load_latest_applied_alarm_configuration(connection: Any) -> AppliedAlarmConf
     return None if row is None else load_applied_alarm_configuration(connection, row[0])
 
 
-__all__ = ["PostgresAlarmConfigurationRepository", "load_applied_alarm_configuration", "load_latest_applied_alarm_configuration"]
+def build_postgres_alarm_configuration() -> AlarmConfiguration:
+    runtime_gate = None
+    try:
+        from app.main import get_pipeline
+
+        pipeline = get_pipeline()
+        if pipeline is not None:
+            runtime_gate = pipeline.data_trunk.configuration_gate
+    except (ImportError, RuntimeError):
+        runtime_gate = None
+    return AlarmConfiguration(
+        PostgresAlarmConfigurationRepository(),
+        runtime_gate=runtime_gate,
+    )
+
+
+__all__ = [
+    "PostgresAlarmConfigurationRepository",
+    "build_postgres_alarm_configuration",
+    "load_applied_alarm_configuration",
+    "load_latest_applied_alarm_configuration",
+]
