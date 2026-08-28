@@ -98,6 +98,14 @@ class ApplyPlanRequest(BaseModel):
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
 
 
+class TrialAlarmRuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entity_instance_id: UUID
+    rule: AlarmRuleRequest
+    value: Any
+    quality: int = Field(ge=0, le=255)
+
+
 def _rule(rule: AlarmRule) -> dict[str, Any]:
     return {"id": rule.id, "name": rule.name, "severity": rule.severity, "trigger": dict(rule.trigger), "trigger_duration_seconds": rule.trigger_duration_seconds, "recovery": dict(rule.recovery), "recovery_duration_seconds": rule.recovery_duration_seconds, "notification_throttle_seconds": rule.notification_throttle_seconds, "unit": rule.unit, "fault_map_id": str(rule.fault_map_id) if rule.fault_map_id else None}
 
@@ -133,6 +141,25 @@ async def current_alarm_configuration(configuration: AlarmConfiguration = Depend
     except AlarmConfigurationError as error:
         raise _error(error) from error
     return {"configuration_revision": context["configuration_revision"], "definitions": [{key: value for key, value in record.items() if key not in {"id", "payload"}} for _, record in sorted(context["definitions"].items())]}
+
+
+@router.post("/alarm-configurations/trials", **protected(CONFIGURATION_READ))
+async def trial_alarm_rule(body: TrialAlarmRuleRequest, configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
+    try:
+        result = configuration.trial(
+            entity_instance_id=body.entity_instance_id,
+            rule=body.rule.domain(),
+            value=body.value,
+            quality=body.quality,
+        )
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
+    return {
+        "entity_instance_id": str(result.entity_instance_id),
+        "trigger_matches": result.trigger_matches,
+        "recovery_matches": result.recovery_matches,
+        "description": result.description,
+    }
 
 
 @router.get("/alarm-rule-sets", **protected(CONFIGURATION_READ))

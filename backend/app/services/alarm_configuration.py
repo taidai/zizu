@@ -14,6 +14,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from app.services.data_trunk_contracts import DataTrunkError
+from app.services.alarm_runtime import GOOD_QUALITY, match_alarm_condition
 
 
 Severity = Literal["CRITICAL", "MAJOR", "WARNING", "INFO"]
@@ -55,6 +56,14 @@ class ResolvedAlarmEntity:
     display_name: str
     data_type: str
     unit: str | None
+
+
+@dataclass(frozen=True)
+class AlarmRuleTrial:
+    entity_instance_id: UUID
+    trigger_matches: bool
+    recovery_matches: bool
+    description: str
 
 
 @dataclass(frozen=True)
@@ -213,6 +222,41 @@ class AlarmConfiguration:
 
     def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
         return self.repository.list_rule_set_revisions()
+
+    def trial(
+        self,
+        *,
+        entity_instance_id: UUID,
+        rule: AlarmRule,
+        value: Any,
+        quality: int,
+    ) -> AlarmRuleTrial:
+        entities = self.repository.resolve_entities(
+            EntitySelection(entity_instance_ids=(entity_instance_id,))
+        )
+        entity = next((item for item in entities if item.id == entity_instance_id), None)
+        if entity is None:
+            raise AlarmConfigurationError("ALARM_ENTITY_UNRESOLVED")
+        issues = _validate_rule(rule) + _binding_issues(entity, rule)
+        if issues:
+            raise AlarmConfigurationError(issues[0]["code"])
+        if quality != GOOD_QUALITY:
+            return AlarmRuleTrial(
+                entity_instance_id,
+                False,
+                False,
+                f"{rule.name}：质量非 GOOD，不触发也不恢复。",
+            )
+        trigger_matches = match_alarm_condition(rule.trigger, value)
+        recovery_matches = match_alarm_condition(rule.recovery, value)
+        trigger_text = "命中触发条件" if trigger_matches else "未命中触发条件"
+        recovery_text = "命中恢复条件" if recovery_matches else "未命中恢复条件"
+        return AlarmRuleTrial(
+            entity_instance_id,
+            trigger_matches,
+            recovery_matches,
+            f"{rule.name}：当前值{trigger_text}，{recovery_text}。",
+        )
 
     def plan(self, command: PlanAlarmConfiguration) -> AlarmConfigurationPlan:
         if not command.planned_by.strip():
