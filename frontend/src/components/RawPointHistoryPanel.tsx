@@ -3,6 +3,11 @@ import ReactECharts from 'echarts-for-react'
 
 import { fetchTagHistory, fetchTags, type HistoryPoint, type Tag } from '../api/client'
 import { RAW_HISTORY_INITIAL_SELECTION } from './data-trunk/dataTrunkViewModel'
+import {
+  loadPhysicalNumericTags,
+  loadSelectedRawPointHistory,
+  requestResultIsCurrent,
+} from './rawPointHistoryModel'
 
 type RangeOption = '1h' | '24h' | '7d'
 type ViewMode = 'trend' | 'table'
@@ -37,13 +42,14 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
     const generation = ++tagGenerationRef.current
     setError('')
     try {
-      const data = await fetchTags(
-        expectedNodeId, 1, 500, undefined, undefined, 'PHYSICAL',
-        undefined, true, 'sort_order', 'asc',
-      )
-      if (generation !== tagGenerationRef.current
-        || activeNodeIdRef.current !== expectedNodeId) return
-      setTags(data.tags.filter((tag) => tag.data_type === 'FLOAT' || tag.data_type === 'INT'))
+      const items = await loadPhysicalNumericTags(expectedNodeId, fetchTags)
+      if (!requestResultIsCurrent({
+        requestGeneration: generation,
+        currentGeneration: tagGenerationRef.current,
+        expectedNodeId,
+        currentNodeId: activeNodeIdRef.current,
+      })) return
+      setTags(items)
     } catch {
       if (generation === tagGenerationRef.current
         && activeNodeIdRef.current === expectedNodeId) {
@@ -72,10 +78,14 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
     const generation = ++historyGenerationRef.current
     setLoading(true)
     setError('')
-    fetchTagHistory(selectedTagId, range)
-      .then((response) => {
-        if (generation === historyGenerationRef.current
-          && activeNodeIdRef.current === expectedNodeId) setPoints(response.points)
+    loadSelectedRawPointHistory(selectedTagId, range, fetchTagHistory)
+      .then((nextPoints) => {
+        if (requestResultIsCurrent({
+          requestGeneration: generation,
+          currentGeneration: historyGenerationRef.current,
+          expectedNodeId,
+          currentNodeId: activeNodeIdRef.current,
+        })) setPoints(nextPoints)
       })
       .catch(() => {
         if (generation === historyGenerationRef.current

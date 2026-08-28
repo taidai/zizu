@@ -449,6 +449,7 @@ export async function fetchTags(
   if (sortBy) params.set('sort_by', sortBy)
   if (sortOrder) params.set('sort_order', sortOrder)
   const res = await apiFetch(`${API_BASE}/tags?${params}`)
+  if (!res.ok) throw await authError(res, `Tag list fetch failed: ${res.status}`)
   return res.json()
 }
 

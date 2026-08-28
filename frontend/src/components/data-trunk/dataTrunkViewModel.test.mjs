@@ -175,5 +175,8 @@ test('scan templates still allow manual binding and raw history starts idle', as
     { input_id: 'power', source_kind: 'l0', source_contract: { plugin: 'modbus' } },
     { input_id: 'site_power', source_kind: 'l2', selector: { scope: 'descendants' } },
   ]).map((input) => input.input_id), ['power'])
+  assert.deepEqual(model.selectedInputBindings({ power: 'source-1', state: '' }), {
+    power: 'source-1',
+  })
   assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })

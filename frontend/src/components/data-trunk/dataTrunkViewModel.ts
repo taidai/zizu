@@ -119,6 +119,12 @@ export function manualBindableInputs<T extends {
   return inputs.filter((input) => input.source_kind === 'l0' && !input.selector)
 }
 
+export function selectedInputBindings(
+  selections: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(Object.entries(selections).filter(([, sourceId]) => sourceId))
+}
+
 export function entityReasonLabel(reason: string | null, ageMs: number): string | null {
   if (reason === 'FRAME_PROCESSING_FAILED') return '本次点位加工失败，当前值不可用'
   if (reason === 'STALE' || reason === 'ENTITY_DATA_STALE') {

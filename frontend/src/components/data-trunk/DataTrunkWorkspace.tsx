@@ -36,12 +36,14 @@ import {
   DATA_TRUNK_STEPS,
   isCurrentNodeResult,
   recommendPointProcessingTemplate,
+  selectedInputBindings,
 } from './dataTrunkViewModel'
 import {
   applyFrameDelta,
   replaceSnapshot,
   type CommittedFrameProjection,
 } from './committedFrameProjection'
+import { requestResultIsCurrent } from '../rawPointHistoryModel'
 
 export default function DataTrunkWorkspace({
   node,
@@ -104,8 +106,13 @@ export default function DataTrunkWorkspace({
     setError('')
     try {
       const nextTrunk = await loadRuntime(expectedNodeId)
-      if (!nextTrunk || generation !== workspaceGenerationRef.current
-        || activeNodeIdRef.current !== expectedNodeId) return
+      if (!nextTrunk || !requestResultIsCurrent({
+        requestGeneration: generation,
+        currentGeneration: workspaceGenerationRef.current,
+        expectedNodeId,
+        currentNodeId: activeNodeIdRef.current,
+        resultNodeId: nextTrunk.node_id,
+      })) return
       if (view === 'processing' && !readOnly) {
         const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
         if (generation !== workspaceGenerationRef.current
@@ -304,11 +311,15 @@ export default function DataTrunkWorkspace({
     try {
       const nextPlan = await createPointProcessingPlan(expectedNodeId, {
         template_revision_id: selectedTemplate.revision_id,
-        input_selections: Object.fromEntries(Object.entries(selections).filter(([, value]) => value)),
+        input_selections: selectedInputBindings(selections),
       })
-      if (generation !== operationGenerationRef.current
-        || !isCurrentNodeResult(nextPlan.node_id, activeNodeIdRef.current)
-        || activeNodeIdRef.current !== expectedNodeId) return
+      if (!requestResultIsCurrent({
+        requestGeneration: generation,
+        currentGeneration: operationGenerationRef.current,
+        expectedNodeId,
+        currentNodeId: activeNodeIdRef.current,
+        resultNodeId: nextPlan.node_id,
+      })) return
       setPlan(nextPlan)
     } catch (reason) {
       if (generation === operationGenerationRef.current

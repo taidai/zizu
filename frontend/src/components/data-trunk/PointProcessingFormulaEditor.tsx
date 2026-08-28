@@ -51,7 +51,7 @@ export default function PointProcessingFormulaEditor({
         <div>
           <div className="text-[11px] font-semibold text-blue-950">跨节点强类型公式</div>
           <div className="mt-1 text-[10px] text-blue-800">
-            {output.entity_definition_id} · 每 {output.transform.scheduleSeconds ?? 1} 秒计算
+            每 {output.transform.scheduleSeconds ?? 1} 秒计算一次
           </div>
         </div>
         <div className="flex rounded-md border border-blue-200 bg-white p-0.5 text-[10px]">
@@ -99,7 +99,7 @@ export default function PointProcessingFormulaEditor({
                 ))}
                 className={`rounded border px-2 py-1 text-[10px] ${visual?.inputId === input.input_id ? 'border-blue-600 bg-blue-100 text-blue-900' : 'border-gray-200 text-gray-700'}`}
               >
-                {input.input_id} · {input.data_type}{input.unit ? `/${input.unit}` : ''}
+                {input.source_key} · {input.data_type}{input.unit ? `/${input.unit}` : ''}
               </button>
             ))}
           </div>
@@ -139,7 +139,7 @@ export default function PointProcessingFormulaEditor({
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">全站 DAG</div><div className="mt-1 font-semibold">{model.dagLabel}</div></div>
           <details className="sm:col-span-3 rounded border border-gray-200 bg-white p-2 text-gray-500">
             <summary className="cursor-pointer font-medium">技术详情</summary>
-            <div className="mt-2 break-all">AST {currentPreview.ast_digest.slice(0, 16)} · DAG {currentPreview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
+            <div className="mt-2 break-all">输出 {output.entity_definition_id} · AST {currentPreview.ast_digest.slice(0, 16)} · DAG {currentPreview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
           </details>
         </div>
       )}

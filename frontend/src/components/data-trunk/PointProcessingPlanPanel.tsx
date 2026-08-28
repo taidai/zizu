@@ -111,23 +111,29 @@ export default function PointProcessingPlanPanel({
             </div>
           )}
 
-          {selectedTemplate && directInputs.map((input) => (
-            <label key={input.input_id} className="mt-3 block text-[11px] font-medium text-gray-700">
-              {inputName(input.input_id)}{input.required ? '（必需）' : ''}
-              <select
-                value={selections[input.input_id] || ''}
-                onChange={(event) => onSelectionChange(input.input_id, event.target.value)}
-                className="neu-input mt-1.5 w-full bg-transparent px-3 py-2 text-xs"
-              >
-                <option value="">自动匹配</option>
-                {trunk.l0.map((source) => (
-                  <option key={source.source_id} value={source.source_id}>
-                    {source.source_key}{source.unit ? `（${source.unit}）` : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
+          {selectedTemplate && directInputs.map((input) => {
+            const compatibleSources = trunk.l0.filter((source) => (
+              source.data_type === input.data_type
+              && (source.unit || null) === (input.unit || null)
+            ))
+            return (
+              <label key={input.input_id} className="mt-3 block text-[11px] font-medium text-gray-700">
+                {inputName(input.input_id)}{input.required ? '（必需）' : ''}
+                <select
+                  value={selections[input.input_id] || ''}
+                  onChange={(event) => onSelectionChange(input.input_id, event.target.value)}
+                  className="neu-input mt-1.5 w-full bg-transparent px-3 py-2 text-xs"
+                >
+                  <option value="">自动匹配</option>
+                  {compatibleSources.map((source) => (
+                    <option key={source.source_id} value={source.source_id}>
+                      {source.source_key}{source.unit ? `（${source.unit}）` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )
+          })}
 
           {selectedTemplate && selectorInputs.map((input) => (
             <div key={input.input_id} className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-[10px]">

@@ -74,7 +74,6 @@ export default function EntityObservationCard({
       >
         <span className="min-w-0 font-semibold text-gray-900">
           <span className="block truncate">{descriptor.display_name}</span>
-          <span className="mt-0.5 block truncate font-normal text-[10px] text-gray-400">{descriptor.definition_id}</span>
         </span>
         <span className={`font-mono-value text-base font-semibold ${quality === 192 ? 'text-gray-900' : 'text-gray-500'}`}>
           {valueLabel(observation?.value ?? null)}
