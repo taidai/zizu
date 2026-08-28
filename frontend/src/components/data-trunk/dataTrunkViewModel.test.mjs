@@ -103,3 +103,38 @@ test('visual formula builder and text parser share one canonical expression', as
     null,
   )
 })
+
+test('node data tabs use task names and hide processing from operators', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  assert.deepEqual(
+    model.nodeDataTabs(false).map((item) => [item.key, item.label]),
+    [
+      ['raw-points', '原始点位'],
+      ['point-processing', '点位加工'],
+      ['entities', '实体数据'],
+    ],
+  )
+  assert.deepEqual(
+    model.nodeDataTabs(true).map((item) => item.key),
+    ['raw-points', 'entities'],
+  )
+})
+
+test('template recommendation keeps installed revision then prefers exact coverage', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  const templates = [
+    { revision_id: 'a', revision: 1, inputs: [{ source_kind: 'l0', source_key: 'P', aliases: [], data_type: 'FLOAT', unit: 'W', required: true }] },
+    { revision_id: 'b', revision: 1, inputs: [{ source_kind: 'l0', source_key: 'Power', aliases: ['PAct'], data_type: 'FLOAT', unit: 'kW', required: true }] },
+  ]
+  const l0 = [{ source_key: 'Power', data_type: 'FLOAT', unit: 'kW' }]
+  assert.equal(model.recommendPointProcessingTemplate(templates, l0, 'a'), 'a')
+  assert.equal(model.recommendPointProcessingTemplate(templates, l0, null), 'b')
+})
+
+test('entity reason is human readable and technical kind stays a label', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  assert.equal(model.processingKindLabel('window'), '统计')
+  assert.equal(model.processingKindLabel('formula'), '即时')
+  assert.equal(model.entityReasonLabel('FRAME_PROCESSING_FAILED', 0), '本次点位加工失败，当前值不可用')
+  assert.equal(model.entityReasonLabel('STALE', 17 * 60_000), '原始数据已 17 分钟未更新')
+})

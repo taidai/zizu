@@ -16,6 +16,79 @@ export const DATA_TRUNK_STEPS = [
 
 export const DATA_TRUNK_LAYERS = ['L0', 'L1', 'L2'] as const
 
+export type NodeDataTabKey = 'raw-points' | 'point-processing' | 'entities'
+
+export interface NodeDataTab {
+  key: NodeDataTabKey
+  label: string
+}
+
+export function nodeDataTabs(readOnly: boolean): readonly NodeDataTab[] {
+  const tabs: NodeDataTab[] = [
+    { key: 'raw-points', label: '原始点位' },
+    { key: 'point-processing', label: '点位加工' },
+    { key: 'entities', label: '实体数据' },
+  ]
+  return readOnly ? tabs.filter((item) => item.key !== 'point-processing') : tabs
+}
+
+interface TemplateCandidate {
+  revision_id: string
+  revision: number
+  inputs: Array<{
+    source_kind: 'l0' | 'l2'
+    source_key: string
+    aliases: string[]
+    data_type: string
+    unit: string | null
+    required: boolean
+  }>
+}
+
+interface L0Candidate {
+  source_key: string
+  data_type: string
+  unit: string | null
+}
+
+export function recommendPointProcessingTemplate(
+  templates: TemplateCandidate[],
+  l0: L0Candidate[],
+  installedRevisionId: string | null,
+): string {
+  if (installedRevisionId && templates.some((item) => item.revision_id === installedRevisionId)) {
+    return installedRevisionId
+  }
+  const score = (template: TemplateCandidate) => template.inputs.reduce((total, input) => {
+    if (input.source_kind !== 'l0') return total
+    const keys = new Set([input.source_key, ...input.aliases].map((item) => item.toLocaleLowerCase()))
+    const matches = l0.filter((source) => (
+      keys.has(source.source_key.toLocaleLowerCase())
+      && source.data_type === input.data_type
+      && (source.unit || null) === (input.unit || null)
+    ))
+    return total + (matches.length === 1 ? 10 : matches.length > 1 ? 1 : input.required ? -100 : 0)
+  }, 0)
+  return [...templates]
+    .sort((left, right) => score(right) - score(left)
+      || right.revision - left.revision
+      || left.revision_id.localeCompare(right.revision_id))[0]?.revision_id || ''
+}
+
+export function processingKindLabel(kind: string | null): '即时' | '统计' {
+  return kind === 'window' || kind === 'metric' || kind === 'statistics' ? '统计' : '即时'
+}
+
+export function entityReasonLabel(reason: string | null, ageMs: number): string | null {
+  if (reason === 'FRAME_PROCESSING_FAILED') return '本次点位加工失败，当前值不可用'
+  if (reason === 'STALE' || reason === 'ENTITY_DATA_STALE') {
+    const minutes = Math.max(1, Math.floor(ageMs / 60_000))
+    return `原始数据已 ${minutes} 分钟未更新`
+  }
+  if (reason === 'ENTITY_DATA_QUALITY_BAD') return '原始数据质量异常，当前值不可用'
+  return reason ? '当前值不可用，请展开技术详情' : null
+}
+
 const INPUT_LABELS: Record<string, string> = {
   active_power_raw: '有功功率',
   operating_state_raw: '运行状态',
