@@ -4,11 +4,13 @@ import {
   DataTrunkResultUnknownError,
   applyPointProcessingPlan,
   createPointProcessingPlan,
+  fetchEntityInstanceHistory,
   fetchEntityInstances,
   fetchNodeDataTrunk,
   fetchPointProcessingPlan,
   fetchPointProcessingTemplates,
   previewPointProcessingFormula,
+  type EntityHistoryRange,
   type EntityInstance,
   type EntityInstanceObservation,
   type Node,
@@ -28,7 +30,7 @@ import {
   readDataTrunkApplyRetry,
   saveDataTrunkApplyRetry,
 } from './dataTrunkRetryState'
-import NodeTrunkOverview from './NodeTrunkOverview'
+import EntityDataPanel from './EntityDataPanel'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
 import { DATA_TRUNK_STEPS, recommendPointProcessingTemplate } from './dataTrunkViewModel'
 import {
@@ -56,6 +58,10 @@ export default function DataTrunkWorkspace({
   const [application, setApplication] = useState<PointProcessingApplication | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
   const [projection, setProjection] = useState<CommittedFrameProjection | null>(null)
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null)
+  const [entityRange, setEntityRange] = useState<EntityHistoryRange>('1h')
+  const [entityHistory, setEntityHistory] = useState<EntityInstanceObservation[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'plan' | 'apply' | 'formula' | null>(null)
   const [error, setError] = useState('')
@@ -121,8 +127,33 @@ export default function DataTrunkWorkspace({
     setSelections({})
     setResultUnknown(false)
     setFormulaPreview(null)
+    setSelectedEntityId(null)
+    setEntityRange('1h')
+    setEntityHistory([])
     void loadWorkspace()
   }, [loadWorkspace])
+
+  useEffect(() => {
+    if (view !== 'entities' || !selectedEntityId) {
+      setHistoryLoading(false)
+      return
+    }
+    let active = true
+    setHistoryLoading(true)
+    setEntityHistory([])
+    setError('')
+    fetchEntityInstanceHistory(selectedEntityId, entityRange)
+      .then((items) => {
+        if (active) setEntityHistory(items)
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : '读取实体历史失败')
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false)
+      })
+    return () => { active = false }
+  }, [entityRange, selectedEntityId, view])
 
   useEffect(() => {
     let active = true
@@ -175,7 +206,6 @@ export default function DataTrunkWorkspace({
   }, [node.id])
 
   const selectedTemplate = templates.find((item) => item.revision_id === selectedRevisionId) || null
-  const installedTemplate = templates.find((item) => item.revision_id === trunk?.l1_summary.revision_id) || null
   const recommendedRevisionId = trunk
     ? recommendPointProcessingTemplate(templates, trunk.l0, trunk.l1_summary.revision_id)
     : ''
@@ -314,13 +344,19 @@ export default function DataTrunkWorkspace({
         </div>
       )}
 
-      {view === 'entities' && <NodeTrunkOverview
+      {view === 'entities' && <EntityDataPanel
         trunk={trunk}
-        installedTemplate={installedTemplate}
         descriptors={descriptors}
         projection={projection}
-        histories={new Map<string, EntityInstanceObservation[]>()}
-        readOnly={readOnly}
+        selectedEntityId={selectedEntityId}
+        selectedRange={entityRange}
+        history={entityHistory}
+        historyLoading={historyLoading}
+        onSelectEntity={(entityId) => {
+          setEntityHistory([])
+          setSelectedEntityId((current) => current === entityId ? null : entityId)
+        }}
+        onRangeChange={setEntityRange}
       />}
 
       {view === 'processing' && !readOnly && (

@@ -32,6 +32,13 @@ export const POINT_PROCESSING_ACTIONS = {
   publishing: '正在发布...',
 } as const
 
+export const ENTITY_HISTORY_RANGES = [
+  ['1h', '1小时'],
+  ['6h', '6小时'],
+  ['24h', '24小时'],
+  ['7d', '7天'],
+] as const
+
 export type NodeDataTabKey = 'raw-points' | 'point-processing' | 'entities'
 
 export interface NodeDataTab {

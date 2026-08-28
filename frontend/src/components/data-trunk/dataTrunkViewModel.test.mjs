@@ -142,6 +142,12 @@ test('template recommendation keeps installed revision then prefers exact covera
 
 test('entity reason is human readable and technical kind stays a label', async () => {
   const model = await import('./dataTrunkViewModel.ts')
+  assert.deepEqual(model.ENTITY_HISTORY_RANGES, [
+    ['1h', '1小时'],
+    ['6h', '6小时'],
+    ['24h', '24小时'],
+    ['7d', '7天'],
+  ])
   assert.equal(model.processingKindLabel('window'), '统计')
   assert.equal(model.processingKindLabel('formula'), '即时')
   assert.equal(model.entityReasonLabel('FRAME_PROCESSING_FAILED', 0), '本次点位加工失败，当前值不可用')
