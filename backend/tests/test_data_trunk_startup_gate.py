@@ -163,6 +163,12 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("FROM t_l0_observation_dedup AS dedup", postgres_source)
         self.assertIn("JOIN LATERAL (", postgres_source)
         self.assertIn("WHERE dedup.created_at=%s", postgres_source)
+        self.assertIn(
+            "item.ts >= %s - interval '5 minutes'", postgres_source
+        )
+        self.assertIn(
+            "JOIN t_telemetry_latest AS telemetry", postgres_source
+        )
         self.assertNotIn(
             "FROM t_telemetry\n                       WHERE frame_id=%s",
             postgres_source,

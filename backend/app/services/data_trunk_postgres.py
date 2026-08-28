@@ -734,6 +734,8 @@ class PostgresFrameRepository:
                         WHERE item.observation_id=dedup.observation_id
                           AND item.ts=dedup.observed_at
                           AND item.frame_id=%s
+                          AND item.ts >= %s - interval '5 minutes'
+                          AND item.ts <= %s + interval '5 minutes'
                         LIMIT 1
                       ) AS telemetry ON TRUE
                       WHERE dedup.created_at=%s
@@ -786,6 +788,8 @@ class PostgresFrameRepository:
                     """,
                     (
                         str(claimed.frame_id),
+                        claimed.shot_at,
+                        claimed.shot_at,
                         claimed.created_at,
                         claimed.configuration_revision,
                     ),
@@ -2099,7 +2103,7 @@ class PostgresFrameRepository:
                        dedup.observation_id, dedup.source_digest,
                        telemetry.event_time_basis
                 FROM t_l0_observation_dedup AS dedup
-                JOIN t_telemetry AS telemetry
+                JOIN t_telemetry_latest AS telemetry
                   ON telemetry.observation_id = dedup.observation_id
                 WHERE dedup.observation_id = ANY(%s::uuid[])
                 ORDER BY dedup.observation_id, telemetry.ts DESC
