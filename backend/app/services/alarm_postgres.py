@@ -14,6 +14,7 @@ from app.services.alarm_definitions import AlarmDefinitionPlan
 from app.services.alarm_runtime import (
     AlarmDefinition,
     AlarmEvent,
+    AlarmEventPresentation,
     AlarmNotification,
     AlarmRuntimeError,
     AlarmTransition,
@@ -35,6 +36,25 @@ def _connection(transaction: Any | None = None):
             raise
         else:
             conn.commit()
+
+
+def _alarm_rule_name(
+    asset_id: str,
+    entity_instance_id: UUID,
+    revisions: list[tuple[Any, Any]],
+) -> str:
+    for rule_set_key, rules in revisions:
+        prefix = f"alarm.{rule_set_key}.{entity_instance_id}."
+        if not asset_id.startswith(prefix):
+            continue
+        rule_id = asset_id[len(prefix):]
+        if isinstance(rules, list):
+            for rule in rules:
+                if isinstance(rule, dict) and rule.get("id") == rule_id:
+                    name = rule.get("name")
+                    if isinstance(name, str) and name.strip():
+                        return name.strip()
+    return asset_id.rsplit(".", 1)[-1] or asset_id
 
 
 class PostgresAlarmDefinitionCatalog:
@@ -238,6 +258,46 @@ class PostgresAlarmRepository:
     def list_events(self) -> tuple[AlarmEvent, ...]:
         with self.transaction() as transaction:
             return transaction.list_events()
+
+    def describe_events(
+        self,
+        events: tuple[AlarmEvent, ...],
+    ) -> dict[UUID, AlarmEventPresentation]:
+        if not events:
+            return {}
+        with _connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event.id, node.name, entity.display_name,
+                           definition.asset_id, definition.entity_instance_id
+                    FROM t_alarm_events event
+                    JOIN t_alarm_definitions definition
+                      ON definition.id = event.definition_id
+                    LEFT JOIN t_entity_instances entity
+                      ON entity.id = event.entity_instance_id
+                    LEFT JOIN t_nodes node ON node.id = entity.node_id
+                    WHERE event.id = ANY(%s::uuid[])
+                    """,
+                    ([str(event.id) for event in events],),
+                )
+                rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT rule_set_key, rules
+                    FROM t_alarm_rule_set_revisions
+                    ORDER BY revision DESC
+                    """
+                )
+                revisions = cur.fetchall()
+        result: dict[UUID, AlarmEventPresentation] = {}
+        for event_id, node_name, entity_name, asset_id, entity_instance_id in rows:
+            result[event_id] = AlarmEventPresentation(
+                str(node_name or "未命名节点"),
+                str(entity_name or "未命名实体"),
+                _alarm_rule_name(str(asset_id), entity_instance_id, revisions),
+            )
+        return result
 
     def transitions(self, event_id: UUID) -> tuple[AlarmTransition, ...]:
         with self.transaction() as transaction:

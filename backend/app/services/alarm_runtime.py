@@ -81,6 +81,13 @@ class AlarmEvent:
 
 
 @dataclass(frozen=True)
+class AlarmEventPresentation:
+    node_name: str
+    entity_name: str
+    alarm_name: str
+
+
+@dataclass(frozen=True)
 class AlarmTransition:
     event_id: UUID
     from_state: str | None
@@ -538,6 +545,34 @@ class AlarmRuntime:
 
     def list(self) -> tuple[AlarmEvent, ...]:
         return self._repository.list_events()
+
+    def describe(
+        self,
+        events: tuple[AlarmEvent, ...],
+    ) -> dict[UUID, AlarmEventPresentation]:
+        repository_describe = getattr(self._repository, "describe_events", None)
+        described = dict(repository_describe(events)) if callable(repository_describe) else {}
+        for event in events:
+            if event.id in described:
+                continue
+            definition = self._definitions.get(event.definition_id)
+            observation = event.last_observation or event.first_observation or {}
+            evidence = observation.get("evidence") if isinstance(observation, dict) else {}
+            if not isinstance(evidence, dict):
+                evidence = {}
+            node_name = evidence.get("node_name") or evidence.get("node_id") or "未命名节点"
+            entity_name = evidence.get("entity_name") or (
+                definition.entity_definition_id if definition is not None else "未命名实体"
+            )
+            alarm_name = evidence.get("alarm_name") or (
+                definition.asset_id if definition is not None else "未命名告警"
+            )
+            described[event.id] = AlarmEventPresentation(
+                str(node_name),
+                str(entity_name),
+                str(alarm_name),
+            )
+        return described
 
     def timeline(self, event_id: UUID) -> tuple[AlarmTransition, ...]:
         self.get(event_id)

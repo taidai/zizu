@@ -19,6 +19,7 @@ from app.api.business_security import (
 from app.services.alarm_runtime import (
     AcknowledgeAlarm,
     AlarmEvent,
+    AlarmEventPresentation,
     AlarmRuntime,
     AlarmRuntimeError,
     AlarmTransition,
@@ -51,22 +52,30 @@ class AcknowledgeAlarmRequest(BaseModel):
     note: str | None = Field(None, max_length=500)
 
 
-def _event_public(event: AlarmEvent) -> dict[str, Any]:
-    value = asdict(event)
-    value["model_version"] = "v1"
-    value["id"] = str(event.id)
-    value["definition_id"] = str(event.definition_id)
-    value["entity_instance_id"] = str(event.entity_instance_id)
-    for field in (
-        "pending_at",
-        "active_at",
-        "acknowledged_at",
-        "recovery_candidate_since",
-        "recovered_at",
-    ):
-        if value[field] is not None:
-            value[field] = value[field].isoformat()
-    return value
+def _event_public(
+    event: AlarmEvent,
+    presentation: AlarmEventPresentation,
+) -> dict[str, Any]:
+    started_at = event.active_at or event.pending_at
+    ended_at = event.recovered_at or datetime.now(timezone.utc)
+    return {
+        "model_version": "v1",
+        "id": str(event.id),
+        "definition_id": str(event.definition_id),
+        "entity_instance_id": str(event.entity_instance_id),
+        "state": event.state,
+        "severity": event.severity,
+        "pending_at": event.pending_at.isoformat(),
+        "active_at": event.active_at.isoformat() if event.active_at else None,
+        "acknowledged_at": event.acknowledged_at.isoformat() if event.acknowledged_at else None,
+        "acknowledged_by": event.acknowledged_by,
+        "acknowledgement_note": event.acknowledgement_note,
+        "recovered_at": event.recovered_at.isoformat() if event.recovered_at else None,
+        "node_name": presentation.node_name,
+        "entity_name": presentation.entity_name,
+        "alarm_name": presentation.alarm_name,
+        "duration_seconds": max(0, int((ended_at - started_at).total_seconds())),
+    }
 
 
 def _transition_public(transition: AlarmTransition) -> dict[str, Any]:
@@ -103,6 +112,15 @@ async def list_alarm_events(
     # ``normal`` is an internal cleared-pending audit state, not an operator
     # alarm.  It must not appear in the active/default event worklist.
     all_items = tuple(item for item in runtime.list() if item.state != "normal")
+    all_items = tuple(
+        sorted(
+            all_items,
+            key=lambda item: (
+                item.state not in {"pending", "active_unacknowledged", "active_acknowledged"},
+                -(item.active_at or item.pending_at).timestamp(),
+            ),
+        )
+    )
     filtered = tuple(
         item
         for item in all_items
@@ -119,19 +137,22 @@ async def list_alarm_events(
     )
     start = (page - 1) * page_size
     items = filtered[start:start + page_size]
+    presentations = runtime.describe(items)
+    active_items = tuple(
+        item
+        for item in all_items
+        if item.state in {"active_unacknowledged", "active_acknowledged"}
+    )
     return {
-        "items": [_event_public(item) for item in items],
+        "items": [_event_public(item, presentations[item.id]) for item in items],
         "total": len(filtered),
         "page": page,
         "page_size": page_size,
         "total_pages": max(1, (len(filtered) + page_size - 1) // page_size),
         "summary": {
-            "total": len(all_items),
-            "unacknowledged": sum(item.state == "active_unacknowledged" for item in all_items),
-            "by_severity": {
-                level: sum(item.severity == level for item in all_items)
-                for level in ("CRITICAL", "MAJOR", "WARNING", "INFO")
-            },
+            "active": len(active_items),
+            "unacknowledged": sum(item.state == "active_unacknowledged" for item in active_items),
+            "critical": sum(item.severity == "CRITICAL" for item in active_items),
         },
         "model_version": "v1",
     }
@@ -143,7 +164,8 @@ async def get_alarm_event(
     runtime: AlarmRuntime = Depends(get_alarm_runtime),
 ) -> dict[str, Any]:
     try:
-        return _event_public(runtime.get(event_id))
+        event = runtime.get(event_id)
+        return _event_public(event, runtime.describe((event,))[event.id])
     except AlarmRuntimeError as exc:
         raise _error(exc) from exc
 
