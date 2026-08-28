@@ -53,7 +53,8 @@ def _observation_changed(previous: _Cell | None, current: RawObservation) -> boo
         return True
     old = previous.observation
     return (
-        old.value != current.value
+        old.observation_id != current.observation_id
+        or old.value != current.value
         or old.raw_unit != current.raw_unit
         or old.quality != current.quality
         or previous.effective_quality != current.quality

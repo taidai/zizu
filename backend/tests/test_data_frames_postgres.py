@@ -21,6 +21,7 @@ from app.services.data_trunk_contracts import (
     InputReference,
     RawObservation,
     SourceOrder,
+    SourceOrderMode,
     TrunkQuality,
     TypedValue,
     ValueKind,
@@ -311,9 +312,16 @@ class DataFramesPostgresTest(unittest.TestCase):
         recovered = self.repository.restore_blackboard()
         self.assertGreaterEqual(recovered.capture_beat, 105)
         self.assertEqual(0, recovered.configuration_revision)
-        self.assertEqual({}, dict(recovered.active_input_contracts))
+        self.assertEqual(
+            {self.tag_id: SourceOrderMode.SEQUENCE},
+            dict(recovered.active_input_contracts),
+        )
         self.assertEqual(frozenset(), recovered.required_tag_ids)
-        self.assertEqual((), recovered.observations)
+        self.assertEqual(1, len(recovered.observations))
+        self.assertEqual(
+            self.tag_id,
+            recovered.observations[0].observation.tag_id,
+        )
 
     def test_transaction_b_atomically_advances_l0_and_completes_frame(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=106))

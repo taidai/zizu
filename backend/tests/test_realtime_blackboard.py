@@ -121,7 +121,7 @@ class RealtimeBlackboardTest(unittest.TestCase):
             tuple(item.observation.tag_id for item in frozen.changed_l0),
         )
 
-    def test_same_value_heartbeat_refreshes_freshness_without_writing_a_frame(self):
+    def test_same_value_new_sample_writes_the_next_frame_with_fresh_evidence(self):
         board = _ready_board()
         first = board.tick(NOW, configuration_revision=3)
         assert first is not None
@@ -129,9 +129,24 @@ class RealtimeBlackboardTest(unittest.TestCase):
 
         board.accept_many((_raw(TAG_A, 2, 10.0),))
 
-        self.assertIsNone(board.tick(NOW + timedelta(seconds=1), configuration_revision=3))
-        self.assertIsNone(board.tick(NOW + timedelta(seconds=2), configuration_revision=3))
-        self.assertIsNone(board.tick(NOW + timedelta(seconds=3), configuration_revision=3))
+        second = board.tick(
+            NOW + timedelta(seconds=1), configuration_revision=3
+        )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(
+            _raw(TAG_A, 2, 10.0).observation_id,
+            second.cells[TAG_A].observation.observation_id,
+        )
+        self.assertEqual(
+            (TAG_A,),
+            tuple(item.observation.tag_id for item in second.changed_l0),
+        )
+        board.acknowledge(second.generation)
+        self.assertIsNone(
+            board.tick(NOW + timedelta(seconds=2), configuration_revision=3)
+        )
 
     def test_third_missed_beat_emits_one_stale_frame_without_erasing_value(self):
         board = _ready_board()

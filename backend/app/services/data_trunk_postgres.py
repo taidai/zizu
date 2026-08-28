@@ -356,8 +356,20 @@ class PostgresFrameRepository:
                 capture_beat = int(cursor.fetchone()[0])
                 cursor.execute(
                     """
-                    SELECT DISTINCT binding.l0_tag_id, input.required,
-                           input.stable_source_key,
+                    SELECT tag.id,
+                           EXISTS (
+                             SELECT 1
+                             FROM t_point_processing_input_bindings AS binding
+                             JOIN t_installed_point_processings AS installed
+                               ON installed.id = binding.installed_processing_id
+                              AND installed.current = TRUE
+                             JOIN t_point_processing_inputs AS input
+                               ON input.id = binding.input_id
+                             WHERE binding.source_kind = 'l0'
+                               AND binding.l0_tag_id = tag.id
+                               AND input.required = TRUE
+                           ) AS required,
+                           COALESCE(NULLIF(tag.source_path, ''), tag.name),
                            COALESCE(tag.value_data_type, tag.data_type),
                            tag.unit,
                            CASE
@@ -365,15 +377,11 @@ class PostgresFrameRepository:
                              WHEN tag.timestamp_trusted THEN 'observed_at'
                              ELSE 'received_at'
                            END AS source_order_mode
-                    FROM t_point_processing_input_bindings AS binding
-                    JOIN t_installed_point_processings AS installed
-                      ON installed.id = binding.installed_processing_id
-                     AND installed.current = TRUE
-                    JOIN t_point_processing_inputs AS input
-                      ON input.id = binding.input_id
-                    JOIN t_tags AS tag ON tag.id = binding.l0_tag_id
-                    WHERE binding.source_kind = 'l0' AND tag.enabled = TRUE
-                    ORDER BY binding.l0_tag_id
+                    FROM t_tags AS tag
+                    JOIN t_nodes AS node ON node.id = tag.node_id
+                    WHERE tag.enabled = TRUE
+                      AND node.enabled = TRUE
+                    ORDER BY tag.id
                     """
                 )
                 contracts = cursor.fetchall()
