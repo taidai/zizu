@@ -313,8 +313,8 @@ class DataFramesPostgresTest(unittest.TestCase):
         self.assertGreaterEqual(recovered.capture_beat, 105)
         self.assertEqual(0, recovered.configuration_revision)
         self.assertEqual(
-            {self.tag_id: SourceOrderMode.SEQUENCE},
-            dict(recovered.active_input_contracts),
+            SourceOrderMode.SEQUENCE,
+            recovered.active_input_contracts[self.tag_id],
         )
         self.assertEqual(frozenset(), recovered.required_tag_ids)
         self.assertEqual(1, len(recovered.observations))

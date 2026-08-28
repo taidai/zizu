@@ -703,7 +703,38 @@ class PostgresFrameRepository:
             with self._connection() as connection, connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    WITH relevant_tags AS (
+                    WITH current_frame AS MATERIALIZED (
+                      SELECT telemetry.observation_id,telemetry.node_id,
+                             telemetry.tag_id,telemetry.raw_unit,
+                             telemetry.raw_value_float,telemetry.raw_value_int,
+                             telemetry.raw_value_bool,telemetry.raw_value_text,
+                             telemetry.quality,telemetry.ts,
+                             telemetry.event_received_at,
+                             telemetry.source_message_id,
+                             telemetry.source_sequence,telemetry.source_digest,
+                             telemetry.event_time_basis,
+                             telemetry.accepted_beat,
+                             telemetry.source_order_mode,
+                             telemetry.source_receive_ordinal
+                      FROM t_l0_observation_dedup AS dedup
+                      JOIN LATERAL (
+                        SELECT item.observation_id,item.node_id,item.tag_id,
+                               item.raw_unit,item.raw_value_float,
+                               item.raw_value_int,item.raw_value_bool,
+                               item.raw_value_text,item.quality,item.ts,
+                               item.event_received_at,item.source_message_id,
+                               item.source_sequence,item.source_digest,
+                               item.event_time_basis,item.accepted_beat,
+                               item.source_order_mode,
+                               item.source_receive_ordinal
+                        FROM t_telemetry AS item
+                        WHERE item.observation_id=dedup.observation_id
+                          AND item.ts=dedup.observed_at
+                          AND item.frame_id=%s
+                        LIMIT 1
+                      ) AS telemetry ON TRUE
+                      WHERE dedup.created_at=%s
+                    ), relevant_tags AS (
                       SELECT DISTINCT binding.l0_tag_id AS tag_id
                       FROM t_point_processing_input_bindings AS binding
                       JOIN t_installed_point_processings AS installed
@@ -712,16 +743,7 @@ class PostgresFrameRepository:
                         AND installed.current=TRUE
                         AND installed.configuration_revision <= %s
                       UNION
-                      SELECT tag_id FROM t_telemetry WHERE frame_id=%s
-                    ), current_frame AS (
-                      SELECT observation_id,node_id,tag_id,raw_unit,
-                             raw_value_float,raw_value_int,raw_value_bool,
-                             raw_value_text,quality,ts,event_received_at,
-                             source_message_id,source_sequence,source_digest,
-                             event_time_basis,accepted_beat,source_order_mode,
-                             source_receive_ordinal
-                      FROM t_telemetry
-                      WHERE frame_id=%s
+                      SELECT tag_id FROM current_frame
                     ), frame_state AS (
                       SELECT * FROM current_frame
                       UNION ALL
@@ -731,18 +753,13 @@ class PostgresFrameRepository:
                              latest.raw_value_text,latest.quality,latest.ts,
                              latest.event_received_at,latest.source_message_id,
                              latest.source_sequence,latest.source_digest,
-                             latest.event_time_basis,source.accepted_beat,
+                             latest.event_time_basis,latest_frame.capture_beat,
                              latest.source_order_mode,
                              latest.source_receive_ordinal
                       FROM t_telemetry_latest AS latest
                       JOIN relevant_tags USING(tag_id)
-                      JOIN LATERAL (
-                        SELECT accepted_beat
-                        FROM t_telemetry AS source
-                        WHERE source.observation_id=latest.observation_id
-                          AND source.ts=latest.ts
-                        LIMIT 1
-                      ) AS source ON TRUE
+                      JOIN t_data_frames AS latest_frame
+                        ON latest_frame.frame_sequence=latest.frame_sequence
                       WHERE NOT EXISTS (
                         SELECT 1 FROM current_frame
                         WHERE current_frame.tag_id=latest.tag_id
@@ -765,9 +782,9 @@ class PostgresFrameRepository:
                     ORDER BY telemetry.tag_id
                     """,
                     (
+                        str(claimed.frame_id),
+                        claimed.created_at,
                         claimed.configuration_revision,
-                        str(claimed.frame_id),
-                        str(claimed.frame_id),
                     ),
                 )
                 cells: dict[UUID, FramedRawObservation] = {}

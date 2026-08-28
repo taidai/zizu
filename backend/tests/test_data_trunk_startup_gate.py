@@ -154,7 +154,18 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("t_l2_stream_outbox", postgres_source)
         self.assertNotIn("_select_history_observations", postgres_source)
         self.assertIn("FROM t_telemetry_latest AS latest", postgres_source)
-        self.assertIn(
+        self.assertIn("JOIN t_data_frames AS latest_frame", postgres_source)
+        self.assertIn("latest_frame.capture_beat", postgres_source)
+        self.assertIn("WITH current_frame AS MATERIALIZED", postgres_source)
+        self.assertIn("SELECT tag_id FROM current_frame", postgres_source)
+        self.assertIn("FROM t_l0_observation_dedup AS dedup", postgres_source)
+        self.assertIn("JOIN LATERAL (", postgres_source)
+        self.assertIn("WHERE dedup.created_at=%s", postgres_source)
+        self.assertNotIn(
+            "FROM t_telemetry\n                       WHERE frame_id=%s",
+            postgres_source,
+        )
+        self.assertNotIn(
             "JOIN LATERAL (\n                        SELECT accepted_beat",
             postgres_source,
         )
