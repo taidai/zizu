@@ -532,28 +532,32 @@ class PostgresFrameOutboxRepository:
         frame_time: datetime,
         failure_id: UUID | None = None,
         failure_code: str | None = None,
+        previous_l0: Mapping[UUID, CommittedL0Change] | None = None,
     ) -> FrameOutboxEvent:
-        current_l0 = cls._load_l0_state(cursor, frame_sequence, capture_beat)
-        cursor.execute(
-            """
-            SELECT max(frame_sequence)
-            FROM t_data_frames
-            WHERE frame_sequence < %s AND status IN ('COMPLETE','FAILED')
-            """,
-            (frame_sequence,),
-        )
-        previous_row = cursor.fetchone()
-        previous_l0 = {}
-        if previous_row is not None and previous_row[0] is not None:
-            previous_sequence = int(previous_row[0])
+        if previous_l0 is None:
+            current_l0 = cls._load_l0_state(cursor, frame_sequence, capture_beat)
             cursor.execute(
-                "SELECT capture_beat FROM t_data_frames WHERE frame_sequence=%s",
-                (previous_sequence,),
+                """
+                SELECT max(frame_sequence)
+                FROM t_data_frames
+                WHERE frame_sequence < %s AND status IN ('COMPLETE','FAILED')
+                """,
+                (frame_sequence,),
             )
-            previous_capture = int(cursor.fetchone()[0])
-            previous_l0 = cls._load_l0_state(
-                cursor, previous_sequence, previous_capture
-            )
+            previous_row = cursor.fetchone()
+            previous_l0 = {}
+            if previous_row is not None and previous_row[0] is not None:
+                previous_sequence = int(previous_row[0])
+                cursor.execute(
+                    "SELECT capture_beat FROM t_data_frames WHERE frame_sequence=%s",
+                    (previous_sequence,),
+                )
+                previous_capture = int(cursor.fetchone()[0])
+                previous_l0 = cls._load_l0_state(
+                    cursor, previous_sequence, previous_capture
+                )
+        else:
+            current_l0 = cls._load_l0_latest_state(cursor, capture_beat)
         l0_changes = tuple(
             change
             for tag_id, change in sorted(current_l0.items(), key=lambda item: str(item[0]))
@@ -609,6 +613,30 @@ class PostgresFrameOutboxRepository:
         )
 
     @staticmethod
+    def _load_l0_latest_state(cursor, capture_beat: int):
+        cursor.execute(
+            """
+            SELECT latest.tag_id,latest.observation_id,tag.data_type,
+                   latest.raw_value_float,latest.raw_value_int,
+                   latest.raw_value_bool,latest.raw_value_text,
+                   latest.quality,latest.ts,latest.event_received_at,
+                   source_frame.capture_beat,tag.node_id,tag.unit,
+                   tag.source_path,tag.source_type
+            FROM t_telemetry_latest AS latest
+            JOIN t_tags AS tag ON tag.id=latest.tag_id
+            JOIN t_l0_observation_dedup AS dedup
+              ON dedup.observation_id=latest.observation_id
+            JOIN t_data_frames AS source_frame
+              ON source_frame.created_at=dedup.created_at
+            WHERE latest.frame_sequence > 0
+            ORDER BY latest.tag_id
+            """
+        )
+        return PostgresFrameOutboxRepository._l0_state_from_rows(
+            cursor.fetchall(), capture_beat
+        )
+
+    @staticmethod
     def _load_l0_state(cursor, frame_sequence: int, capture_beat: int):
         cursor.execute(
             """
@@ -628,8 +656,14 @@ class PostgresFrameOutboxRepository:
             """,
             (frame_sequence,),
         )
+        return PostgresFrameOutboxRepository._l0_state_from_rows(
+            cursor.fetchall(), capture_beat
+        )
+
+    @staticmethod
+    def _l0_state_from_rows(rows, capture_beat: int):
         state = {}
-        for row in cursor.fetchall():
+        for row in rows:
             source_quality = TrunkQuality(int(row[7]))
             accepted_beat = int(row[10])
             effective_quality = (
@@ -657,6 +691,29 @@ class PostgresFrameOutboxRepository:
         return state
 
 
+def capture_previous_l0_state(
+    cursor,
+    frame_sequence: int,
+) -> Mapping[UUID, CommittedL0Change]:
+    """Capture the last terminal L0 state before latest advances in transaction B."""
+    cursor.execute(
+        """
+        SELECT capture_beat
+        FROM t_data_frames
+        WHERE frame_sequence < %s AND status IN ('COMPLETE','FAILED')
+        ORDER BY frame_sequence DESC
+        LIMIT 1
+        """,
+        (frame_sequence,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return {}
+    return PostgresFrameOutboxRepository._load_l0_latest_state(
+        cursor, int(row[0])
+    )
+
+
 def build_frame_outbox_event(
     cursor,
     *,
@@ -668,6 +725,7 @@ def build_frame_outbox_event(
     frame_time: datetime,
     failure_id: UUID | None = None,
     failure_code: str | None = None,
+    previous_l0: Mapping[UUID, CommittedL0Change] | None = None,
 ) -> FrameOutboxEvent:
     """Build the immutable delta once, inside the terminal-frame transaction."""
     return PostgresFrameOutboxRepository.build_event_from_history(
@@ -680,6 +738,7 @@ def build_frame_outbox_event(
         frame_time=frame_time,
         failure_id=failure_id,
         failure_code=failure_code,
+        previous_l0=previous_l0,
     )
 
 

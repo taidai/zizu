@@ -140,6 +140,7 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         )
 
     def test_production_source_has_no_legacy_runtime_path(self) -> None:
+        from app.services import data_trunk_outbox
         from app.services.data_trunk import DataTrunk
         from app.services.data_trunk_postgres import PostgresFrameRepository
         from app.services.pipeline import DataPipeline
@@ -147,6 +148,7 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         pipeline_source = inspect.getsource(DataPipeline)
         trunk_source = inspect.getsource(DataTrunk)
         postgres_source = inspect.getsource(PostgresFrameRepository)
+        outbox_source = inspect.getsource(data_trunk_outbox)
         self.assertNotIn("_buffer", pipeline_source)
         self.assertNotIn("flush_now", pipeline_source)
         self.assertNotIn("evaluate_due_formulas", trunk_source)
@@ -168,6 +170,11 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn(
             "JOIN LATERAL (\n                        SELECT accepted_beat",
             postgres_source,
+        )
+        self.assertIn("def capture_previous_l0_state", outbox_source)
+        self.assertIn("FROM t_telemetry_latest AS latest", outbox_source)
+        self.assertIn(
+            "previous_l0 = capture_previous_l0_state(", postgres_source
         )
         self.assertNotIn("candidate.frame_sequence <=", postgres_source)
 

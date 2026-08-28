@@ -46,7 +46,10 @@ from app.services.data_trunk_contracts import (
 from app.services.point_processing_dag import validate_processing_dag
 from app.services.point_processing import _formula_input_names
 from app.services.runtime_identity import RUNTIME_INSTANCE_ID
-from app.services.data_trunk_outbox import build_frame_outbox_event
+from app.services.data_trunk_outbox import (
+    build_frame_outbox_event,
+    capture_previous_l0_state,
+)
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 FaultHook = Callable[[str], None]
 
@@ -1054,6 +1057,9 @@ class PostgresFrameRepository:
                                 "DATA_FRAME_CLAIM_LOST",
                                 "DATA_FRAME_CLAIM_LOST",
                             )
+                        previous_l0 = capture_previous_l0_state(
+                            cursor, claimed.frame_sequence
+                        )
                         self._advance_frame_l0_latest(
                             cursor,
                             claimed.frame_sequence,
@@ -1074,6 +1080,7 @@ class PostgresFrameRepository:
                             ),
                             capture_beat=claimed.capture_beat,
                             frame_time=finished_at,
+                            previous_l0=previous_l0,
                         )
                         cursor.execute(
                             """
@@ -1346,6 +1353,9 @@ class PostgresFrameRepository:
                                 "DATA_FRAME_CLAIM_LOST",
                             )
                         candidate_digest = str(frame_row[0]).strip()
+                        previous_l0 = capture_previous_l0_state(
+                            cursor, claimed.frame_sequence
+                        )
                         self._advance_frame_l0_latest(
                             cursor,
                             claimed.frame_sequence,
@@ -1415,6 +1425,7 @@ class PostgresFrameRepository:
                                         frame_time=now,
                                         failure_id=failure_id,
                                         failure_code=failure.code,
+                                        previous_l0=previous_l0,
                                     ).public_dict()
                                 ),
                             ),
