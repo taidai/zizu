@@ -17,6 +17,7 @@ from app.services.alarm_configuration import (
     AlarmConfigurationPlan,
     AlarmConfigurationPlanItem,
     AlarmRule,
+    AlarmRuleGroup,
     AlarmRuleSetRevision,
     AppliedAlarmConfiguration,
     EntitySelection,
@@ -101,6 +102,53 @@ def _plan_from_json(value: dict[str, Any], *, status: str | None = None, applied
     )
 
 
+def _rule_groups(
+    revisions: tuple[AlarmRuleSetRevision, ...],
+    bindings: tuple[tuple[str, UUID, UUID, bool], ...],
+) -> tuple[AlarmRuleGroup, ...]:
+    severity_rank = {"INFO": 0, "WARNING": 1, "MAJOR": 2, "CRITICAL": 3}
+    grouped: dict[UUID, list[AlarmRuleSetRevision]] = {}
+    for revision in revisions:
+        grouped.setdefault(revision.rule_set_id, []).append(revision)
+    result: list[AlarmRuleGroup] = []
+    for rule_set_id, candidates in grouped.items():
+        latest = max(candidates, key=lambda item: item.revision)
+        non_empty = [item for item in candidates if item.rules]
+        last_non_empty = max(non_empty, key=lambda item: item.revision) if non_empty else None
+        entity_ids: set[UUID] = set()
+        enabled_ids: set[UUID] = set()
+        node_ids: set[UUID] = set()
+        prefix = f"alarm.{latest.key}."
+        for asset_id, entity_id, node_id, enabled in bindings:
+            if not asset_id.startswith(prefix):
+                continue
+            entity_ids.add(entity_id)
+            node_ids.add(node_id)
+            if enabled:
+                enabled_ids.add(entity_id)
+        rules = () if last_non_empty is None else last_non_empty.rules
+        highest = max(
+            (rule.severity for rule in rules),
+            key=severity_rank.__getitem__,
+            default=None,
+        )
+        result.append(
+            AlarmRuleGroup(
+                rule_set_id,
+                latest.key,
+                latest.name,
+                latest.revision,
+                None if last_non_empty is None else last_non_empty.revision,
+                tuple(sorted(entity_ids, key=str)),
+                tuple(sorted(enabled_ids, key=str)),
+                len(node_ids),
+                len(rules),
+                highest,
+            )
+        )
+    return tuple(sorted(result, key=lambda item: (item.name, item.key)))
+
+
 class PostgresAlarmConfigurationRepository:
     def __init__(self, connection_factory: ConnectionFactory | None = None) -> None:
         register_uuid()
@@ -167,6 +215,30 @@ class PostgresAlarmConfigurationRepository:
                 cursor.execute("SELECT rule_set_id,rule_set_key,rule_set_name,revision,rules,digest FROM t_alarm_rule_set_revisions ORDER BY rule_set_key,revision")
                 rows = cursor.fetchall()
         return tuple(AlarmRuleSetRevision(row[0], row[1], row[2], int(row[3]), tuple(_rule_from_json(item) for item in row[4]), row[5].strip()) for row in rows)
+
+    def list_rule_groups(self) -> tuple[AlarmRuleGroup, ...]:
+        revisions = self.list_rule_set_revisions()
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT definition.asset_id, definition.entity_instance_id,
+                           entity.node_id,
+                           (current.definition_id IS NOT NULL) AS enabled
+                    FROM t_alarm_definitions definition
+                    JOIN t_entity_instances entity
+                      ON entity.id = definition.entity_instance_id
+                    LEFT JOIN t_alarm_definition_current current
+                      ON current.definition_id = definition.id
+                    ORDER BY definition.asset_id, definition.entity_instance_id
+                    """
+                )
+                rows = cursor.fetchall()
+        bindings = tuple(
+            (str(row[0]), row[1], row[2], bool(row[3]))
+            for row in rows
+        )
+        return _rule_groups(revisions, bindings)
 
     def resolve_entities(self, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]:
         clauses = ["entity.active=TRUE"]

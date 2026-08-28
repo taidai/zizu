@@ -170,6 +170,31 @@ async def list_alarm_rule_sets(configuration: AlarmConfiguration = Depends(get_a
         raise _error(error) from error
 
 
+@router.get("/alarm-rule-groups", **protected(CONFIGURATION_READ))
+async def list_alarm_rule_groups(configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
+    try:
+        items = configuration.list_rule_groups()
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
+    return {
+        "items": [
+            {
+                "rule_set_id": str(item.rule_set_id),
+                "key": item.key,
+                "name": item.name,
+                "latest_revision": item.latest_revision,
+                "last_non_empty_revision": item.last_non_empty_revision,
+                "entity_instance_ids": [str(value) for value in item.entity_instance_ids],
+                "enabled_entity_instance_ids": [str(value) for value in item.enabled_entity_instance_ids],
+                "device_count": item.device_count,
+                "rule_count": item.rule_count,
+                "highest_severity": item.highest_severity,
+            }
+            for item in items
+        ]
+    }
+
+
 @router.post("/alarm-rule-sets", status_code=201, openapi_extra=capability_metadata(CONFIGURATION_WRITE))
 async def create_alarm_rule_set(body: CreateRuleSetRequest, principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)), configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
     try:

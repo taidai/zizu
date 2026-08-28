@@ -86,6 +86,59 @@ class _RuntimeGate:
 
 
 class AlarmConfigurationL2Test(unittest.TestCase):
+    def test_rule_group_summary_survives_an_empty_disable_revision(self) -> None:
+        from app.services.alarm_configuration_postgres import _rule_groups
+
+        repository = _Repository()
+        enabled_revision = AlarmRuleSetRevision(
+            repository.rule_set.rule_set_id,
+            "pcs-fault-codes",
+            "PCS 故障码",
+            1,
+            (
+                AlarmRule(
+                    "e30",
+                    "压缩机故障",
+                    "CRITICAL",
+                    {"operator": "contains", "value": "E30"},
+                    0,
+                    {"operator": "not_contains", "value": "E30"},
+                    3,
+                    60,
+                ),
+            ),
+            "digest-1",
+        )
+        disabled_revision = AlarmRuleSetRevision(
+            repository.rule_set.rule_set_id,
+            "pcs-fault-codes",
+            "PCS 故障码",
+            2,
+            (),
+            "digest-2",
+        )
+
+        groups = _rule_groups(
+            (enabled_revision, disabled_revision),
+            (
+                (
+                    f"alarm.pcs-fault-codes.{repository.entity.id}.e30",
+                    repository.entity.id,
+                    repository.node_id,
+                    False,
+                ),
+            ),
+        )
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual(2, groups[0].latest_revision)
+        self.assertEqual(1, groups[0].last_non_empty_revision)
+        self.assertEqual((repository.entity.id,), groups[0].entity_instance_ids)
+        self.assertEqual((), groups[0].enabled_entity_instance_ids)
+        self.assertEqual(1, groups[0].device_count)
+        self.assertEqual(1, groups[0].rule_count)
+        self.assertEqual("CRITICAL", groups[0].highest_severity)
+
     def test_plan_targets_active_l2_entity_and_current_revision(self) -> None:
         repository = _Repository()
         plan = AlarmConfiguration(repository).plan(
@@ -271,6 +324,40 @@ class AlarmConfigurationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.json()["recovery_matches"])
         self.assertIsNone(repository.saved)
         self.assertEqual(0, repository.apply_calls)
+
+    async def test_rule_group_endpoint_returns_the_minimal_list_contract(self) -> None:
+        from app.api.alarm_configurations import get_alarm_configuration, router
+        from app.services.alarm_configuration import AlarmRuleGroup
+
+        repository = _Repository()
+        repository.list_rule_groups = lambda: (
+            AlarmRuleGroup(
+                repository.rule_set.rule_set_id,
+                "pcs-power",
+                "PCS 功率",
+                2,
+                1,
+                (repository.entity.id,),
+                (repository.entity.id,),
+                1,
+                1,
+                "MAJOR",
+            ),
+        )
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1")
+        app.dependency_overrides[get_alarm_configuration] = lambda: AlarmConfiguration(repository)
+
+        async with AuthenticatedApiClient(app) as client:
+            response = await client._client.get(
+                "/api/v1/alarm-rule-groups",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("PCS 功率", response.json()["items"][0]["name"])
+        self.assertEqual(1, response.json()["items"][0]["device_count"])
+        self.assertEqual("MAJOR", response.json()["items"][0]["highest_severity"])
 
 
 if __name__ == "__main__":

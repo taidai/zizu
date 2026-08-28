@@ -49,6 +49,20 @@ class AlarmRuleSetRevision:
 
 
 @dataclass(frozen=True)
+class AlarmRuleGroup:
+    rule_set_id: UUID
+    key: str
+    name: str
+    latest_revision: int
+    last_non_empty_revision: int | None
+    entity_instance_ids: tuple[UUID, ...]
+    enabled_entity_instance_ids: tuple[UUID, ...]
+    device_count: int
+    rule_count: int
+    highest_severity: Severity | None
+
+
+@dataclass(frozen=True)
 class ResolvedAlarmEntity:
     id: UUID
     node_id: UUID
@@ -128,6 +142,7 @@ class AppliedAlarmConfiguration:
 class AlarmConfigurationRepository(Protocol):
     def save_rule_set_revision(self, *, key: str, name: str, rules: tuple[AlarmRule, ...], actor: str) -> AlarmRuleSetRevision: ...
     def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]: ...
+    def list_rule_groups(self) -> tuple[AlarmRuleGroup, ...]: ...
     def get_rule_set_revision(self, rule_set_id: UUID, revision: int) -> AlarmRuleSetRevision | None: ...
     def resolve_entities(self, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]: ...
     def current_configuration_revision(self) -> int: ...
@@ -222,6 +237,9 @@ class AlarmConfiguration:
 
     def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
         return self.repository.list_rule_set_revisions()
+
+    def list_rule_groups(self) -> tuple[AlarmRuleGroup, ...]:
+        return self.repository.list_rule_groups()
 
     def trial(
         self,
