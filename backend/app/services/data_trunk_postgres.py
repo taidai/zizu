@@ -1500,7 +1500,8 @@ class PostgresFrameRepository:
                    latest.event_id,latest.observed_at,latest.received_at,
                    latest.calculated_at,latest.value_float,latest.value_int,
                    latest.value_numeric,latest.value_bool,latest.value_text,
-                   latest.value_codes,latest.source_digest
+                   latest.value_codes,latest.source_digest,
+                   latest.quality,latest.reason
             FROM t_point_processing_output_bindings AS output_binding
             JOIN t_installed_point_processings AS installed
               ON installed.id=output_binding.installed_processing_id
@@ -1522,6 +1523,15 @@ class PostgresFrameRepository:
         for row in cursor.fetchall():
             entity_id = UUID(str(row[0]))
             has_baseline = row[5] is not None
+            if (
+                row[16] == int(TrunkQuality.STALE)
+                and row[17]
+                in {
+                    "FRAME_PROCESSING_FAILED",
+                    "FRAME_PROCESSING_FAILED_NO_BASELINE",
+                }
+            ):
+                continue
             value = (
                 _l2_value_from_columns(
                     str(row[2]), row[9], row[10], row[11], row[12], row[13], row[14]

@@ -751,6 +751,41 @@ class DataFramesPostgresTest(unittest.TestCase):
             )
             self.assertEqual((1,), cursor.fetchone())
 
+        # The first expired recovery frame makes the affected entities STALE.
+        # A later expired frame still needs its frame failure and outbox, but it
+        # must not append an identical L2 state transition for every old beat.
+        expired_frames = []
+        for capture_beat in (112, 113):
+            expired = self.repository.commit_pending(
+                self._multi_candidate(
+                    capture_beat=capture_beat,
+                    configuration_revision=applied.configuration_revision,
+                    tag_specs=tag_specs,
+                )
+            )
+            expired_frames.append(expired)
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute("SET session_replication_role=replica")
+                cursor.execute(
+                    "UPDATE t_data_frames SET created_at=%s WHERE frame_id=%s",
+                    (datetime.now(UTC) - timedelta(seconds=61), str(expired.frame_id)),
+                )
+                cursor.execute("SET session_replication_role=origin")
+            budget = self.repository.claim_next(datetime.now(UTC))
+            self.repository.fail_budget(budget, datetime.now(UTC))
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_l2_observations WHERE frame_id=%s",
+                (str(expired_frames[0].frame_id),),
+            )
+            self.assertEqual((4,), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_l2_observations WHERE frame_id=%s",
+                (str(expired_frames[1].frame_id),),
+            )
+            self.assertEqual((0,), cursor.fetchone())
+
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT count(*) FROM t_telemetry")
             history_before_stale = cursor.fetchone()[0]
