@@ -958,7 +958,7 @@ export async function acknowledgeAlarm(alarmId: string): Promise<void> {
 // ── Unified alarm configuration ──
 
 export type AlarmSeverity = 'CRITICAL' | 'MAJOR' | 'WARNING' | 'INFO'
-export type AlarmConditionOperator = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte'
+export type AlarmConditionOperator = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'not_contains'
 
 export interface AlarmCondition {
   operator: AlarmConditionOperator
@@ -1221,17 +1221,13 @@ export async function fetchEntityInstanceHistory(
   return (await response.json() as { items: EntityInstanceObservation[] }).items
 }
 
-export interface NumericAlarmCondition extends AlarmCondition {
-  value: number
-}
-
 export interface AlarmRule {
   id: string
   name: string
   severity: AlarmSeverity
-  trigger: NumericAlarmCondition
+  trigger: AlarmCondition
   trigger_duration_seconds: number
-  recovery: NumericAlarmCondition
+  recovery: AlarmCondition
   recovery_duration_seconds: number
   notification_throttle_seconds: number
   unit: string | null
