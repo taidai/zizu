@@ -4658,3 +4658,12 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 实施计划：`docs/superpowers/plans/2026-08-28-minimal-alarm-center-implementation.md`。
 - 计划坚持复用现有 committed L2 告警状态机和配置发布链，只补 CODE_SET 条件、零副作用试算、面向人的读模型和一个前端入口；不新增表、依赖、基础设施、JDM 告警或通知系统。
 - 下一步按计划逐项 TDD 实现，完成全部本地/真实 PostgreSQL 门禁后只构建一次 ARM64 镜像，并以固定 digest 部署 1 号机。
+
+### 2026-08-28 — v0.4.85-rc.11 最简告警中心实现
+
+- 后端完成 CODE_SET `contains/not_contains`、运行态强类型回滚门禁、零持久化试算、活动告警摘要、节点/实体/故障名称读模型和规则组摘要；没有新增表、依赖或第二套状态机。
+- 前端左侧只保留一个“告警中心”，内部为“当前告警/告警规则”；操作员只能看当前告警，工程师/管理员可按数值、状态或三列多故障码配置、试算、预览、发布及安全启停。JDM 新建入口不再提供 alarm/fault_map。
+- 本地完整后端 `298 tests / 116 skipped / 0 failed`；前端模型 3/3、TypeScript 和 Vite production build 通过。
+- 一次性 TimescaleDB `zizu_alarm_center_test` 的现行 PostgreSQL seam 6/6、0 skip：覆盖规则发布、空修订停用后保留重启用目标、可读事件标签和 Schema049 committed-frame 回执；测试容器已按精确 ID 删除，正式 `zizu-tsdb` 未触碰。
+- 历史 `test_alarm_configuration_postgres` 中 12 项安装包/旧迁移用例仍使用硬切前的 `installation_id` 参数，不能作为现行 L0→L1→L2 主干门禁；本轮未恢复兼容模型。
+- 发布候选统一为 `0.4.85-rc.11`。下一步：最终门禁、构建并解析 ARM64 固定 digest、部署1号机并做无设备写入的网页 smoke。
