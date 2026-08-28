@@ -25,6 +25,13 @@ export const RAW_POINT_COLUMNS = [
   '来源',
 ] as const
 
+export const POINT_PROCESSING_ACTIONS = {
+  inspect: '检查加工结果',
+  publish: '检查并发布',
+  inspecting: '正在检查...',
+  publishing: '正在发布...',
+} as const
+
 export type NodeDataTabKey = 'raw-points' | 'point-processing' | 'entities'
 
 export interface NodeDataTab {

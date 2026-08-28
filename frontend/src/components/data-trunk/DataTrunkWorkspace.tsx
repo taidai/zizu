@@ -4,7 +4,6 @@ import {
   DataTrunkResultUnknownError,
   applyPointProcessingPlan,
   createPointProcessingPlan,
-  fetchEntityInstanceHistory,
   fetchEntityInstances,
   fetchNodeDataTrunk,
   fetchPointProcessingPlan,
@@ -31,7 +30,7 @@ import {
 } from './dataTrunkRetryState'
 import NodeTrunkOverview from './NodeTrunkOverview'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
-import { DATA_TRUNK_STEPS } from './dataTrunkViewModel'
+import { DATA_TRUNK_STEPS, recommendPointProcessingTemplate } from './dataTrunkViewModel'
 import {
   applyFrameDelta,
   replaceSnapshot,
@@ -42,11 +41,12 @@ export default function DataTrunkWorkspace({
   node,
   readOnly,
   actorId,
+  view,
 }: {
   node: Node
   readOnly: boolean
   actorId: string
-  view?: 'processing' | 'entities'
+  view: 'processing' | 'entities'
 }) {
   const [trunk, setTrunk] = useState<NodeDataTrunk | null>(null)
   const [templates, setTemplates] = useState<PointProcessingTemplate[]>([])
@@ -56,7 +56,6 @@ export default function DataTrunkWorkspace({
   const [application, setApplication] = useState<PointProcessingApplication | null>(null)
   const [descriptors, setDescriptors] = useState<Map<string, EntityInstance>>(new Map())
   const [projection, setProjection] = useState<CommittedFrameProjection | null>(null)
-  const [histories, setHistories] = useState<Map<string, EntityInstanceObservation[]>>(new Map())
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'plan' | 'apply' | 'formula' | null>(null)
   const [error, setError] = useState('')
@@ -64,35 +63,31 @@ export default function DataTrunkWorkspace({
   const [formulaPreview, setFormulaPreview] = useState<PointProcessingFormulaPreview | null>(null)
 
   const loadRuntime = useCallback(async () => {
-    const [nextTrunk, catalog] = await Promise.all([
-      fetchNodeDataTrunk(node.id),
-      fetchEntityInstances(),
-    ])
-    const descriptorMap = new Map(catalog.items.map((item) => [item.id, item]))
-    const historyEntries = await Promise.all(nextTrunk.l2.map(async (item) => {
-      try {
-        const items = await fetchEntityInstanceHistory(item.entity_instance_id)
-        return [item.entity_instance_id, items] as const
-      } catch {
-        return [item.entity_instance_id, [] as EntityInstanceObservation[]] as const
-      }
-    }))
-    const nextHistories = new Map(historyEntries)
+    const nextTrunk = await fetchNodeDataTrunk(node.id)
+    if (view === 'entities') {
+      const catalog = await fetchEntityInstances()
+      setDescriptors(new Map(catalog.items.map((item) => [item.id, item])))
+    } else {
+      setDescriptors(new Map())
+    }
     setTrunk(nextTrunk)
-    setDescriptors(descriptorMap)
-    setHistories(nextHistories)
     return nextTrunk
-  }, [node.id])
+  }, [node.id, view])
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const nextTrunk = await loadRuntime()
-      if (!readOnly) {
+      if (view === 'processing' && !readOnly) {
         const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
         setTemplates(nextTemplates)
-        setSelectedRevisionId((current) => current || nextTrunk.l1_summary.revision_id || nextTemplates[0]?.revision_id || '')
+        const recommended = recommendPointProcessingTemplate(
+          nextTemplates,
+          nextTrunk.l0,
+          nextTrunk.l1_summary.revision_id,
+        )
+        setSelectedRevisionId((current) => current || recommended)
         const retry = findDataTrunkApplyRetry(sessionStorage, actorId, node.id)
         if (retry) {
           try {
@@ -117,7 +112,7 @@ export default function DataTrunkWorkspace({
     } finally {
       setLoading(false)
     }
-  }, [actorId, loadRuntime, node.id, node.node_type, readOnly])
+  }, [actorId, loadRuntime, node.id, node.node_type, readOnly, view])
 
   useEffect(() => {
     setPlan(null)
@@ -181,6 +176,9 @@ export default function DataTrunkWorkspace({
 
   const selectedTemplate = templates.find((item) => item.revision_id === selectedRevisionId) || null
   const installedTemplate = templates.find((item) => item.revision_id === trunk?.l1_summary.revision_id) || null
+  const recommendedRevisionId = trunk
+    ? recommendPointProcessingTemplate(templates, trunk.l0, trunk.l1_summary.revision_id)
+    : ''
 
   useEffect(() => {
     if (!selectedTemplate || !trunk) return
@@ -293,16 +291,20 @@ export default function DataTrunkWorkspace({
       <header className="rounded-xl border border-gray-200 bg-white/55 p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">{node.name} 数据主干</h2>
-            <p className="mt-1 text-xs text-gray-500">原始点位经过点位加工形成稳定全局实体，上层功能不再直接依赖品牌地址。</p>
+            <h2 className="text-base font-semibold text-gray-900">{view === 'processing' ? '点位加工' : '实体数据'}</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              {view === 'processing'
+                ? '把设备原始点位转换为名称和单位稳定的实体。'
+                : '查看供告警、策略、控制和画面使用的实时值与历史值。'}
+            </p>
           </div>
-          <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+          {view === 'processing' && <div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
             {DATA_TRUNK_STEPS.map((step, index) => (
               <div key={step.key} className={`rounded-lg border px-2 py-2 text-center text-[10px] font-medium ${index <= completedStage ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-gray-200 bg-gray-50 text-gray-500'}`}>
                 {step.label}
               </div>
             ))}
-          </div>
+          </div>}
         </div>
       </header>
 
@@ -312,22 +314,34 @@ export default function DataTrunkWorkspace({
         </div>
       )}
 
-      <NodeTrunkOverview
+      {view === 'entities' && <NodeTrunkOverview
         trunk={trunk}
         installedTemplate={installedTemplate}
         descriptors={descriptors}
         projection={projection}
-        histories={histories}
+        histories={new Map<string, EntityInstanceObservation[]>()}
         readOnly={readOnly}
-      />
+      />}
 
-      {!readOnly && (
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="rounded-xl border border-gray-200 bg-white/45 p-4"><h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3><div className="mt-3 grid grid-cols-2 gap-3"><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">L2 输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个全局实体</div></div><div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">统一配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.configuration_revision ?? projection?.configurationRevision ?? '未发布'}</div></div></div></div>
+      {view === 'processing' && !readOnly && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-gray-200 bg-white/45 p-4">
+            <h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">实体输出</div><div className="mt-1 text-sm font-semibold text-gray-900">{trunk.l1_summary.output_count} 个实体</div></div>
+              <div className="border-l-2 border-blue-500 pl-3"><div className="text-[10px] text-gray-500">配置版本</div><div className="mt-1 text-sm font-semibold text-gray-900">{application?.configuration_revision ?? projection?.configurationRevision ?? '未发布'}</div></div>
+            </div>
+            {application && (
+              <div className="mt-3 rounded border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">
+                发布成功｜配置修订 {application.configuration_revision}｜生成 {trunk.l1_summary.output_count} 个实体
+              </div>
+            )}
+          </div>
           <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}
             selectedTemplate={selectedTemplate}
+            recommendedRevisionId={recommendedRevisionId}
             selections={selections}
             plan={plan}
             busy={busy}

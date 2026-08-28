@@ -121,7 +121,7 @@ export default function PointProcessingFormulaEditor({
       )}
 
       <div className="mt-2 text-[10px] leading-4 text-blue-800">
-        预检只验证草稿，不改变已签名模板；正式应用仍使用所选模板修订中的公式。
+        检查只验证草稿，不改变已发布模板；正式发布仍使用所选模板修订中的公式。
       </div>
       <button
         type="button"
@@ -129,7 +129,7 @@ export default function PointProcessingFormulaEditor({
         onClick={() => onPreview(expression)}
         className="neu-btn mt-2 w-full px-3 py-2 text-xs font-semibold text-blue-700 disabled:opacity-50"
       >
-        {busy ? '正在编译并展开实体...' : '预检公式、成员与 DAG'}
+        {busy ? '正在检查公式...' : '检查公式、成员与依赖'}
       </button>
 
       {model && currentPreview && (

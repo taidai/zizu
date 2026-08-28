@@ -132,6 +132,12 @@ test('template recommendation keeps installed revision then prefers exact covera
   const l0 = [{ source_key: 'Power', data_type: 'FLOAT', unit: 'kW' }]
   assert.equal(model.recommendPointProcessingTemplate(templates, l0, 'a'), 'a')
   assert.equal(model.recommendPointProcessingTemplate(templates, l0, null), 'b')
+  assert.deepEqual(model.POINT_PROCESSING_ACTIONS, {
+    inspect: '检查加工结果',
+    publish: '检查并发布',
+    inspecting: '正在检查...',
+    publishing: '正在发布...',
+  })
 })
 
 test('entity reason is human readable and technical kind stays a label', async () => {
