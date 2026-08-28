@@ -4663,7 +4663,22 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 
 - 后端完成 CODE_SET `contains/not_contains`、运行态强类型回滚门禁、零持久化试算、活动告警摘要、节点/实体/故障名称读模型和规则组摘要；没有新增表、依赖或第二套状态机。
 - 前端左侧只保留一个“告警中心”，内部为“当前告警/告警规则”；操作员只能看当前告警，工程师/管理员可按数值、状态或三列多故障码配置、试算、预览、发布及安全启停。JDM 新建入口不再提供 alarm/fault_map。
-- 本地完整后端 `298 tests / 116 skipped / 0 failed`；前端模型 3/3、TypeScript 和 Vite production build 通过。
+- 本地完整后端 `300 tests / 118 skipped / 0 failed`；前端模型 3/3、TypeScript 和 Vite production build 通过。
 - 一次性 TimescaleDB `zizu_alarm_center_test` 的现行 PostgreSQL seam 6/6、0 skip：覆盖规则发布、空修订停用后保留重启用目标、可读事件标签和 Schema049 committed-frame 回执；测试容器已按精确 ID 删除，正式 `zizu-tsdb` 未触碰。
 - 历史 `test_alarm_configuration_postgres` 中 12 项安装包/旧迁移用例仍使用硬切前的 `installation_id` 参数，不能作为现行 L0→L1→L2 主干门禁；本轮未恢复兼容模型。
 - 发布候选统一为 `0.4.85-rc.11`。下一步：最终门禁、构建并解析 ARM64 固定 digest、部署1号机并做无设备写入的网页 smoke。
+
+### 2026-08-28 — v0.4.85-rc.11 部署与最简告警中心验收
+
+- GitHub Actions `33137526715` 成功；1号机运行固定 ARM64 摘要
+  `ghcr.io/taidai/zizu@sha256:a494e89a1b63a632877992dc6820c11f07e1ff237721f407f54f8cebd529891a`，
+  实际 image ID `sha256:e3afa1b82369153eda4bc698cef0bb602b4e628588c22489979ca282a1f03fc6`。
+- 切换前 Schema049 备份为 `/opt/zizu-backups/pre-v0.4.85-rc.11-schema049/omnithings.dump`，
+  3,433,038 bytes，SHA-256 `73b4127c7ecfb393e8fa5bf6523ba329609071955801c02d6a5deb4b43c29406`；
+  `sha256sum --check` 与 `pg_restore -l` 通过。
+- 仅重建 backend，保留 host 网络、`/dev/mqueue`、restart policy、运行环境和数据卷；容器 healthy、
+  restart count 0，Schema049，数据帧 outbox 积压 0，公网首页 200，健康接口返回 rc.11。
+- 管理员只读验收成功：7 条历史告警、0 条活动告警、1 个规则组；可读节点/实体/故障名称和持续时间
+  字段齐全，浏览器公网登录页正常加载。未发布规则、未执行试算写入、自动策略、控制或设备写入。
+- 完整记录：`docs/deploy-1号机-v0.4.85-rc.11-http.md`。下一步先让现场工程师在界面上用一个真实 L2
+  实体完成“试算→发布→触发→恢复”人工小闭环，再根据使用感受微调，不扩展通知或新引擎。
