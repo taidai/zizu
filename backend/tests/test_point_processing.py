@@ -143,8 +143,8 @@ class PointProcessingTest(unittest.TestCase):
             ApplyPointProcessingPlan,
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
-            PointProcessingService,
             PointProcessingSource,
+            PointProcessingService,
             PreviewPointProcessing,
         )
 
@@ -426,6 +426,7 @@ class PointProcessingTest(unittest.TestCase):
         from app.services.point_processing import (
             InMemoryPointProcessingCatalog,
             InMemoryPointProcessingRepository,
+            PointProcessingSource,
             PointProcessingService,
             PreviewPointProcessing,
         )
@@ -452,6 +453,15 @@ class PointProcessingTest(unittest.TestCase):
             InMemoryPointProcessingCatalog(
                 templates={METER_REVISION_ID: ambiguous_asset},
                 node_source_keys={NODE_ID: "meter"},
+                sources=(PointProcessingSource(
+                    UUID("85000000-0000-0000-0000-000000000099"),
+                    "l0",
+                    NODE_ID,
+                    "总有功功率",
+                    "INT",
+                    "kW",
+                    True,
+                ),),
             ),
             point_scanner=NeuronPointCatalog(AmbiguousMeterNeuron()),
         )
@@ -468,6 +478,7 @@ class PointProcessingTest(unittest.TestCase):
         )["candidate_source_ids"]
         self.assertEqual("blocked", blocked.status)
         self.assertEqual(2, len(candidates))
+        self.assertEqual(2, len(set(candidates)))
 
         ready = service.preview(PreviewPointProcessing(
             node_id=NODE_ID,

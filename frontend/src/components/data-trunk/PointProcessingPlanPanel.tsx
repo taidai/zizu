@@ -9,6 +9,7 @@ import {
   manualBindableInputs,
   planActionLabel,
   POINT_PROCESSING_ACTIONS,
+  pointCandidateLabel,
   scannedInputCandidates,
 } from './dataTrunkViewModel'
 import PointProcessingDagPanel from './PointProcessingDagPanel'
@@ -145,7 +146,7 @@ export default function PointProcessingPlanPanel({
                   <option value="">自动匹配</option>
                   {compatibleSources.map((source) => (
                     <option key={source.source_id} value={source.source_id}>
-                      {source.source_key}{source.unit ? `（${source.unit}）` : ''}
+                      {pointCandidateLabel(source)}
                     </option>
                   ))}
                 </select>

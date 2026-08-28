@@ -1097,6 +1097,8 @@ export interface PointProcessingPlanItem {
     name: string
     value_data_type: string
     unit: string | null
+    group: string
+    source_address: string
   } | null
 }
 

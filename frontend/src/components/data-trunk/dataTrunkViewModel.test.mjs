@@ -179,8 +179,11 @@ test('scan templates still allow manual binding and raw history starts idle', as
     power: 'source-1',
   })
   assert.deepEqual(model.scannedInputCandidates([
-    { kind: 'l0_point', input_id: 'power', after: { source_id: 'candidate-1', name: '功率 A', value_data_type: 'FLOAT', unit: 'kW' } },
-    { kind: 'l0_point', input_id: 'state', after: { source_id: 'candidate-2', name: '状态', value_data_type: 'STRING', unit: null } },
-  ], 'power'), [{ source_id: 'candidate-1', source_key: '功率 A', data_type: 'FLOAT', unit: 'kW' }])
+    { kind: 'l0_point', input_id: 'power', after: { source_id: 'candidate-1', name: '功率 A', value_data_type: 'FLOAT', unit: 'kW', group: 'data-a', source_address: '1!1' } },
+    { kind: 'l0_point', input_id: 'state', after: { source_id: 'candidate-2', name: '状态', value_data_type: 'STRING', unit: null, group: 'data-b', source_address: '1!2' } },
+  ], 'power'), [{ source_id: 'candidate-1', source_key: '功率 A', data_type: 'FLOAT', unit: 'kW', group: 'data-a', source_address: '1!1' }])
+  assert.equal(model.pointCandidateLabel({
+    source_key: '总有功功率', unit: 'kW', group: 'data-a', source_address: '1!416409',
+  }), '总有功功率 · data-a · 1!416409（kW）')
   assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })

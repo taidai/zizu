@@ -61,6 +61,7 @@ export default function EntityDataPanel({
               observation={projection?.l2.get(item.entity_instance_id) || null}
               processingKind={item.processing_kind}
               sourceSummary={item.source_summary}
+              frameSequence={projection?.frameSequence ?? null}
               expanded={expanded}
               selectedRange={selectedRange}
               history={expanded ? history : []}

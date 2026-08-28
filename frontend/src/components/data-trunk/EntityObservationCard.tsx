@@ -35,6 +35,7 @@ export default function EntityObservationCard({
   observation,
   processingKind,
   sourceSummary,
+  frameSequence,
   expanded,
   selectedRange,
   history,
@@ -46,6 +47,7 @@ export default function EntityObservationCard({
   observation: L2FrameItem | null
   processingKind: string | null
   sourceSummary: NodeDataTrunk['l1_summary']['source_summary']
+  frameSequence: number | null
   expanded: boolean
   selectedRange: EntityHistoryRange
   history: EntityInstanceObservation[]
@@ -168,7 +170,7 @@ export default function EntityObservationCard({
                   <div><dt className="inline text-gray-400">processing_revision_id: </dt><dd className="inline">{observation?.processing_revision_id || '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">configuration_revision: </dt><dd className="inline">{observation?.configuration_revision ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">source_digest: </dt><dd className="inline">{observation?.source_digest || '未记录'}</dd></div>
-                  <div><dt className="inline text-gray-400">frame_sequence: </dt><dd className="inline">{observation?.frame_sequence ?? '未记录'}</dd></div>
+                  <div><dt className="inline text-gray-400">frame_sequence: </dt><dd className="inline">{frameSequence ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">received_at: </dt><dd className="inline">{formatTime(observation?.received_at)}</dd></div>
                   <div><dt className="inline text-gray-400">calculated_at: </dt><dd className="inline">{formatTime(observation?.calculated_at)}</dd></div>
                   <div><dt className="inline text-gray-400">reason: </dt><dd className="inline">{observation?.reason || '无'}</dd></div>

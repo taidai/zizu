@@ -134,10 +134,19 @@ export function scannedInputCandidates(
       name: string
       value_data_type: string
       unit: string | null
+      group: string
+      source_address: string
     } | null
   }>,
   inputId: string,
-): Array<{ source_id: string; source_key: string; data_type: string; unit: string | null }> {
+): Array<{
+  source_id: string
+  source_key: string
+  data_type: string
+  unit: string | null
+  group: string
+  source_address: string
+}> {
   return items
     .filter((item) => item.kind === 'l0_point' && item.input_id === inputId && item.after)
     .map((item) => ({
@@ -145,7 +154,21 @@ export function scannedInputCandidates(
       source_key: item.after!.name,
       data_type: item.after!.value_data_type,
       unit: item.after!.unit,
+      group: item.after!.group,
+      source_address: item.after!.source_address,
     }))
+}
+
+export function pointCandidateLabel(source: {
+  source_key: string
+  unit: string | null
+  group?: string
+  source_address?: string
+}): string {
+  const location = source.group && source.source_address
+    ? ` · ${source.group} · ${source.source_address}`
+    : ''
+  return `${source.source_key}${location}${source.unit ? `（${source.unit}）` : ''}`
 }
 
 export function entityReasonLabel(reason: string | null, ageMs: number): string | null {

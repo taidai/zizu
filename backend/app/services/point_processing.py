@@ -1509,13 +1509,17 @@ def _scan_plan_inputs(
                 )
                 continue
             freshness_seconds = max(3 * point.group_interval_ms / 1000, 5.0)
-            existing = next(
-                (
-                    source for source in existing_l0
-                    if _normalized_source_key(source.stable_source_key)
-                    == _normalized_source_key(point.name)
-                ),
-                None,
+            existing = (
+                next(
+                    (
+                        source for source in existing_l0
+                        if _normalized_source_key(source.stable_source_key)
+                        == _normalized_source_key(point.name)
+                    ),
+                    None,
+                )
+                if len(matches) == 1
+                else None
             )
             source_id = (
                 existing.source_id if existing is not None
