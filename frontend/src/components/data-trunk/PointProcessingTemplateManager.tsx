@@ -9,6 +9,7 @@ import {
 import {
   buildTransform,
   cloneTemplateDraft,
+  createTemplateDraftFromL0,
   formatEnumEntries,
   parseEnumEntries,
   visualTransformKind,
@@ -22,13 +23,21 @@ const DATA_TYPES = ['FLOAT', 'INT', 'BOOL', 'STRING', 'ENUM', 'CODE_SET']
 export default function PointProcessingTemplateManager({
   templates,
   selectedRevisionId,
+  l0Points,
+  nodeName,
+  deviceCategory,
+  canManage,
   onPublished,
 }: {
   templates: PointProcessingTemplate[]
   selectedRevisionId: string
+  l0Points: Array<{ source_key: string; data_type: string; unit: string | null }>
+  nodeName: string
+  deviceCategory: string
+  canManage: boolean
   onPublished: (revisionId: string) => Promise<void>
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const [baseRevisionId, setBaseRevisionId] = useState(selectedRevisionId)
   const [draft, setDraft] = useState<TemplateDocument | null>(null)
   const [draftMode, setDraftMode] = useState<TemplateCopyMode>('next-revision')
@@ -40,6 +49,24 @@ export default function PointProcessingTemplateManager({
   const [success, setSuccess] = useState('')
 
   const activeBaseRevision = baseRevisionId || selectedRevisionId || templates[0]?.revision_id || ''
+
+  const createFromCurrentNode = () => {
+    const key = nodeName.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'device'
+    setDraftMode('new-template')
+    setDraft(createTemplateDraftFromL0(l0Points, {
+      id: `custom.${String(deviceCategory || 'device').toLowerCase()}.${key}`,
+      displayName: `${nodeName} 点位加工模板`,
+      deviceCategory: deviceCategory || 'DEVICE',
+      brand: '待填写',
+      model: nodeName,
+    }))
+    setEnumTexts({})
+    setCheckedContent(null)
+    setCheckedDigest('')
+    setError('')
+    setSuccess('已把当前原始点位放入草稿；请确认输入、输出和加工方法。')
+    setOpen(true)
+  }
 
   const markDirty = () => {
     setCheckedContent(null)
@@ -177,20 +204,21 @@ export default function PointProcessingTemplateManager({
         className="flex w-full items-center justify-between px-4 py-3 text-left"
       >
         <span>
-          <span className="block text-sm font-semibold text-gray-900">维护共享模板</span>
-          <span className="mt-0.5 block text-[11px] text-gray-500">管理员复制旧版本，修改加工方法，再发布新版本；不会改坏已运行的模板。</span>
+          <span className="block text-sm font-semibold text-gray-900">模板库</span>
+          <span className="mt-0.5 block text-[11px] text-gray-500">把一种设备的原始点位加工方法保存下来，换品牌或换站点时直接复用。</span>
         </span>
         <span className="text-xs font-medium text-blue-700">{open ? '收起' : '展开'}</span>
       </button>
 
       {open && (
         <div className="space-y-4 border-t border-gray-200 p-4">
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto] lg:items-end">
+          {!canManage && <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">当前账号可查看模板；创建和发布模板需要配置管理权限。</p>}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-end">
             <label className="text-xs text-gray-600">
               从哪个模板开始
               <select
                 value={activeBaseRevision}
-                disabled={busy !== null}
+                disabled={busy !== null || templates.length === 0}
                 onChange={(event) => setBaseRevisionId(event.target.value)}
                 className="neu-input mt-1 w-full bg-transparent px-3 py-2 text-xs"
               >
@@ -201,20 +229,23 @@ export default function PointProcessingTemplateManager({
                 ))}
               </select>
             </label>
-            <button type="button" disabled={!activeBaseRevision || busy !== null} onClick={() => void loadDraft('next-revision')} className="neu-btn px-3 py-2 text-xs text-blue-700 disabled:opacity-50">
+            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={() => void loadDraft('next-revision')} className="neu-btn px-3 py-2 text-xs text-blue-700 disabled:opacity-50">
               复制为下一修订
             </button>
-            <button type="button" disabled={!activeBaseRevision || busy !== null} onClick={() => void loadDraft('new-template')} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-50">
+            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={() => void loadDraft('new-template')} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-50">
               另存为新模板
+            </button>
+            <button type="button" disabled={!canManage || l0Points.length === 0 || busy !== null} onClick={createFromCurrentNode} className="rounded-lg bg-[#185FA5] px-3 py-2 text-xs font-medium text-white disabled:opacity-40">
+              从当前设备创建
             </button>
           </div>
 
-          {templates.length === 0 && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">当前设备类型还没有模板，请先导入一份标准模板文件。</p>}
+          {templates.length === 0 && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">当前设备类型还没有模板。点击“从当前设备创建”，平台会把已有原始点位变成可编辑草稿。</p>}
           {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
           {success && <p className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{success}</p>}
 
           {draft && (
-            <fieldset disabled={busy !== null} className="space-y-4 disabled:opacity-70">
+            <fieldset disabled={!canManage || busy !== null} className="space-y-4 disabled:opacity-70">
               <div className="rounded-lg border border-gray-200 bg-white/60 p-3">
                 <h4 className="text-xs font-semibold text-gray-800">1. 模板是谁</h4>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -313,8 +344,8 @@ export default function PointProcessingTemplateManager({
                   {checkedDigest ? `已检查：${checkedDigest.slice(0, 12)}…` : '先检查，检查通过后才能发布。发布只新增版本，不覆盖旧版本。'}
                 </div>
                 <div className="flex gap-2">
-                  <button type="button" disabled={busy !== null} onClick={() => void handleCheck()} className="neu-btn px-4 py-2 text-xs font-medium text-blue-700 disabled:opacity-50">{busy === 'check' ? '检查中…' : '检查模板'}</button>
-                  <button type="button" disabled={!canPublish || busy !== null} onClick={() => void handlePublish()} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
+                  <button type="button" disabled={!canManage || busy !== null} onClick={() => void handleCheck()} className="neu-btn px-4 py-2 text-xs font-medium text-blue-700 disabled:opacity-50">{busy === 'check' ? '检查中…' : '检查模板'}</button>
+                  <button type="button" disabled={!canManage || !canPublish || busy !== null} onClick={() => void handlePublish()} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
                 </div>
               </div>
             </fieldset>

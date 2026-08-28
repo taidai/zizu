@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
     CONFIGURATION_READ,
@@ -225,13 +225,12 @@ async def list_tags(
 
     if node_id:
         conditions.append("t.node_id = %s")
-        params.append(UUID(node_id))
+        params.append(str(UUID(node_id)))
     if data_type:
         conditions.append("t.data_type = %s")
         params.append(data_type.upper())
-    if tag_type:
-        conditions.append("t.tag_type = %s")
-        params.append(tag_type.upper())
+    if tag_type and tag_type.upper() != "PHYSICAL":
+        return {"tags": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
     if read_write:
         conditions.append("t.read_write = %s")
         params.append(read_write.upper())
@@ -255,7 +254,7 @@ async def list_tags(
         "latest_ts": "latest.ts",
         "scale_factor": "t.scale_factor",
         "value_offset": "t.value_offset",
-        "sort_order": "t.sort_order",
+        "sort_order": "t.name",
     }
     order_by = sort_map.get(sort_by, "t.sort_order")
     order_dir = "DESC" if sort_order.lower() == "desc" else "ASC"
@@ -265,10 +264,12 @@ async def list_tags(
 
     query = f"""
     SELECT
-       t.id, t.node_id, t.name, t.display_name, t.data_type, t.tag_type,
+       t.id, t.node_id, t.name, t.display_name, t.data_type,
+       'PHYSICAL'::text AS tag_type,
        t.unit, t.scale_factor, t.value_offset, t.source_path, t.source_type,
-       t.read_write, t.enabled, t.description,
-       t.aggregate_fn, t.formula, t.formula_type, t.sources,
+       t.read_write, t.enabled, NULL::text AS description,
+       NULL::text AS aggregate_fn, NULL::text AS formula,
+       NULL::text AS formula_type, NULL::uuid[] AS sources,
        n.name AS node_name,
         t.alarm_level, t.alarm_type, t.alarm_threshold, t.fault_map_id,
         fm.name AS fault_map_name,
@@ -286,7 +287,7 @@ async def list_tags(
     {where}
     ORDER BY
         CASE WHEN latest.ts IS NOT NULL THEN 0 ELSE 1 END,
-        {order_by} {order_dir}, t.sort_order, t.name
+        {order_by} {order_dir}, t.name
     LIMIT %s OFFSET %s
     """
 
@@ -840,105 +841,157 @@ async def update_tag(tag_id: UUID, req: TagUpdateRequest) -> dict:
 
 
 # ══════════════════════════════════════
-# Neuron 同步导入 (M1 / F3 · S10)
+# Neuron 多组预览与摘要确认导入
 # ══════════════════════════════════════
 
-class NeuronImportRequest(BaseModel):
-    """从 Neuron 采集组批量导入点位到指定节点。"""
-    node_id: str = Field(..., description="ZiZu 目标节点 (Station/EnergyNode) UUID")
-    neuron_node: str = Field(..., description="Neuron 南向节点名 (driver node)")
-    neuron_group: str = Field(..., description="Neuron 采集组名")
+
+class NeuronImportSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: UUID
+    neuron_node: str = Field(min_length=1, max_length=256)
+    neuron_groups: list[str] = Field(min_length=1, max_length=128)
 
 
-# Neuron data type code → ZiZu data_type
-# 参考 Neuron: 3=INT16 4=UINT16 5=INT32 6=UINT32 9=FLOAT 10=DOUBLE 11=BIT ...
-# NOTE: data_type 必须为大写 (t_tags CHECK 约束: FLOAT/INT/BOOL/STRING/ENUM)
-_NEURON_TYPE_MAP = {
-    3: "INT", 4: "INT", 5: "INT", 6: "INT", 7: "INT", 8: "INT",
-    9: "FLOAT", 10: "FLOAT", 11: "BOOL", 13: "STRING",
-}
+class NeuronImportRequest(NeuronImportSelection):
+    preview_digest: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+def get_neuron_tag_imports():
+    from app.services.neuron_tag_import import PostgresNeuronTagImports
+
+    return PostgresNeuronTagImports()
+
+
+def get_neuron_import_catalog():
+    from app.services.neuron_client import get_neuron_client
+    from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+
+    return NeuronPointCatalog(get_neuron_client())
+
+
+def get_neuron_import_runtime():
+    from app.main import get_pipeline
+
+    pipeline = get_pipeline()
+    if pipeline is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "DATA_TRUNK_UNAVAILABLE", "message": "数据主干尚未启动"},
+        )
+    return pipeline
+
+
+def _neuron_import_response(preview) -> dict:
+    return {
+        "node_id": str(preview.node_id),
+        "neuron_node": preview.neuron_node,
+        "selected_groups": list(preview.selected_groups),
+        "base_configuration_revision": preview.base_configuration_revision,
+        "preview_digest": preview.digest,
+        "counts": preview.counts,
+        "has_conflicts": preview.has_conflicts,
+        "items": [
+            {
+                "source_path": item.source_path,
+                "group": item.group,
+                "name": item.name,
+                "source_address": item.source_address,
+                "wire_data_type": item.wire_data_type,
+                "value_data_type": item.value_data_type,
+                "action": item.action,
+                "reason": item.reason,
+            }
+            for item in preview.items
+        ],
+    }
+
+
+def _raise_neuron_import_http(error: Exception) -> None:
+    from app.services.configuration_revision import ConfigurationRevisionError
+    from app.services.neuron_tag_import import NeuronTagImportError
+
+    if isinstance(error, NeuronTagImportError):
+        code = error.code
+    elif isinstance(error, ConfigurationRevisionError):
+        code = error.code
+    else:
+        raise error
+    status_by_code = {
+        "NEURON_IMPORT_NODE_NOT_FOUND": status.HTTP_404_NOT_FOUND,
+        "NEURON_IMPORT_PREVIEW_STALE": status.HTTP_409_CONFLICT,
+        "NEURON_IMPORT_CONFLICT": status.HTTP_409_CONFLICT,
+        "CONFIGURATION_REVISION_STALE": status.HTTP_409_CONFLICT,
+        "CONFIGURATION_REVISION_UNAVAILABLE": status.HTTP_503_SERVICE_UNAVAILABLE,
+    }
+    raise HTTPException(
+        status_code=status_by_code.get(code, status.HTTP_422_UNPROCESSABLE_CONTENT),
+        detail={"code": code, "message": str(error)},
+    )
+
+
+def _scan_neuron_import(selection: NeuronImportSelection, catalog, repository):
+    groups = tuple(sorted({group.strip() for group in selection.neuron_groups if group.strip()}))
+    if not groups:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "NEURON_IMPORT_GROUP_REQUIRED", "message": "至少选择一个采集组"},
+        )
+    try:
+        scan = catalog.scan_selected(selection.neuron_node.strip(), groups)
+    except Exception as error:
+        logger.error("[API/tags/import-neuron] Neuron scan failed: {}", error)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "NEURON_CATALOG_UNAVAILABLE", "message": str(error)},
+        ) from error
+    if scan.blockers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "NEURON_IMPORT_CATALOG_INVALID", "blockers": [dict(item) for item in scan.blockers]},
+        )
+    try:
+        return repository.preview(
+            node_id=selection.node_id,
+            neuron_node=selection.neuron_node.strip(),
+            selected_groups=groups,
+            points=scan.points,
+        )
+    except Exception as error:
+        _raise_neuron_import_http(error)
+
+
+@router.post("/tags/import-neuron/preview", **protected(CONFIGURATION_WRITE))
+async def preview_neuron_tags(
+    request: NeuronImportSelection,
+    catalog=Depends(get_neuron_import_catalog),
+    repository=Depends(get_neuron_tag_imports),
+) -> dict:
+    preview = _scan_neuron_import(request, catalog, repository)
+    return _neuron_import_response(preview)
 
 
 @router.post("/tags/import-neuron", **protected(CONFIGURATION_WRITE))
-async def import_neuron_tags(req: NeuronImportRequest) -> dict:
-    """
-    从 Neuron 指定采集组拉取点位，作为 PHYSICAL 点位挂载到目标节点。
+async def import_neuron_tags(
+    request: NeuronImportRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    catalog=Depends(get_neuron_import_catalog),
+    repository=Depends(get_neuron_tag_imports),
+    runtime=Depends(get_neuron_import_runtime),
+) -> dict:
+    from app.services.neuron_tag_import import apply_neuron_tag_import
 
-    - source_type = "neuron"
-    - source_path = "{neuron_node}/{neuron_group}/{tag_name}" (供采集管道路由)
-    - 已存在同名点位 (同 node_id + name) 则跳过，避免重复导入。
-    """
-    from app.services.telemetry_store import get_connection
-    from app.services.neuron_client import get_neuron_client
-
-    # 1) 校验目标节点
+    preview = _scan_neuron_import(request, catalog, repository)
     try:
-        node_uuid = UUID(req.node_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid node_id (not a UUID)")
-
-    # 2) 从 Neuron 拉取点位
-    try:
-        client = get_neuron_client()
-        neuron_tags = client.get_tags(req.neuron_node, req.neuron_group)
-    except Exception as e:
-        logger.error("[API/tags/import-neuron] Neuron fetch failed: {}", e)
-        raise HTTPException(status_code=502, detail=f"Neuron fetch failed: {e}")
-
-    if not neuron_tags:
-        return {"imported": 0, "skipped": 0, "message": "No tags in Neuron group"}
-
-    imported = 0
-    skipped = 0
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                # 校验节点存在
-                cur.execute("SELECT id FROM t_nodes WHERE id = %s", (node_uuid,))
-                if not cur.fetchone():
-                    raise HTTPException(status_code=404, detail="Target node not found")
-
-                # 已存在点位名集合 (去重)
-                cur.execute(
-                    "SELECT name FROM t_tags WHERE node_id = %s", (node_uuid,)
-                )
-                existing = {r[0] for r in cur.fetchall()}
-
-                for nt in neuron_tags:
-                    tname = nt.get("name")
-                    if not tname or tname in existing:
-                        skipped += 1
-                        continue
-
-                    dtype = _NEURON_TYPE_MAP.get(nt.get("type"), "FLOAT")
-                    # Neuron attribute bit0=read bit1=write → RW 权限
-                    attr = nt.get("attribute", 1)
-                    rw = "RW" if (attr & 0x02) else "R"
-                    source_path = f"{req.neuron_node}/{req.neuron_group}/{tname}"
-
-                    cur.execute(
-                        """
-                        INSERT INTO t_tags (node_id, name, display_name, data_type, tag_type,
-                                            source_type, source_path, read_write, enabled)
-                        VALUES (%s, %s, %s, %s, 'PHYSICAL', 'neuron', %s, %s, TRUE)
-                        """,
-                        (node_uuid, tname, tname, dtype, source_path, rw),
-                    )
-                    imported += 1
-                    existing.add(tname)
-
-                conn.commit()
-
-        logger.info(
-            "[API/tags/import-neuron] node={} group={}/{} imported={} skipped={}",
-            req.node_id, req.neuron_node, req.neuron_group, imported, skipped,
+        return await apply_neuron_tag_import(
+            preview,
+            preview_digest=request.preview_digest,
+            actor=principal.actor,
+            repository=repository,
+            runtime_gate=runtime.data_trunk.configuration_gate,
+            reload_runtime=runtime.reload_rules_now,
         )
-        return {"imported": imported, "skipped": skipped, "total": len(neuron_tags)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("[API/tags/import-neuron] Insert failed: {}", e)
-        raise HTTPException(status_code=500, detail=f"Import failed: {e}")
+    except Exception as error:
+        _raise_neuron_import_http(error)
 
 
 # ══════════════════════════════════════

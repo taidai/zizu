@@ -15,6 +15,12 @@ export type TemplateDocument = Record<string, unknown> & {
 export type TemplateCopyMode = 'next-revision' | 'new-template'
 export type VisualTransformKind = 'passthrough' | 'numeric' | 'enum' | 'formula'
 
+export interface RawPointDraftSource {
+  source_key: string
+  data_type: string
+  unit: string | null
+}
+
 function deepCopy<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
@@ -117,5 +123,69 @@ export function buildTransform(
     kind: 'formula', expression,
     scheduleSeconds: 1,
     controlEligible: false,
+  }
+}
+
+function stableKey(value: string, fallback: string): string {
+  const normalized = value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return normalized || fallback
+}
+
+export function createTemplateDraftFromL0(
+  points: RawPointDraftSource[],
+  identity: {
+    id: string
+    displayName: string
+    deviceCategory: string
+    brand: string
+    model: string
+  },
+): TemplateDocument {
+  const used = new Set<string>()
+  const entries = points.map((point, index) => {
+    const fallback = `point_${index + 1}`
+    const base = stableKey(point.source_key, fallback)
+    let key = base
+    let suffix = 2
+    while (used.has(key)) key = `${base}_${suffix++}`
+    used.add(key)
+    return { point, key }
+  })
+  const categoryKey = stableKey(identity.deviceCategory, 'entity')
+  const outputEntries = entries.filter(({ point }) =>
+    ['FLOAT', 'INT', 'BOOL'].includes(String(point.data_type).toUpperCase()))
+  return {
+    schemaVersion: 'zizu.point-processing/v1alpha1',
+    id: identity.id,
+    kind: 'point_processing_template',
+    displayName: identity.displayName,
+    deviceCategory: identity.deviceCategory,
+    brand: identity.brand,
+    model: identity.model,
+    revision: 1,
+    status: 'active',
+    inputs: entries.map(({ point, key }) => ({
+      id: key,
+      sourceKind: 'l0',
+      sourceKey: point.source_key,
+      aliases: [],
+      dataType: point.data_type,
+      unit: point.unit,
+      required: true,
+    })),
+    outputs: outputEntries.map(({ point, key }) => ({
+      id: key,
+      entityDefinition: `${categoryKey}.${key}`,
+      dataType: String(point.data_type).toUpperCase(),
+      unit: point.unit,
+      freshness: '30s',
+      transform: String(point.data_type).toUpperCase() === 'FLOAT'
+        ? buildTransform('passthrough', key)
+        : buildTransform('formula', key, { expression: key }),
+    })),
   }
 }

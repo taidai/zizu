@@ -252,11 +252,9 @@ export async function fetchNodeDetail(nodeId: string): Promise<{ node: Node; tag
 export interface NodeCreateInput {
   name: string
   parent_id?: string | null
-  layer: number
-  node_type?: string | null
+  node_type: string
   config?: Record<string, any>
   sort_order?: number
-  enabled?: boolean
 }
 
 export async function createNode(input: NodeCreateInput): Promise<{ node: Node }> {
@@ -267,16 +265,16 @@ export async function createNode(input: NodeCreateInput): Promise<{ node: Node }
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Create node failed: ${res.status}`)
+    throw new Error(err.detail?.message || err.detail || `Create node failed: ${res.status}`)
   }
   return res.json()
 }
 
-export async function deleteNode(nodeId: string): Promise<{ deleted: string; cascade_nodes: number }> {
+export async function deleteNode(nodeId: string): Promise<{ retired: string; retired_nodes: number; configuration_revision: number }> {
   const res = await apiFetch(`${API_BASE}/nodes/${nodeId}`, { method: 'DELETE' })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Delete node failed: ${res.status}`)
+    throw new Error(err.detail?.message || err.detail || `Delete node failed: ${res.status}`)
   }
   return res.json()
 }
@@ -311,7 +309,48 @@ export async function createTag(input: TagCreateInput): Promise<{ status: string
   return res.json()
 }
 
-export async function importNeuronTags(input: { node_id: string; neuron_node: string; neuron_group: string }): Promise<{ imported: number; skipped: number; total?: number; message?: string }> {
+export interface NeuronImportItem {
+  source_path: string
+  group: string
+  name: string
+  source_address: string
+  wire_data_type: string
+  value_data_type: string
+  action: 'create' | 'update' | 'unchanged' | 'conflict'
+  reason?: string | null
+}
+
+export interface NeuronImportPreview {
+  node_id: string
+  neuron_node: string
+  selected_groups: string[]
+  base_configuration_revision: number
+  preview_digest: string
+  counts: Partial<Record<NeuronImportItem['action'], number>>
+  has_conflicts: boolean
+  items: NeuronImportItem[]
+}
+
+export interface NeuronImportSelection {
+  node_id: string
+  neuron_node: string
+  neuron_groups: string[]
+}
+
+export async function previewNeuronTags(input: NeuronImportSelection): Promise<NeuronImportPreview> {
+  const res = await apiFetch(`${API_BASE}/tags/import-neuron/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail?.message || err.detail || `Preview Neuron tags failed: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function importNeuronTags(input: NeuronImportSelection & { preview_digest: string }): Promise<{ status: string; configuration_revision: number; counts: NeuronImportPreview['counts'] }> {
   const res = await apiFetch(`${API_BASE}/tags/import-neuron`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -319,7 +358,7 @@ export async function importNeuronTags(input: { node_id: string; neuron_node: st
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Import Neuron tags failed: ${res.status}`)
+    throw new Error(err.detail?.message || err.detail || `Import Neuron tags failed: ${res.status}`)
   }
   return res.json()
 }
@@ -647,8 +686,8 @@ export async function truncateTable(table: string, confirm: string): Promise<any
 export interface NodeUpdateRequest {
   name?: string
   node_type?: string
+  parent_id?: string | null
   sort_order?: number
-  enabled?: boolean
   config?: Record<string, any>
 }
 
@@ -658,7 +697,10 @@ export async function updateNode(nodeId: string, updates: NodeUpdateRequest): Pr
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
   })
-  if (!res.ok) throw new Error(`Update node failed: ${res.status}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail?.message || err.detail || `Update node failed: ${res.status}`)
+  }
   const data = await res.json()
   return data.node || data
 }

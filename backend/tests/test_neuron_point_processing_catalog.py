@@ -28,6 +28,7 @@ class FakeNeuron:
             }
             for point in fixture["points"]
         ]
+        self.requested_groups: list[str] = []
 
     def get_groups(self, node_name: str) -> list[dict]:
         self.node_name = node_name
@@ -35,6 +36,7 @@ class FakeNeuron:
 
     def get_tags(self, node_name: str, group_name: str) -> list[dict]:
         self.group_name = group_name
+        self.requested_groups.append(group_name)
         return list(self.tags)
 
 
@@ -81,6 +83,24 @@ class NeuronPointProcessingCatalogTest(unittest.TestCase):
         self.assertEqual((), scan.blockers)
         self.assertTrue(all(point.group_interval_ms == 0 for point in scan.points))
         self.assertEqual([], neuron.mutating_calls)
+
+    def test_scan_selected_reads_only_the_groups_the_user_chose(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+
+        neuron = FakeNeuron()
+        neuron.get_groups = lambda _node: [
+            {"name": "data", "interval": 1000},
+            {"name": "status", "interval": 1000},
+            {"name": "control", "interval": 1000},
+        ]
+
+        scan = NeuronPointCatalog(neuron).scan_selected(
+            "EN9-PCS",
+            ("status", "data"),
+        )
+
+        self.assertEqual(["data", "status"], neuron.requested_groups)
+        self.assertEqual({"data", "status"}, {item.group for item in scan.points})
 
 
 if __name__ == "__main__":

@@ -57,7 +57,28 @@ class NeuronPointCatalog:
         self._client = client
 
     def scan(self, node_name: str) -> ScannedPointCatalog:
-        groups = self._client.get_groups(node_name)
+        return self._scan(node_name, selected_groups=None)
+
+    def scan_selected(
+        self,
+        node_name: str,
+        selected_groups: tuple[str, ...],
+    ) -> ScannedPointCatalog:
+        normalized = {group.strip() for group in selected_groups if group.strip()}
+        return self._scan(node_name, selected_groups=normalized)
+
+    def _scan(
+        self,
+        node_name: str,
+        *,
+        selected_groups: set[str] | None,
+    ) -> ScannedPointCatalog:
+        all_groups = self._client.get_groups(node_name)
+        groups = [
+            group
+            for group in all_groups
+            if selected_groups is None or str(group.get("name", "")).strip() in selected_groups
+        ]
         blockers: list[Mapping[str, str]] = []
         intervals = {
             int(group.get("interval", 0))

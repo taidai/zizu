@@ -76,6 +76,7 @@ export default function DataTrunkWorkspace({
   const [error, setError] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
   const [formulaPreview, setFormulaPreview] = useState<PointProcessingFormulaPreview | null>(null)
+  const [processingSection, setProcessingSection] = useState<'library' | 'application'>('application')
   const activeNodeIdRef = useRef(node.id)
   const workspaceGenerationRef = useRef(0)
   const operationGenerationRef = useRef(0)
@@ -121,6 +122,7 @@ export default function DataTrunkWorkspace({
         if (generation !== workspaceGenerationRef.current
           || activeNodeIdRef.current !== expectedNodeId) return
         setTemplates(nextTemplates)
+        if (nextTemplates.length === 0) setProcessingSection('library')
         const recommended = recommendPointProcessingTemplate(
           nextTemplates,
           nextTrunk.l0,
@@ -275,6 +277,7 @@ export default function DataTrunkWorkspace({
     setSelections(initial)
     setPlan(null)
     setResultUnknown(false)
+    setProcessingSection('application')
     setFormulaPreview(null)
   }, [selectedRevisionId, trunk?.node_id])
 
@@ -385,6 +388,7 @@ export default function DataTrunkWorkspace({
     setSelectedRevisionId(revisionId)
     setPlan(null)
     setResultUnknown(false)
+    setProcessingSection('application')
   }
 
   const completedStage = application || plan?.status === 'applied'
@@ -453,6 +457,26 @@ export default function DataTrunkWorkspace({
 
       {view === 'processing' && !readOnly && (
         <div className="space-y-3">
+          <div className="flex gap-2 rounded-xl border border-gray-200 bg-white/45 p-2">
+            <button type="button" onClick={() => setProcessingSection('library')} className={`rounded-lg px-4 py-2 text-xs font-medium ${processingSection === 'library' ? 'bg-[#185FA5] text-white' : 'text-gray-600 hover:bg-white'}`}>
+              模板库
+            </button>
+            <button type="button" onClick={() => setProcessingSection('application')} className={`rounded-lg px-4 py-2 text-xs font-medium ${processingSection === 'application' ? 'bg-[#52c41a] text-white' : 'text-gray-600 hover:bg-white'}`}>
+              本节点应用
+            </button>
+          </div>
+          {processingSection === 'library' && (
+            <PointProcessingTemplateManager
+              templates={templates}
+              selectedRevisionId={selectedRevisionId}
+              l0Points={trunk.l0}
+              nodeName={node.name}
+              deviceCategory={(node.node_type || 'DEVICE').toUpperCase()}
+              canManage={canManageTemplates}
+              onPublished={handleTemplatePublished}
+            />
+          )}
+          {processingSection === 'application' && <>
           <div className="rounded-xl border border-gray-200 bg-white/45 p-4">
             <h3 className="text-sm font-semibold text-gray-900">当前生效状态</h3>
             <div className="mt-3 grid grid-cols-2 gap-3">
@@ -465,13 +489,6 @@ export default function DataTrunkWorkspace({
               </div>
             )}
           </div>
-          {canManageTemplates && (
-            <PointProcessingTemplateManager
-              templates={templates}
-              selectedRevisionId={selectedRevisionId}
-              onPublished={handleTemplatePublished}
-            />
-          )}
           <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}
@@ -488,6 +505,7 @@ export default function DataTrunkWorkspace({
             onApply={() => void handleApply()}
             onFormulaPreview={(expression) => void handleFormulaPreview(expression)}
           />
+          </>}
         </div>
       )}
     </div>
