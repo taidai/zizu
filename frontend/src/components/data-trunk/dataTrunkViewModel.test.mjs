@@ -118,6 +118,9 @@ test('node data tabs use task names and hide processing from operators', async (
     model.nodeDataTabs(true).map((item) => item.key),
     ['raw-points', 'entities'],
   )
+  assert.deepEqual(model.RAW_POINT_COLUMNS, [
+    '点位名称', '当前值', '单位', '质量', '数据时间', '来源',
+  ])
 })
 
 test('template recommendation keeps installed revision then prefers exact coverage', async () => {

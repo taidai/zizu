@@ -6,8 +6,8 @@ import {
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
 import DataTrunkWorkspace from '../components/data-trunk/DataTrunkWorkspace'
+import { nodeDataTabs, type NodeDataTabKey } from '../components/data-trunk/dataTrunkViewModel'
 
-type TabKey = 'data-trunk' | 'overview' | 'tags'
 type FormMode = 'create' | 'edit'
 
 const LAYER_NAMES: Record<number, string> = {
@@ -438,7 +438,7 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
   const [categories, setCategories] = useState<Category[]>([])
   const [selectedId, setSelectedId] = useState<string>('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [activeTab, setActiveTab] = useState<TabKey>('data-trunk')
+  const [activeTab, setActiveTab] = useState<NodeDataTabKey>('raw-points')
   const [showAssignModal, setShowAssignModal] = useState(false)
   const [nodeFormMode, setNodeFormMode] = useState<FormMode | null>(null)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -488,6 +488,10 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
       loadCategories()
     }
   }, [readOnly])
+
+  useEffect(() => {
+    if (readOnly && activeTab === 'point-processing') setActiveTab('raw-points')
+  }, [activeTab, readOnly])
 
   useEffect(() => {
     if (nodes.length === 0) return
@@ -673,58 +677,28 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
             </div>
 
             <div className="flex items-center gap-2 mb-3">
-              {(readOnly ? [
-                { key: 'data-trunk', label: 'L0 → L1 → L2' },
-              ] : [
-                { key: 'data-trunk', label: 'L0 → L1 → L2' },
-                { key: 'overview', label: '节点概览' },
-                { key: 'tags', label: 'L0 点位实时' },
-              ]).map((t) => (
+              {nodeDataTabs(readOnly).map((tab) => (
                 <button
-                  key={t.key}
-                  onClick={() => setActiveTab(t.key as TabKey)}
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setActiveTab(tab.key)}
                   className={`px-4 py-1.5 text-xs font-medium rounded-full transition-colors ${
-                    activeTab === t.key ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    activeTab === tab.key ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
-                  {t.label}
+                  {tab.label}
                 </button>
               ))}
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === 'data-trunk' && (
-                <DataTrunkWorkspace node={selectedNode} readOnly={readOnly} actorId={actorId} />
+              {activeTab === 'raw-points' && <NodeTagPanel nodeId={selectedNode.id} />}
+              {activeTab === 'point-processing' && !readOnly && (
+                <DataTrunkWorkspace node={selectedNode} readOnly={false} actorId={actorId} view="processing" />
               )}
-              {activeTab === 'overview' && (
-                <div className="neu-card p-4 space-y-3">
-                  <div className="grid grid-cols-2 gap-4 text-xs">
-                    <div className="neu-inset p-3">
-                      <div className="text-gray-400 text-[10px] uppercase">节点名称</div>
-                      <div className="font-medium text-gray-800 mt-1">{selectedNode.name}</div>
-                    </div>
-                    <div className="neu-inset p-3">
-                      <div className="text-gray-400 text-[10px] uppercase">节点类型</div>
-                      <div className="font-medium text-gray-800 mt-1">{selectedNode.node_type}</div>
-                    </div>
-                    <div className="neu-inset p-3">
-                      <div className="text-gray-400 text-[10px] uppercase">层级</div>
-                      <div className="font-medium text-gray-800 mt-1">{LAYER_NAMES[selectedNode.layer] || selectedNode.layer}</div>
-                    </div>
-                    <div className="neu-inset p-3">
-                      <div className="text-gray-400 text-[10px] uppercase">排序</div>
-                      <div className="font-medium text-gray-800 mt-1">{selectedNode.sort_order}</div>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-gray-500 mb-1">配置 (config)</div>
-                    <pre className="neu-inset p-3 text-[11px] font-mono text-gray-700 overflow-x-auto">
-                      {JSON.stringify(selectedNode.config || {}, null, 2)}
-                    </pre>
-                  </div>
-                </div>
+              {activeTab === 'entities' && (
+                <DataTrunkWorkspace node={selectedNode} readOnly={readOnly} actorId={actorId} view="entities" />
               )}
-              {activeTab === 'tags' && <NodeTagPanel nodeId={selectedNode.id} />}
             </div>
           </>
         ) : (

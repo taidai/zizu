@@ -16,6 +16,15 @@ export const DATA_TRUNK_STEPS = [
 
 export const DATA_TRUNK_LAYERS = ['L0', 'L1', 'L2'] as const
 
+export const RAW_POINT_COLUMNS = [
+  '点位名称',
+  '当前值',
+  '单位',
+  '质量',
+  '数据时间',
+  '来源',
+] as const
+
 export type NodeDataTabKey = 'raw-points' | 'point-processing' | 'entities'
 
 export interface NodeDataTab {

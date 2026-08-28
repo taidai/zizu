@@ -46,6 +46,7 @@ export default function DataTrunkWorkspace({
   node: Node
   readOnly: boolean
   actorId: string
+  view?: 'processing' | 'entities'
 }) {
   const [trunk, setTrunk] = useState<NodeDataTrunk | null>(null)
   const [templates, setTemplates] = useState<PointProcessingTemplate[]>([])
