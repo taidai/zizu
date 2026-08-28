@@ -185,5 +185,9 @@ test('scan templates still allow manual binding and raw history starts idle', as
   assert.equal(model.pointCandidateLabel({
     source_key: '总有功功率', unit: 'kW', group: 'data-a', source_address: '1!416409',
   }), '总有功功率 · data-a · 1!416409（kW）')
+  assert.deepEqual(model.entityFrameEvidence(7, 9), {
+    observationFrameSequence: 7,
+    projectionFrameSequence: 9,
+  })
   assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })

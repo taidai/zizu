@@ -1509,8 +1509,8 @@ def _scan_plan_inputs(
                 )
                 continue
             freshness_seconds = max(3 * point.group_interval_ms / 1000, 5.0)
-            existing = (
-                next(
+            if len(matches) == 1:
+                existing = next(
                     (
                         source for source in existing_l0
                         if _normalized_source_key(source.stable_source_key)
@@ -1518,20 +1518,19 @@ def _scan_plan_inputs(
                     ),
                     None,
                 )
-                if len(matches) == 1
-                else None
-            )
-            source_id = (
-                existing.source_id if existing is not None
-                else uuid5(
-                    NAMESPACE_URL,
-                    (
-                        f"zizu/l0/{node_id}/{point.address}"
-                        if len(matches) == 1
-                        else f"zizu/l0/{node_id}/{point.group}/{point.address}/{point.name}"
-                    ),
+                source_id = (
+                    existing.source_id if existing is not None
+                    else uuid5(NAMESPACE_URL, f"zizu/l0/{node_id}/{point.address}")
                 )
-            )
+            else:
+                source_id = uuid5(
+                    NAMESPACE_URL,
+                    f"zizu/l0/{node_id}/{point.group}/{point.address}/{point.name}",
+                )
+                existing = next(
+                    (source for source in existing_l0 if source.source_id == source_id),
+                    None,
+                )
             source = PointProcessingSource(
                 source_id=source_id,
                 source_kind="l0",

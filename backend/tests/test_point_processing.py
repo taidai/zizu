@@ -448,21 +448,23 @@ class PointProcessingTest(unittest.TestCase):
         payload["inputs"][0]["sourceContract"]["group"] = "preferred"
         ambiguous_asset = parse_point_processing_template(payload)
 
+        existing_source = PointProcessingSource(
+            UUID("85000000-0000-0000-0000-000000000099"),
+            "l0",
+            NODE_ID,
+            "总有功功率",
+            "INT",
+            "kW",
+            True,
+        )
+        catalog = InMemoryPointProcessingCatalog(
+            templates={METER_REVISION_ID: ambiguous_asset},
+            node_source_keys={NODE_ID: "meter"},
+            sources=(existing_source,),
+        )
         service = PointProcessingService(
             InMemoryPointProcessingRepository(),
-            InMemoryPointProcessingCatalog(
-                templates={METER_REVISION_ID: ambiguous_asset},
-                node_source_keys={NODE_ID: "meter"},
-                sources=(PointProcessingSource(
-                    UUID("85000000-0000-0000-0000-000000000099"),
-                    "l0",
-                    NODE_ID,
-                    "总有功功率",
-                    "INT",
-                    "kW",
-                    True,
-                ),),
-            ),
+            catalog,
             point_scanner=NeuronPointCatalog(AmbiguousMeterNeuron()),
         )
 
@@ -494,6 +496,20 @@ class PointProcessingTest(unittest.TestCase):
         )
         self.assertEqual(candidates[0], selected["selected_source_id"])
         self.assertEqual(1, sum(item["kind"] == "l0_point" for item in ready.items))
+        catalog.replace_sources((
+            existing_source,
+            PointProcessingSource(
+                UUID(candidates[0]), "l0", NODE_ID, "总有功功率", "INT", "kW", True
+            ),
+        ))
+        repeated = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=METER_REVISION_ID,
+            input_selections={"active_power_raw": UUID(candidates[0])},
+            actor="user:engineer",
+        ))
+        repeated_l0 = next(item for item in repeated.items if item["kind"] == "l0_point")
+        self.assertEqual("update", repeated_l0["action"])
 
     def test_en9_apply_rejects_point_catalog_changed_after_preview(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog

@@ -171,6 +171,16 @@ export function pointCandidateLabel(source: {
   return `${source.source_key}${location}${source.unit ? `（${source.unit}）` : ''}`
 }
 
+export function entityFrameEvidence(
+  observationFrameSequence: number | null | undefined,
+  projectionFrameSequence: number | null | undefined,
+): { observationFrameSequence: number | null; projectionFrameSequence: number | null } {
+  return {
+    observationFrameSequence: observationFrameSequence ?? null,
+    projectionFrameSequence: projectionFrameSequence ?? null,
+  }
+}
+
 export function entityReasonLabel(reason: string | null, ageMs: number): string | null {
   if (reason === 'FRAME_PROCESSING_FAILED') return '本次点位加工失败，当前值不可用'
   if (reason === 'STALE' || reason === 'ENTITY_DATA_STALE') {

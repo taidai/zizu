@@ -9,6 +9,7 @@ import type { L2FrameItem } from '../../api/committedFrameStream'
 import {
   entityReasonLabel,
   ENTITY_HISTORY_RANGES,
+  entityFrameEvidence,
   processingKindLabel,
   qualityLabel,
 } from './dataTrunkViewModel'
@@ -35,7 +36,7 @@ export default function EntityObservationCard({
   observation,
   processingKind,
   sourceSummary,
-  frameSequence,
+  projectionFrameSequence,
   expanded,
   selectedRange,
   history,
@@ -47,7 +48,7 @@ export default function EntityObservationCard({
   observation: L2FrameItem | null
   processingKind: string | null
   sourceSummary: NodeDataTrunk['l1_summary']['source_summary']
-  frameSequence: number | null
+  projectionFrameSequence: number | null
   expanded: boolean
   selectedRange: EntityHistoryRange
   history: EntityInstanceObservation[]
@@ -65,6 +66,10 @@ export default function EntityObservationCard({
     item.observed_at,
     item.quality === 192 && typeof item.value === 'number' ? item.value : null,
   ])
+  const frames = entityFrameEvidence(
+    observation?.frame_sequence,
+    projectionFrameSequence,
+  )
 
   return (
     <article className="rounded-lg border border-gray-200 bg-white">
@@ -170,7 +175,8 @@ export default function EntityObservationCard({
                   <div><dt className="inline text-gray-400">processing_revision_id: </dt><dd className="inline">{observation?.processing_revision_id || '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">configuration_revision: </dt><dd className="inline">{observation?.configuration_revision ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">source_digest: </dt><dd className="inline">{observation?.source_digest || '未记录'}</dd></div>
-                  <div><dt className="inline text-gray-400">frame_sequence: </dt><dd className="inline">{frameSequence ?? '未记录'}</dd></div>
+                  <div><dt className="inline text-gray-400">observation_frame_sequence: </dt><dd className="inline">{frames.observationFrameSequence ?? '未记录'}</dd></div>
+                  <div><dt className="inline text-gray-400">projection_frame_sequence: </dt><dd className="inline">{frames.projectionFrameSequence ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">received_at: </dt><dd className="inline">{formatTime(observation?.received_at)}</dd></div>
                   <div><dt className="inline text-gray-400">calculated_at: </dt><dd className="inline">{formatTime(observation?.calculated_at)}</dd></div>
                   <div><dt className="inline text-gray-400">reason: </dt><dd className="inline">{observation?.reason || '无'}</dd></div>
