@@ -728,9 +728,13 @@ class PostgresFrameRepository:
                              latest.source_receive_ordinal
                       FROM t_telemetry_latest AS latest
                       JOIN relevant_tags USING(tag_id)
-                      JOIN t_telemetry AS source
-                        ON source.observation_id=latest.observation_id
-                       AND source.ts=latest.ts
+                      JOIN LATERAL (
+                        SELECT accepted_beat
+                        FROM t_telemetry AS source
+                        WHERE source.observation_id=latest.observation_id
+                          AND source.ts=latest.ts
+                        LIMIT 1
+                      ) AS source ON TRUE
                       WHERE NOT EXISTS (
                         SELECT 1 FROM current_frame
                         WHERE current_frame.tag_id=latest.tag_id

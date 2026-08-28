@@ -1,6 +1,6 @@
 ---
 
-## Session 2026-08-28 — rc.16 PCS L0 恢复与 L1 模板维护（发布中）
+## Session 2026-08-28 — rc.17 PCS L0 恢复与 L1 模板维护（发布中）
 
 - 已修复过期 `PROCESSING` 帧无法接管：租约接管保持 attempt count，并为每次恢复生成新 owner/token；
   旧版遗留的零重试次数帧在写失败证据时规范为 1，避免最老帧永久堵住队列。现场复现了两个根因，
@@ -12,14 +12,15 @@
   工程师仍只选择、绑定和安装。import/validate 改为 `system.manage`，export 补真实认证。
 - rc.14 修复遗留帧接管，rc.15 将逐点历史检索改为索引查询；现场仍发现积压帧处理耗时。rc.16
   进一步按单写者严格 FIFO 语义，以 `t_telemetry_latest` 上一份已提交状态叠加当前帧变化构造加工快照，
-  不再为每个点扫描历史大表。真实 PostgreSQL 数据帧专项测试 15/15 通过。
-- 版本已提升为 `0.4.85-rc.16`，发布提交与 1 号机验收待完成。此前新鲜验证：后端 discovery 308/308
+  但现场普通 JOIN 仍触发 Timescale 压缩历史块扫描；rc.17 改为按最新值时间动态裁剪的 LATERAL 精确取节拍证据，
+  现场同类查询执行约 92ms。真实 PostgreSQL 数据帧专项测试 15/15 通过。
+- 版本已提升为 `0.4.85-rc.17`，发布提交与 1 号机验收待完成。此前新鲜验证：后端 discovery 308/308
   （121 环境型 skip）、现场回归 2/2、compileall 与 diff check 通过；rc.13 的其余前后端验证保持通过。
 - 1 号机切换前备份位于 `/opt/zizu-backups/pre-v0.4.85-rc.13-schema049`，SHA256 为
   `cd7f1ec95bcd93e3ed26b89ad046615442a7b84b9712e20af0b544a5a429c512`，`pg_restore -l` 已验证。
   Neuron `en9_pcs` 的 cmd/data/error1 发布主题已统一为 `/neuron/en9_pcs/telemetry`，与平台
   `/neuron/#` 订阅一致。
-- 待完成：发布 rc.16 固定 ARM64 摘要，切换 1 号机并验证积压归零、
+- 待完成：发布 rc.17 固定 ARM64 摘要，切换 1 号机并验证积压归零、
   PCS 值前进、模板维护 API 与页面可用。
   不启动 Caddy/TLS，不执行 JDM、控制或设备写入。
 

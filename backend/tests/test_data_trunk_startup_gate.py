@@ -154,6 +154,10 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("t_l2_stream_outbox", postgres_source)
         self.assertNotIn("_select_history_observations", postgres_source)
         self.assertIn("FROM t_telemetry_latest AS latest", postgres_source)
+        self.assertIn(
+            "JOIN LATERAL (\n                        SELECT accepted_beat",
+            postgres_source,
+        )
         self.assertNotIn("candidate.frame_sequence <=", postgres_source)
 
 
