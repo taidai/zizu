@@ -4748,3 +4748,20 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   这是本地开发数据库，不是 1 号机。临时前端/后端进程须在 smoke 后停止。
 - 未冒充已交付：统计加工运行时、候选配置对当前 committed frame 的在线值试算、共享模板完整生命周期、
   7 天以上服务端聚合历史。本轮未构建 ARM64 镜像，未连接、修改或部署 1 号机。
+
+### 2026-08-28 — 三任务页独立评审修复
+
+- 两轮独立代码评审发现并修复跨节点异步串数据风险：workspace/runtime/plan/apply 与原始点位列表均按
+  节点身份和请求代次 fail closed，页面再以 `node_id:view` key 隔离；旧节点计划不能在新节点发布。
+- scan-driven 模板保留自动扫描，同时始终允许工程师手动选择兼容的 L0 点位解决歧义；手动选择会进入
+  `input_selections`，下拉只列数据类型和单位兼容的候选。
+- L2 每个输出新增自己的 `source_summary`，numeric/enum/fault-codes/formula/boolean-set 按实际 transform
+  输入归属；实体卡不再错误展示整份模板的全部来源。
+- 原始历史改成单点按需查询：初始零历史请求，选一个点位只请求一次；物理数值点位列表按后端上限
+  200 条自动分页，`fetchTags` 对非 2xx 显式失败。旧的多点自动三连查 `NodeHistoryPanel.tsx` 已由
+  `RawPointHistoryPanel.tsx` 取代并删除，避免保留两套冲突逻辑。
+- 普通首屏不再显示 definition ID、input ID、帧号和摘要；这些信息统一收进“技术详情”。未知加工类型
+  显示“未标注”，不再误标成“即时”。
+- 最新验证：前端全量 Node 测试 25/25、TypeScript/Vite production build 退出 0；后端完整 300 tests、
+  118 skipped、0 failure，`compileall app` 退出 0，`git diff --check` 通过。最终双角色浏览器 smoke 仍等待
+  用户明确授权把已有本地密码输入 `127.0.0.1:3000`；未获得授权前不得声称浏览器验收完成。
