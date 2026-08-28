@@ -414,9 +414,9 @@ class DataFramesPostgresTest(unittest.TestCase):
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
             cursor.execute(
-                "UPDATE t_data_frames SET lease_until=clock_timestamp()-interval '1 second' "
+                "UPDATE t_data_frames SET lease_until=%s "
                 "WHERE frame_id=%s",
-                (str(first.frame_id),),
+                (datetime.now(UTC) - timedelta(minutes=5), str(first.frame_id)),
             )
             cursor.execute("SET session_replication_role=origin")
         other = PostgresFrameRepository(connection_factory=self._connection_factory())
@@ -430,6 +430,22 @@ class DataFramesPostgresTest(unittest.TestCase):
                 self.repository.load_processing_snapshot(first),
                 (),
             )
+
+    def test_expired_processing_lease_can_be_reclaimed_by_same_repository(self) -> None:
+        self.repository.commit_pending(self._candidate(capture_beat=119))
+        first = self.repository.claim_next(NOW)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "UPDATE t_data_frames SET lease_until=%s "
+                "WHERE frame_id=%s",
+                (datetime.now(UTC) - timedelta(minutes=5), str(first.frame_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+        second = self.repository.claim_next(datetime.now(UTC))
+        self.assertEqual(first.frame_id, second.frame_id)
+        self.assertNotEqual(first.processing_owner, second.processing_owner)
+        self.assertNotEqual(first.processing_token, second.processing_token)
 
     def test_retry_clears_claim_and_third_failure_is_durable(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=110))
@@ -495,6 +511,39 @@ class DataFramesPostgresTest(unittest.TestCase):
         self.assertEqual("FAILED", terminal.status.value)
         next_claim = self.repository.claim_next(datetime.now(UTC))
         self.assertEqual(next_pending.frame_id, next_claim.frame_id)
+
+    def test_legacy_zero_attempt_processing_head_records_one_failure_attempt(self) -> None:
+        old_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO t_data_frames
+                  (frame_id,candidate_digest,capture_beat,shot_at,
+                   configuration_revision,status,attempt_count,processing_owner,
+                   processing_token,lease_until,created_at)
+                VALUES(%s,%s,122,%s,0,'PROCESSING',0,%s,%s,%s,%s)
+                """,
+                (
+                    str(old_id),
+                    "f" * 64,
+                    NOW,
+                    str(uuid4()),
+                    str(uuid4()),
+                    datetime.now(UTC) - timedelta(seconds=1),
+                    datetime.now(UTC) - timedelta(seconds=61),
+                ),
+            )
+        budget = self.repository.claim_next(datetime.now(UTC))
+        self.assertEqual(old_id, budget.frame_id)
+        self.assertEqual(0, budget.attempt_count)
+        terminal = self.repository.fail_budget(budget, datetime.now(UTC))
+        self.assertEqual("FAILED", terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT attempts FROM t_ingestion_failures WHERE frame_id=%s",
+                (str(old_id),),
+            )
+            self.assertEqual((1,), cursor.fetchone())
 
     def test_z_transaction_b_persists_every_installed_l1_output_once(self) -> None:
         reference_root = (

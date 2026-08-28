@@ -619,6 +619,11 @@ class PostgresFrameRepository:
                                 if terminalization or head[10] == "PROCESSING"
                                 else int(head[5]) + 1
                             )
+                            claim_owner = (
+                                uuid4()
+                                if head[10] == "PROCESSING"
+                                else self._processing_owner
+                            )
                             cursor.execute(
                                 """
                                 UPDATE t_data_frames
@@ -633,7 +638,7 @@ class PostgresFrameRepository:
                                 """,
                                 (
                                     next_attempt,
-                                    str(self._processing_owner),
+                                    str(claim_owner),
                                     str(token),
                                     lease_until,
                                     str(head[0]),
@@ -1327,7 +1332,7 @@ class PostgresFrameRepository:
                                         ),
                                     }
                                 ),
-                                claimed.attempt_count,
+                                max(1, claimed.attempt_count),
                                 str(claimed.frame_id),
                             ),
                         )
