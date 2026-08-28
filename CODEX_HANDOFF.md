@@ -1,5 +1,25 @@
 ---
 
+## Session 2026-08-29 — v0.4.86 易用性闭环已部署并验收
+
+- 主线仍为 `节点 → L0 原始点位 → L1 点位加工 → L2 全局实体 → 告警/JDM/控制/画面`。本轮完成节点
+  CRUD、Neuron 多组预览/摘要确认导入、全部 committed L0 实时与历史展示、管理员 L1 模板维护以及
+  L2 实时/历史闭环；版本正式进位为 0.4.86。
+- 最终源码 `bca5e33c3a4e8e64a07270823f5b73f8d6eceac0`，标签 `v0.4.86-hotfix.6`，Actions
+  `33214331065` 成功；1 号机 ARM64 固定摘要为
+  `ghcr.io/taidai/zizu@sha256:07396b534b8c44f0947517aa00cbc29e45ed920a48567da65fd704ad4f7b183d`。
+- 现场旧帧积压未被删除，而是按预算结算为 FAILED 并保留失败事实/outbox。修复了历史扫描、过期 L0
+  晋升和重复 L2 STALE 写入三处性能问题；10 秒窗口内实时帧稳定前进，未完成帧最大龄 0.48 秒。
+- 现场还发现 Neuron 导入创建点位漏写 `tag_type`；已明确写为 `PHYSICAL`，真实 PostgreSQL RED→GREEN。
+  完整后端 329 项通过（130 skip），数据帧 PostgreSQL 16 项、Neuron 导入 PostgreSQL 2 项通过。
+- 临时验收树完成创建、移动、改名、`en9_pcs/cmd` 16 点位预览与真实应用、整树退役；活动节点前后均为
+  6，验收节点残留 0。PCS committed 快照为 45/45 L0 有值（42 GOOD、3 STALE）；L2“PCS 有功功率”
+  为 GOOD，原始点位和实体历史均可读，模板 6 个可见。
+- 最终 Schema 050、restart 0、host network、`/dev/mqueue`、unless-stopped、未发布 outbox 0、活动来源
+  重复 0、日志无 ERROR/Traceback。未启动 Caddy/TLS，未验证自动策略，未执行设备写。
+- 完整证据见 `docs/deploy-1号机-v0.4.86-http.md`。后续不应继续扩展功能；先由用户在页面按真实工作流
+  使用节点、点位导入、点位加工和实体数据，收集具体易用性问题。
+
 ## Session 2026-08-28 — rc.17 PCS L0 恢复与 L1 模板维护（发布中）
 
 - 已修复过期 `PROCESSING` 帧无法接管：租约接管保持 attempt count，并为每次恢复生成新 owner/token；
