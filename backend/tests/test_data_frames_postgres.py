@@ -520,6 +520,36 @@ class DataFramesPostgresTest(unittest.TestCase):
         next_claim = self.repository.claim_next(datetime.now(UTC))
         self.assertEqual(next_pending.frame_id, next_claim.frame_id)
 
+    def test_expired_frame_is_failed_without_promoting_late_l0(self) -> None:
+        pending = self.repository.commit_pending(
+            self._candidate(capture_beat=123)
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            expired_at = datetime.now(UTC) - timedelta(seconds=61)
+            cursor.execute(
+                "UPDATE t_data_frames SET created_at=%s WHERE frame_id=%s",
+                (expired_at, str(pending.frame_id)),
+            )
+            cursor.execute(
+                "UPDATE t_l0_observation_dedup SET created_at=%s "
+                "WHERE observation_id IN ("
+                "SELECT observation_id FROM t_telemetry WHERE frame_id=%s)",
+                (expired_at, str(pending.frame_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+
+        budget = self.repository.claim_next(datetime.now(UTC))
+        terminal = self.repository.fail_budget(budget, datetime.now(UTC))
+
+        self.assertEqual("FAILED", terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_telemetry_latest WHERE frame_sequence=%s",
+                (pending.frame_sequence,),
+            )
+            self.assertEqual((0,), cursor.fetchone())
+
     def test_legacy_zero_attempt_processing_head_records_one_failure_attempt(self) -> None:
         old_id = uuid4()
         with self._connection() as connection, connection.cursor() as cursor:

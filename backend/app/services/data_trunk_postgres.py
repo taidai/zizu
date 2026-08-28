@@ -1329,7 +1329,13 @@ class PostgresFrameRepository:
         failure: FrameFailure,
         now: datetime,
     ) -> TerminalFrame:
-        snapshot = self.load_processing_snapshot(claimed)
+        drop_expired_l0 = (
+            isinstance(claimed, BudgetTerminalizationClaim)
+            and now - claimed.created_at >= timedelta(seconds=60)
+        )
+        snapshot = (
+            None if drop_expired_l0 else self.load_processing_snapshot(claimed)
+        )
         try:
             with self._connection() as connection:
                 try:
@@ -1360,11 +1366,12 @@ class PostgresFrameRepository:
                         previous_l0 = capture_previous_l0_state(
                             cursor, claimed.frame_sequence
                         )
-                        self._advance_frame_l0_latest(
-                            cursor,
-                            claimed.frame_sequence,
-                            tuple(snapshot.l0_by_tag.values()),
-                        )
+                        if snapshot is not None:
+                            self._advance_frame_l0_latest(
+                                cursor,
+                                claimed.frame_sequence,
+                                tuple(snapshot.l0_by_tag.values()),
+                            )
                         stale_outputs = self._failure_stale_outputs(
                             cursor,
                             claimed,
