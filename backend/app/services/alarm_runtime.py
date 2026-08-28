@@ -741,6 +741,27 @@ class AlarmRuntime:
                 "ALARM_DEFINITION_MISMATCH",
                 "Alarm observation does not match the supplied definition",
             )
+        supported = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "not_contains"}
+        for condition in (definition.trigger, definition.recovery):
+            operator = condition.get("op", condition.get("operator"))
+            if operator not in supported:
+                raise AlarmRuntimeError(
+                    "ALARM_DEFINITION_INVALID",
+                    "Alarm condition operator is not supported",
+                )
+            if operator in {"contains", "not_contains"}:
+                expected = condition.get("value")
+                value = observation.value
+                if (
+                    not isinstance(expected, str)
+                    or not expected
+                    or not isinstance(value, (list, tuple, frozenset))
+                    or not all(isinstance(item, str) for item in value)
+                ):
+                    raise AlarmRuntimeError(
+                        "ALARM_DEFINITION_INVALID",
+                        "CODE_SET alarm conditions require a string collection observation",
+                    )
 
 
 def _utc(value: datetime) -> datetime:
