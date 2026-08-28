@@ -705,6 +705,36 @@ class PostgresFrameRepository:
                         AND installed.configuration_revision <= %s
                       UNION
                       SELECT tag_id FROM t_telemetry WHERE frame_id=%s
+                    ), current_frame AS (
+                      SELECT observation_id,node_id,tag_id,raw_unit,
+                             raw_value_float,raw_value_int,raw_value_bool,
+                             raw_value_text,quality,ts,event_received_at,
+                             source_message_id,source_sequence,source_digest,
+                             event_time_basis,accepted_beat,source_order_mode,
+                             source_receive_ordinal
+                      FROM t_telemetry
+                      WHERE frame_id=%s
+                    ), frame_state AS (
+                      SELECT * FROM current_frame
+                      UNION ALL
+                      SELECT latest.observation_id,latest.node_id,latest.tag_id,
+                             latest.raw_unit,latest.raw_value_float,
+                             latest.raw_value_int,latest.raw_value_bool,
+                             latest.raw_value_text,latest.quality,latest.ts,
+                             latest.event_received_at,latest.source_message_id,
+                             latest.source_sequence,latest.source_digest,
+                             latest.event_time_basis,source.accepted_beat,
+                             latest.source_order_mode,
+                             latest.source_receive_ordinal
+                      FROM t_telemetry_latest AS latest
+                      JOIN relevant_tags USING(tag_id)
+                      JOIN t_telemetry AS source
+                        ON source.observation_id=latest.observation_id
+                       AND source.ts=latest.ts
+                      WHERE NOT EXISTS (
+                        SELECT 1 FROM current_frame
+                        WHERE current_frame.tag_id=latest.tag_id
+                      )
                     )
                     SELECT
                       telemetry.observation_id,telemetry.node_id,
@@ -718,22 +748,14 @@ class PostgresFrameRepository:
                       telemetry.event_time_basis,telemetry.accepted_beat,
                       telemetry.source_order_mode,
                       telemetry.source_receive_ordinal
-                    FROM relevant_tags
-                    JOIN LATERAL (
-                      SELECT candidate.*
-                      FROM t_telemetry AS candidate
-                      WHERE candidate.tag_id=relevant_tags.tag_id
-                        AND candidate.frame_sequence <= %s
-                      ORDER BY candidate.frame_sequence DESC,candidate.ts DESC
-                      LIMIT 1
-                    ) AS telemetry ON TRUE
+                    FROM frame_state AS telemetry
                     JOIN t_tags AS tag ON tag.id=telemetry.tag_id
                     ORDER BY telemetry.tag_id
                     """,
                     (
                         claimed.configuration_revision,
                         str(claimed.frame_id),
-                        claimed.frame_sequence,
+                        str(claimed.frame_id),
                     ),
                 )
                 cells: dict[UUID, FramedRawObservation] = {}
