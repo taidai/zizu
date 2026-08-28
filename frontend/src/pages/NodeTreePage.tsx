@@ -692,12 +692,12 @@ export default function NodeTreePage({ readOnly = false, actorId }: { readOnly?:
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === 'raw-points' && <NodeTagPanel nodeId={selectedNode.id} />}
+              {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw`} nodeId={selectedNode.id} />}
               {activeTab === 'point-processing' && !readOnly && (
-                <DataTrunkWorkspace node={selectedNode} readOnly={false} actorId={actorId} view="processing" />
+                <DataTrunkWorkspace key={`${selectedNode.id}:processing`} node={selectedNode} readOnly={false} actorId={actorId} view="processing" />
               )}
               {activeTab === 'entities' && (
-                <DataTrunkWorkspace node={selectedNode} readOnly={readOnly} actorId={actorId} view="entities" />
+                <DataTrunkWorkspace key={`${selectedNode.id}:entities`} node={selectedNode} readOnly={readOnly} actorId={actorId} view="entities" />
               )}
             </div>
           </>

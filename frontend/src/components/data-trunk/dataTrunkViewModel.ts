@@ -25,6 +25,8 @@ export const RAW_POINT_COLUMNS = [
   '来源',
 ] as const
 
+export const RAW_HISTORY_INITIAL_SELECTION: string | null = null
+
 export const POINT_PROCESSING_ACTIONS = {
   inspect: '检查加工结果',
   publish: '检查并发布',
@@ -98,8 +100,23 @@ export function recommendPointProcessingTemplate(
       || left.revision_id.localeCompare(right.revision_id))[0]?.revision_id || ''
 }
 
-export function processingKindLabel(kind: string | null): '即时' | '统计' {
+export function processingKindLabel(kind: string | null): '即时' | '统计' | '未标注' {
+  if (!kind) return '未标注'
   return kind === 'window' || kind === 'metric' || kind === 'statistics' ? '统计' : '即时'
+}
+
+export function isCurrentNodeResult(
+  resultNodeId: string | undefined,
+  currentNodeId: string,
+): boolean {
+  return Boolean(resultNodeId) && resultNodeId === currentNodeId
+}
+
+export function manualBindableInputs<T extends {
+  source_kind: 'l0' | 'l2'
+  selector?: unknown
+}>(inputs: T[]): T[] {
+  return inputs.filter((input) => input.source_kind === 'l0' && !input.selector)
 }
 
 export function entityReasonLabel(reason: string | null, ageMs: number): string | null {
@@ -154,7 +171,7 @@ export function planActionLabel(action: PointProcessingPlanAction): string {
     add: '新增',
     update: '更新',
     preserve: '保持',
-    delete_candidate: '应用后停止生成新的 L2 观测；历史值与来源证据保留',
+    delete_candidate: '应用后停止生成新的实体数据；历史值与来源证据保留',
     block: '阻断',
   }
   return labels[action]
@@ -186,12 +203,12 @@ export function buildDataTrunkViewModel({ plan }: { plan: PlanLike | null }) {
     : plan?.status === 'ready'
       ? '核对变更后应用点位加工'
       : plan?.status === 'applied'
-        ? '查看全局实体实时值与来源证据'
+        ? '查看实体实时值与来源证据'
         : '选择点位加工模板并生成计划'
   return {
     steps: DATA_TRUNK_STEPS,
     layers: [...DATA_TRUNK_LAYERS],
-    labels: { l0: 'L0 原始点位', l1: 'L1 点位加工', l2: 'L2 全局实体' },
+    labels: { l0: 'L0 原始点位', l1: 'L1 点位加工', l2: 'L2 实体数据' },
     canApply: plan?.status === 'ready' && !plan.blockers.length,
     nextAction,
     counts,

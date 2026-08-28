@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DataTrunkApiError,
   DataTrunkResultUnknownError,
@@ -32,7 +32,11 @@ import {
 } from './dataTrunkRetryState'
 import EntityDataPanel from './EntityDataPanel'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
-import { DATA_TRUNK_STEPS, recommendPointProcessingTemplate } from './dataTrunkViewModel'
+import {
+  DATA_TRUNK_STEPS,
+  isCurrentNodeResult,
+  recommendPointProcessingTemplate,
+} from './dataTrunkViewModel'
 import {
   applyFrameDelta,
   replaceSnapshot,
@@ -67,26 +71,45 @@ export default function DataTrunkWorkspace({
   const [error, setError] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
   const [formulaPreview, setFormulaPreview] = useState<PointProcessingFormulaPreview | null>(null)
+  const activeNodeIdRef = useRef(node.id)
+  const workspaceGenerationRef = useRef(0)
+  const operationGenerationRef = useRef(0)
+  activeNodeIdRef.current = node.id
 
-  const loadRuntime = useCallback(async () => {
-    const nextTrunk = await fetchNodeDataTrunk(node.id)
+  useEffect(() => () => {
+    workspaceGenerationRef.current += 1
+    operationGenerationRef.current += 1
+    activeNodeIdRef.current = ''
+  }, [])
+
+  const loadRuntime = useCallback(async (expectedNodeId = node.id): Promise<NodeDataTrunk | null> => {
+    const nextTrunk = await fetchNodeDataTrunk(expectedNodeId)
+    let catalog: { items: EntityInstance[] } | null = null
     if (view === 'entities') {
-      const catalog = await fetchEntityInstances()
-      setDescriptors(new Map(catalog.items.map((item) => [item.id, item])))
-    } else {
-      setDescriptors(new Map())
+      catalog = await fetchEntityInstances()
     }
+    if (!isCurrentNodeResult(nextTrunk.node_id, activeNodeIdRef.current)
+      || activeNodeIdRef.current !== expectedNodeId) return null
+    setDescriptors(catalog
+      ? new Map(catalog.items.map((item) => [item.id, item]))
+      : new Map())
     setTrunk(nextTrunk)
     return nextTrunk
   }, [node.id, view])
 
   const loadWorkspace = useCallback(async () => {
+    const expectedNodeId = node.id
+    const generation = ++workspaceGenerationRef.current
     setLoading(true)
     setError('')
     try {
-      const nextTrunk = await loadRuntime()
+      const nextTrunk = await loadRuntime(expectedNodeId)
+      if (!nextTrunk || generation !== workspaceGenerationRef.current
+        || activeNodeIdRef.current !== expectedNodeId) return
       if (view === 'processing' && !readOnly) {
         const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
+        if (generation !== workspaceGenerationRef.current
+          || activeNodeIdRef.current !== expectedNodeId) return
         setTemplates(nextTemplates)
         const recommended = recommendPointProcessingTemplate(
           nextTemplates,
@@ -98,6 +121,8 @@ export default function DataTrunkWorkspace({
         if (retry) {
           try {
             const restoredPlan = await fetchPointProcessingPlan(retry.planId)
+            if (!isCurrentNodeResult(restoredPlan.node_id, activeNodeIdRef.current)
+              || activeNodeIdRef.current !== expectedNodeId) return
             if (readDataTrunkApplyRetry(sessionStorage, {
               actorId,
               nodeId: node.id,
@@ -114,13 +139,23 @@ export default function DataTrunkWorkspace({
         }
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '读取节点数据主干失败')
+      if (generation === workspaceGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setError(reason instanceof Error ? reason.message : '读取节点数据主干失败')
+      }
     } finally {
-      setLoading(false)
+      if (generation === workspaceGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setLoading(false)
     }
   }, [actorId, loadRuntime, node.id, node.node_type, readOnly, view])
 
   useEffect(() => {
+    workspaceGenerationRef.current += 1
+    operationGenerationRef.current += 1
+    setLoading(true)
+    setTrunk(null)
+    setTemplates([])
+    setDescriptors(new Map())
     setPlan(null)
     setApplication(null)
     setSelectedRevisionId('')
@@ -235,41 +270,66 @@ export default function DataTrunkWorkspace({
 
   const handleFormulaPreview = async (expression: string) => {
     if (!selectedTemplate) return
+    const expectedNodeId = node.id
+    const generation = ++operationGenerationRef.current
     setBusy('formula')
     setError('')
     try {
-      setFormulaPreview(await previewPointProcessingFormula(node.id, {
+      const preview = await previewPointProcessingFormula(expectedNodeId, {
         template_revision_id: selectedTemplate.revision_id,
         expression,
-      }))
+      })
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setFormulaPreview(preview)
     } catch (reason) {
-      setFormulaPreview(null)
-      setError(reason instanceof Error ? reason.message : '公式预检失败')
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setFormulaPreview(null)
+        setError(reason instanceof Error ? reason.message : '公式预检失败')
+      }
     } finally {
-      setBusy(null)
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setBusy(null)
     }
   }
 
   const handlePlan = async () => {
     if (!selectedTemplate) return
+    const expectedNodeId = node.id
+    const generation = ++operationGenerationRef.current
     setBusy('plan')
     setError('')
     clearDataTrunkApplyRetry(sessionStorage)
     setResultUnknown(false)
     try {
-      setPlan(await createPointProcessingPlan(node.id, {
+      const nextPlan = await createPointProcessingPlan(expectedNodeId, {
         template_revision_id: selectedTemplate.revision_id,
         input_selections: Object.fromEntries(Object.entries(selections).filter(([, value]) => value)),
-      }))
+      })
+      if (generation !== operationGenerationRef.current
+        || !isCurrentNodeResult(nextPlan.node_id, activeNodeIdRef.current)
+        || activeNodeIdRef.current !== expectedNodeId) return
+      setPlan(nextPlan)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '生成计划失败')
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setError(reason instanceof Error ? reason.message : '生成计划失败')
+      }
     } finally {
-      setBusy(null)
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setBusy(null)
     }
   }
 
   const handleApply = async () => {
     if (!plan) return
+    if (!isCurrentNodeResult(plan.node_id, node.id)) {
+      setPlan(null)
+      setError('节点已经切换，请重新检查当前节点的加工结果。')
+      return
+    }
+    const expectedNodeId = node.id
+    const generation = ++operationGenerationRef.current
     setBusy('apply')
     setError('')
     const identity = { actorId, nodeId: node.id, planId: plan.id, planDigest: plan.digest }
@@ -278,20 +338,29 @@ export default function DataTrunkWorkspace({
     saveDataTrunkApplyRetry(sessionStorage, retry)
     try {
       const result = await applyPointProcessingPlan(plan.id, plan.digest, retry.idempotencyKey)
+      if (generation !== operationGenerationRef.current
+        || activeNodeIdRef.current !== expectedNodeId) {
+        clearDataTrunkApplyRetry(sessionStorage)
+        return
+      }
       setApplication(result)
       setPlan({ ...plan, status: 'applied' })
       clearDataTrunkApplyRetry(sessionStorage)
       setResultUnknown(false)
-      await loadRuntime()
+      await loadRuntime(expectedNodeId)
     } catch (reason) {
       const shouldKeep = reason instanceof DataTrunkResultUnknownError
         || reason instanceof TypeError
         || (reason instanceof DataTrunkApiError && reason.retryable)
       if (!shouldKeep) clearDataTrunkApplyRetry(sessionStorage)
-      setResultUnknown(shouldKeep)
-      setError(reason instanceof Error ? reason.message : '应用点位加工失败')
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setResultUnknown(shouldKeep)
+        setError(reason instanceof Error ? reason.message : '应用点位加工失败')
+      }
     } finally {
-      setBusy(null)
+      if (generation === operationGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setBusy(null)
     }
   }
 

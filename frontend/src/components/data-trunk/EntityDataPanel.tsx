@@ -60,7 +60,7 @@ export default function EntityDataPanel({
               descriptor={item.descriptor}
               observation={projection?.l2.get(item.entity_instance_id) || null}
               processingKind={item.processing_kind}
-              sourceSummary={trunk.l1_summary.source_summary}
+              sourceSummary={item.source_summary}
               expanded={expanded}
               selectedRange={selectedRange}
               history={expanded ? history : []}

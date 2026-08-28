@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchTags, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
@@ -10,7 +10,7 @@ import {
   type CommittedFrameProjection,
 } from './data-trunk/committedFrameProjection'
 import { qualityLabel, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
-import NodeHistoryPanel from './NodeHistoryPanel'
+import RawPointHistoryPanel from './RawPointHistoryPanel'
 
 interface NodeTagPanelProps {
   nodeId: string
@@ -35,8 +35,18 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const activeNodeIdRef = useRef(nodeId)
+  const tagRequestGenerationRef = useRef(0)
+  activeNodeIdRef.current = nodeId
+
+  useEffect(() => () => {
+    tagRequestGenerationRef.current += 1
+    activeNodeIdRef.current = ''
+  }, [])
 
   const loadTags = useCallback(async () => {
+    const expectedNodeId = nodeId
+    const generation = ++tagRequestGenerationRef.current
     setLoading(true)
     setError('')
     try {
@@ -52,18 +62,26 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
         'sort_order',
         'asc',
       )
-      setTags(data.tags)
-      setTotal(data.total)
-      setTotalPages(data.total_pages || 1)
+      if (generation === tagRequestGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setTags(data.tags)
+        setTotal(data.total)
+        setTotalPages(data.total_pages || 1)
+      }
     } catch {
-      setTags([])
-      setError('原始点位读取失败，请稍后重试')
+      if (generation === tagRequestGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) {
+        setTags([])
+        setError('原始点位读取失败，请稍后重试')
+      }
     } finally {
-      setLoading(false)
+      if (generation === tagRequestGenerationRef.current
+        && activeNodeIdRef.current === expectedNodeId) setLoading(false)
     }
   }, [dataType, nodeId, page, search])
 
   useEffect(() => {
+    tagRequestGenerationRef.current += 1
     setPage(1)
   }, [nodeId, search, dataType])
 
@@ -150,7 +168,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
       </div>
 
       {view === 'history' ? (
-        <NodeHistoryPanel nodeId={nodeId} />
+        <RawPointHistoryPanel nodeId={nodeId} />
       ) : (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">

@@ -6,7 +6,9 @@ export default function PointProcessingDagPanel({ plan }: { plan: PointProcessin
   if (!selectorItems.length && !dag) return null
 
   return (
-    <section className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-[10px]">
+    <details className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-[10px]">
+      <summary className="cursor-pointer font-semibold text-gray-700">技术详情：冻结成员与依赖图</summary>
+      <section className="mt-3">
       <div className="flex items-center justify-between gap-3">
         <span className="font-semibold text-gray-800">冻结成员与全站依赖</span>
         <span className={dag?.action === 'block' ? 'text-red-700' : 'text-emerald-700'}>
@@ -29,6 +31,7 @@ export default function PointProcessingDagPanel({ plan }: { plan: PointProcessin
           </div>
         )}
       </div>
-    </section>
+      </section>
+    </details>
   )
 }

@@ -6,6 +6,7 @@ import type {
 } from '../../api/client'
 import {
   buildDataTrunkViewModel,
+  manualBindableInputs,
   planActionLabel,
   POINT_PROCESSING_ACTIONS,
 } from './dataTrunkViewModel'
@@ -60,9 +61,7 @@ export default function PointProcessingPlanPanel({
     && selectedTemplate
     && trunk.l1_summary.revision_id !== selectedTemplate.revision_id,
   )
-  const directInputs = selectedTemplate?.inputs.filter((input) => (
-    !input.selector && input.source_kind === 'l0'
-  )) || []
+  const directInputs = manualBindableInputs(selectedTemplate?.inputs || [])
   const selectorInputs = selectedTemplate?.inputs.filter((input) => input.selector) || []
 
   return (
@@ -112,7 +111,7 @@ export default function PointProcessingPlanPanel({
             </div>
           )}
 
-          {selectedTemplate && !scanDriven && directInputs.map((input) => (
+          {selectedTemplate && directInputs.map((input) => (
             <label key={input.input_id} className="mt-3 block text-[11px] font-medium text-gray-700">
               {inputName(input.input_id)}{input.required ? '（必需）' : ''}
               <select
@@ -130,7 +129,7 @@ export default function PointProcessingPlanPanel({
             </label>
           ))}
 
-          {selectedTemplate && !scanDriven && selectorInputs.map((input) => (
+          {selectedTemplate && selectorInputs.map((input) => (
             <div key={input.input_id} className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-[10px]">
               <div className="font-semibold text-gray-800">{inputName(input.input_id)}，自动选择</div>
               <div className="mt-1 text-gray-500">

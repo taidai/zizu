@@ -560,6 +560,18 @@ class PointProcessingService:
             if installed_template is not None
             else {}
         )
+        source_summary_by_output = (
+            {
+                output.output_id: [
+                    item
+                    for item in source_summary
+                    if item["input_id"] in _output_input_ids(output)
+                ]
+                for output in installed_template.outputs
+            }
+            if installed_template is not None
+            else {}
+        )
         l1_summary = {
             "installed": current is not None,
             "revision_id": str(current.revision_id) if current is not None else None,
@@ -574,6 +586,7 @@ class PointProcessingService:
                         "output_key": key,
                         "entity_instance_id": str(value),
                         "processing_kind": processing_kind_by_output.get(key),
+                        "source_summary": source_summary_by_output.get(key, []),
                     }
                 )
                 for key, value in sorted(current.output_entity_ids.items())
@@ -1680,6 +1693,17 @@ def _formula_input_names(value: Any) -> tuple[str, ...]:
 
     visit(value)
     return tuple(sorted(names))
+
+
+def _output_input_ids(output: Any) -> tuple[str, ...]:
+    transform = output.transform
+    kind = transform.get("kind")
+    if kind == "formula":
+        return _formula_input_names(transform.get("canonicalAst"))
+    if kind == "boolean_set":
+        return tuple(sorted({str(item["input"]) for item in transform["entries"]}))
+    input_id = transform.get("input")
+    return (str(input_id),) if isinstance(input_id, str) else ()
 
 
 def _plain(value: Any) -> Any:

@@ -1066,6 +1066,11 @@ export interface NodeDataTrunk {
     output_key: string
     entity_instance_id: string
     processing_kind: string | null
+    source_summary: Array<{
+      input_id: string
+      source_kind: 'l0' | 'l2'
+      source_key: string
+    }>
   }>
 }
 

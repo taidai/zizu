@@ -137,7 +137,10 @@ export default function PointProcessingFormulaEditor({
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">结果契约</div><div className="mt-1 font-semibold">{model.resultContract}</div></div>
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">选择器</div><div className="mt-1 font-semibold">{model.memberLabel}</div></div>
           <div className="rounded border border-current/20 bg-white p-2"><div className="text-gray-500">全站 DAG</div><div className="mt-1 font-semibold">{model.dagLabel}</div></div>
-          <div className="sm:col-span-3 break-all text-gray-500">AST {currentPreview.ast_digest.slice(0, 16)} · DAG {currentPreview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
+          <details className="sm:col-span-3 rounded border border-gray-200 bg-white p-2 text-gray-500">
+            <summary className="cursor-pointer font-medium">技术详情</summary>
+            <div className="mt-2 break-all">AST {currentPreview.ast_digest.slice(0, 16)} · DAG {currentPreview.dag_summary.digest?.slice(0, 16) || '阻断'}</div>
+          </details>
         </div>
       )}
     </section>

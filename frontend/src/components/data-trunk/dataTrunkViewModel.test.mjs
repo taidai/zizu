@@ -43,7 +43,7 @@ test('delete candidate explains runtime stop without erasing history', async () 
   const viewModel = await import('./dataTrunkViewModel.ts')
   assert.equal(
     viewModel.planActionLabel('delete_candidate'),
-    '应用后停止生成新的 L2 观测；历史值与来源证据保留',
+    '应用后停止生成新的实体数据；历史值与来源证据保留',
   )
 })
 
@@ -157,6 +157,23 @@ test('entity reason is human readable and technical kind stays a label', async (
   ])
   assert.equal(model.processingKindLabel('window'), '统计')
   assert.equal(model.processingKindLabel('formula'), '即时')
+  assert.equal(model.processingKindLabel(null), '未标注')
   assert.equal(model.entityReasonLabel('FRAME_PROCESSING_FAILED', 0), '本次点位加工失败，当前值不可用')
   assert.equal(model.entityReasonLabel('STALE', 17 * 60_000), '原始数据已 17 分钟未更新')
+})
+
+test('async results fail closed when the selected node changed', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  assert.equal(model.isCurrentNodeResult('node-a', 'node-a'), true)
+  assert.equal(model.isCurrentNodeResult('node-a', 'node-b'), false)
+  assert.equal(model.isCurrentNodeResult(undefined, 'node-a'), false)
+})
+
+test('scan templates still allow manual binding and raw history starts idle', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  assert.deepEqual(model.manualBindableInputs([
+    { input_id: 'power', source_kind: 'l0', source_contract: { plugin: 'modbus' } },
+    { input_id: 'site_power', source_kind: 'l2', selector: { scope: 'descendants' } },
+  ]).map((input) => input.input_id), ['power'])
+  assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })

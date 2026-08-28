@@ -303,6 +303,13 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all("processing_kind" in item for item in operator_trunk.json()["l2"])
         )
+        sources_by_output = {
+            item["output_key"]: [source["input_id"] for source in item["source_summary"]]
+            for item in operator_trunk.json()["l2"]
+        }
+        self.assertEqual(["active_power_raw"], sources_by_output["active_power"])
+        self.assertEqual(["operating_state_raw"], sources_by_output["operating_state"])
+        self.assertEqual(["fault_codes_raw"], sources_by_output["fault_codes"])
         self.assertNotIn(
             "source_id",
             operator_trunk.json()["l1_summary"]["source_summary"][0],
