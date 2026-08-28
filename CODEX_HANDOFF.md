@@ -4762,6 +4762,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   `RawPointHistoryPanel.tsx` 取代并删除，避免保留两套冲突逻辑。
 - 普通首屏不再显示 definition ID、input ID、帧号和摘要；这些信息统一收进“技术详情”。未知加工类型
   显示“未标注”，不再误标成“即时”。
-- 最新验证：前端全量 Node 测试 25/25、TypeScript/Vite production build 退出 0；后端完整 300 tests、
+- Neuron 扫描歧义已完成真实闭环：首次检查返回带稳定唯一 UUID、组名和地址的候选；工程师选择后再次
+  检查转为 ready。多候选不按名称复用旧 L0 ID，重复扫描按确定 UUID 识别已存在点位，预览为 update。
+- 实体技术详情分别显示实体自身 `observation_frame_sequence` 与流头 `projection_frame_sequence`，流头
+  前进时不会把未变化实体误标成新帧证据。
+- 最终独立复审结论为 Critical/Important/Minor 全部清零，可以进入最终验收。
+- 最新验证：前端全量 Node 测试 25/25、TypeScript/Vite production build 退出 0；后端完整 301 tests、
   118 skipped、0 failure，`compileall app` 退出 0，`git diff --check` 通过。最终双角色浏览器 smoke 仍等待
   用户明确授权把已有本地密码输入 `127.0.0.1:3000`；未获得授权前不得声称浏览器验收完成。
