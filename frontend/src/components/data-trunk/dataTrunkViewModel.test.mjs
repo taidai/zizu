@@ -178,5 +178,9 @@ test('scan templates still allow manual binding and raw history starts idle', as
   assert.deepEqual(model.selectedInputBindings({ power: 'source-1', state: '' }), {
     power: 'source-1',
   })
+  assert.deepEqual(model.scannedInputCandidates([
+    { kind: 'l0_point', input_id: 'power', after: { source_id: 'candidate-1', name: '功率 A', value_data_type: 'FLOAT', unit: 'kW' } },
+    { kind: 'l0_point', input_id: 'state', after: { source_id: 'candidate-2', name: '状态', value_data_type: 'STRING', unit: null } },
+  ], 'power'), [{ source_id: 'candidate-1', source_key: '功率 A', data_type: 'FLOAT', unit: 'kW' }])
   assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })

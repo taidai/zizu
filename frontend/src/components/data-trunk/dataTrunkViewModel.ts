@@ -125,6 +125,29 @@ export function selectedInputBindings(
   return Object.fromEntries(Object.entries(selections).filter(([, sourceId]) => sourceId))
 }
 
+export function scannedInputCandidates(
+  items: Array<{
+    kind: string
+    input_id?: string
+    after?: {
+      source_id: string
+      name: string
+      value_data_type: string
+      unit: string | null
+    } | null
+  }>,
+  inputId: string,
+): Array<{ source_id: string; source_key: string; data_type: string; unit: string | null }> {
+  return items
+    .filter((item) => item.kind === 'l0_point' && item.input_id === inputId && item.after)
+    .map((item) => ({
+      source_id: item.after!.source_id,
+      source_key: item.after!.name,
+      data_type: item.after!.value_data_type,
+      unit: item.after!.unit,
+    }))
+}
+
 export function entityReasonLabel(reason: string | null, ageMs: number): string | null {
   if (reason === 'FRAME_PROCESSING_FAILED') return '本次点位加工失败，当前值不可用'
   if (reason === 'STALE' || reason === 'ENTITY_DATA_STALE') {

@@ -421,6 +421,69 @@ class PointProcessingTest(unittest.TestCase):
         ))
         self.assertEqual(METER_REVISION_ID, application.revision_id)
 
+    def test_scan_ambiguity_can_be_resolved_by_selecting_a_stable_candidate(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingService,
+            PreviewPointProcessing,
+        )
+
+        class AmbiguousMeterNeuron:
+            def get_groups(self, node_name: str) -> list[dict]:
+                return [
+                    {"name": "data-a", "interval": 100},
+                    {"name": "data-b", "interval": 100},
+                ]
+
+            def get_tags(self, node_name: str, group_name: str) -> list[dict]:
+                return [{"name": "总有功功率", "type": 3, "attribute": 1, "decimal": 0.0, "address": "1!416409"}]
+
+        payload = json.loads(
+            (REFERENCE_DIR / "meter-modbus-active-power.zizu-point-processing.json")
+            .read_text(encoding="utf-8")
+        )
+        payload["inputs"][0]["sourceContract"]["group"] = "preferred"
+        ambiguous_asset = parse_point_processing_template(payload)
+
+        service = PointProcessingService(
+            InMemoryPointProcessingRepository(),
+            InMemoryPointProcessingCatalog(
+                templates={METER_REVISION_ID: ambiguous_asset},
+                node_source_keys={NODE_ID: "meter"},
+            ),
+            point_scanner=NeuronPointCatalog(AmbiguousMeterNeuron()),
+        )
+
+        blocked = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=METER_REVISION_ID,
+            input_selections={},
+            actor="user:engineer",
+        ))
+        candidates = next(
+            item for item in blocked.items
+            if item["kind"] == "input_binding"
+        )["candidate_source_ids"]
+        self.assertEqual("blocked", blocked.status)
+        self.assertEqual(2, len(candidates))
+
+        ready = service.preview(PreviewPointProcessing(
+            node_id=NODE_ID,
+            template_revision_id=METER_REVISION_ID,
+            input_selections={"active_power_raw": UUID(candidates[0])},
+            actor="user:engineer",
+        ))
+
+        self.assertEqual("ready", ready.status, ready.public_dict())
+        selected = next(
+            item for item in ready.items
+            if item["kind"] == "input_binding"
+        )
+        self.assertEqual(candidates[0], selected["selected_source_id"])
+        self.assertEqual(1, sum(item["kind"] == "l0_point" for item in ready.items))
+
     def test_en9_apply_rejects_point_catalog_changed_after_preview(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
         from app.services.point_processing import (

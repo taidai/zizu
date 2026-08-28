@@ -1092,6 +1092,12 @@ export interface PointProcessingPlanItem {
   planned_edges?: Array<[string, string]>
   max_depth?: number | null
   dag_digest?: string | null
+  after?: {
+    source_id: string
+    name: string
+    value_data_type: string
+    unit: string | null
+  } | null
 }
 
 export interface PointProcessingPlan {

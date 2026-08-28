@@ -9,6 +9,7 @@ import {
   manualBindableInputs,
   planActionLabel,
   POINT_PROCESSING_ACTIONS,
+  scannedInputCandidates,
 } from './dataTrunkViewModel'
 import PointProcessingDagPanel from './PointProcessingDagPanel'
 import PointProcessingFormulaEditor from './PointProcessingFormulaEditor'
@@ -63,6 +64,19 @@ export default function PointProcessingPlanPanel({
   )
   const directInputs = manualBindableInputs(selectedTemplate?.inputs || [])
   const selectorInputs = selectedTemplate?.inputs.filter((input) => input.selector) || []
+  const planItemName = (item: PointProcessingPlan['items'][number]): string => {
+    if (item.input_id) {
+      const input = selectedTemplate?.inputs.find((candidate) => candidate.input_id === item.input_id)
+      return inputName(item.input_id) !== item.input_id
+        ? inputName(item.input_id)
+        : input?.source_key || '输入点位'
+    }
+    if (item.output_id) {
+      const index = selectedTemplate?.outputs.findIndex((output) => output.output_key === item.output_id) ?? -1
+      return index >= 0 ? `输出实体 ${index + 1}` : '输出实体'
+    }
+    return item.kind === 'dag_validation' ? '全站依赖检查' : '加工变更'
+  }
 
   return (
     <section className="rounded-xl border border-gray-200 bg-white/55 p-4" aria-label="点位加工工作区">
@@ -112,7 +126,11 @@ export default function PointProcessingPlanPanel({
           )}
 
           {selectedTemplate && directInputs.map((input) => {
-            const compatibleSources = trunk.l0.filter((source) => (
+            const sourceMap = new Map([
+              ...trunk.l0,
+              ...scannedInputCandidates(plan?.items || [], input.input_id),
+            ].map((source) => [source.source_id, source]))
+            const compatibleSources = [...sourceMap.values()].filter((source) => (
               source.data_type === input.data_type
               && (source.unit || null) === (input.unit || null)
             ))
@@ -210,7 +228,7 @@ export default function PointProcessingPlanPanel({
                 <div className="mt-3 max-h-48 overflow-y-auto text-[10px] text-gray-600">
                   {plan.items.map((item) => (
                     <div key={item.item_key} className="flex justify-between gap-2 py-1">
-                      <span className="truncate">{inputName(item.input_id || item.output_id || item.item_key)}</span>
+                      <span className="truncate">{planItemName(item)}</span>
                       <span className="shrink-0 font-medium">{planActionLabel(item.action)}</span>
                     </div>
                   ))}

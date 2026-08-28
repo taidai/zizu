@@ -1109,6 +1109,7 @@ def compile_point_processing_plan(
             template,
             scan,
             sources,
+            command.input_selections,
         )
         sources = tuple(
             item for item in sources if item.source_kind != "l0"
@@ -1439,6 +1440,7 @@ def _scan_plan_inputs(
     template: PointProcessingTemplate,
     scan: ScannedPointCatalog,
     existing_sources: tuple[PointProcessingSource, ...],
+    input_selections: Mapping[str, UUID],
 ) -> tuple[
     tuple[PointProcessingSource, ...],
     tuple[Mapping[str, Any], ...],
@@ -1496,77 +1498,90 @@ def _scan_plan_inputs(
                     })
                 )
                 continue
-        if len(matches) != 1:
-            code = (
-                "NEURON_REQUIRED_POINT_MISSING"
-                if not matches
-                else "NEURON_REQUIRED_POINT_AMBIGUOUS"
+        candidates: list[tuple[PointProcessingSource, ScannedPoint, Any, dict[str, Any]]] = []
+        for point in matches:
+            if point.group_interval_ms <= 0:
+                blockers.append(
+                    MappingProxyType({
+                        "code": "NEURON_GROUP_INTERVAL_MISSING",
+                        "input_id": input_contract.input_id,
+                    })
+                )
+                continue
+            freshness_seconds = max(3 * point.group_interval_ms / 1000, 5.0)
+            existing = next(
+                (
+                    source for source in existing_l0
+                    if _normalized_source_key(source.stable_source_key)
+                    == _normalized_source_key(point.name)
+                ),
+                None,
             )
-            blockers.append(
-                MappingProxyType(
-                    {"code": code, "input_id": input_contract.input_id}
+            source_id = (
+                existing.source_id if existing is not None
+                else uuid5(
+                    NAMESPACE_URL,
+                    (
+                        f"zizu/l0/{node_id}/{point.address}"
+                        if len(matches) == 1
+                        else f"zizu/l0/{node_id}/{point.group}/{point.address}/{point.name}"
+                    ),
                 )
             )
-            continue
-        point = matches[0]
-        if point.group_interval_ms <= 0:
-            blockers.append(
-                MappingProxyType({
-                    "code": "NEURON_GROUP_INTERVAL_MISSING",
-                    "input_id": input_contract.input_id,
-                })
+            source = PointProcessingSource(
+                source_id=source_id,
+                source_kind="l0",
+                node_id=node_id,
+                stable_source_key=point.name,
+                data_type=point.value_data_type,
+                unit=input_contract.unit,
+                confirmed=True,
             )
-            continue
-        freshness_seconds = max(3 * point.group_interval_ms / 1000, 5.0)
-        existing = next(
-            (
-                source for source in existing_l0
-                if _normalized_source_key(source.stable_source_key)
-                == _normalized_source_key(point.name)
-            ),
+            sources.append(source)
+            after = {
+                "source_id": str(source_id),
+                "group": point.group,
+                "name": point.name,
+                "wire_data_type": point.wire_data_type,
+                "value_data_type": point.value_data_type,
+                "source_address": point.address,
+                "decimal": point.decimal,
+                "read_only": point.read_only,
+                "unit": input_contract.unit,
+                "freshness_seconds": freshness_seconds,
+            }
+            candidates.append((source, point, existing, after))
+
+        selected_id = input_selections.get(input_contract.input_id)
+        selected = next(
+            (candidate for candidate in candidates if candidate[0].source_id == selected_id),
             None,
         )
-        source_id = (
-            existing.source_id if existing is not None
-            else uuid5(NAMESPACE_URL, f"zizu/l0/{node_id}/{point.address}")
-        )
-        source = PointProcessingSource(
-            source_id=source_id,
-            source_kind="l0",
-            node_id=node_id,
-            stable_source_key=point.name,
-            data_type=point.value_data_type,
-            unit=input_contract.unit,
-            confirmed=True,
-        )
-        sources.append(source)
-        after = {
-            "source_id": str(source_id),
-            "group": point.group,
-            "name": point.name,
-            "wire_data_type": point.wire_data_type,
-            "value_data_type": point.value_data_type,
-            "source_address": point.address,
-            "decimal": point.decimal,
-            "read_only": point.read_only,
-            "unit": input_contract.unit,
-            "freshness_seconds": freshness_seconds,
-        }
-        items.append(
-            MappingProxyType(
-                {
-                    "item_key": f"l0:{input_contract.input_id}",
-                    "layer": "L0",
-                    "kind": "l0_point",
-                    "action": "add" if existing is None else "update",
-                    "resource_key": point.address,
-                    "input_id": input_contract.input_id,
-                    "before": None,
-                    "after": MappingProxyType(after),
-                    "blocker_code": None,
-                }
+        planned = (selected,) if selected is not None else tuple(candidates)
+        candidate_blocked = len(candidates) > 1 and selected is None
+        for source, point, existing, after in planned:
+            items.append(
+                MappingProxyType(
+                    {
+                        "item_key": f"l0:{input_contract.input_id}:{source.source_id}",
+                        "layer": "L0",
+                        "kind": "l0_point",
+                        "action": (
+                            "block" if candidate_blocked
+                            else "add" if existing is None
+                            else "update"
+                        ),
+                        "resource_key": point.address,
+                        "input_id": input_contract.input_id,
+                        "before": None,
+                        "after": MappingProxyType(after),
+                        "blocker_code": (
+                            "POINT_PROCESSING_INPUT_AMBIGUOUS"
+                            if candidate_blocked else None
+                        ),
+                    }
+                )
             )
-        )
     return tuple(sources), tuple(items), tuple(blockers)
 
 
