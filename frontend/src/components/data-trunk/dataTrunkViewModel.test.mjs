@@ -85,6 +85,13 @@ test('formula preview exposes one typed selector and DAG summary', async () => {
   assert.equal(model.memberLabel, '已冻结 2 个输入实体')
   assert.equal(model.dagLabel, '2 条依赖 · 深度 2/8')
   assert.equal(model.ready, true)
+  assert.equal(viewModel.buildFormulaPreviewViewModel({
+    result_type: 'FLOAT',
+    result_unit: null,
+    member_count: 0,
+    dag_summary: { edge_count: 0, max_depth: null },
+    blockers: [],
+  }).dagLabel, '0 条依赖 · 深度 未计算/8')
 })
 
 test('visual formula builder and text parser share one canonical expression', async () => {

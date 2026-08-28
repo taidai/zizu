@@ -38,7 +38,7 @@ class RealtimeHardCutTest(unittest.TestCase):
             for path in (
                 ROOT / "frontend/src/components/NodeTagPanel.tsx",
                 ROOT / "frontend/src/components/data-trunk/DataTrunkWorkspace.tsx",
-                ROOT / "frontend/src/components/data-trunk/NodeTrunkOverview.tsx",
+                ROOT / "frontend/src/components/data-trunk/EntityDataPanel.tsx",
                 ROOT / "frontend/src/components/data-trunk/EntityObservationCard.tsx",
             )
         )

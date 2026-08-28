@@ -47,7 +47,7 @@ export default function EntityDataPanel({
         </div>
         <div className="text-right text-[10px] text-gray-500">
           <div>{entityRows.length} 个实体</div>
-          <div className="mt-1">数据时间 {formatTime(projection?.frameTime)}</div>
+          <div className="mt-1">帧 {projection?.frameSequence ?? '未形成'}｜数据时间 {formatTime(projection?.frameTime)}</div>
         </div>
       </div>
 

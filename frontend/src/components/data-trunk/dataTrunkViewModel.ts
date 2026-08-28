@@ -209,7 +209,7 @@ export function buildFormulaPreviewViewModel(preview: {
   return {
     resultContract: `${preview.result_type}${preview.result_unit ? ` · ${preview.result_unit}` : ''}`,
     memberLabel: `已冻结 ${preview.member_count} 个输入实体`,
-    dagLabel: `${preview.dag_summary.edge_count} 条依赖 · 深度 ${preview.dag_summary.max_depth ?? '—'}/8`,
+    dagLabel: `${preview.dag_summary.edge_count} 条依赖 · 深度 ${preview.dag_summary.max_depth ?? '未计算'}/8`,
     ready: preview.blockers.length === 0,
   }
 }
