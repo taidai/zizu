@@ -706,7 +706,7 @@ class PostgresFrameRepository:
                       UNION
                       SELECT tag_id FROM t_telemetry WHERE frame_id=%s
                     )
-                    SELECT DISTINCT ON (telemetry.tag_id)
+                    SELECT
                       telemetry.observation_id,telemetry.node_id,
                       telemetry.tag_id,tag.name,
                       COALESCE(tag.value_data_type,tag.data_type),
@@ -718,12 +718,17 @@ class PostgresFrameRepository:
                       telemetry.event_time_basis,telemetry.accepted_beat,
                       telemetry.source_order_mode,
                       telemetry.source_receive_ordinal
-                    FROM t_telemetry AS telemetry
-                    JOIN relevant_tags USING(tag_id)
+                    FROM relevant_tags
+                    JOIN LATERAL (
+                      SELECT candidate.*
+                      FROM t_telemetry AS candidate
+                      WHERE candidate.tag_id=relevant_tags.tag_id
+                        AND candidate.frame_sequence <= %s
+                      ORDER BY candidate.frame_sequence DESC,candidate.ts DESC
+                      LIMIT 1
+                    ) AS telemetry ON TRUE
                     JOIN t_tags AS tag ON tag.id=telemetry.tag_id
-                    WHERE telemetry.frame_sequence <= %s
-                    ORDER BY telemetry.tag_id,telemetry.frame_sequence DESC,
-                             telemetry.ts DESC
+                    ORDER BY telemetry.tag_id
                     """,
                     (
                         claimed.configuration_revision,

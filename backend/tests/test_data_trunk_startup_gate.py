@@ -153,6 +153,7 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("mark_expired_outputs_stale", trunk_source)
         self.assertNotIn("t_l2_stream_outbox", postgres_source)
         self.assertNotIn("_select_history_observations", postgres_source)
+        self.assertIn("JOIN LATERAL", postgres_source)
 
 
 if __name__ == "__main__":
