@@ -4770,3 +4770,19 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 最新验证：前端全量 Node 测试 25/25、TypeScript/Vite production build 退出 0；后端完整 301 tests、
   118 skipped、0 failure，`compileall app` 退出 0，`git diff --check` 通过。最终双角色浏览器 smoke 仍等待
   用户明确授权把已有本地密码输入 `127.0.0.1:3000`；未获得授权前不得声称浏览器验收完成。
+
+### 2026-08-28 — v0.4.85-rc.12 三任务页部署
+
+- 发布身份更新为 `v0.4.85-rc.12` / Schema 049；发布提交 `175359d` 已推送，GitHub Actions
+  `33150903078` 成功，1号机运行固定 ARM64 摘要
+  `ghcr.io/taidai/zizu@sha256:8aa018672bdefef962b4d8d3c5c8e1b1780fba7534aa4f3adb7129532afaf5f7`。
+- 本地发布门禁：前端 25/25 与 production build 通过；后端 301 tests、118 skipped、0 failure；
+  scripts 37/37、compileall 和 `git diff --check` 通过。顺带修正发布构建测试仍写死 Schema 048 的欠账。
+- 切换前 Schema049 备份为 `/opt/zizu-backups/pre-v0.4.85-rc.12-schema049/omnithings.dump`，
+  3,552,364 bytes，SHA-256 `fbb5678bf1144530787dc5e962cc4a0f7170b975d23c6465887541b265163137`；
+  SHA 与 `pg_restore -l` 均通过。
+- 只重建 backend，保留 host 网络、`/dev/mqueue` tmpfs、unless-stopped、既有运行环境和业务卷；
+  TimescaleDB、NanoMQ、Neuron 未重建。最终 backend healthy、restart 0、公网首页 200、健康接口 rc.12、
+  Schema049、outbox 积压 0、真实错误日志 0。
+- 未启动 TLS/Caddy，未执行策略、控制、设备写入或配置发布。未输入业务账号做双角色浏览器 smoke；
+  完整部署证据见 `docs/deploy-1号机-v0.4.85-rc.12-http.md`。
