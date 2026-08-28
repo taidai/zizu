@@ -191,6 +191,7 @@ class PointProcessingTemplateSummary:
             "revision": self.asset.revision,
             "status": self.asset.status,
             "content_digest": self.asset.content_digest,
+            "requires_scan": _requires_neuron_scan(self.asset),
             "inputs": [
                 {
                     "input_id": item.input_id,
@@ -527,10 +528,43 @@ class PointProcessingService:
             if current is not None
             else {}
         )
+        source_by_id = {item.source_id: item for item in sources}
+        source_summary = []
+        if current is not None:
+            selected = {
+                key: (value,)
+                for key, value in current.input_source_ids.items()
+            }
+            selected.update(current.selector_source_ids)
+            source_summary = [
+                {
+                    "input_id": input_id,
+                    "source_kind": source_by_id[source_id].source_kind,
+                    "source_key": source_by_id[source_id].stable_source_key,
+                }
+                for input_id, source_ids in sorted(selected.items())
+                for source_id in source_ids
+                if source_id in source_by_id
+            ]
+
+        installed_template = (
+            self._catalog.get_template(current.revision_id)
+            if current is not None
+            else None
+        )
+        processing_kind_by_output = (
+            {
+                output.output_id: str(output.transform.get("kind"))
+                for output in installed_template.outputs
+            }
+            if installed_template is not None
+            else {}
+        )
         l1_summary = {
             "installed": current is not None,
             "revision_id": str(current.revision_id) if current is not None else None,
             "output_count": len(current.output_entity_ids) if current is not None else 0,
+            "source_summary": source_summary,
             **({"input_bindings": input_bindings} if include_engineering else {}),
         }
         l2 = (
@@ -539,6 +573,7 @@ class PointProcessingService:
                     {
                         "output_key": key,
                         "entity_instance_id": str(value),
+                        "processing_kind": processing_kind_by_output.get(key),
                     }
                 )
                 for key, value in sorted(current.output_entity_ids.items())

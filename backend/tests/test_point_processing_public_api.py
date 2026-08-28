@@ -292,6 +292,22 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engineer_trunk.json()["l0"])
         self.assertIn("input_bindings", engineer_trunk.json()["l1_summary"])
         self.assertTrue(
+            all("requires_scan" in item for item in templates.json()["items"])
+        )
+        self.assertTrue(
+            all(
+                set(item) == {"input_id", "source_kind", "source_key"}
+                for item in operator_trunk.json()["l1_summary"]["source_summary"]
+            )
+        )
+        self.assertTrue(
+            all("processing_kind" in item for item in operator_trunk.json()["l2"])
+        )
+        self.assertNotIn(
+            "source_id",
+            operator_trunk.json()["l1_summary"]["source_summary"][0],
+        )
+        self.assertTrue(
             any(
                 event.event == "authorization.decision"
                 and event.outcome == "denied"

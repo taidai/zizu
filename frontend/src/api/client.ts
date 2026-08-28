@@ -1003,6 +1003,7 @@ export interface PointProcessingTemplate {
   revision: number
   status: 'active' | 'retired'
   content_digest: string
+  requires_scan: boolean
   inputs: PointProcessingTemplateInput[]
   outputs: Array<{
     output_key: string
@@ -1054,11 +1055,17 @@ export interface NodeDataTrunk {
     installed: boolean
     revision_id: string | null
     output_count: number
+    source_summary: Array<{
+      input_id: string
+      source_kind: 'l0' | 'l2'
+      source_key: string
+    }>
     input_bindings?: Record<string, string>
   }
   l2: Array<{
     output_key: string
     entity_instance_id: string
+    processing_kind: string | null
   }>
 }
 
@@ -1218,9 +1225,11 @@ export async function applyPointProcessingPlan(
   catch (cause) { throw new DataTrunkResultUnknownError(cause) }
 }
 
+export type EntityHistoryRange = '1h' | '6h' | '24h' | '7d'
+
 export async function fetchEntityInstanceHistory(
   entityInstanceId: string,
-  range: '1h' | '6h' | '24h' | '7d' = '1h',
+  range: EntityHistoryRange = '1h',
 ): Promise<EntityInstanceObservation[]> {
   const response = await apiFetch(`${API_BASE}/entity-instances/${encodeURIComponent(entityInstanceId)}/history?range=${range}`)
   if (!response.ok) throw await dataTrunkError(response, `读取全局实体历史失败：${response.status}`)
