@@ -62,8 +62,8 @@ export function defaultAlarmDraft(dataType: AlarmDraftDataType): AlarmRule {
   if (dataType === 'STATE') {
     return {
       id: 'state-alarm', name: '状态告警', severity: 'WARNING',
-      trigger: { operator: 'eq', value: true }, trigger_duration_seconds: 0,
-      recovery: { operator: 'ne', value: true }, recovery_duration_seconds: 3,
+      trigger: { operator: 'eq', value: '故障' }, trigger_duration_seconds: 0,
+      recovery: { operator: 'ne', value: '故障' }, recovery_duration_seconds: 3,
       notification_throttle_seconds: 300, unit: null, fault_map_id: null,
     }
   }

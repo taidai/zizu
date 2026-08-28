@@ -9,12 +9,11 @@ import {
 } from './api/authSession'
 import AdminPanel from './components/AdminPanel'
 import { clearDataTrunkApplyRetry } from './components/data-trunk/dataTrunkRetryState'
-import { Network, Scale, Bell, Settings, AlertTriangle, LayoutDashboard } from 'lucide-react'
+import { Network, Scale, Bell, Settings, LayoutDashboard } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
-const AlarmConfigurationPage = lazy(() => import('./pages/AlarmConfigurationPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
 
 function PageLoader() {
@@ -53,7 +52,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'workbench' | 'tree' | 'rules' | 'alarms' | 'alarm-config' | 'admin'
+type PageKey = 'workbench' | 'tree' | 'rules' | 'alarms' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -77,7 +76,6 @@ const NAV_ITEMS: NavigationItem[] = [
   { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
-  { key: 'alarm-config', label: '告警配置', icon: <AlertTriangle size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   // Server-side protection for system/control APIs is intentionally Ticket #4.
   { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} />, roles: ['admin'] },
 ]
@@ -272,8 +270,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
             {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} actorId={session.user.id} />}
             {activePage === 'rules' && <RuleEnginePage />}
-            {activePage === 'alarms' && <AlarmCenterPage />}
-            {activePage === 'alarm-config' && <AlarmConfigurationPage actorId={session.user.id} onOpenAlarms={() => setActivePage('alarms')} />}
+            {activePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={CONFIG_ROLES.includes(session.user.role)} />}
           </Suspense>
           {activePage === 'admin' && <AdminPanel />}
         </div>

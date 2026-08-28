@@ -140,7 +140,7 @@ function bindingsToActions(bindings: OutputBinding[]): ControlAction[] {
     }))
 }
 
-const RULE_TYPES: RuleCreateRequest['rule_type'][] = ['alarm', 'control', 'fault_map', 'linkage']
+const RULE_TYPES: RuleCreateRequest['rule_type'][] = ['control', 'linkage']
 
 const TYPE_LABELS: Record<RuleCreateRequest['rule_type'], string> = {
   alarm: '告警 alarm',

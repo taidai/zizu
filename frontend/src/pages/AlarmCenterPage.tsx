@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
+import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -9,12 +10,12 @@ const LEVEL_STYLES: Record<AlarmLevel, string> = {
 }
 
 interface Stats {
-  total: number
+  active: number
   unack: number
-  byLevel: Record<AlarmLevel, number>
+  critical: number
 }
 
-export default function AlarmCenterPage() {
+function CurrentAlarmView() {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
@@ -24,7 +25,7 @@ export default function AlarmCenterPage() {
   const [alarmEntities, setAlarmEntities] = useState<{ id: string; name: string; display_name: string | null }[]>([])
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
-  const [stats, setStats] = useState<Stats>({ total: 0, unack: 0, byLevel: { CRITICAL: 0, MAJOR: 0, WARNING: 0, INFO: 0 } })
+  const [stats, setStats] = useState<Stats>({ active: 0, unack: 0, critical: 0 })
   const pageSize = 50
 
   const load = async (targetPage = page) => {
@@ -38,9 +39,9 @@ export default function AlarmCenterPage() {
       setAlarms(data.alarms)
       setTotalPages(data.total_pages || 1)
       setStats({
-        total: data.summary.total,
+        active: data.summary.active,
         unack: data.summary.unacknowledged,
-        byLevel: data.summary.by_severity,
+        critical: data.summary.critical,
       })
     } finally {
       setLoading(false)
@@ -94,29 +95,19 @@ export default function AlarmCenterPage() {
       </div>
 
       {/* 统计卡 */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-3 gap-3">
         <div className="neu-card p-3">
-          <div className="text-[10px] text-gray-400 uppercase">全部告警</div>
-          <div className="text-lg font-bold text-gray-800 font-mono-value">{stats.total}</div>
+          <div className="text-[10px] text-gray-400 uppercase">活动告警</div>
+          <div className="text-lg font-bold text-gray-800 font-mono-value">{stats.active}</div>
         </div>
         <div className="neu-card p-3">
           <div className="text-[10px] text-gray-400 uppercase">未确认</div>
           <div className="text-lg font-bold text-gray-800 font-mono-value">{stats.unack}</div>
         </div>
-        {(['CRITICAL', 'MAJOR', 'WARNING', 'INFO'] as AlarmLevel[]).map((lv) => (
-          <button
-            key={lv}
-            onClick={() => setLevelFilter(levelFilter === lv ? '' : lv)}
-            className={`neu-card p-3 text-left transition ${levelFilter === lv ? 'ring-2 ring-[#52c41a]' : ''}`}
-          >
-            <div className="text-[10px] text-gray-400 uppercase">{lv}</div>
-            <div className={`text-lg font-bold font-mono-value ${
-              lv === 'CRITICAL' ? 'text-red-600' : lv === 'MAJOR' ? 'text-orange-600' : lv === 'WARNING' ? 'text-amber-600' : 'text-blue-600'
-            }`}>
-              {stats.byLevel[lv]}
-            </div>
-          </button>
-        ))}
+        <button onClick={() => setLevelFilter(levelFilter === 'CRITICAL' ? '' : 'CRITICAL')} className={`neu-card p-3 text-left transition ${levelFilter === 'CRITICAL' ? 'ring-2 ring-red-400' : ''}`}>
+          <div className="text-[10px] text-gray-400 uppercase">紧急</div>
+          <div className="text-lg font-bold text-red-600 font-mono-value">{stats.critical}</div>
+        </button>
       </div>
 
       {/* 筛选栏 */}
@@ -191,7 +182,7 @@ export default function AlarmCenterPage() {
                   </div>
                   <h3 className="text-sm font-bold text-gray-800">{alarm.message}</h3>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    事件状态: {alarm.state === 'pending' ? '触发待确认' : alarm.resolved_at ? '已恢复' : alarm.acknowledged ? '活动已确认' : '活动未确认'}
+                    {alarm.node_name ? `${alarm.node_name} · ` : ''}持续 {alarm.duration_seconds ?? 0} 秒 · {alarm.state === 'pending' ? '触发待确认' : alarm.resolved_at ? '已恢复' : alarm.acknowledged ? '活动已确认' : '活动未确认'}
                   </p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
@@ -244,4 +235,15 @@ export default function AlarmCenterPage() {
       )}
     </div>
   )
+}
+
+export default function AlarmCenterPage({ actorId, canConfigure }: { actorId: string; canConfigure: boolean }) {
+  const [tab, setTab] = useState<'events' | 'rules'>('events')
+  return <div className="space-y-4">
+    <div className="flex gap-2 border-b border-white/70 pb-2">
+      <button onClick={() => setTab('events')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'events' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>当前告警</button>
+      {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>告警规则</button>}
+    </div>
+    {tab === 'events' ? <CurrentAlarmView /> : <MinimalAlarmRulesPage key={actorId} />}
+  </div>
 }

@@ -842,6 +842,7 @@ export interface Alarm {
   alarm_source?: string | null
   alarm_count?: number | null
   alarm_code?: string | null
+  duration_seconds?: number
   state?: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
 }
 
@@ -852,9 +853,9 @@ export interface AlarmListResponse {
   page_size: number
   total_pages: number
   summary: {
-    total: number
+    active: number
     unacknowledged: number
-    by_severity: Record<AlarmLevel, number>
+    critical: number
   }
 }
 
@@ -869,7 +870,10 @@ interface AlarmEventWire {
   acknowledged_at: string | null
   acknowledged_by: string | null
   recovered_at: string | null
-  last_observation: { evidence?: { alarm_definition?: string } } | null
+  node_name: string
+  entity_name: string
+  alarm_name: string
+  duration_seconds: number
 }
 
 export async function fetchAlarms(
@@ -905,15 +909,17 @@ export async function fetchAlarms(
       id: item.id,
       rule_id: null,
       node_id: null,
+      node_name: item.node_name,
       entity_id: item.entity_instance_id,
-      entity_name: `实体实例 ${item.entity_instance_id}`,
+      entity_name: item.entity_name,
       level: item.severity,
-      message: item.last_observation?.evidence?.alarm_definition || `告警定义 ${item.definition_id}`,
+      message: item.alarm_name,
       acknowledged: item.state === 'active_acknowledged',
       ack_user: item.acknowledged_by,
       ack_at: item.acknowledged_at,
       created_at: item.active_at || item.pending_at,
       resolved_at: item.recovered_at,
+      duration_seconds: item.duration_seconds,
       state: item.state,
     })),
     total: data.total,
@@ -1225,9 +1231,9 @@ export interface AlarmRule {
   id: string
   name: string
   severity: AlarmSeverity
-  trigger: AlarmCondition
+  trigger: AlarmCondition & { value: number | string }
   trigger_duration_seconds: number
-  recovery: AlarmCondition
+  recovery: AlarmCondition & { value: number | string }
   recovery_duration_seconds: number
   notification_throttle_seconds: number
   unit: string | null
@@ -1241,6 +1247,26 @@ export interface AlarmRuleSetRevision {
   revision: number
   rules: AlarmRule[]
   digest: string
+}
+
+export interface AlarmRuleGroup {
+  rule_set_id: string
+  key: string
+  name: string
+  latest_revision: number
+  last_non_empty_revision: number | null
+  entity_instance_ids: string[]
+  enabled_entity_instance_ids: string[]
+  device_count: number
+  rule_count: number
+  highest_severity: AlarmSeverity | null
+}
+
+export interface AlarmRuleTrial {
+  entity_instance_id: string
+  trigger_matches: boolean
+  recovery_matches: boolean
+  description: string
 }
 
 export interface AlarmBlocker { code: string; message: string }
@@ -1428,6 +1454,25 @@ export async function fetchAlarmRuleSets(): Promise<AlarmRuleSetRevision[]> {
   const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-sets`)
   if (!response.ok) throw await alarmConfigurationError(response, `读取规则集失败：${response.status}`)
   return (await response.json() as { items: AlarmRuleSetRevision[] }).items
+}
+
+export async function fetchAlarmRuleGroups(): Promise<AlarmRuleGroup[]> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-groups`)
+  if (!response.ok) throw await alarmConfigurationError(response, `读取告警规则失败：${response.status}`)
+  return (await response.json() as { items: AlarmRuleGroup[] }).items
+}
+
+export async function trialAlarmRule(input: {
+  entity_instance_id: string
+  rule: AlarmRule
+  value: AlarmConditionValue | string[]
+  quality: number
+}): Promise<AlarmRuleTrial> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-configurations/trials`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `试算失败：${response.status}`)
+  return response.json()
 }
 
 export async function createAlarmRuleSet(input: Pick<AlarmRuleSetRevision, 'key' | 'name' | 'rules'>): Promise<AlarmRuleSetRevision> {
