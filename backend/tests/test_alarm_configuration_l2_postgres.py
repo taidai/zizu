@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import psycopg2
@@ -14,6 +15,8 @@ from app.services.alarm_configuration import (
     PlanAlarmConfiguration,
 )
 from app.services.alarm_configuration_postgres import PostgresAlarmConfigurationRepository
+from app.services.alarm_postgres import PostgresAlarmDefinitionCatalog, PostgresAlarmRepository
+from app.services.alarm_runtime import AlarmObservation, AlarmRuntime
 from tests import test_alarm_configuration_postgres
 from tests import test_node_data_trunk_hard_cut_migration_postgres
 
@@ -61,6 +64,54 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
             self.assertEqual(cursor.fetchone(), (self.entity_id, result.configuration_revision))
             cursor.execute("SELECT count(*) FROM t_configuration_audit WHERE configuration_revision=%s AND resource_kind='alarm_configuration'", (result.configuration_revision,))
             self.assertEqual(cursor.fetchone()[0], 1)
+
+    def test_empty_revision_disables_group_without_losing_reenable_target(self) -> None:
+        service = AlarmConfiguration(PostgresAlarmConfigurationRepository(lambda: psycopg2.connect(**self.kwargs)))
+        rule_set = service.create_rule_set(
+            key="pcs-power", name="PCS 功率",
+            rules=(AlarmRule("high", "功率越限", "MAJOR", {"operator": "gt", "value": 90}, 0, {"operator": "lt", "value": 85}, 0, 60, "kW"),),
+            actor="operator:test",
+        )
+        enabled_plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), rule_set.rule_set_id, 1, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(enabled_plan.id, enabled_plan.digest, "alarm-enable-1", "operator:test"))
+        empty = service.create_rule_set_revision(rule_set_id=rule_set.rule_set_id, rules=(), actor="operator:test")
+        disabled_plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), empty.rule_set_id, empty.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(disabled_plan.id, disabled_plan.digest, "alarm-disable-1", "operator:test"))
+
+        group = service.list_rule_groups()[0]
+        self.assertEqual(2, group.latest_revision)
+        self.assertEqual(1, group.last_non_empty_revision)
+        self.assertEqual((self.entity_id,), group.entity_instance_ids)
+        self.assertEqual((), group.enabled_entity_instance_ids)
+
+    def test_event_view_resolves_node_entity_and_rule_names(self) -> None:
+        from app.services.telemetry_store import close_db_pool, init_db_pool
+
+        service = AlarmConfiguration(PostgresAlarmConfigurationRepository(lambda: psycopg2.connect(**self.kwargs)))
+        rule_set = service.create_rule_set(
+            key="pcs-power", name="PCS 功率",
+            rules=(AlarmRule("high", "功率越限", "MAJOR", {"operator": "gt", "value": 90}, 0, {"operator": "lt", "value": 85}, 0, 60, "kW"),),
+            actor="operator:test",
+        )
+        plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), rule_set.rule_set_id, 1, "operator:test"))
+        result = service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "alarm-view-1", "operator:test"))
+        definitions = PostgresAlarmDefinitionCatalog()
+        runtime = AlarmRuntime(definitions, PostgresAlarmRepository())
+        init_db_pool(1, 2)
+        try:
+            runtime.submit(AlarmObservation(
+                definition_id=result.definition_ids[0], entity_instance_id=self.entity_id,
+                observed_at=datetime.now(timezone.utc), value=100, quality=192,
+                source_kind="committed_l2", source_ref="frame:test", evidence={},
+            ))
+
+            event = runtime.list()[0]
+            presentation = runtime.describe((event,))[event.id]
+            self.assertEqual("PCS-01", presentation.node_name)
+            self.assertEqual("有功功率", presentation.entity_name)
+            self.assertEqual("功率越限", presentation.alarm_name)
+        finally:
+            close_db_pool()
 
 
 if __name__ == "__main__":
