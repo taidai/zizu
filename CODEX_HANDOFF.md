@@ -4652,3 +4652,9 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   08-23、08-25、08-27 专项规格增加状态说明，README 顶部增加唯一架构入口；未改生产代码或部署。
 - 用户以 `AAAA` 完成最终书面复核；总纲转为 Accepted，并成为唯一现行总体架构入口。
 - 下一步：先为“数据帧底座”单独编写实施计划，不启动一次性全平台重构。
+# 2026-08-28 — 最简告警中心规格确认
+
+- 用户正式确认 `docs/superpowers/specs/2026-08-28-minimal-alarm-center-design.md`；状态已由 Proposed 改为 Accepted。
+- 实施计划：`docs/superpowers/plans/2026-08-28-minimal-alarm-center-implementation.md`。
+- 计划坚持复用现有 committed L2 告警状态机和配置发布链，只补 CODE_SET 条件、零副作用试算、面向人的读模型和一个前端入口；不新增表、依赖、基础设施、JDM 告警或通知系统。
+- 下一步按计划逐项 TDD 实现，完成全部本地/真实 PostgreSQL 门禁后只构建一次 ARM64 镜像，并以固定 digest 部署 1 号机。
