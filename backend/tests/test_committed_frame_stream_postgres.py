@@ -13,6 +13,8 @@ import psycopg2
 from app.services.committed_frame_stream import FrameScope, FrameStreamError
 from app.services.committed_frame_stream_postgres import (
     PostgresCommittedFrameStreamRepository,
+    _l0_snapshot_quality,
+    _l0_snapshot_value,
 )
 from app.services.data_trunk_contracts import (
     FramedRawObservation,
@@ -90,6 +92,61 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
         self.assertFalse(connection.readonly)
         self.assertEqual(1, connection.commits)
+
+
+class CommittedFrameLegacyProjectionTest(unittest.TestCase):
+    def test_legacy_int_point_uses_its_nonempty_float_column_for_diagnostics(self) -> None:
+        self.assertEqual(
+            34.1,
+            _l0_snapshot_value(
+                "INT",
+                0,
+                raw_float=None,
+                raw_int=None,
+                raw_bool=None,
+                raw_text=None,
+                legacy_float=34.1,
+                legacy_int=None,
+                legacy_bool=None,
+                legacy_text=None,
+            ),
+        )
+        self.assertEqual(
+            int(TrunkQuality.STALE),
+            _l0_snapshot_quality(0, has_value=True, stored_quality=192),
+        )
+
+    def test_committed_frame_keeps_strict_declared_type(self) -> None:
+        self.assertIsNone(
+            _l0_snapshot_value(
+                "INT",
+                1,
+                raw_float=34.1,
+                raw_int=None,
+                raw_bool=None,
+                raw_text=None,
+                legacy_float=34.1,
+                legacy_int=None,
+                legacy_bool=None,
+                legacy_text=None,
+            )
+        )
+
+    def test_ambiguous_legacy_value_columns_fail_closed(self) -> None:
+        self.assertIsNone(
+            _l0_snapshot_value(
+                "INT",
+                0,
+                raw_float=None,
+                raw_int=None,
+                raw_bool=None,
+                raw_text=None,
+                legacy_float=34.1,
+                legacy_int=34,
+                legacy_bool=None,
+                legacy_text=None,
+            )
+        )
 
 
 @unittest.skipUnless(
@@ -273,6 +330,30 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
         self.assertEqual(1, len(snapshot.l2))
         self.assertIsNone(snapshot.l2[0]["value"])
         self.assertEqual("WAITING_DATA", snapshot.l2[0]["reason"])
+
+    def test_legacy_latest_value_is_visible_but_stale(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_tags SET data_type='INT' WHERE id=%s",
+                (str(self.tag_a),),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_telemetry_latest(
+                  node_id,tag_id,ts,value_float,quality,frame_sequence,
+                  event_time_basis,event_received_at
+                ) VALUES(%s,%s,%s,34.1,192,0,'received_at',%s)
+                """,
+                (str(self.node_a), str(self.tag_a), NOW, NOW),
+            )
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=self._connection_factory()
+        ).read_snapshot(FrameScope.for_node(self.node_a))
+
+        point = next(item for item in snapshot.l0 if item["tag_id"] == str(self.tag_a))
+        self.assertEqual(34.1, point["value"])
+        self.assertEqual(int(TrunkQuality.STALE), point["effective_quality"])
 
     def test_replay_filters_payload_without_leaking_other_node(self) -> None:
         frame = self._commit_frame(3, 3.0, 30.0)

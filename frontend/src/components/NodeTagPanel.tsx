@@ -9,7 +9,7 @@ import {
   replaceSnapshot,
   type CommittedFrameProjection,
 } from './data-trunk/committedFrameProjection'
-import { qualityLabel, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
+import { projectRawPointValue, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
 import RawPointHistoryPanel from './RawPointHistoryPanel'
 
 interface NodeTagPanelProps {
@@ -216,13 +216,23 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
               <tbody className="divide-y divide-gray-100">
                 {!loading && tags.map((tag) => {
                   const current = projection?.l0.get(tag.id)
-                  const value = current?.value
+                  const point = projectRawPointValue(
+                    current?.value,
+                    current?.effective_quality ?? 1,
+                  )
+                  const qualityClass = point.qualityTone === 'good'
+                    ? 'text-green-700'
+                    : point.qualityTone === 'uncertain'
+                      ? 'text-amber-700'
+                      : point.qualityTone === 'stale'
+                        ? 'font-semibold text-orange-700'
+                        : 'font-semibold text-red-700'
                   return (
                     <tr key={tag.id} className="text-gray-700 hover:bg-gray-50">
                       <td className="px-3 py-2 font-medium text-gray-800">{tag.display_name || tag.name}</td>
-                      <td className="px-3 py-2 font-mono">{value === null || value === undefined ? '-' : String(value)}</td>
+                      <td className="px-3 py-2 font-mono">{point.displayValue}</td>
                       <td className="px-3 py-2">{current?.unit || tag.unit || '-'}</td>
-                      <td className="px-3 py-2">{qualityLabel(current?.effective_quality ?? 1)}</td>
+                      <td className={`px-3 py-2 ${qualityClass}`}>{point.qualityLabel}</td>
                       <td className="whitespace-nowrap px-3 py-2">{formatTime(current?.source_timestamp)}</td>
                       <td className="max-w-80 truncate px-3 py-2 font-mono text-[11px] text-gray-500" title={current?.source_path || tag.source_path || ''}>
                         {current?.source_path || tag.source_path || '未记录'}

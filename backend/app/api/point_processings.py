@@ -15,6 +15,7 @@ from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
     RUNTIME_READ,
+    SYSTEM_MANAGE,
     capability_metadata,
     principal_for,
     protected,
@@ -26,7 +27,12 @@ from app.services.point_processing import (
     PointProcessingService,
     PointProcessingError,
 )
-from app.services.point_processing_templates import PointProcessingTemplateError
+from app.services.point_processing_templates import (
+    PointProcessingTemplateError,
+    canonical_point_processing_content,
+    parse_point_processing_template,
+    point_processing_revision_id,
+)
 
 
 router = APIRouter()
@@ -116,11 +122,11 @@ def _raise_template_http(exc: PointProcessingTemplateError) -> NoReturn:
 @router.post(
     "/point-processing-templates/import",
     status_code=status.HTTP_201_CREATED,
-    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+    openapi_extra=capability_metadata(SYSTEM_MANAGE),
 )
 async def import_point_processing_template(
     body: dict[str, Any],
-    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    principal: Principal = Depends(principal_for(SYSTEM_MANAGE)),
     templates: Any = Depends(get_point_processing_templates),
 ) -> dict[str, Any]:
     try:
@@ -129,9 +135,29 @@ async def import_point_processing_template(
         _raise_template_http(exc)
 
 
+@router.post(
+    "/point-processing-templates/validate",
+    openapi_extra=capability_metadata(SYSTEM_MANAGE),
+)
+async def validate_point_processing_template(
+    body: dict[str, Any],
+    _principal: Principal = Depends(principal_for(SYSTEM_MANAGE)),
+) -> dict[str, Any]:
+    """Validate an immutable revision without changing the template registry."""
+    try:
+        template = parse_point_processing_template(body)
+    except PointProcessingTemplateError as exc:
+        _raise_template_http(exc)
+    return {
+        "revision_id": str(point_processing_revision_id(template)),
+        "content_digest": template.content_digest,
+        "content": canonical_point_processing_content(template),
+    }
+
+
 @router.get(
     "/point-processing-templates/{revision_id}/export",
-    openapi_extra=capability_metadata(CONFIGURATION_READ),
+    **protected(CONFIGURATION_READ),
 )
 async def export_point_processing_template(
     revision_id: UUID,

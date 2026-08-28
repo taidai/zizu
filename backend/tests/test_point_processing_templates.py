@@ -72,6 +72,37 @@ class PointProcessingTemplateTest(unittest.TestCase):
         self.assertEqual(raw, canonical_point_processing_content(parsed))
         self.assertEqual(64, len(parsed.content_digest))
 
+    def test_visual_editor_transform_shapes_match_the_backend_contract(self) -> None:
+        cases = (
+            ({
+                "kind": "numeric", "input": "active_power_raw",
+                "scale": 1, "offset": 0,
+                "minimum": -1000000000, "maximum": 1000000000,
+            }, "FLOAT", "FLOAT"),
+            ({
+                "kind": "numeric", "input": "active_power_raw",
+                "scale": 0.001, "offset": -2,
+                "minimum": -500, "maximum": 500,
+            }, "FLOAT", "FLOAT"),
+            ({
+                "kind": "enum", "input": "active_power_raw",
+                "entries": {"0": "STOPPED", "1": "RUNNING"},
+            }, "STRING", "ENUM"),
+            ({
+                "kind": "formula", "expression": "active_power_raw",
+                "scheduleSeconds": 1, "controlEligible": False,
+            }, "FLOAT", "FLOAT"),
+        )
+        for transform, input_type, output_type in cases:
+            with self.subTest(kind=transform["kind"], scale=transform.get("scale")):
+                raw = template_json()
+                raw["inputs"][0]["dataType"] = input_type
+                raw["outputs"][0]["dataType"] = output_type
+                raw["outputs"][0]["transform"] = transform
+                if transform["kind"] == "formula":
+                    raw["outputs"][0]["unit"] = raw["inputs"][0]["unit"]
+                parse_point_processing_template(raw)
+
     def test_revision_is_immutable_and_import_does_not_publish_configuration(self) -> None:
         registry = InMemoryPointProcessingTemplates(configuration_revision=7)
         first = registry.import_template(template_json(), actor="user:engineer")

@@ -1,5 +1,23 @@
 ---
 
+## Session 2026-08-28 — rc.13 PCS L0 恢复与 L1 模板维护（发布中）
+
+- 已修复过期 `PROCESSING` 帧无法接管：租约接管保持 attempt count，只更换 owner/token，符合 Schema 048
+  fencing；真实 PostgreSQL 数据帧 13 项通过。
+- committed L0 对迁移前 `frame_sequence=0` 的唯一非空旧值列提供诊断显示并强制 STALE；多列冲突
+  fail closed，新帧继续严格按声明类型读取。前端显示“最后值 + 超时”，不再把旧值显示为空或正常。
+- 共享点位加工模板现由管理员维护：复制为下一不可变修订或另存新模板，编辑基本信息、L0 输入契约
+  （含 Neuron group/address/wire type/decimal）和直通/倍率、枚举、公式规则，先零副作用检查再发布；
+  工程师仍只选择、绑定和安装。import/validate 改为 `system.manage`，export 补真实认证。
+- 版本已提升为 `0.4.85-rc.13`。当前新鲜验证：后端 discovery 304/304（119 环境型 skip）、scripts
+  37/37、前端 Node 30/30、L1 专项 12/12、真实 PostgreSQL committed stream 8/8，compileall 与
+  diff check 通过；最终 Vite 构建正在执行。
+- 待完成：提交推送、GitHub Actions 生成固定 ARM64 摘要、备份并切换 1 号机、把 Neuron `en9_pcs`
+  的 cmd/data/error1 订阅主题统一为 `neuron/en9_pcs/telemetry`，最后验证积压归零与 PCS 值前进。
+  不启动 Caddy/TLS，不执行 JDM、控制或设备写入。
+
+---
+
 ## Session 2026-08-28 — 最简告警中心设计待书面确认
 
 - 用户要求停止扩展告警功能，优先把已经部署的 committed L2 告警真正用起来；最终聊天方案收口为一个

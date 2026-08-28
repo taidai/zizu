@@ -39,6 +39,21 @@ test('quality and invalid-current-value projection are explicit', async () => {
   })
 })
 
+test('raw point keeps the last diagnostic value while stale', async () => {
+  const viewModel = await import('./dataTrunkViewModel.ts')
+
+  assert.deepEqual(viewModel.projectRawPointValue(34.1, 1), {
+    displayValue: '34.1',
+    qualityLabel: '超时',
+    qualityTone: 'stale',
+  })
+  assert.deepEqual(viewModel.projectRawPointValue(null, 1), {
+    displayValue: '-',
+    qualityLabel: '超时',
+    qualityTone: 'stale',
+  })
+})
+
 test('delete candidate explains runtime stop without erasing history', async () => {
   const viewModel = await import('./dataTrunkViewModel.ts')
   assert.equal(

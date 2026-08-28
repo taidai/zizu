@@ -1186,6 +1186,42 @@ export async function fetchPointProcessingTemplates(deviceCategory: string): Pro
   return (await response.json() as { items: PointProcessingTemplate[] }).items
 }
 
+export interface PointProcessingTemplateDocumentResult {
+  revision_id: string
+  content_digest: string
+  content: Record<string, unknown>
+}
+
+export async function exportPointProcessingTemplate(revisionId: string): Promise<Record<string, unknown>> {
+  const response = await apiFetch(`${API_BASE}/point-processing-templates/${encodeURIComponent(revisionId)}/export`)
+  if (!response.ok) throw await dataTrunkError(response, `读取模板内容失败：${response.status}`)
+  return response.json()
+}
+
+export async function validatePointProcessingTemplate(
+  content: Record<string, unknown>,
+): Promise<PointProcessingTemplateDocumentResult> {
+  const response = await apiFetch(`${API_BASE}/point-processing-templates/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(content),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `检查模板失败：${response.status}`)
+  return response.json()
+}
+
+export async function importPointProcessingTemplate(
+  content: Record<string, unknown>,
+): Promise<PointProcessingTemplateDocumentResult> {
+  const response = await apiFetch(`${API_BASE}/point-processing-templates/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(content),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `发布模板失败：${response.status}`)
+  return response.json()
+}
+
 export async function fetchNodeDataTrunk(nodeId: string): Promise<NodeDataTrunk> {
   const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/data-trunk`)
   if (!response.ok) throw await dataTrunkError(response, `读取节点数据主干失败：${response.status}`)

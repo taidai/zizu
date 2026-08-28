@@ -31,6 +31,7 @@ from app.services.data_trunk_conversion import evaluate_processing
 from app.services.frame_processor import FrameProcessor
 from tests import test_data_frames_migration_postgres as frame_migration
 from tests import test_committed_frame_payload_migration_postgres as payload_migration
+from tests import test_frame_retention_migration_postgres as retention_migration
 
 
 NOW = datetime.now(UTC)
@@ -60,6 +61,9 @@ class DataFramesPostgresTest(unittest.TestCase):
             with connection.cursor() as cursor:
                 migration_test._apply_046(cursor)
                 payload_migration.CommittedFramePayloadMigrationPostgresTest._apply_047(cursor)
+                cursor.execute(
+                    retention_migration.MIGRATION_048.read_text(encoding="utf-8")
+                )
             connection.commit()
 
     def setUp(self) -> None:
@@ -418,7 +422,7 @@ class DataFramesPostgresTest(unittest.TestCase):
         other = PostgresFrameRepository(connection_factory=self._connection_factory())
         second = other.claim_next(datetime.now(UTC))
         self.assertEqual(first.frame_id, second.frame_id)
-        self.assertEqual(2, second.attempt_count)
+        self.assertEqual(1, second.attempt_count)
         self.assertNotEqual(first.processing_token, second.processing_token)
         with self.assertRaisesRegex(DataTrunkError, "DATA_FRAME_CLAIM_LOST"):
             self.repository.complete(

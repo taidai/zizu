@@ -610,9 +610,13 @@ class PostgresFrameRepository:
                                 int(head[5]) >= 3
                                 or (now - head[9]).total_seconds() >= 60
                             )
+                            # Migration 048 treats an expired PROCESSING lease as
+                            # ownership recovery, not another business attempt.
+                            # Only a PENDING -> PROCESSING transition spends the
+                            # next retry from the three-attempt budget.
                             next_attempt = (
                                 int(head[5])
-                                if terminalization
+                                if terminalization or head[10] == "PROCESSING"
                                 else int(head[5]) + 1
                             )
                             cursor.execute(

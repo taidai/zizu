@@ -181,24 +181,53 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
             transport=transport,
             base_url="https://testserver",
         ) as client:
+            admin_headers = await self.login(client, "admin")
             engineer_headers = await self.login(client, "engineer")
-            created = await client.post(
+            validated = await client.post(
+                "/api/v1/point-processing-templates/validate",
+                headers=admin_headers,
+                json=template_json(),
+            )
+            validation_was_not_persisted = await client.get(
+                f"/api/v1/point-processing-templates/{validated.json()['revision_id']}/export",
+                headers=admin_headers,
+            )
+            denied_engineer_validate = await client.post(
+                "/api/v1/point-processing-templates/validate",
+                headers=engineer_headers,
+                json=template_json(),
+            )
+            denied_engineer_import = await client.post(
                 "/api/v1/point-processing-templates/import",
                 headers=engineer_headers,
+                json=template_json(),
+            )
+            created = await client.post(
+                "/api/v1/point-processing-templates/import",
+                headers=admin_headers,
                 json=template_json(),
             )
             changed = template_json()
             changed["displayName"] = "篡改名称"
             conflict = await client.post(
                 "/api/v1/point-processing-templates/import",
-                headers=engineer_headers,
+                headers=admin_headers,
                 json=changed,
+            )
+            anonymous_export = await client.get(
+                f"/api/v1/point-processing-templates/{created.json()['revision_id']}/export"
             )
             exported = await client.get(
                 f"/api/v1/point-processing-templates/{created.json()['revision_id']}/export",
                 headers=engineer_headers,
             )
 
+        self.assertEqual(200, validated.status_code, validated.text)
+        self.assertEqual(template_json(), validated.json()["content"])
+        self.assertEqual(404, validation_was_not_persisted.status_code)
+        self.assertEqual(0, registry.configuration_revision)
+        self.assertEqual(403, denied_engineer_validate.status_code)
+        self.assertEqual(403, denied_engineer_import.status_code)
         self.assertEqual(201, created.status_code, created.text)
         self.assertEqual(0, registry.configuration_revision)
         self.assertEqual(409, conflict.status_code, conflict.text)
@@ -206,6 +235,7 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
             "POINT_PROCESSING_REVISION_IMMUTABLE",
             conflict.json()["detail"]["code"],
         )
+        self.assertEqual(401, anonymous_export.status_code)
         self.assertEqual(200, exported.status_code, exported.text)
         self.assertEqual(template_json(), exported.json())
         self.assertEqual(

@@ -246,7 +246,9 @@ class PostgresCommittedFrameStreamRepository:
                    latest.raw_value_int,latest.raw_value_bool,
                    latest.raw_value_text,latest.quality,latest.ts,
                    latest.event_received_at,latest.source_digest,
-                   latest.frame_sequence,history.quality,history.accepted_beat
+                   latest.frame_sequence,history.quality,history.accepted_beat,
+                   latest.value_float,latest.value_int,
+                   latest.value_bool,latest.value_str
             FROM t_tags AS tag
             LEFT JOIN t_telemetry_latest AS latest
               ON latest.tag_id=tag.id AND latest.node_id=tag.node_id
@@ -264,9 +266,15 @@ class PostgresCommittedFrameStreamRepository:
         )
         items = []
         for row in cursor.fetchall():
-            has_value = row[7] is not None
-            effective_quality = (
-                int(TrunkQuality.STALE) if not has_value else int(row[12])
+            frame_sequence_value = 0 if row[16] is None else int(row[16])
+            legacy_has_value = frame_sequence_value == 0 and any(
+                value is not None for value in row[19:23]
+            )
+            has_value = row[7] is not None or legacy_has_value
+            effective_quality = _l0_snapshot_quality(
+                frame_sequence_value,
+                has_value=has_value,
+                stored_quality=row[12],
             )
             source_quality = (
                 int(TrunkQuality.STALE)
@@ -276,8 +284,17 @@ class PostgresCommittedFrameStreamRepository:
             value = (
                 None
                 if not has_value
-                else _typed_value(
-                    str(row[3]), row[8], row[9], None, row[10], row[11], None
+                else _l0_snapshot_value(
+                    str(row[3]),
+                    frame_sequence_value,
+                    raw_float=row[8],
+                    raw_int=row[9],
+                    raw_bool=row[10],
+                    raw_text=row[11],
+                    legacy_float=row[19],
+                    legacy_int=row[20],
+                    legacy_bool=row[21],
+                    legacy_text=row[22],
                 )
             )
             items.append(
@@ -299,7 +316,7 @@ class PostgresCommittedFrameStreamRepository:
                     "source_digest": (
                         None if row[15] is None else str(row[15]).strip()
                     ),
-                    "frame_sequence": 0 if row[16] is None else int(row[16]),
+                    "frame_sequence": frame_sequence_value,
                 }
             )
         return tuple(items)
@@ -391,6 +408,55 @@ def _typed_value(
         value = value_text
     else:
         value = None if value_codes is None else list(value_codes)
+    return float(value) if isinstance(value, Decimal) else value
+
+
+def _l0_snapshot_quality(
+    frame_sequence: int,
+    *,
+    has_value: bool,
+    stored_quality: Any,
+) -> int:
+    """Migration-era values are diagnostic history, never current GOOD data."""
+    if not has_value or frame_sequence == 0:
+        return int(TrunkQuality.STALE)
+    return int(stored_quality)
+
+
+def _l0_snapshot_value(
+    data_type: str,
+    frame_sequence: int,
+    *,
+    raw_float: Any,
+    raw_int: Any,
+    raw_bool: Any,
+    raw_text: Any,
+    legacy_float: Any,
+    legacy_int: Any,
+    legacy_bool: Any,
+    legacy_text: Any,
+) -> Any:
+    if frame_sequence > 0:
+        return _typed_value(
+            data_type,
+            raw_float,
+            raw_int,
+            None,
+            raw_bool,
+            raw_text,
+            None,
+        )
+    # Before committed frames, imported Neuron register types and engineering
+    # values were occasionally stored in different legacy columns. Preserve
+    # the last observable value for diagnostics without relaxing new frames.
+    values = tuple(
+        value
+        for value in (legacy_float, legacy_int, legacy_bool, legacy_text)
+        if value is not None
+    )
+    if len(values) != 1:
+        return None
+    value = values[0]
     return float(value) if isinstance(value, Decimal) else value
 
 

@@ -32,6 +32,7 @@ import {
 } from './dataTrunkRetryState'
 import EntityDataPanel from './EntityDataPanel'
 import PointProcessingPlanPanel from './PointProcessingPlanPanel'
+import PointProcessingTemplateManager from './PointProcessingTemplateManager'
 import {
   DATA_TRUNK_STEPS,
   isCurrentNodeResult,
@@ -49,11 +50,13 @@ export default function DataTrunkWorkspace({
   node,
   readOnly,
   actorId,
+  canManageTemplates,
   view,
 }: {
   node: Node
   readOnly: boolean
   actorId: string
+  canManageTemplates: boolean
   view: 'processing' | 'entities'
 }) {
   const [trunk, setTrunk] = useState<NodeDataTrunk | null>(null)
@@ -375,6 +378,15 @@ export default function DataTrunkWorkspace({
     }
   }
 
+  const handleTemplatePublished = async (revisionId: string) => {
+    const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'PCS').toUpperCase())
+    if (activeNodeIdRef.current !== node.id) return
+    setTemplates(nextTemplates)
+    setSelectedRevisionId(revisionId)
+    setPlan(null)
+    setResultUnknown(false)
+  }
+
   const completedStage = application || plan?.status === 'applied'
     ? 3
     : plan
@@ -453,6 +465,13 @@ export default function DataTrunkWorkspace({
               </div>
             )}
           </div>
+          {canManageTemplates && (
+            <PointProcessingTemplateManager
+              templates={templates}
+              selectedRevisionId={selectedRevisionId}
+              onPublished={handleTemplatePublished}
+            />
+          )}
           <PointProcessingPlanPanel
             trunk={trunk}
             templates={templates}

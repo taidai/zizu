@@ -212,6 +212,24 @@ export function qualityLabel(quality: number): string {
   return '无效'
 }
 
+export function projectRawPointValue(value: unknown, quality: number): {
+  displayValue: string
+  qualityLabel: string
+  qualityTone: 'good' | 'uncertain' | 'stale' | 'bad'
+} {
+  return {
+    displayValue: value === null || value === undefined
+      ? '-'
+      : Array.isArray(value) ? value.join('、') : String(value),
+    qualityLabel: qualityLabel(quality),
+    qualityTone: quality === 192
+      ? 'good'
+      : quality === 64
+        ? 'uncertain'
+        : quality === 1 ? 'stale' : 'bad',
+  }
+}
+
 export function projectEntityValue(observation: { value: unknown; quality: number }): {
   currentValue: string
   qualityLabel: string
