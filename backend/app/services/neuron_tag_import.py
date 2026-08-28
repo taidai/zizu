@@ -318,11 +318,11 @@ class PostgresNeuronTagImports:
                             cursor.execute(
                                 """
                                 INSERT INTO t_tags
-                                  (id,node_id,name,display_name,data_type,
+                                  (id,node_id,tag_type,name,display_name,data_type,
                                    source_type,source_path,source_address,
                                    wire_data_type,value_data_type,decimal,
                                    read_write,read_only,enabled)
-                                VALUES (%s,%s,%s,%s,%s,'neuron',%s,%s,%s,%s,
+                                VALUES (%s,%s,'PHYSICAL',%s,%s,%s,'neuron',%s,%s,%s,%s,
                                         %s,%s,%s,TRUE)
                                 """,
                                 (

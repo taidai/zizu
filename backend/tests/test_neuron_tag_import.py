@@ -368,6 +368,51 @@ class NeuronTagImportPostgresTest(unittest.TestCase):
                 cursor.execute("SELECT count(*) FROM t_telemetry WHERE tag_id=%s", (str(TAG_ID),))
                 self.assertEqual(1, cursor.fetchone()[0])
 
+    def test_source_create_is_a_physical_tag(self) -> None:
+        from app.services.neuron_tag_import import PostgresNeuronTagImports
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                # The legacy migration fixture predates the production
+                # PHYSICAL/LOGICAL discriminator. Recreate the live contract
+                # here so the Neuron create path cannot silently rely on a
+                # database default that production does not have.
+                cursor.execute(
+                    "ALTER TABLE t_tags ADD COLUMN tag_type TEXT NOT NULL "
+                    "CHECK (tag_type IN ('PHYSICAL','LOGICAL'))"
+                )
+                cursor.execute(
+                    "INSERT INTO t_nodes(id,name,node_type,enabled) "
+                    "VALUES (%s,'PCS','Device',TRUE)",
+                    (str(NODE_ID),),
+                )
+            connection.commit()
+
+        repository = PostgresNeuronTagImports(
+            connection_factory=lambda: psycopg2.connect(**self.connection_kwargs)
+        )
+        preview = repository.preview(
+            node_id=NODE_ID,
+            neuron_node="EN9-PCS",
+            selected_groups=("data",),
+            points=(point("新有功功率"),),
+        )
+
+        result = repository.apply(preview, actor="user:engineer")
+
+        self.assertEqual("applied", result["status"])
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT tag_type,source_type,source_path FROM t_tags "
+                    "WHERE node_id=%s",
+                    (str(NODE_ID),),
+                )
+                self.assertEqual(
+                    ("PHYSICAL", "neuron", "EN9-PCS/data/新有功功率"),
+                    cursor.fetchone(),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
