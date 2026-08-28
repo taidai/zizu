@@ -43,7 +43,7 @@ def get_alarm_configuration() -> AlarmConfiguration:
 
 class AlarmConditionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "not_contains"]
     value: float | int | bool | str
 
 

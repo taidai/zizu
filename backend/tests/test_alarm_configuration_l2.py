@@ -123,6 +123,65 @@ class AlarmConfigurationL2Test(unittest.TestCase):
         self.assertIs(repository.applied, result)
         self.assertEqual([("begin", 7), ("reconcile",)], gate.calls)
 
+    def test_code_set_membership_rule_can_only_bind_a_code_set_entity(self) -> None:
+        repository = _Repository()
+        rule = AlarmRule(
+            "e30",
+            "压缩机故障",
+            "MAJOR",
+            {"operator": "contains", "value": "E30"},
+            0,
+            {"operator": "not_contains", "value": "E30"},
+            3,
+            60,
+        )
+        repository.rule_set = AlarmRuleSetRevision(
+            repository.rule_set.rule_set_id,
+            "pcs-fault-codes",
+            "PCS 故障码",
+            1,
+            (rule,),
+            canonical_digest(rule),
+        )
+        repository.entity = ResolvedAlarmEntity(
+            repository.entity.id,
+            repository.node_id,
+            "pcs.faultCodes",
+            "故障码",
+            "CODE_SET",
+            None,
+        )
+
+        compatible = AlarmConfiguration(repository).plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(repository.entity.id,)),
+                repository.rule_set.rule_set_id,
+                1,
+                "operator:test",
+            )
+        )
+        self.assertEqual("ready", compatible.status)
+        self.assertEqual("add", compatible.items[0].action)
+
+        repository.entity = ResolvedAlarmEntity(
+            repository.entity.id,
+            repository.node_id,
+            "pcs.activePower",
+            "有功功率",
+            "FLOAT",
+            "kW",
+        )
+        incompatible = AlarmConfiguration(repository).plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(repository.entity.id,)),
+                repository.rule_set.rule_set_id,
+                1,
+                "operator:test",
+            )
+        )
+        self.assertEqual("blocked", incompatible.status)
+        self.assertEqual("ALARM_DATA_TYPE_UNSUPPORTED", incompatible.blockers[0]["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -150,3 +150,47 @@ class AlarmRuntimeTest(unittest.TestCase):
         self.assertEqual("ALARM_RECOVERY_PENDING", second_recovery_pending.code)
         self.assertEqual("ALARM_RECOVERED", recovered.code)
         self.assertEqual(active.event_id, recovered.event_id)
+
+    def test_code_set_condition_matches_each_fault_code_independently(self) -> None:
+        from app.services.alarm_runtime import match_alarm_condition
+
+        self.assertTrue(
+            match_alarm_condition(
+                {"operator": "contains", "value": "E30"},
+                ["E30", "E42"],
+            )
+        )
+        self.assertFalse(
+            match_alarm_condition(
+                {"operator": "contains", "value": "E99"},
+                ["E30", "E42"],
+            )
+        )
+        self.assertTrue(
+            match_alarm_condition(
+                {"operator": "not_contains", "value": "E30"},
+                ["E42"],
+            )
+        )
+
+    def test_condition_matcher_rejects_invalid_membership_inputs_without_crashing(self) -> None:
+        from app.services.alarm_runtime import match_alarm_condition
+
+        self.assertFalse(
+            match_alarm_condition(
+                {"operator": "contains", "value": ""},
+                ["E30"],
+            )
+        )
+        self.assertFalse(
+            match_alarm_condition(
+                {"operator": "contains", "value": "E30"},
+                "E30",
+            )
+        )
+        self.assertFalse(
+            match_alarm_condition(
+                {"operator": "unknown", "value": "E30"},
+                ["E30"],
+            )
+        )

@@ -406,7 +406,7 @@ class AlarmRuntime:
             observation.entity_instance_id,
         )
         condition = (
-            _matches(definition.trigger, observation.value)
+            match_alarm_condition(definition.trigger, observation.value)
             and observation.quality == GOOD_QUALITY
         )
 
@@ -612,7 +612,7 @@ class AlarmRuntime:
         observed_at = _utc(observation.observed_at)
         evidence = _evidence(observation)
         recovery_condition = (
-            _matches(definition.recovery, observation.value)
+            match_alarm_condition(definition.recovery, observation.value)
             and observation.quality == GOOD_QUALITY
             and not _has_continuity_gap(event, observation)
         )
@@ -739,8 +739,8 @@ def _has_continuity_gap(event: AlarmEvent, observation: AlarmObservation) -> boo
     return _utc(observation.observed_at) > previous + timedelta(seconds=window)
 
 
-def _matches(condition: dict[str, Any], value: Any) -> bool:
-    operator = condition.get("op")
+def match_alarm_condition(condition: dict[str, Any], value: Any) -> bool:
+    operator = condition.get("op", condition.get("operator"))
     expected = condition.get("value")
     if operator == "eq":
         return value == expected
@@ -757,7 +757,13 @@ def _matches(condition: dict[str, Any], value: Any) -> bool:
             "lt": value < expected,
             "lte": value <= expected,
         }[operator]
-    raise AlarmRuntimeError(
-        "ALARM_DEFINITION_INVALID",
-        "Alarm condition operator is not supported",
-    )
+    if operator in {"contains", "not_contains"}:
+        if not isinstance(expected, str) or not expected:
+            return False
+        if not isinstance(value, (list, tuple, frozenset)):
+            return False
+        if not all(isinstance(item, str) for item in value):
+            return False
+        matched = expected in value
+        return matched if operator == "contains" else not matched
+    return False

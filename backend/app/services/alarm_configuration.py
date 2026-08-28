@@ -145,8 +145,9 @@ def canonical_digest(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte"}
+_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "not_contains"}
 _ORDERED = {"gt", "gte", "lt", "lte"}
+_MEMBERSHIP = {"contains", "not_contains"}
 _NUMERIC = {"FLOAT", "INT", "NUMBER", "NUMERIC", "DOUBLE", "DECIMAL"}
 
 
@@ -172,6 +173,8 @@ def _binding_issues(entity: ResolvedAlarmEntity, rule: AlarmRule) -> tuple[dict[
     issues: list[dict[str, Any]] = []
     if (rule.trigger.get("operator") in _ORDERED or rule.recovery.get("operator") in _ORDERED) and entity.data_type.upper() not in _NUMERIC:
         issues.append(_blocker("ALARM_DATA_TYPE_UNSUPPORTED", "ordered alarm comparisons require a numeric L2 entity"))
+    if (rule.trigger.get("operator") in _MEMBERSHIP or rule.recovery.get("operator") in _MEMBERSHIP) and entity.data_type.upper() != "CODE_SET":
+        issues.append(_blocker("ALARM_DATA_TYPE_UNSUPPORTED", "membership alarm comparisons require a CODE_SET L2 entity"))
     if rule.unit is not None and (entity.unit or "").strip() != rule.unit.strip():
         issues.append(_blocker("ALARM_UNIT_MISMATCH", "alarm rule and L2 entity units must match"))
     return tuple(issues)
