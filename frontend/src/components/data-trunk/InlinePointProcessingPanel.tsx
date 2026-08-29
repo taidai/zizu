@@ -130,7 +130,9 @@ export default function InlinePointProcessingPanel({
   }
 
   const planView = plan ? buildDataTrunkViewModel({ plan }) : null
-  const trialView = plan?.trial ? projectInlinePointProcessingTrial(plan.trial) : null
+  const trialView = plan?.trial
+    ? projectInlinePointProcessingTrial(plan.trial, definitionKey)
+    : null
 
   return (
     <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50/60 p-3" aria-label="加工为实体">

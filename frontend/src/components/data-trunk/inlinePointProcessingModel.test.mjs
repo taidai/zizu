@@ -159,6 +159,50 @@ test('committed-frame trial projects value quality time and source evidence', as
   })
 })
 
+test('inline trial shows the requested entity instead of the first output from the merged node revision', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  const result = model.projectInlinePointProcessingTrial({
+    available: true,
+    frame_sequence: 34520,
+    frame_time: '2026-08-30T00:00:57+08:00',
+    configuration_revision: 28,
+    outputs: [
+      {
+        entity_instance_id: 'entity-igbt',
+        entity_definition_id: 'pcs.igbt',
+        value: 33,
+        data_type: 'INT',
+        unit: null,
+        quality: 192,
+        reason: null,
+        observed_at: '2026-08-29T23:39:43+08:00',
+        source_ids: ['observation-igbt'],
+      },
+      {
+        entity_instance_id: 'entity-active-power',
+        entity_definition_id: 'pcs.active_power',
+        value: 0,
+        data_type: 'FLOAT',
+        unit: 'kW',
+        quality: 192,
+        reason: null,
+        observed_at: '2026-08-30T00:00:56+08:00',
+        source_ids: ['observation-active-power'],
+      },
+    ],
+  }, 'pcs.active_power')
+
+  assert.deepEqual(result, {
+    status: 'available',
+    valueText: '0 kW',
+    qualityText: '正常',
+    evidenceText: '1 个来源 · 帧 34520 · 配置 28',
+    observedAt: '2026-08-30T00:00:56+08:00',
+    message: '',
+  })
+})
+
 test('unavailable trial is explicit in Chinese and never looks like zero', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
 

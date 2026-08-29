@@ -69,8 +69,7 @@ function trialQualityLabel(quality: number): string {
   return '未知质量'
 }
 
-function trialValue(value: PointProcessingTrial & { available: true }): string {
-  const output = value.outputs[0]
+function trialValue(output: { value: unknown; unit: string | null }): string {
   if (!output || output.value === null) return '—'
   const raw = Array.isArray(output.value)
     ? output.value.join('、')
@@ -82,6 +81,7 @@ function trialValue(value: PointProcessingTrial & { available: true }): string {
 
 export function projectInlinePointProcessingTrial(
   trial: PointProcessingTrial,
+  targetEntityDefinitionId?: string,
 ): InlinePointProcessingTrialView {
   if (!trial.available) {
     return {
@@ -94,7 +94,9 @@ export function projectInlinePointProcessingTrial(
         || '当前无法试算，请检查原始数据后重试。',
     }
   }
-  const output = trial.outputs[0]
+  const output = targetEntityDefinitionId
+    ? trial.outputs.find((item) => item.entity_definition_id === targetEntityDefinitionId)
+    : trial.outputs[0]
   if (!output) {
     return {
       status: 'unavailable',
@@ -107,7 +109,7 @@ export function projectInlinePointProcessingTrial(
   }
   return {
     status: 'available',
-    valueText: trialValue(trial),
+    valueText: trialValue(output),
     qualityText: trialQualityLabel(output.quality),
     evidenceText: `${output.source_ids.length} 个来源 · 帧 ${trial.frame_sequence} · 配置 ${trial.configuration_revision}`,
     observedAt: output.observed_at,
