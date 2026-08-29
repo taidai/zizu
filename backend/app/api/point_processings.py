@@ -133,6 +133,28 @@ def _raise_template_http(exc: PointProcessingTemplateError) -> NoReturn:
     ) from exc
 
 
+def _plan_with_trial(
+    service: PointProcessingService,
+    plan: Any,
+) -> dict[str, Any]:
+    payload = plan.public_dict()
+    try:
+        trial = service.trial(plan)
+    except PointProcessingError as exc:
+        payload["trial"] = {
+            "available": False,
+            "reason": exc.code,
+            "message": str(exc),
+        }
+    else:
+        payload["trial"] = (
+            None
+            if trial is None
+            else {"available": True, **trial.public_dict()}
+        )
+    return payload
+
+
 @router.post(
     "/point-processing-templates/import",
     status_code=status.HTTP_201_CREATED,
@@ -243,9 +265,10 @@ async def create_point_processing_plan(
     service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
-        return service.preview(
+        plan = service.preview(
             body.to_command(node_id=node_id, actor=principal.actor)
-        ).public_dict()
+        )
+        return _plan_with_trial(service, plan)
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
 
@@ -262,12 +285,13 @@ async def create_point_processing_draft_plan(
     service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
-        return service.preview_node_definition(
+        plan = service.preview_node_definition(
             node_id=node_id,
             content=body.content,
             input_selections=body.input_selections,
             actor=principal.actor,
-        ).public_dict()
+        )
+        return _plan_with_trial(service, plan)
     except PointProcessingTemplateError as exc:
         _raise_template_http(exc)
     except PointProcessingError as exc:

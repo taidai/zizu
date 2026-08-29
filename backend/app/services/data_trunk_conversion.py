@@ -207,22 +207,28 @@ def _evaluate_formula_output(
             "formula processing requires a formula transform",
         )
     values: dict[str, float | int | bool | list[float | int | bool]] = {}
-    sources: list[L2Observation] = []
+    sources: list[RawObservation | L2Observation] = []
     default_used = False
     failure_quality: TrunkQuality | None = None
     failure_reason: str | None = None
 
     for name, contract in transform.source_contracts.items():
         references = transform.sources[name]
-        selected: list[L2Observation] = []
+        selected: list[RawObservation | L2Observation] = []
         for reference in references:
             source = current_inputs.get(reference)
             if source is None:
                 continue
-            if not isinstance(source, L2Observation):
+            if (
+                reference.source_kind == "l0"
+                and not isinstance(source, RawObservation)
+            ) or (
+                reference.source_kind == "l2"
+                and not isinstance(source, L2Observation)
+            ):
                 raise DataTrunkError(
                     "POINT_PROCESSING_CONFIGURATION_INVALID",
-                    "formula processing requires frozen L2 inputs",
+                    "formula processing source kind does not match its input",
                 )
             selected.append(source)
         sources.extend(selected)
@@ -256,7 +262,10 @@ def _evaluate_formula_output(
 
         normalized: list[float | int | bool] = []
         for source in selected:
-            if source.value.kind is not contract.data_type or source.unit != contract.unit:
+            source_unit = (
+                source.raw_unit if isinstance(source, RawObservation) else source.unit
+            )
+            if source.value.kind is not contract.data_type or source_unit != contract.unit:
                 failure_quality = TrunkQuality.BAD
                 failure_reason = (
                     "TYPE_MISMATCH"
@@ -283,11 +292,22 @@ def _evaluate_formula_output(
     source_digest = hashlib.sha256(
         "|".join(sorted(source.source_digest for source in sources)).encode("ascii")
     ).hexdigest()
-    source_ids = tuple(source.event_id for source in sources)
-    observed_at = max((source.observed_at for source in sources), default=calculated_at)
+    source_ids = tuple(
+        source.observation_id if isinstance(source, RawObservation) else source.event_id
+        for source in sources
+    )
+    observed_at = max(
+        (
+            source.source_timestamp
+            if isinstance(source, RawObservation)
+            else source.observed_at
+            for source in sources
+        ),
+        default=calculated_at,
+    )
     received_at = max((source.received_at for source in sources), default=calculated_at)
     source_order_key = f"F:{len(sources):04d}:{source_digest}"
-    event_time_basis = _l2_event_time_basis(sources)
+    event_time_basis = _formula_event_time_basis(sources)
 
     if failure_reason is not None:
         return _observation(
@@ -774,6 +794,14 @@ def _raw_event_time_basis(sources: list[RawObservation]) -> str:
 
 
 def _l2_event_time_basis(sources: list[L2Observation]) -> str:
+    if sources and all(source.event_time_basis == "observed_at" for source in sources):
+        return "observed_at"
+    return "received_at"
+
+
+def _formula_event_time_basis(
+    sources: list[RawObservation | L2Observation],
+) -> str:
     if sources and all(source.event_time_basis == "observed_at" for source in sources):
         return "observed_at"
     return "received_at"

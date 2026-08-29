@@ -131,8 +131,8 @@ test('node data tabs expose only raw points and entities', async () => {
   assert.deepEqual(
     model.nodeDataTabs(false).map((item) => [item.key, item.label]),
     [
-      ['raw-points', '原始点位'],
-      ['entities', '实体数据'],
+      ['raw-points', '原始数据'],
+      ['entities', '标准实体'],
     ],
   )
   assert.deepEqual(

@@ -19,9 +19,61 @@ BRAND_B_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000b")
 EN9_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000c")
 SITE_FORMULA_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000d")
 METER_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000e")
+LOCAL_L0_FORMULA_REVISION_ID = UUID("81000000-0000-0000-0000-00000000000f")
 PCS_POWER_1 = UUID("85000000-0000-0000-0000-000000000001")
 PCS_POWER_2 = UUID("85000000-0000-0000-0000-000000000002")
 GRID_POWER = UUID("85000000-0000-0000-0000-000000000003")
+
+
+def _local_l0_formula_asset():
+    return parse_point_processing_template(
+        {
+            "schemaVersion": "zizu.point-processing/v1alpha1",
+            "id": "pcs.local-apparent-power",
+            "kind": "point_processing_template",
+            "displayName": "PCS 本地多点加工",
+            "deviceCategory": "PCS",
+            "brand": "ZiZu",
+            "model": "INLINE",
+            "revision": 1,
+            "status": "active",
+            "inputs": [
+                {
+                    "id": "active",
+                    "sourceKind": "l0",
+                    "sourceKey": "ActivePowerRaw",
+                    "aliases": [],
+                    "dataType": "FLOAT",
+                    "unit": "W",
+                    "required": True,
+                },
+                {
+                    "id": "reactive",
+                    "sourceKind": "l0",
+                    "sourceKey": "ReactivePowerRaw",
+                    "aliases": [],
+                    "dataType": "FLOAT",
+                    "unit": "W",
+                    "required": True,
+                },
+            ],
+            "outputs": [
+                {
+                    "id": "combined",
+                    "entityDefinition": "pcs.combined_power",
+                    "dataType": "FLOAT",
+                    "unit": "W",
+                    "freshness": "5s",
+                    "transform": {
+                        "kind": "formula",
+                        "expression": "active + reactive",
+                        "scheduleSeconds": 1,
+                        "controlEligible": False,
+                    },
+                }
+            ],
+        }
+    )
 
 
 def _site_formula_asset():
@@ -137,6 +189,111 @@ def _assets():
 
 
 class PointProcessingTest(unittest.TestCase):
+    def test_same_node_l0_formula_is_not_recorded_as_a_cross_entity_dag(self) -> None:
+        from app.services.data_trunk_contracts import FormulaTransform, InputReference
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingSource,
+            PointProcessingService,
+            PreviewPointProcessing,
+        )
+
+        active_id = UUID("85000000-0000-0000-0000-000000000011")
+        reactive_id = UUID("85000000-0000-0000-0000-000000000012")
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={LOCAL_L0_FORMULA_REVISION_ID: _local_l0_formula_asset()},
+            sources=(
+                PointProcessingSource(active_id, "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                PointProcessingSource(reactive_id, "l0", NODE_ID, "ReactivePowerRaw", "FLOAT", "W", True),
+            ),
+        )
+        service = PointProcessingService(repository, catalog)
+
+        plan = service.preview(
+            PreviewPointProcessing(
+                node_id=NODE_ID,
+                template_revision_id=LOCAL_L0_FORMULA_REVISION_ID,
+                input_selections={},
+                actor="user:engineer",
+            )
+        )
+        dag = next(item for item in plan.items if item["kind"] == "dag_validation")
+
+        self.assertEqual("ready", plan.status)
+        self.assertEqual((), dag["planned_edges"])
+        self.assertEqual((), dag["planned_dependencies"])
+        service.apply(
+            ApplyPointProcessingPlan(plan.id, plan.digest, "local-l0", "user:engineer")
+        )
+        transform = repository.installed_processings(catalog)[0].transform
+        self.assertIsInstance(transform, FormulaTransform)
+        self.assertEqual((InputReference.l0(active_id),), transform.sources["active"])
+        self.assertEqual((InputReference.l0(reactive_id),), transform.sources["reactive"])
+
+    def test_trial_is_bound_to_one_committed_frame_and_does_not_apply_the_plan(self) -> None:
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingSource,
+            PointProcessingService,
+            PointProcessingTrial,
+            PreviewPointProcessing,
+        )
+
+        class TrialEvaluator:
+            def evaluate(self, plan, catalog):
+                self.plan = plan
+                self.catalog = catalog
+                return PointProcessingTrial(
+                    frame_sequence=12,
+                    frame_time="2026-08-29T10:00:00+00:00",
+                    configuration_revision=3,
+                    outputs=(
+                        {
+                            "entity_definition_id": "pcs.combined_power",
+                            "value": 42.0,
+                            "unit": "W",
+                            "quality": 192,
+                            "reason": None,
+                            "source_ids": ("l0-a", "l0-b"),
+                        },
+                    ),
+                )
+
+        evaluator = TrialEvaluator()
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={LOCAL_L0_FORMULA_REVISION_ID: _local_l0_formula_asset()},
+            sources=(
+                PointProcessingSource(UUID(int=1), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                PointProcessingSource(UUID(int=2), "l0", NODE_ID, "ReactivePowerRaw", "FLOAT", "W", True),
+            ),
+        )
+        service = PointProcessingService(
+            repository,
+            catalog,
+            trial_evaluator=evaluator,
+        )
+        plan = service.preview(
+            PreviewPointProcessing(
+                NODE_ID,
+                LOCAL_L0_FORMULA_REVISION_ID,
+                {},
+                "user:engineer",
+            )
+        )
+
+        trial = service.trial(plan)
+
+        self.assertEqual(12, trial.frame_sequence)
+        self.assertEqual(42.0, trial.public_dict()["outputs"][0]["value"])
+        self.assertIs(plan, evaluator.plan)
+        self.assertIs(catalog, evaluator.catalog)
+        self.assertEqual(0, repository.application_count())
+
     def test_node_draft_is_persisted_and_planned_without_a_shared_template(self) -> None:
         from copy import deepcopy
 

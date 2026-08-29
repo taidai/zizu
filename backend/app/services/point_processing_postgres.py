@@ -23,7 +23,9 @@ from app.services.point_processing import (
     PointProcessingPlan,
     PointProcessingSource,
     PointProcessingTemplateSummary,
+    PointProcessingTrial,
     _template_source_catalog_digest,
+    trial_installed_processings,
 )
 from app.services.point_processing_dag import (
     PointProcessingDagError,
@@ -1952,6 +1954,206 @@ class PostgresPointProcessingRepository:
         )
 
 
+class PostgresPointProcessingTrialEvaluator:
+    """Evaluate a ready plan against one repeatable-read committed frame."""
+
+    def evaluate(
+        self,
+        plan: PointProcessingPlan,
+        catalog: PointProcessingCatalog,
+    ) -> PointProcessingTrial:
+        from app.services.data_trunk_contracts import (
+            BooleanSetTransform,
+            EnumTransform,
+            FaultCodeTransform,
+            FormulaTransform,
+            InputReference,
+            L2Observation,
+            NumericTransform,
+            RawObservation,
+            TrunkQuality,
+            ValueKind,
+        )
+        from app.services.data_trunk_conversion import evaluate_processing
+        from app.services.data_trunk_postgres import (
+            _l2_value_from_columns,
+            _raw_value_from_columns,
+        )
+
+        installed = trial_installed_processings(plan, catalog)
+        references: set[InputReference] = set()
+        for item in installed:
+            transform = item.transform
+            if isinstance(transform, (NumericTransform, EnumTransform, FaultCodeTransform)):
+                references.add(transform.input)
+            elif isinstance(transform, BooleanSetTransform):
+                references.update(entry.input for entry in transform.inputs)
+            elif isinstance(transform, FormulaTransform):
+                references.update(
+                    reference
+                    for values in transform.sources.values()
+                    for reference in values
+                )
+        l0_ids = sorted(
+            (item.source_id for item in references if item.source_kind == "l0"),
+            key=str,
+        )
+        l2_ids = sorted(
+            (item.source_id for item in references if item.source_kind == "l2"),
+            key=str,
+        )
+
+        current_inputs: dict[InputReference, RawObservation | L2Observation] = {}
+        try:
+            with PostgresPointProcessingRepository._connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT frame_sequence,shot_at,configuration_revision
+                        FROM t_data_frames
+                        WHERE status='COMPLETE'
+                          AND configuration_revision=%s
+                        ORDER BY frame_sequence DESC
+                        LIMIT 1
+                        """,
+                        (plan.base_configuration_revision,),
+                    )
+                    frame = cursor.fetchone()
+                    if frame is None:
+                        raise PointProcessingError(
+                            "POINT_PROCESSING_TRIAL_FRAME_UNAVAILABLE",
+                            "No committed frame is available for the planned configuration",
+                        )
+                    frame_sequence, frame_time, frame_revision = frame
+                    if l0_ids:
+                        cursor.execute(
+                            """
+                            SELECT latest.observation_id,latest.node_id,latest.tag_id,
+                                   tag.name,COALESCE(tag.value_data_type,tag.data_type),
+                                   latest.raw_unit,latest.raw_value_float,
+                                   latest.raw_value_int,latest.raw_value_bool,
+                                   latest.raw_value_text,latest.quality,latest.ts,
+                                   latest.event_received_at,latest.source_message_id,
+                                   latest.source_sequence,latest.source_digest,
+                                   latest.event_time_basis
+                            FROM t_telemetry_latest AS latest
+                            JOIN t_tags AS tag ON tag.id=latest.tag_id
+                            WHERE latest.tag_id=ANY(%s::uuid[])
+                              AND latest.frame_sequence <= %s
+                            ORDER BY latest.tag_id
+                            """,
+                            ([str(item) for item in l0_ids], frame_sequence),
+                        )
+                        for row in cursor.fetchall():
+                            raw = RawObservation(
+                                observation_id=UUID(str(row[0])),
+                                node_id=UUID(str(row[1])),
+                                tag_id=UUID(str(row[2])),
+                                source_key=str(row[3]),
+                                value=_raw_value_from_columns(
+                                    str(row[4]), row[6], row[7], row[8], row[9]
+                                ),
+                                raw_unit=row[5],
+                                quality=TrunkQuality(int(row[10])),
+                                source_timestamp=row[11],
+                                received_at=row[12],
+                                source_message_id=row[13],
+                                source_sequence=row[14],
+                                source_digest=str(row[15]).strip(),
+                                event_time_basis=str(row[16]),
+                            )
+                            current_inputs[InputReference.l0(raw.tag_id)] = raw
+                    if l2_ids:
+                        cursor.execute(
+                            """
+                            SELECT latest.event_id,latest.entity_instance_id,
+                                   entity.definition_id,entity.data_type,entity.unit,
+                                   latest.observed_at,latest.received_at,
+                                   latest.calculated_at,latest.value_float,
+                                   latest.value_int,latest.value_numeric,
+                                   latest.value_bool,latest.value_text,
+                                   latest.value_codes,latest.quality,latest.reason,
+                                   latest.processing_revision_id,
+                                   latest.configuration_revision,
+                                   latest.source_digest,latest.source_order_key,
+                                   latest.event_time_basis,latest.frame_sequence
+                            FROM t_l2_latest AS latest
+                            JOIN t_entity_instances AS entity
+                              ON entity.id=latest.entity_instance_id
+                            WHERE latest.entity_instance_id=ANY(%s::uuid[])
+                              AND latest.frame_sequence <= %s
+                            ORDER BY latest.entity_instance_id
+                            """,
+                            ([str(item) for item in l2_ids], frame_sequence),
+                        )
+                        for row in cursor.fetchall():
+                            observation = L2Observation(
+                                event_id=UUID(str(row[0])),
+                                entity_instance_id=UUID(str(row[1])),
+                                definition_id=str(row[2]),
+                                value=_l2_value_from_columns(
+                                    str(row[3]), row[8], row[9], row[10],
+                                    row[11], row[12], row[13],
+                                ),
+                                unit=row[4],
+                                quality=TrunkQuality(int(row[14])),
+                                reason=row[15],
+                                observed_at=row[5],
+                                received_at=row[6],
+                                calculated_at=row[7],
+                                processing_revision_id=UUID(str(row[16])),
+                                configuration_revision=int(row[17]),
+                                source_observation_ids=(),
+                                source_digest=str(row[18]).strip(),
+                                source_order_key=str(row[19]),
+                                event_time_basis=str(row[20]),
+                                frame_id=None,
+                                frame_sequence=int(row[21]),
+                            )
+                            current_inputs[InputReference.l2(observation.entity_instance_id)] = observation
+        except PointProcessingError:
+            raise
+        except (psycopg2.Error, ValueError) as exc:
+            raise PointProcessingError(
+                "POINT_PROCESSING_TRIAL_UNAVAILABLE",
+                "Committed data could not be loaded for point-processing trial",
+            ) from exc
+
+        outputs = evaluate_processing(
+            installed=installed,
+            current_inputs=current_inputs,
+            configuration_revision=int(frame_revision),
+            calculated_at=frame_time,
+            frame_sequence=int(frame_sequence),
+        )
+        return PointProcessingTrial(
+            frame_sequence=int(frame_sequence),
+            frame_time=frame_time.isoformat(),
+            configuration_revision=int(frame_revision),
+            outputs=tuple(
+                {
+                    "entity_instance_id": str(item.entity_instance_id),
+                    "entity_definition_id": item.definition_id,
+                    "value": (
+                        list(item.value.value)
+                        if isinstance(item.value.value, tuple)
+                        else item.value.value
+                    ),
+                    "data_type": item.value.kind.value,
+                    "unit": item.unit,
+                    "quality": int(item.quality),
+                    "reason": item.reason,
+                    "observed_at": item.observed_at.isoformat(),
+                    "source_ids": tuple(str(value) for value in item.source_observation_ids),
+                }
+                for item in outputs
+            ),
+        )
+
+
 def build_postgres_point_processing() -> PointProcessingService:
     from app.services.neuron_client import get_neuron_client
     from app.services.neuron_point_processing_catalog import NeuronPointCatalog
@@ -1970,6 +2172,7 @@ def build_postgres_point_processing() -> PointProcessingService:
         PostgresPointProcessingCatalog(),
         point_scanner=NeuronPointCatalog(get_neuron_client()),
         runtime_gate=runtime_gate,
+        trial_evaluator=PostgresPointProcessingTrialEvaluator(),
     )
 
 

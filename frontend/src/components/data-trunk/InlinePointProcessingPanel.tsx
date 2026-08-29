@@ -8,6 +8,7 @@ import {
 import { buildDataTrunkViewModel } from './dataTrunkViewModel'
 import {
   buildNodePointProcessingDraft,
+  projectInlinePointProcessingTrial,
   suggestInlinePointProcessingDefaults,
   type InlinePointProcessingMode,
 } from './inlinePointProcessingModel'
@@ -118,7 +119,7 @@ export default function InlinePointProcessingPanel({
     setError('')
     try {
       await applyPointProcessingPlan(plan.id, plan.digest, idempotencyKey)
-      setSuccess('实体已发布，可到“实体数据”查看实时值、历史和来源。')
+      setSuccess('标准实体已发布，可到“标准实体”查看实时值、历史和来源。')
       setPlan(null)
       onPublished()
     } catch (reason) {
@@ -129,13 +130,14 @@ export default function InlinePointProcessingPanel({
   }
 
   const planView = plan ? buildDataTrunkViewModel({ plan }) : null
+  const trialView = plan?.trial ? projectInlinePointProcessingTrial(plan.trial) : null
 
   return (
     <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50/60 p-3" aria-label="加工为实体">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <span className="text-xs font-semibold text-gray-800">已选择 {points.length} 个原始点位</span>
-          <span className="ml-2 text-[11px] text-gray-500">L0 保持不变，发布后生成稳定实体。</span>
+          <span className="ml-2 text-[11px] text-gray-500">定义标准实体的数据来源与计算，原始数据保持不变。</span>
         </div>
         <button
           type="button"
@@ -215,6 +217,21 @@ export default function InlinePointProcessingPanel({
           {planView && (
             <div className={`mt-3 rounded px-3 py-2 text-xs ${planView.canApply ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
               {planView.canApply ? '检查通过，可以发布。' : planView.nextAction}
+            </div>
+          )}
+          {trialView && (
+            <div className={`mt-3 rounded border px-3 py-3 text-xs ${trialView.status === 'available' ? 'border-green-200 bg-green-50 text-green-900' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+              <div className="font-semibold">当前试算结果</div>
+              {trialView.status === 'available' ? (
+                <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  <div><span className="text-gray-500">当前值</span><div className="mt-1 font-mono-value text-base font-semibold">{trialView.valueText}</div></div>
+                  <div><span className="text-gray-500">质量</span><div className="mt-1 font-semibold">{trialView.qualityText}</div></div>
+                  <div><span className="text-gray-500">来源证据</span><div className="mt-1">{trialView.evidenceText}</div></div>
+                  <div className="sm:col-span-3 text-[11px] text-gray-500">数据时间：{trialView.observedAt ? new Date(trialView.observedAt).toLocaleString() : '—'}{trialView.message ? ` · ${trialView.message}` : ''}</div>
+                </div>
+              ) : (
+                <p className="mt-2">{trialView.message}</p>
+              )}
             </div>
           )}
           <div className="mt-3 flex justify-end gap-2">

@@ -53,7 +53,7 @@ export default function EntityDataPanel({
     .filter((item): item is typeof item & { descriptor: EntityInstance } => Boolean(item.descriptor))
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white/55 p-4" aria-label="实体数据列表">
+    <section className="rounded-xl border border-gray-200 bg-white/55 p-4" aria-label="标准实体列表">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">实体实时数据</h3>
@@ -130,7 +130,7 @@ export default function EntityDataPanel({
         })}
         {entityRows.length === 0 && (
           <div className="rounded border border-dashed border-gray-300 px-4 py-10 text-center text-xs text-gray-500">
-            当前节点还没有实体。请到“原始点位”勾选数据并加工为实体。
+            当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。
           </div>
         )}
       </div>

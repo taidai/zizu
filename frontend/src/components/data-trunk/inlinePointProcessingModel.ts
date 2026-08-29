@@ -1,3 +1,5 @@
+import type { PointProcessingTrial } from '../../api/client'
+
 export type InlinePointProcessingMode = 'passthrough' | 'numeric' | 'state' | 'formula'
 
 export interface InlineRawPoint {
@@ -43,6 +45,74 @@ export interface InlinePointProcessingDefaults {
   unit: string
   dataType: string
   expression: string
+}
+
+export interface InlinePointProcessingTrialView {
+  status: 'available' | 'unavailable'
+  valueText: string
+  qualityText: string
+  evidenceText: string
+  observedAt: string | null
+  message: string
+}
+
+const TRIAL_REASON_MESSAGES: Record<string, string> = {
+  POINT_PROCESSING_TRIAL_FRAME_UNAVAILABLE: '当前还没有可用于试算的已提交数据帧。',
+  POINT_PROCESSING_TRIAL_UNAVAILABLE: '当前数据无法用于试算，请检查原始数据后重试。',
+}
+
+function trialQualityLabel(quality: number): string {
+  if (quality === 192) return '正常'
+  if (quality === 64) return '存疑'
+  if (quality === 1) return '超时'
+  if (quality === 0) return '无效'
+  return '未知质量'
+}
+
+function trialValue(value: PointProcessingTrial & { available: true }): string {
+  const output = value.outputs[0]
+  if (!output || output.value === null) return '—'
+  const raw = Array.isArray(output.value)
+    ? output.value.join('、')
+    : typeof output.value === 'boolean'
+      ? (output.value ? '是' : '否')
+      : String(output.value)
+  return output.unit ? `${raw} ${output.unit}` : raw
+}
+
+export function projectInlinePointProcessingTrial(
+  trial: PointProcessingTrial,
+): InlinePointProcessingTrialView {
+  if (!trial.available) {
+    return {
+      status: 'unavailable',
+      valueText: '—',
+      qualityText: '未试算',
+      evidenceText: '',
+      observedAt: null,
+      message: TRIAL_REASON_MESSAGES[trial.reason]
+        || '当前无法试算，请检查原始数据后重试。',
+    }
+  }
+  const output = trial.outputs[0]
+  if (!output) {
+    return {
+      status: 'unavailable',
+      valueText: '—',
+      qualityText: '未试算',
+      evidenceText: '',
+      observedAt: null,
+      message: '检查已完成，但没有生成标准实体结果。',
+    }
+  }
+  return {
+    status: 'available',
+    valueText: trialValue(trial),
+    qualityText: trialQualityLabel(output.quality),
+    evidenceText: `${output.source_ids.length} 个来源 · 帧 ${trial.frame_sequence} · 配置 ${trial.configuration_revision}`,
+    observedAt: output.observed_at,
+    message: output.reason || '',
+  }
 }
 
 function stableKey(value: string, fallback: string): string {

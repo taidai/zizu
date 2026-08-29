@@ -409,7 +409,7 @@ class FormulaTransform:
             set(source_map) != set(contracts)
             or not 1 <= self.schedule_seconds <= 3600
             or any(
-                reference.source_kind != "l2"
+                reference.source_kind not in {"l0", "l2"}
                 for references in source_map.values()
                 for reference in references
             )

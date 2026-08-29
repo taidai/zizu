@@ -275,6 +275,8 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(201, planned.status_code, planned.text)
         self.assertEqual(str(NODE_ID), planned.json()["node_id"])
         self.assertEqual([], planned.json()["blockers"])
+        self.assertIn("trial", planned.json())
+        self.assertIsNone(planned.json()["trial"])
         self.assertEqual(1, repository.configuration_revision())
         self.assertEqual(1, repository.application_count())
 

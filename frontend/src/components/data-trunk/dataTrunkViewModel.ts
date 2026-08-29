@@ -50,8 +50,8 @@ export interface NodeDataTab {
 
 export function nodeDataTabs(_readOnly: boolean): readonly NodeDataTab[] {
   return [
-    { key: 'raw-points', label: '原始点位' },
-    { key: 'entities', label: '实体数据' },
+    { key: 'raw-points', label: '原始数据' },
+    { key: 'entities', label: '标准实体' },
   ]
 }
 

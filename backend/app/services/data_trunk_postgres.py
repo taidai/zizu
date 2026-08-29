@@ -944,7 +944,8 @@ class PostgresFrameRepository:
             ) = row
             cursor.execute(
                 """
-                SELECT input.id,input.input_key,input.data_type,input.unit,
+                SELECT input.id,input.input_key,input.source_kind,
+                       input.data_type,input.unit,
                        input.required,COALESCE(selector.cardinality,'one'),
                        selector.default_value
                 FROM t_point_processing_inputs AS input
@@ -958,17 +959,36 @@ class PostgresFrameRepository:
             input_rows = cursor.fetchall()
             cursor.execute(
                 """
-                SELECT input_id,source_entity_instance_id
-                FROM t_point_processing_dependencies
-                WHERE installed_processing_id=%s AND output_id=%s
-                ORDER BY input_id,source_entity_instance_id
+                SELECT input_id,source_kind,l0_tag_id,l2_entity_instance_id
+                FROM t_point_processing_input_bindings
+                WHERE installed_processing_id=%s
+                ORDER BY input_id
                 """,
-                (installation_id, output_id),
+                (installation_id,),
             )
-            dependency_sources: dict[UUID, list[UUID]] = {}
-            for input_id, source_id in cursor.fetchall():
-                dependency_sources.setdefault(UUID(str(input_id)), []).append(
-                    UUID(str(source_id))
+            bound_sources: dict[UUID, list[InputReference]] = {}
+            for input_id, source_kind, l0_tag_id, l2_entity_id in cursor.fetchall():
+                source_id = l0_tag_id if source_kind == "l0" else l2_entity_id
+                if source_id is None:
+                    raise DataTrunkError(
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
+                        "formula input binding has no source",
+                    )
+                bound_sources.setdefault(UUID(str(input_id)), []).append(
+                    InputReference(str(source_kind), UUID(str(source_id)))
+                )
+            cursor.execute(
+                """
+                SELECT input_id,entity_instance_id
+                FROM t_point_processing_selector_members
+                WHERE installed_processing_id=%s
+                ORDER BY input_id,ordinal
+                """,
+                (installation_id,),
+            )
+            for input_id, entity_id in cursor.fetchall():
+                bound_sources.setdefault(UUID(str(input_id)), []).append(
+                    InputReference.l2(UUID(str(entity_id)))
                 )
             referenced_inputs = set(_formula_input_names(canonical_ast))
             source_contracts: dict[str, FormulaSource] = {}
@@ -976,6 +996,7 @@ class PostgresFrameRepository:
             for (
                 input_id,
                 input_key,
+                source_kind,
                 data_type,
                 unit,
                 required,
@@ -984,10 +1005,15 @@ class PostgresFrameRepository:
             ) in input_rows:
                 if input_key not in referenced_inputs:
                     continue
-                source_ids = tuple(
-                    dependency_sources.get(UUID(str(input_id)), ())
+                references = tuple(
+                    bound_sources.get(UUID(str(input_id)), ())
                 )
-                if not source_ids and required:
+                if any(reference.source_kind != source_kind for reference in references):
+                    raise DataTrunkError(
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
+                        "formula input binding kind does not match its contract",
+                    )
+                if not references and required:
                     raise DataTrunkError(
                         "POINT_PROCESSING_CONFIGURATION_INVALID",
                         "required formula input has no frozen source",
@@ -1000,9 +1026,7 @@ class PostgresFrameRepository:
                     bool(required),
                     default_value,
                 )
-                sources[input_key] = tuple(
-                    InputReference.l2(source_id) for source_id in source_ids
-                )
+                sources[input_key] = references
             items.append(
                 InstalledPointProcessing(
                     installation_id=UUID(str(installation_id)),

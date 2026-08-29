@@ -491,6 +491,60 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(output.reason, "OPTIONAL_DEFAULT_USED")
         self.assertEqual(output.source_observation_ids, (current[primary_ref].event_id,))
 
+    def test_formula_combines_same_node_l0_inputs_without_promoting_them_to_l2(self) -> None:
+        first = next(iter(self.fixture()["current_inputs"].values()))
+        second = replace(
+            first,
+            observation_id=UUID("00000000-0000-0000-0000-000000000102"),
+            tag_id=UUID("00000000-0000-0000-0000-000000000012"),
+            source_key="ReactivePowerRaw",
+            value=TypedValue.float(4.0),
+            source_digest="b" * 64,
+        )
+        references = {
+            "active": (InputReference.l0(first.tag_id),),
+            "reactive": (InputReference.l0(second.tag_id),),
+        }
+        contracts = {
+            name: FormulaSource(name, ValueKind.FLOAT, "W", "one", True, None)
+            for name in references
+        }
+        compiled = compile_formula(
+            "active + reactive",
+            sources=tuple(contracts.values()),
+            result_type=ValueKind.FLOAT,
+            result_unit="W",
+        )
+        installed = replace(
+            self.fixture()["installed"][0],
+            output_kind=ValueKind.FLOAT,
+            output_unit="W",
+            transform=FormulaTransform(
+                sources=references,
+                source_contracts=contracts,
+                compiled=compiled,
+                schedule_seconds=1,
+                control_eligible=False,
+            ),
+        )
+
+        output = evaluate_processing(
+            installed=(installed,),
+            current_inputs={
+                InputReference.l0(first.tag_id): first,
+                InputReference.l0(second.tag_id): second,
+            },
+            configuration_revision=5,
+            calculated_at=datetime(2026, 8, 17, 0, 0, 2, tzinfo=UTC),
+        )[0]
+
+        self.assertEqual(TypedValue.float(12349.0), output.value)
+        self.assertEqual(TrunkQuality.GOOD, output.quality)
+        self.assertEqual(
+            tuple(sorted((first.observation_id, second.observation_id), key=str)),
+            output.source_observation_ids,
+        )
+
     @staticmethod
     def _l2_input(
         *,

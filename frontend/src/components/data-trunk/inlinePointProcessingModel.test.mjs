@@ -127,3 +127,53 @@ test('technical identity and freshness inputs stay inside advanced settings', as
   assert.ok(source.indexOf('业务标识') > advanced)
   assert.ok(source.indexOf('超时秒数') > advanced)
 })
+
+test('committed-frame trial projects value quality time and source evidence', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  const result = model.projectInlinePointProcessingTrial({
+    available: true,
+    frame_sequence: 12,
+    frame_time: '2026-08-29T10:00:00+00:00',
+    configuration_revision: 7,
+    outputs: [{
+      entity_instance_id: 'entity-1',
+      entity_definition_id: 'pcs.combined_power',
+      value: 42,
+      data_type: 'FLOAT',
+      unit: 'W',
+      quality: 192,
+      reason: null,
+      observed_at: '2026-08-29T09:59:59+00:00',
+      source_ids: ['observation-1', 'observation-2'],
+    }],
+  })
+
+  assert.deepEqual(result, {
+    status: 'available',
+    valueText: '42 W',
+    qualityText: '正常',
+    evidenceText: '2 个来源 · 帧 12 · 配置 7',
+    observedAt: '2026-08-29T09:59:59+00:00',
+    message: '',
+  })
+})
+
+test('unavailable trial is explicit in Chinese and never looks like zero', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  const result = model.projectInlinePointProcessingTrial({
+    available: false,
+    reason: 'POINT_PROCESSING_TRIAL_FRAME_UNAVAILABLE',
+    message: 'No committed frame is available',
+  })
+
+  assert.deepEqual(result, {
+    status: 'unavailable',
+    valueText: '—',
+    qualityText: '未试算',
+    evidenceText: '',
+    observedAt: null,
+    message: '当前还没有可用于试算的已提交数据帧。',
+  })
+})

@@ -160,6 +160,29 @@ class PointProcessingPlan:
 
 
 @dataclass(frozen=True)
+class PointProcessingTrial:
+    frame_sequence: int
+    frame_time: str
+    configuration_revision: int
+    outputs: tuple[Mapping[str, Any], ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "outputs",
+            tuple(MappingProxyType(dict(item)) for item in self.outputs),
+        )
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "frame_sequence": self.frame_sequence,
+            "frame_time": self.frame_time,
+            "configuration_revision": self.configuration_revision,
+            "outputs": [_plain(item) for item in self.outputs],
+        }
+
+
+@dataclass(frozen=True)
 class PointProcessingApplication:
     id: UUID
     plan_id: UUID
@@ -314,6 +337,14 @@ class PointProcessingRepository(Protocol):
     ) -> PointProcessingApplication: ...
 
 
+class PointProcessingTrialEvaluator(Protocol):
+    def evaluate(
+        self,
+        plan: PointProcessingPlan,
+        catalog: PointProcessingCatalog,
+    ) -> PointProcessingTrial: ...
+
+
 class PointScanner(Protocol):
     def scan(self, node_name: str) -> ScannedPointCatalog: ...
 
@@ -328,11 +359,18 @@ class PointProcessingService:
         *,
         point_scanner: PointScanner | None = None,
         runtime_gate: Any | None = None,
+        trial_evaluator: PointProcessingTrialEvaluator | None = None,
     ) -> None:
         self._repository = repository
         self._catalog = catalog
         self._point_scanner = point_scanner
         self._runtime_gate = runtime_gate
+        self._trial_evaluator = trial_evaluator
+
+    def trial(self, plan: PointProcessingPlan) -> PointProcessingTrial | None:
+        if plan.status != "ready" or self._trial_evaluator is None:
+            return None
+        return self._trial_evaluator.evaluate(plan, self._catalog)
 
     def preview(self, command: PreviewPointProcessing) -> PointProcessingPlan:
         owner_node_id = self._catalog.template_owner_node(
@@ -918,6 +956,153 @@ class InMemoryPointProcessingCatalog:
         self._sources = tuple(sources)
 
 
+def _installed_processings_for_context(
+    *,
+    asset: PointProcessingTemplate,
+    current: CurrentPointProcessingContext,
+    installation_id: UUID,
+) -> tuple[InstalledPointProcessing, ...]:
+    installed: list[InstalledPointProcessing] = []
+    inputs = {item.input_id: item for item in asset.inputs}
+    for output in asset.outputs:
+        kind = output.transform["kind"]
+        if kind == "boolean_set":
+            transform = BooleanSetTransform(
+                inputs=tuple(
+                    BooleanCodeInput(
+                        input=InputReference(
+                            inputs[entry["input"]].source_kind,
+                            current.input_source_ids[entry["input"]],
+                        ),
+                        code=entry["code"],
+                    )
+                    for entry in output.transform["entries"]
+                )
+            )
+        elif kind != "formula":
+            input_id = str(output.transform["input"])
+            input_contract = inputs[input_id]
+            input_reference = InputReference(
+                input_contract.source_kind,
+                current.input_source_ids[input_id],
+            )
+        if kind == "numeric":
+            transform = NumericTransform(
+                input=input_reference,
+                scale=float(output.transform["scale"]),
+                offset=float(output.transform["offset"]),
+                input_unit=input_contract.unit,
+                minimum=float(output.transform["minimum"]),
+                maximum=float(output.transform["maximum"]),
+            )
+        elif kind == "enum":
+            transform = EnumTransform(
+                input=input_reference,
+                entries=dict(output.transform["entries"]),
+            )
+        elif kind == "fault_codes":
+            transform = FaultCodeTransform(
+                input=input_reference,
+                delimiter=str(output.transform["delimiter"]),
+                entries={
+                    raw_code: str(entry["code"])
+                    for raw_code, entry in output.transform["entries"].items()
+                },
+            )
+        elif kind == "formula":
+            referenced_inputs = _formula_input_names(output.transform["canonicalAst"])
+            formula_contracts = {
+                input_id: FormulaSource(
+                    input_id,
+                    ValueKind(inputs[input_id].data_type),
+                    inputs[input_id].unit,
+                    inputs[input_id].cardinality,
+                    inputs[input_id].required,
+                    inputs[input_id].default_value,
+                )
+                for input_id in referenced_inputs
+            }
+            transform = FormulaTransform(
+                sources={
+                    input_id: tuple(
+                        InputReference(inputs[input_id].source_kind, source_id)
+                        for source_id in (
+                            current.selector_source_ids.get(input_id)
+                            or (
+                                (current.input_source_ids[input_id],)
+                                if input_id in current.input_source_ids
+                                else ()
+                            )
+                        )
+                    )
+                    for input_id in referenced_inputs
+                },
+                source_contracts=formula_contracts,
+                compiled=CompiledFormula(
+                    text=str(output.transform["expression"]),
+                    ast=output.transform["canonicalAst"],
+                    digest=str(output.transform["astDigest"]),
+                    result_kind=ValueKind(output.data_type),
+                    result_unit=output.unit,
+                ),
+                schedule_seconds=int(output.transform["scheduleSeconds"]),
+                control_eligible=bool(output.transform["controlEligible"]),
+            )
+        installed.append(
+            InstalledPointProcessing(
+                installation_id=installation_id,
+                revision_id=current.revision_id,
+                entity_instance_id=current.output_entity_ids[output.output_id],
+                entity_definition_id=output.entity_definition_id,
+                output_kind=ValueKind(output.data_type),
+                output_unit=output.unit,
+                freshness_seconds=output.freshness_seconds,
+                transform=transform,
+            )
+        )
+    return tuple(sorted(installed, key=lambda item: str(item.entity_instance_id)))
+
+
+def trial_installed_processings(
+    plan: PointProcessingPlan,
+    catalog: PointProcessingCatalog,
+) -> tuple[InstalledPointProcessing, ...]:
+    asset = catalog.get_template(plan.template_revision_id)
+    if asset is None or plan.status != "ready":
+        raise PointProcessingError(
+            "POINT_PROCESSING_PLAN_BLOCKED",
+            "Only a ready point-processing plan can be evaluated",
+        )
+    input_source_ids = {
+        str(item["input_id"]): UUID(str(item["selected_source_id"]))
+        for item in plan.items
+        if item["kind"] == "input_binding" and item.get("selected_source_id")
+    }
+    selector_source_ids = {
+        str(item["input_id"]): tuple(UUID(str(value)) for value in item["selected_source_ids"])
+        for item in plan.items
+        if item["kind"] == "selector_binding"
+    }
+    output_entity_ids = {
+        str(item["output_id"]): UUID(str(item["output_entity_instance_id"]))
+        for item in plan.items
+        if item["kind"] == "output_binding"
+    }
+    return _installed_processings_for_context(
+        asset=asset,
+        current=CurrentPointProcessingContext(
+            revision_id=plan.template_revision_id,
+            input_source_ids=input_source_ids,
+            output_entity_ids=output_entity_ids,
+            selector_source_ids=selector_source_ids,
+        ),
+        installation_id=uuid5(
+            NAMESPACE_URL,
+            f"zizu/point-processing-trial/{plan.id}",
+        ),
+    )
+
+
 class InMemoryPointProcessingRepository:
     def __init__(
         self,
@@ -974,108 +1159,13 @@ class InMemoryPointProcessingRepository:
             installation_id = self._installed_ids.get(node_id)
             if asset is None or installation_id is None:
                 continue
-            inputs = {item.input_id: item for item in asset.inputs}
-            for output in asset.outputs:
-                kind = output.transform["kind"]
-                if kind == "boolean_set":
-                    transform = BooleanSetTransform(
-                        inputs=tuple(
-                            BooleanCodeInput(
-                                input=InputReference(
-                                    inputs[entry["input"]].source_kind,
-                                    current.input_source_ids[entry["input"]],
-                                ),
-                                code=entry["code"],
-                            )
-                            for entry in output.transform["entries"]
-                        )
-                    )
-                elif kind != "formula":
-                    input_id = str(output.transform["input"])
-                    input_contract = inputs[input_id]
-                    input_source_id = current.input_source_ids[input_id]
-                    input_reference = InputReference(
-                        input_contract.source_kind,
-                        input_source_id,
-                    )
-                if kind == "numeric":
-                    transform = NumericTransform(
-                        input=input_reference,
-                        scale=float(output.transform["scale"]),
-                        offset=float(output.transform["offset"]),
-                        input_unit=input_contract.unit,
-                        minimum=float(output.transform["minimum"]),
-                        maximum=float(output.transform["maximum"]),
-                    )
-                elif kind == "enum":
-                    transform = EnumTransform(
-                        input=input_reference,
-                        entries=dict(output.transform["entries"]),
-                    )
-                elif kind == "fault_codes":
-                    transform = FaultCodeTransform(
-                        input=input_reference,
-                        delimiter=str(output.transform["delimiter"]),
-                        entries={
-                            raw_code: str(entry["code"])
-                            for raw_code, entry in output.transform["entries"].items()
-                        },
-                    )
-                elif kind == "formula":
-                    referenced_inputs = _formula_input_names(
-                        output.transform["canonicalAst"]
-                    )
-                    formula_contracts = {
-                        input_id: FormulaSource(
-                            input_id,
-                            ValueKind(inputs[input_id].data_type),
-                            inputs[input_id].unit,
-                            inputs[input_id].cardinality,
-                            inputs[input_id].required,
-                            inputs[input_id].default_value,
-                        )
-                        for input_id in referenced_inputs
-                    }
-                    transform = FormulaTransform(
-                        sources={
-                            input_id: tuple(
-                                InputReference.l2(source_id)
-                                for source_id in (
-                                    current.selector_source_ids.get(input_id)
-                                    or (
-                                        (current.input_source_ids[input_id],)
-                                        if input_id in current.input_source_ids
-                                        else ()
-                                    )
-                                )
-                            )
-                            for input_id in referenced_inputs
-                        },
-                        source_contracts=formula_contracts,
-                        compiled=CompiledFormula(
-                            text=str(output.transform["expression"]),
-                            ast=output.transform["canonicalAst"],
-                            digest=str(output.transform["astDigest"]),
-                            result_kind=ValueKind(output.data_type),
-                            result_unit=output.unit,
-                        ),
-                        schedule_seconds=int(output.transform["scheduleSeconds"]),
-                        control_eligible=bool(output.transform["controlEligible"]),
-                    )
-                installed.append(
-                    InstalledPointProcessing(
-                        installation_id=installation_id,
-                        revision_id=current.revision_id,
-                        entity_instance_id=current.output_entity_ids[
-                            output.output_id
-                        ],
-                        entity_definition_id=output.entity_definition_id,
-                        output_kind=ValueKind(output.data_type),
-                        output_unit=output.unit,
-                        freshness_seconds=output.freshness_seconds,
-                        transform=transform,
-                    )
+            installed.extend(
+                _installed_processings_for_context(
+                    asset=asset,
+                    current=current,
+                    installation_id=installation_id,
                 )
+            )
         return tuple(sorted(installed, key=lambda item: str(item.entity_instance_id)))
 
     def apply_plan(
@@ -1514,6 +1604,7 @@ def compile_point_processing_plan(
         if output.transform["kind"] == "formula"
     )
     if formula_outputs:
+        input_contracts = {item.input_id: item for item in template.inputs}
         planned_dependencies = tuple(
             (
                 input_id,
@@ -1528,7 +1619,10 @@ def compile_point_processing_plan(
                 if input_id in frozen_selectors
                 else (
                     (selected_inputs[input_id],)
-                    if input_id in selected_inputs
+                    if (
+                        input_id in selected_inputs
+                        and input_contracts[input_id].source_kind == "l2"
+                    )
                     else ()
                 )
             )

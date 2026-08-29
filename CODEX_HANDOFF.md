@@ -1,5 +1,21 @@
 ---
 
+## Session 2026-08-29 — 标准实体 PCS 纵向切片完成（本地候选，未部署）
+
+- 已按中立评审后的易用性基线收口：L0/L1/L2 继续作为内部架构，普通节点页只显示“原始数据”和
+  “标准实体”；L1 不再要求用户进入独立概念页，而以内嵌的“数据来源与计算”完成定义、检查和发布。
+- 同节点公式已能直接引用一个或多个 L0；跨节点输入仍只允许 committed L2。ready plan 会编译为生产
+  `InstalledPointProcessing`，在只读 repeatable-read 事务读取最近 COMPLETE 帧后调用同一
+  `evaluate_processing` 试算，不写 latest、历史、outbox 或配置修订。
+- 试算结果展示值、单位、质量、数据时间和来源证据；无已提交帧时明确显示不可试算，不伪造 0/GOOD。
+  PostgreSQL 回归另修复了旧字段 `conversion_revision_id`、不存在的 `frame_id` 和误选 FAILED 帧三处问题。
+- 新鲜验证：后端 269 passed / 134 environment skip / 57 subtests；真实 PostgreSQL 主干 24 passed；
+  前端 42 passed；`npx tsc -b` 与 `npm run build` 成功（仅既有大 chunk 警告）；`git diff --check` 无错误。
+- 1 号机仍运行 v0.4.86，本地候选尚未发布、构建镜像或部署。下一步先提交候选，再以真实 PCS 在本地
+  页面完成“选原始数据 → 定义标准实体 → 检查结果 → 发布 → 查看实时/历史”的人工验收，之后单独部署。
+- 未跟踪的 `docs/deploy-1号机-v0.4.85-rc.17-http.md` 与
+  `docs/research/2026-08-29-iot-platform-research.md` 是用户文件，本轮未纳入。
+
 ## Session 2026-08-29 — v0.4.86 易用性闭环已部署并验收
 
 - 主线仍为 `节点 → L0 原始点位 → L1 点位加工 → L2 全局实体 → 告警/JDM/控制/画面`。本轮完成节点

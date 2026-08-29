@@ -33,9 +33,11 @@ from app.services.frame_processor import FrameProcessor
 from tests import test_data_frames_migration_postgres as frame_migration
 from tests import test_committed_frame_payload_migration_postgres as payload_migration
 from tests import test_frame_retention_migration_postgres as retention_migration
+from tests import test_committed_frame_consumers_migration_postgres as consumer_migration
 
 
-NOW = datetime.now(UTC)
+MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050_node_l0_usability.sql"
+MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
 
 
 @unittest.skipUnless(
@@ -55,6 +57,10 @@ class DataFramesPostgresTest(unittest.TestCase):
             "user": os.environ["DB_USER"],
             "password": os.environ["DB_PASSWORD"],
         }
+        with psycopg2.connect(**cls.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DROP SCHEMA IF EXISTS zizu_internal CASCADE")
+            connection.commit()
         migration_test = frame_migration.DataFramesMigrationPostgresTest
         migration_test.connection_kwargs = cls.connection_kwargs
         migration_test().setUp()
@@ -65,9 +71,15 @@ class DataFramesPostgresTest(unittest.TestCase):
                 cursor.execute(
                     retention_migration.MIGRATION_048.read_text(encoding="utf-8")
                 )
+                cursor.execute(
+                    consumer_migration.MIGRATION_049.read_text(encoding="utf-8")
+                )
+                cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
             connection.commit()
 
     def setUp(self) -> None:
+        self.now = datetime.now(UTC)
         self.node_id = uuid4()
         self.tag_id = uuid4()
         with self._connection() as connection, connection.cursor() as cursor:
@@ -86,8 +98,8 @@ class DataFramesPostgresTest(unittest.TestCase):
                 cursor.execute(f"DELETE FROM {table}")
             cursor.execute("SET session_replication_role=origin")
             cursor.execute(
-                "INSERT INTO t_nodes(id,name,node_type,enabled) "
-                "VALUES(%s,%s,'DEVICE',TRUE)",
+                "INSERT INTO t_nodes(id,name,node_type,enabled,layer) "
+                "VALUES(%s,%s,'DEVICE',TRUE,1)",
                 (str(self.node_id), f"frame-node-{self.node_id}"),
             )
             cursor.execute(
@@ -135,8 +147,8 @@ class DataFramesPostgresTest(unittest.TestCase):
             value=TypedValue.float(float(capture_beat)),
             raw_unit="kW",
             quality=TrunkQuality.GOOD,
-            source_timestamp=NOW,
-            received_at=NOW,
+            source_timestamp=self.now,
+            received_at=self.now,
             source_message_id=f"message-{capture_beat}",
             source_sequence=capture_beat,
             source_digest=source_digest,
@@ -156,7 +168,7 @@ class DataFramesPostgresTest(unittest.TestCase):
             candidate_digest=candidate_digest,
             generation=capture_beat,
             capture_beat=capture_beat,
-            shot_at=NOW,
+            shot_at=self.now,
             configuration_revision=configuration_revision,
             cells=MappingProxyType({self.tag_id: framed}),
             changed_l0=(framed,),
@@ -177,8 +189,8 @@ class DataFramesPostgresTest(unittest.TestCase):
             raw = RawObservation(
                 observation_id=uuid4(), node_id=self.node_id, tag_id=tag_id,
                 source_key=source_key, value=value, raw_unit=unit,
-                quality=TrunkQuality.GOOD, source_timestamp=NOW,
-                received_at=NOW, source_message_id=f"multi-{capture_beat}",
+                quality=TrunkQuality.GOOD, source_timestamp=self.now,
+                received_at=self.now, source_message_id=f"multi-{capture_beat}",
                 source_sequence=capture_beat, source_digest=digest,
                 event_time_basis="received_at",
                 source_order=SourceOrder.sequence(capture_beat),
@@ -197,7 +209,7 @@ class DataFramesPostgresTest(unittest.TestCase):
             ).hexdigest(),
             generation=capture_beat,
             capture_beat=capture_beat,
-            shot_at=NOW,
+            shot_at=self.now,
             configuration_revision=configuration_revision,
             cells=MappingProxyType(
                 {cell.observation.tag_id: cell for cell in cells}
@@ -418,7 +430,7 @@ class DataFramesPostgresTest(unittest.TestCase):
 
     def test_expired_processing_lease_is_reclaimed_and_old_token_is_fenced(self) -> None:
         self.repository.commit_pending(self._candidate(capture_beat=109))
-        first = self.repository.claim_next(NOW)
+        first = self.repository.claim_next(self.now)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
             cursor.execute(
@@ -441,7 +453,7 @@ class DataFramesPostgresTest(unittest.TestCase):
 
     def test_expired_processing_lease_can_be_reclaimed_by_same_repository(self) -> None:
         self.repository.commit_pending(self._candidate(capture_beat=119))
-        first = self.repository.claim_next(NOW)
+        first = self.repository.claim_next(self.now)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
             cursor.execute(
@@ -505,7 +517,7 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (
                     str(old_id),
                     "e" * 64,
-                    NOW,
+                    self.now,
                     datetime.now(UTC) - timedelta(seconds=61),
                 ),
             )
@@ -564,7 +576,7 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (
                     str(old_id),
                     "f" * 64,
-                    NOW,
+                    self.now,
                     str(uuid4()),
                     str(uuid4()),
                     datetime.now(UTC) - timedelta(seconds=1),
@@ -614,12 +626,12 @@ class DataFramesPostgresTest(unittest.TestCase):
         )
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO t_nodes(id,name,node_type,enabled) "
-                "VALUES(%s,'FRAME-SITE','SITE',TRUE)",
+                "INSERT INTO t_nodes(id,name,node_type,enabled,layer) "
+                "VALUES(%s,'FRAME-SITE','SITE',TRUE,1)",
                 (str(site_node_id),),
             )
             cursor.execute(
-                "UPDATE t_nodes SET node_type='PCS',parent_id=%s WHERE id=%s",
+                "UPDATE t_nodes SET node_type='PCS',parent_id=%s,layer=2 WHERE id=%s",
                 (str(site_node_id), str(self.node_id)),
             )
             for tag_id, source_key, value, unit in tag_specs:

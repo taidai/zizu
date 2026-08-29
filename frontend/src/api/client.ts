@@ -1145,6 +1145,30 @@ export interface PointProcessingPlanItem {
   } | null
 }
 
+export interface PointProcessingTrialOutput {
+  entity_instance_id: string
+  entity_definition_id: string
+  value: number | boolean | string | string[] | null
+  data_type: string
+  unit: string | null
+  quality: number
+  reason: string | null
+  observed_at: string
+  source_ids: string[]
+}
+
+export type PointProcessingTrial = {
+  available: true
+  frame_sequence: number
+  frame_time: string
+  configuration_revision: number
+  outputs: PointProcessingTrialOutput[]
+} | {
+  available: false
+  reason: string
+  message: string
+}
+
 export interface PointProcessingPlan {
   id: string
   node_id: string
@@ -1154,6 +1178,7 @@ export interface PointProcessingPlan {
   items: PointProcessingPlanItem[]
   blockers: Array<{ code: string; input_id: string }>
   digest: string
+  trial?: PointProcessingTrial | null
 }
 
 export interface PointProcessingApplication {

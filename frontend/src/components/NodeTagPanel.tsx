@@ -171,10 +171,10 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
   }
 
   return (
-    <section className="neu-card min-h-full p-4" aria-label="原始点位">
+    <section className="neu-card min-h-full p-4" aria-label="原始数据">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-bold text-gray-800">原始点位</h3>
+          <h3 className="text-sm font-bold text-gray-800">原始数据</h3>
           <p className="mt-1 text-xs text-gray-500">查看设备实际上传的值。点位配置请使用节点上方的“导入点位”。</p>
         </div>
         <div className="flex gap-2" aria-label="原始点位数据视图">

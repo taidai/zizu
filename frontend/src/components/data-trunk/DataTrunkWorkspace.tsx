@@ -60,7 +60,7 @@ export default function DataTrunkWorkspace({
     } catch (reason) {
       if (generation === requestGenerationRef.current
         && activeNodeIdRef.current === expectedNodeId) {
-        setError(reason instanceof Error ? reason.message : '读取实体数据失败')
+        setError(reason instanceof Error ? reason.message : '读取标准实体失败')
       }
     } finally {
       if (generation === requestGenerationRef.current
@@ -153,12 +153,12 @@ export default function DataTrunkWorkspace({
   }, [node.id])
 
   if (loading) {
-    return <div className="neu-card p-6 text-sm text-gray-500">正在读取实体数据...</div>
+    return <div className="neu-card p-6 text-sm text-gray-500">正在读取标准实体...</div>
   }
   if (!trunk) {
     return (
       <div className="neu-card p-6">
-        <p className="text-sm font-semibold text-gray-800">实体数据不可用</p>
+        <p className="text-sm font-semibold text-gray-800">标准实体不可用</p>
         <p className="mt-1 text-xs text-red-600">{error || '请检查节点和平台连接。'}</p>
         <button type="button" onClick={() => void loadWorkspace()} className="neu-btn mt-4 px-3 py-2 text-xs text-blue-700">重新读取</button>
       </div>
@@ -170,7 +170,7 @@ export default function DataTrunkWorkspace({
       <header className="rounded-xl border border-gray-200 bg-white/55 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">实体数据</h2>
+            <h2 className="text-base font-semibold text-gray-900">标准实体</h2>
             <p className="mt-1 text-xs text-gray-500">查看供告警、JDM、控制和 EMS 工作台使用的实时值与历史值。</p>
           </div>
           <div className="text-[10px] text-gray-500">
