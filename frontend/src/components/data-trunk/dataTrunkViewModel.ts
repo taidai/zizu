@@ -210,11 +210,22 @@ export function qualityLabel(quality: number): string {
   return '无效'
 }
 
-export function projectRawPointValue(value: unknown, quality: number): {
+export function projectRawPointValue(
+  value: unknown,
+  quality: number,
+  available = true,
+): {
   displayValue: string
   qualityLabel: string
   qualityTone: 'good' | 'uncertain' | 'stale' | 'bad'
 } {
+  if (!available) {
+    return {
+      displayValue: '-',
+      qualityLabel: '平台暂不可用',
+      qualityTone: 'bad',
+    }
+  }
   return {
     displayValue: value === null || value === undefined
       ? '-'

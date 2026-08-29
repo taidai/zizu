@@ -52,6 +52,11 @@ test('raw point keeps the last diagnostic value while stale', async () => {
     qualityLabel: '超时',
     qualityTone: 'stale',
   })
+  assert.deepEqual(viewModel.projectRawPointValue(null, 1, false), {
+    displayValue: '-',
+    qualityLabel: '平台暂不可用',
+    qualityTone: 'bad',
+  })
 })
 
 test('delete candidate explains runtime stop without erasing history', async () => {

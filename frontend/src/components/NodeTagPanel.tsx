@@ -4,6 +4,7 @@ import {
   connectCommittedFrameStream,
   fetchCommittedFrameSnapshot,
 } from '../api/committedFrameStream'
+import { retryCommittedFrameSnapshot } from '../api/committedFrameRecovery'
 import {
   applyFrameDelta,
   replaceSnapshot,
@@ -107,10 +108,15 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
       const currentGeneration = ++generation
       stopStream()
       controller?.abort()
-      controller = new AbortController()
+      const requestController = new AbortController()
+      controller = requestController
       setProjection(null)
       try {
-        const snapshot = await fetchCommittedFrameSnapshot(nodeId, controller.signal)
+        const snapshot = await retryCommittedFrameSnapshot(
+          () => fetchCommittedFrameSnapshot(nodeId, requestController.signal),
+          () => active && currentGeneration === generation,
+        )
+        if (snapshot === null) return
         if (!active || currentGeneration !== generation) return
         setProjection(replaceSnapshot(null, snapshot))
         stopStream = connectCommittedFrameStream({
@@ -244,6 +250,12 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
             />
           )}
 
+          {projection === null && (
+            <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              实时数据暂不可用，平台正在自动重试；这不代表设备点位超时。
+            </div>
+          )}
+
           <div className="overflow-x-auto rounded border border-gray-200 bg-white">
             <table className="w-full text-left text-xs">
               <thead className="bg-gray-50 text-gray-500">
@@ -264,6 +276,7 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
                   const point = projectRawPointValue(
                     current?.value,
                     current?.effective_quality ?? 1,
+                    projection !== null,
                   )
                   const qualityClass = point.qualityTone === 'good'
                     ? 'text-green-700'
