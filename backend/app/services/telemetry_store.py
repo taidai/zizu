@@ -17,6 +17,7 @@ import asyncio
 from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
+from threading import BoundedSemaphore
 from uuid import UUID
 
 from loguru import logger
@@ -33,11 +34,13 @@ from app.models.schemas import NormalizedMessage, TelemetryRecord, Quality
 # ══════════════════════════════════════
 
 _pool: psycopg2.pool.AbstractConnectionPool | None = None
+_pool_slots: BoundedSemaphore | None = None
+_POOL_WAIT_SECONDS = 5.0
 
 
 def init_db_pool(min_conn: int = 2, max_conn: int = 10) -> None:
     """初始化连接池。应在应用启动时调用一次（幂等）。"""
-    global _pool
+    global _pool, _pool_slots
     if _pool is not None:
         return
     # psycopg2 默认不能适配 Python UUID → 必须注册 adapter
@@ -54,6 +57,7 @@ def init_db_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         user=settings.db_user,
         password=settings.db_password,
     )
+    _pool_slots = BoundedSemaphore(max_conn)
     # 验证连接
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -64,10 +68,11 @@ def init_db_pool(min_conn: int = 2, max_conn: int = 10) -> None:
 
 def close_db_pool() -> None:
     """关闭连接池。应在应用停更时调用。"""
-    global _pool
+    global _pool, _pool_slots
     if _pool is not None:
         _pool.closeall()
         _pool = None
+        _pool_slots = None
         logger.info("[DB] Connection pool closed")
 
 
@@ -104,13 +109,20 @@ def verify_legacy_alarm_history_gate() -> None:
 @contextmanager
 def get_connection():
     """获取数据库连接 (上下文管理器)。"""
-    if _pool is None:
+    pool = _pool
+    slots = _pool_slots
+    if pool is None or slots is None:
         raise RuntimeError("DB pool not initialized. Call init_db_pool() first.")
-    conn = _pool.getconn()
+    if not slots.acquire(timeout=_POOL_WAIT_SECONDS):
+        raise RuntimeError("DB connection pool wait timed out")
+    conn = None
     try:
+        conn = pool.getconn()
         yield conn
     finally:
-        _pool.putconn(conn)
+        if conn is not None:
+            pool.putconn(conn)
+        slots.release()
 
 
 # ══════════════════════════════════════
