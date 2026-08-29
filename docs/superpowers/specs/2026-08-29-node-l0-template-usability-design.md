@@ -1,6 +1,8 @@
 ---
-status: accepted
+status: superseded
 date: 2026-08-29
+superseded_by:
+  - 2026-08-29-inline-l0-point-processing-design.md
 authority:
   - 2026-08-27-zizu-platform-core-architecture-design.md
   - 2026-08-28-l0-l1-l2-user-experience-design.md
@@ -8,6 +10,9 @@ authority:
 ---
 
 # 节点、L0 与点位加工模板易用性收口设计
+
+> 本文的节点 CRUD、Neuron 导入和 L0 实时语义仍作为历史实现依据；其中“独立点位加工页、模板优先”
+> 的用户路径已被《原始点位内联加工设计》取代，不得据此恢复普通用户必须先维护模板的流程。
 
 ## 1. 目标
 
