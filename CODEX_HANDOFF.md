@@ -4928,3 +4928,21 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 本轮 Browser 已打开 `http://e606.hlszh.com:9000/`，页面正常显示登录表单，但没有有效登录会话，因此当前主干浏览器验收为 `INCOMPLETE`。登录页已保留，等待用户手工登录后继续。
 - 用户登录后已继续只读验收：节点树可选择 PCS；L0 实时显示 45 个点位及值/质量/时间/来源；L2 实时显示 `PCS 有功功率` 与 `pcs.igbt`；告警中心可查看当前事件、三条已配置规则及“选择实体 → 设置规则 → 试算/发布”入口。
 - 当前仍为 `INCOMPLETE`：L0 历史虽然能选择点位与 1h/24h/7d 范围，但浏览器未确认图表数据；没有完成单点 L1 试算；点击 L2 实体后未确认历史与来源详情。Browser 在大表格页多次读取超时，需区分工具超时与产品问题后再下结论。本轮没有发布配置、触发告警、控制或设备写。
+
+## 2026-08-30 — v0.4.89 部署与 Browser 主干验收
+
+- 修复 L1 内联试算在节点已有多个输出时总取 `outputs[0]` 的问题；前端现在按请求的
+  `entity_definition_id` 选择结果。回归测试覆盖“既有 IGBT + 新建 PCS 有功功率”场景。
+- 发布提交 `3567b54`、标签 `v0.4.89`；GitHub Actions `33262237897` 成功。1 号机运行 ARM64 固定摘要
+  `sha256:a2e2ccbc45f6a1e7c6a134574f4dca34be8f42594f7d32b6843d9f49f698f942`，实际 image ID
+  `sha256:2e911a94d330e31bb23505a6aa189294169e9308eba098f4532397152c355265`。
+- 切换前 Schema051 备份为 `/opt/zizu-backups/pre-v0.4.89-schema051/omnithings.dump`，88,338,480 bytes，
+  SHA-256 `b52055043abdd83527f5fded4b1e7e6885366a2c8ec3b7b51c3c3e9a2114a9f5`，`pg_restore -l` 775 项通过。
+- 运行复核：容器 healthy、restart 0、host 网络、`/dev/mqueue`、Schema051、outbox 积压 0，近 30 分钟
+  PoolError/连接池耗尽/Traceback/CRITICAL/ERROR 为 0；未启用 TLS/Caddy，未执行策略、控制或设备写。
+- Browser 已完成“节点树 → L0 → L1 → L2 → 告警”安全验收。PCS 有 45 个 L0 点位；选择
+  `交流总有功功率` 的 L1 试算返回 `0`、正常、正确时间和 1 条来源证据，不再显示 IGBT 的 33；L2 可查看
+  实时、历史入口与来源；告警规则从 L2 实体中选择。未点击发布实体。
+- 尚存独立质量缺陷：部分数小时未更新的 L0/L2 数据仍显示“正常”，逐点 STALE 判定不一致。下一步优先
+  按原始观测时间与统一节拍复现并修正质量传播，不扩展新功能。
+- 完整记录：`docs/deploy-1号机-v0.4.89-http.md`。
