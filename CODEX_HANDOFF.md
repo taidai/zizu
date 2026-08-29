@@ -1,5 +1,20 @@
 ---
 
+## Session 2026-08-29 — v0.4.87 已发布并部署到 1 号机
+
+- `main` 已发布为 `v0.4.87`，源码 `ad914b4`；Actions `33248803913` 成功。1 号机已切换到 ARM64 固定摘要
+  `sha256:633726335628319c0507b820e84c010f71528a724415381d864f936caef23ca9`，Schema 051。
+- 切换前备份位于 `/opt/zizu-backups/pre-v0.4.87-schema050/omnithings.dump`，大小 14,413,530 bytes，
+  SHA256 为 `46986771d426348dc21a439d56aba68940aef5991ed0fdcd8cbda2cb758d94be`；未清空业务数据。
+- 完整门禁：后端 270 passed / 134 skipped / 57 subtests，发布专项 15 passed，前端 42 passed，
+  TypeScript 与 Vite build 通过。
+- 现场公网首页和 live 健康接口为 200；容器 healthy、restart 0，保持 host 网络、`/dev/mqueue` 和
+  unless-stopped。PCS 45/45 L0 latest 均为 GOOD，`pcs.active_power` 为 `0 / GOOD`，L2 来源证据和历史可读，
+  outbox 为 0，告警消费者持续前进，日志无 ERROR/Traceback。
+- 未启用 Caddy/TLS，未验证自动策略，未执行设备写。现场账号已轮换，因此尚缺有效账号登录后的页面点击复验；
+  没有重置密码或继续试探。完整证据见 `docs/deploy-1号机-v0.4.87-http.md`。
+- `stash@{0}` 保险和四个用户未跟踪路径继续保留，未纳入发布。
+
 ## Session 2026-08-29 — PCS 标准实体闭环已本地合并到 main（未推送、未部署）
 
 - 已将 `ticket/v0.4.85-node-data-trunk-hard-cut` 快进合并到本地 `main`，合并后代码提交为
