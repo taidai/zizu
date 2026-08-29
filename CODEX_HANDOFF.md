@@ -4904,3 +4904,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 新增标准库脚本 `scripts/verify_delivery.py`，运行后端完整单测、scripts 完整单测、前端全部 Node 测试和生产构建；可通过 `--site-url` 追加首页与匿名存活探针，只做 GET，不登录、不配置、不控制。报告记录 commit、VERSION、Schema 和逐项结果；无现场地址返回 `INCOMPLETE`，任一失败返回 `FAILED`，本地及现场自动检查全通过返回 `PASSED`。
 - TDD 证据：专项测试先因 `scripts.verify_delivery` 不存在而 RED，最小实现后 6/6 通过。完整单命令实测：后端 341 tests / 134 skipped / 0 failure，scripts 43/43，前端 42/42，Vite 8184 modules 构建成功；因未在该次命令传现场地址，报告按设计为 `INCOMPLETE`。
 - 另行匿名只读复核 1 号机：公网首页 HTTP 200，`/api/v1/health/live` 为 `alive / 0.4.87`。这只证明站点存活，不替代 `docs/acceptance-checklist.md` 中节点、点位、实体和告警的人工业务闭环。
+
+## 2026-08-29 — Browser 主干验收成为完成条件
+
+- 维护者要求每次开发或部署完成后，都用 Browser 沿“节点树 → L0 原始点位 → L1 点位加工 → L2 全局实体 → 告警”实际使用一次；首页和健康探针不再算浏览器验收。
+- 规则已写入 `AGENTS.md`，详细步骤归入 `docs/acceptance-checklist.md`。默认只读浏览；涉及配置变更时使用隔离测试节点，不执行策略、控制或设备写。
+- 本轮 Browser 已打开 `http://e606.hlszh.com:9000/`，页面正常显示登录表单，但没有有效登录会话，因此当前主干浏览器验收为 `INCOMPLETE`。登录页已保留，等待用户手工登录后继续。
+- 用户登录后已继续只读验收：节点树可选择 PCS；L0 实时显示 45 个点位及值/质量/时间/来源；L2 实时显示 `PCS 有功功率` 与 `pcs.igbt`；告警中心可查看当前事件、三条已配置规则及“选择实体 → 设置规则 → 试算/发布”入口。
+- 当前仍为 `INCOMPLETE`：L0 历史虽然能选择点位与 1h/24h/7d 范围，但浏览器未确认图表数据；没有完成单点 L1 试算；点击 L2 实体后未确认历史与来源详情。Browser 在大表格页多次读取超时，需区分工具超时与产品问题后再下结论。本轮没有发布配置、触发告警、控制或设备写。
