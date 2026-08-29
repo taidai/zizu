@@ -16,7 +16,12 @@ from app.services.data_trunk_outbox import (
     FrameOutboxEvent,
 )
 from app.services.committed_l2_jdm_consumer import CommittedL2JdmConsumer
-from app.services.jdm_runtime import JdmModel, JdmRuntime, evaluate_model
+from app.services.jdm_runtime import (
+    JdmModel,
+    JdmRuntime,
+    evaluate_model,
+    evaluate_model_content,
+)
 
 
 NOW = datetime(2026, 8, 30, 1, 0, tzinfo=UTC)
@@ -158,6 +163,13 @@ def _consumer(repository: _Repository) -> CommittedL2JdmConsumer:
 
 
 class CommittedL2JdmConsumerTest(unittest.IsolatedAsyncioTestCase):
+    def test_explicit_simulation_uses_the_same_pure_model_adapter(self) -> None:
+        result = evaluate_model_content(_model().content, {"power": 12})
+
+        self.assertTrue(result["triggered"])
+        self.assertEqual("control", result["actions"][0]["type"])
+        self.assertIsNone(result["error"])
+
     async def test_good_committed_l2_records_judgment_and_control_intent(self) -> None:
         repository = _Repository(_model())
         event = _frame(_change())

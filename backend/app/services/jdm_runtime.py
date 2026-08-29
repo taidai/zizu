@@ -154,15 +154,11 @@ def evaluate_model(model: JdmModel, event: FrameOutboxEvent) -> JdmExecution:
         context[field] = _json_value(change.value.value)
 
     try:
-        result = evaluate_rule(model.content, context)
+        result = evaluate_model_content(model.content, context)
         if result.get("error"):
             raise JdmRuntimeError("JDM_EVALUATION_FAILED")
-        outputs = _json_mapping(result.get("outputs", {}))
-        actions = [
-            _json_mapping(action)
-            for action in result.get("actions", ())
-            if isinstance(action, Mapping)
-        ]
+        outputs = result["outputs"]
+        actions = result["actions"]
     except Exception:
         return _execution(
             model,
@@ -183,6 +179,25 @@ def evaluate_model(model: JdmModel, event: FrameOutboxEvent) -> JdmExecution:
         outputs=outputs,
         actions=actions,
     )
+
+
+def evaluate_model_content(
+    content: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate editor input without persistence or runtime side effects."""
+    result = evaluate_rule(dict(content), _json_mapping(context))
+    return {
+        "triggered": bool(result.get("triggered")),
+        "actions": [
+            _json_mapping(action)
+            for action in result.get("actions", ())
+            if isinstance(action, Mapping)
+        ],
+        "outputs": _json_mapping(result.get("outputs", {})),
+        "error": None if result.get("error") is None else str(result["error"]),
+        "engine": str(result.get("engine", "error")),
+    }
 
 
 class JdmRuntime:

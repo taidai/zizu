@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
 import unittest
-from unittest.mock import patch
 from uuid import UUID
 
 os.environ.setdefault("DB_PASSWORD", "database-secret-value")
@@ -158,18 +157,6 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
         with self.assertRaises(EntityInstanceError) as raised:
             self.runtime.read(ENTITY_ID)
         self.assertEqual(raised.exception.code, "ENTITY_DATA_MISSING")
-
-    def test_rule_context_keeps_the_l2_event_and_conversion_provenance(self) -> None:
-        from app.services.rule_engine import _entity_instance_context
-
-        self.publish_l2()
-        with patch(
-            "app.api.entity_instances.get_entity_instance_runtime",
-            return_value=self.runtime,
-        ):
-            context = _entity_instance_context({str(ENTITY_ID)})
-
-        self.assert_l2_provenance(context[str(ENTITY_ID)])
 
 if __name__ == "__main__":
     unittest.main()

@@ -849,16 +849,6 @@ export async function deleteRuleTemplate(templateId: string): Promise<void> {
   if (!res.ok) throw new Error(`Delete template failed: ${res.status}`)
 }
 
-export async function applyRuleTemplate(templateId: string, name: string, enabled = true): Promise<{ rule: any; status: string }> {
-  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}/apply`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, enabled }),
-  })
-  if (!res.ok) throw new Error(`Apply template failed: ${res.status}`)
-  return res.json()
-}
-
 // ── Alarms ──
 
 export type AlarmLevel = 'INFO' | 'WARNING' | 'MAJOR' | 'CRITICAL' 

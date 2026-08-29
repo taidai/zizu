@@ -92,6 +92,7 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_data_frames') IS NULL
                      OR to_regclass('public.t_data_frame_outbox') IS NULL
                      OR to_regclass('public.t_committed_frame_consumers') IS NULL
+                     OR to_regclass('public.t_jdm_executions') IS NULL
                      OR to_regclass('public.l2_agg_1h') IS NULL
                      OR to_regclass('public.l2_agg_1d') IS NULL
                      OR to_regclass('zizu_internal.retention_guard') IS NULL
@@ -131,7 +132,21 @@ def verify_data_trunk_contract_gate(
                       ('t_telemetry_latest','frame_sequence'),
                       ('t_l2_observations','frame_id'),
                       ('t_l2_observations','commit_sequence'),
-                      ('t_l2_latest','frame_sequence')
+                      ('t_l2_latest','frame_sequence'),
+                      ('t_rules','configuration_revision'),
+                      ('t_jdm_executions','id'),
+                      ('t_jdm_executions','rule_id'),
+                      ('t_jdm_executions','rule_version'),
+                      ('t_jdm_executions','frame_id'),
+                      ('t_jdm_executions','frame_sequence'),
+                      ('t_jdm_executions','configuration_revision'),
+                      ('t_jdm_executions','model_digest'),
+                      ('t_jdm_executions','status'),
+                      ('t_jdm_executions','reason_code'),
+                      ('t_jdm_executions','inputs'),
+                      ('t_jdm_executions','outputs'),
+                      ('t_jdm_executions','actions'),
+                      ('t_jdm_executions','executed_at')
                     ) AS required(table_name,column_name)
                     LEFT JOIN information_schema.columns AS actual
                       ON actual.table_schema='public'
@@ -159,10 +174,14 @@ def verify_data_trunk_contract_gate(
                       AND indexname='ix_telemetry_tag_frame_sequence'
                   ) OR NOT EXISTS (
                     SELECT 1 FROM pg_indexes
-                    WHERE schemaname='public'
+                      WHERE schemaname='public'
                       AND indexname='uq_committed_frame_consumer_sequence'
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname='public'
+                      AND indexname='ix_jdm_executions_rule_sequence'
                   ) THEN
-                    RAISE EXCEPTION 'schema 049 frame indexes are incomplete'
+                    RAISE EXCEPTION 'schema 052 frame indexes are incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF to_regprocedure('public.guard_data_frame_transition()') IS NULL
@@ -182,7 +201,7 @@ def verify_data_trunk_contract_gate(
                        WHERE conname='chk_data_frame_outbox_claim'
                      ) OR (
                        SELECT count(*) FROM pg_constraint
-                       WHERE conrelid='public.t_committed_frame_consumers'::regclass
+                     WHERE conrelid='public.t_committed_frame_consumers'::regclass
                          AND conname IN (
                            't_committed_frame_consumers_pkey',
                            'chk_committed_frame_consumer_key',
@@ -191,8 +210,28 @@ def verify_data_trunk_contract_gate(
                            'fk_committed_frame_consumer_frame'
                          )
                      ) <> 5
+                     OR NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conrelid='public.t_rules'::regclass
+                         AND conname='fk_rule_configuration_revision'
+                     )
+                     OR (
+                       SELECT count(*) FROM pg_constraint
+                       WHERE conrelid='public.t_jdm_executions'::regclass
+                         AND conname IN (
+                           't_jdm_executions_pkey',
+                           'uq_jdm_execution_rule_frame',
+                           'fk_jdm_execution_frame',
+                           'fk_jdm_execution_configuration_revision',
+                           'chk_jdm_execution_rule_version',
+                           'chk_jdm_execution_frame_sequence',
+                           'chk_jdm_execution_model_digest',
+                           'chk_jdm_execution_status',
+                           'chk_jdm_execution_reason'
+                         )
+                     ) <> 9
                      ) THEN
-                    RAISE EXCEPTION 'schema 049 frame fencing is incomplete'
+                    RAISE EXCEPTION 'schema 052 frame fencing is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF (

@@ -1,24 +1,19 @@
-"""
-ZiZu Rules API - 规则引擎管理
-
-规则以 GoRules JDM JSON 形式存储，支持 CRUD 与模拟测试。
-后端使用 zen-engine 对 JDM 决策图/决策表进行真实评估。
-"""
+"""JDM configuration, side-effect-free simulation, and execution evidence."""
 from __future__ import annotations
 
-import json
-import hashlib
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
-from app.services.gorules_adapter import _normalize_jdm_content
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
     CONFIGURATION_READ,
     CONFIGURATION_WRITE,
+    RUNTIME_READ,
     principal_for,
     protected,
 )
@@ -28,515 +23,350 @@ from app.services.entity_instance_catalog import (
     EntityInstanceReferenceError,
     validate_rule_entity_references,
 )
-from app.services.rule_alarm_adapter import (
-    RuleAlarmAdapter,
-    build_postgres_rule_alarm_adapter,
-)
 from app.services.identity import Principal
-from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
+from app.services.jdm_runtime import (
+    JdmRuntimeError,
+    evaluate_model_content,
+    required_inputs,
+)
+
 
 router = APIRouter()
 
 
-def _rule_digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-
-
-def _publish_jdm_revision(
-    connection,
-    *,
-    actor: str,
-    action: str,
-    rule_id: UUID,
-    content: object,
-) -> int:
-    revisions = PostgresConfigurationRevisions()
-    base = revisions.current(transaction=connection)
-    return revisions.publish(
-        transaction=connection,
-        base_revision=base,
-        actor=actor,
-        action=action,
-        resource_kind="jdm_rule",
-        resource_id=str(rule_id),
-        before_digest=None,
-        after_digest=_rule_digest(content),
-        details={},
-    )
-
-
-def get_rule_alarm_adapter() -> RuleAlarmAdapter:
-    return build_postgres_rule_alarm_adapter()
-
-# zen-engine 为可选依赖；未安装时模拟接口回退到占位实现
-ZEN_AVAILABLE = False
-ZenEngine = None
-ZenError = Exception
-try:
-    from zen import ZenEngine as _ZenEngine
-
-    ZenEngine = _ZenEngine
-    ZEN_AVAILABLE = True
-except Exception as e:
-    logger.warning("[API/rules] zen package not available: {}", e)
-
-
 class RuleCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
-    rule_type: str = Field(..., pattern="^(alarm|control|fault_map|linkage)$")
-    jdm_content: dict = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    rule_type: str = Field(min_length=1, max_length=32)
+    jdm_content: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
 
 
 class RuleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str | None = Field(None, min_length=1, max_length=200)
-    rule_type: str | None = Field(None, pattern="^(alarm|control|fault_map|linkage)$")
-    jdm_content: dict | None = None
+    rule_type: str | None = Field(None, min_length=1, max_length=32)
+    jdm_content: dict[str, Any] | None = None
     enabled: bool | None = None
 
 
 class SimulateRequest(BaseModel):
-    context: dict = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvaluateRequest(BaseModel):
-    content: dict = Field(default_factory=dict)
-    context: dict = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+    content: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
-def _serialize_rule(row: dict) -> dict:
-    row = dict(row)
-    row["id"] = str(row["id"])
-    if row.get("jdm_content") and isinstance(row["jdm_content"], str):
-        try:
-            row["jdm_content"] = json.loads(row["jdm_content"])
-        except Exception:
-            pass
-    if row.get("created_at"):
-        row["created_at"] = row["created_at"].isoformat()
-    if row.get("updated_at"):
-        row["updated_at"] = row["updated_at"].isoformat()
-    config = row.get("jdm_content", {}).get("_config", {}) \
-        if isinstance(row.get("jdm_content"), dict) else {}
-    if isinstance(config, dict) and config.get("sourceEntityIds"):
-        row["entity_reference_migration"] = {
-            "code": "ENTITY_REFERENCE_LEGACY_DEPRECATED",
-            "status": "read_only_compatibility",
-            "replacement": "sourceEntityInstanceIds",
-            "preview_path": "/api/v1/entity-instances/legacy-migration-preview",
-            "removal_ticket": 10,
-        }
-    if _has_legacy_control_actions(row.get("jdm_content")):
-        row["control_action_migration"] = {
-            "code": "RULE_CONTROL_LEGACY_FORBIDDEN",
-            "status": "read_only_compatibility",
-            "replacement": "_config.actions[].entity_instance_id",
-            "removal_ticket": 10,
-        }
-    return row
+def get_jdm_rules():
+    from app.services.jdm_postgres import PostgresJdmRules
+
+    return PostgresJdmRules()
 
 
-def _has_legacy_control_actions(content: object) -> bool:
-    if not isinstance(content, dict):
-        return False
-    config = content.get("_config", {})
-    groups = [content.get("actions", [])]
-    if isinstance(config, dict):
-        groups.append(config.get("actions", []))
-    forbidden_fields = {
-        "node", "group", "tag", "topic", "payload", "command",
-        "entity_id", "entity", "entity_name", "cooldown",
-    }
-    for actions in groups:
-        if isinstance(actions, list) and any(
-            isinstance(action, dict) and (
-                action.get("type") == "neuron_write"
-                or (
-                    action.get("type") == "control"
-                    and bool(forbidden_fields.intersection(action))
-                )
-            )
-            for action in actions
-        ):
-            return True
-    return False
+def get_jdm_runtime():
+    from app.main import get_pipeline
 
-
-def _replace_rule_entity_instance_references(
-    cur,
-    rule_id: UUID,
-    references: tuple[tuple[str, str, UUID], ...],
-) -> None:
-    cur.execute(
-        "DELETE FROM t_rule_entity_instance_refs WHERE rule_id = %s",
-        (rule_id,),
-    )
-    for reference_kind, reference_key, entity_instance_id in references:
-        cur.execute(
-            """
-            INSERT INTO t_rule_entity_instance_refs
-              (rule_id, reference_kind, reference_key, entity_instance_id)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (rule_id, reference_kind, reference_key, entity_instance_id),
+    runtime = get_pipeline()
+    if runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "DATA_TRUNK_UNAVAILABLE",
+                "message": "数据主干尚未启动",
+            },
         )
+    return runtime
+
+
+def _serialize(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _serialize(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_serialize(item) for item in value]
+    return value
+
+
+def _serialize_rule(row: dict[str, Any]) -> dict[str, Any]:
+    return _serialize(dict(row))
+
+
+def _raise_jdm_http(error: Exception) -> None:
+    from app.services.configuration_revision import ConfigurationRevisionError
+    from app.services.data_trunk_contracts import DataTrunkError
+    from app.services.jdm_postgres import JdmRuleError
+
+    if isinstance(error, EntityInstanceReferenceError):
+        code = error.code
+    elif isinstance(error, (JdmRuleError, JdmRuntimeError)):
+        code = error.code
+    elif isinstance(error, ConfigurationRevisionError):
+        code = error.code
+    elif isinstance(error, DataTrunkError):
+        code = error.code
+    else:
+        logger.exception("[API/rules] JDM operation failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "JDM_OPERATION_FAILED", "message": "JDM 操作失败"},
+        ) from error
+
+    status_by_code = {
+        "JDM_RULE_NOT_FOUND": 404,
+        "CONFIGURATION_REVISION_UNAVAILABLE": 503,
+        "DATA_TRUNK_UNAVAILABLE": 503,
+        "CONFIGURATION_REVISION_STALE": 409,
+        "DATA_FRAME_CONFIGURATION_STALE": 409,
+        "CONFIGURATION_RUNTIME_BUSY": 409,
+    }
+    raise HTTPException(
+        status_code=status_by_code.get(code, 409),
+        detail={"code": code, "message": str(error)},
+    ) from error
+
+
+def _require_runtime_type(rule_type: str) -> None:
+    if rule_type not in {"control", "linkage"}:
+        from app.services.jdm_postgres import JdmRuleError
+
+        raise JdmRuleError("JDM_RULE_TYPE_UNSUPPORTED")
+
+
+def _validate_content(
+    content: dict[str, Any],
+    catalog: EntityInstanceCatalog,
+) -> tuple[tuple[str, str, UUID], ...]:
+    from app.services.jdm_postgres import JdmRuleError
+
+    config = content.get("_config")
+    if not isinstance(config, dict):
+        raise JdmRuleError("JDM_MODEL_INVALID")
+    forbidden_sources = {
+        "sourceNodeIds",
+        "sourceTagIds",
+        "sourceTags",
+        "tagMappings",
+        "nodeMappings",
+    }
+    if forbidden_sources.intersection(config):
+        raise JdmRuleError("JDM_L2_INPUT_REQUIRED")
+    try:
+        required_inputs(content)
+    except JdmRuntimeError as error:
+        raise JdmRuleError(error.code) from error
+
+    actions = [
+        *content.get("actions", ()),
+        *config.get("actions", ()),
+    ]
+    if not all(
+        isinstance(action, dict) and action.get("type") == "control"
+        for action in actions
+    ):
+        raise JdmRuleError("JDM_ACTION_UNSUPPORTED")
+    return validate_rule_entity_references(content, catalog)
+
+
+async def _apply_jdm_change(repository, runtime, operation):
+    base_revision = await asyncio.to_thread(repository.current_revision)
+    gate = runtime.data_trunk.configuration_gate
+    await asyncio.to_thread(gate.begin_configuration_publish, base_revision)
+    try:
+        result = await asyncio.to_thread(operation, base_revision)
+    except Exception:
+        gate.cancel_configuration_publish()
+        raise
+    await runtime.reload_rules_now()
+    await asyncio.to_thread(gate.reconcile_configuration_runtime)
+    return result
 
 
 @router.get("/rules", **protected(CONFIGURATION_READ))
-async def list_rules(enabled: bool | None = Query(None)) -> dict:
-    """列出所有规则。"""
-    from app.services.telemetry_store import get_connection
-
-    conditions = []
-    params: list = []
-    if enabled is not None:
-        conditions.append("enabled = %s")
-        params.append(enabled)
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-
-    query = f"""
-    SELECT id, name, rule_type, jdm_content, version, enabled, created_at, updated_at
-    FROM t_rules
-    {where}
-    ORDER BY updated_at DESC
-    """
+async def list_rules(
+    enabled: bool | None = Query(None),
+    repository=Depends(get_jdm_rules),
+) -> dict[str, Any]:
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-                columns = [desc[0] for desc in cur.description]
-                rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"rules": [_serialize_rule(r) for r in rows]}
-    except Exception as e:
-        logger.error("[API/rules] list failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        rows = await asyncio.to_thread(repository.list, enabled)
+        return {"rules": [_serialize_rule(row) for row in rows]}
+    except Exception as error:
+        _raise_jdm_http(error)
+
+
+@router.post("/rules/evaluate", **protected(CONFIGURATION_WRITE))
+async def evaluate_rule(request: EvaluateRequest) -> dict[str, Any]:
+    """Evaluate an editor draft through the production model adapter only."""
+    evaluation = await asyncio.to_thread(
+        evaluate_model_content,
+        request.content,
+        request.context,
+    )
+    return {"context": request.context, "evaluation": evaluation}
 
 
 @router.post("/rules", **protected(CONFIGURATION_WRITE))
 async def create_rule(
-    req: RuleCreateRequest,
+    request: RuleCreateRequest,
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
-    rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
-) -> dict:
-    """创建规则。"""
-    from app.services.telemetry_store import get_connection
-
+    repository=Depends(get_jdm_rules),
+    runtime=Depends(get_jdm_runtime),
+) -> dict[str, Any]:
     try:
-        references = validate_rule_entity_references(
-            req.jdm_content,
-            catalog,
-            has_installed_alarm_definition=rule_alarms.has_installed_definition,
+        _require_runtime_type(request.rule_type)
+        references = _validate_content(request.jdm_content, catalog)
+        row = await _apply_jdm_change(
+            repository,
+            runtime,
+            lambda base_revision: repository.create(
+                name=request.name,
+                rule_type=request.rule_type,
+                jdm_content=request.jdm_content,
+                enabled=request.enabled,
+                references=references,
+                actor=principal.actor,
+                base_revision=base_revision,
+            ),
         )
-    except EntityInstanceReferenceError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO t_rules (name, rule_type, jdm_content, enabled, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id, name, rule_type, jdm_content, version, enabled, created_at, updated_at
-                    """,
-                    (req.name, req.rule_type, json.dumps(req.jdm_content), req.enabled,
-                     datetime.now(timezone.utc), datetime.now(timezone.utc)),
-                )
-                row = dict(zip([desc[0] for desc in cur.description], cur.fetchone()))
-                _replace_rule_entity_instance_references(cur, row["id"], references)
-                _publish_jdm_revision(
-                    conn,
-                    actor=principal.actor,
-                    action="jdm_rule.create",
-                    rule_id=row["id"],
-                    content=row,
-                )
-                conn.commit()
         return _serialize_rule(row)
-    except Exception as e:
-        logger.error("[API/rules] create failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        _raise_jdm_http(error)
 
 
 @router.get("/rules/{rule_id}", **protected(CONFIGURATION_READ))
-async def get_rule(rule_id: UUID) -> dict:
-    """获取单个规则。"""
-    from app.services.telemetry_store import get_connection
+async def get_rule(
+    rule_id: UUID,
+    repository=Depends(get_jdm_rules),
+) -> dict[str, Any]:
+    try:
+        row = await asyncio.to_thread(repository.get, rule_id)
+        if row is None:
+            from app.services.jdm_postgres import JdmRuleError
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, name, rule_type, jdm_content, version, enabled, created_at, updated_at FROM t_rules WHERE id = %s",
-                (rule_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Rule not found")
-            columns = [desc[0] for desc in cur.description]
-            return _serialize_rule(dict(zip(columns, row)))
+            raise JdmRuleError("JDM_RULE_NOT_FOUND")
+        return _serialize_rule(row)
+    except Exception as error:
+        _raise_jdm_http(error)
 
 
 @router.put("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
 async def update_rule(
     rule_id: UUID,
-    req: RuleUpdateRequest,
+    request: RuleUpdateRequest,
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
     catalog: EntityInstanceCatalog = Depends(get_entity_instance_catalog),
-    rule_alarms: RuleAlarmAdapter = Depends(get_rule_alarm_adapter),
-) -> dict:
-    """更新规则，版本号 +1。"""
-    from app.services.telemetry_store import get_connection
-
-    updates = []
-    params: list = []
-    data = req.model_dump(exclude_none=True)
-    if req.jdm_content is not None:
-        try:
-            references = validate_rule_entity_references(
-                req.jdm_content,
-                catalog,
-                has_installed_alarm_definition=rule_alarms.has_installed_definition,
-            )
-        except EntityInstanceReferenceError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": exc.code, "message": str(exc)},
-            ) from exc
-    for field, value in data.items():
-        if field == "jdm_content":
-            updates.append("jdm_content = %s")
-            params.append(json.dumps(value))
-        else:
-            updates.append(f"{field} = %s")
-            params.append(value)
-
-    if not updates:
-        return await get_rule(rule_id)
-
-    updates.append("version = version + 1")
-    updates.append("updated_at = %s")
-    params.append(datetime.now(timezone.utc))
-    params.append(rule_id)
-
-    query = f"UPDATE t_rules SET {', '.join(updates)} WHERE id = %s RETURNING id, name, rule_type, jdm_content, version, enabled, created_at, updated_at"
+    repository=Depends(get_jdm_rules),
+    runtime=Depends(get_jdm_runtime),
+) -> dict[str, Any]:
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-                row = cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail="Rule not found")
-                columns = [desc[0] for desc in cur.description]
-                if req.jdm_content is not None:
-                    _replace_rule_entity_instance_references(cur, rule_id, references)
-                result = _serialize_rule(dict(zip(columns, row)))
-                _publish_jdm_revision(
-                    conn,
-                    actor=principal.actor,
-                    action="jdm_rule.update",
-                    rule_id=rule_id,
-                    content=result,
-                )
-                conn.commit()
-                return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("[API/rules] update failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        current = await asyncio.to_thread(repository.get, rule_id)
+        if current is None:
+            from app.services.jdm_postgres import JdmRuleError
+
+            raise JdmRuleError("JDM_RULE_NOT_FOUND")
+        if current["rule_type"] not in {"control", "linkage"}:
+            from app.services.jdm_postgres import JdmRuleError
+
+            raise JdmRuleError("JDM_RULE_LEGACY_READ_ONLY")
+        changes = request.model_dump(exclude_none=True)
+        if not changes:
+            return _serialize_rule(current)
+        rule_type = str(changes.get("rule_type", current["rule_type"]))
+        _require_runtime_type(rule_type)
+        content = changes.get("jdm_content", current["jdm_content"])
+        references = (
+            _validate_content(content, catalog)
+            if "jdm_content" in changes
+            else None
+        )
+        row = await _apply_jdm_change(
+            repository,
+            runtime,
+            lambda base_revision: repository.update(
+                rule_id=rule_id,
+                changes=changes,
+                references=references,
+                actor=principal.actor,
+                base_revision=base_revision,
+            ),
+        )
+        return _serialize_rule(row)
+    except Exception as error:
+        _raise_jdm_http(error)
 
 
 @router.delete("/rules/{rule_id}", **protected(CONFIGURATION_WRITE))
 async def delete_rule(
     rule_id: UUID,
     principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
-) -> dict:
-    """删除规则。"""
-    from app.services.telemetry_store import get_connection
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM t_rules WHERE id = %s RETURNING id", (rule_id,))
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Rule not found")
-            _publish_jdm_revision(
-                conn,
-                actor=principal.actor,
-                action="jdm_rule.delete",
-                rule_id=rule_id,
-                content={"deleted": str(rule_id)},
-            )
-            conn.commit()
-    return {"status": "deleted", "id": str(rule_id)}
-
-
-@router.post("/rules/evaluate", **protected(CONFIGURATION_WRITE))
-async def evaluate_rule(req: EvaluateRequest) -> dict:
-    """直接评估决策图/表内容，不依赖数据库中的规则。"""
-    logger.info("[API/rules] evaluate context_keys={}", list(req.context.keys()))
+    repository=Depends(get_jdm_rules),
+    runtime=Depends(get_jdm_runtime),
+) -> dict[str, Any]:
     try:
-        if ZEN_AVAILABLE:
-            evaluation = _evaluate_with_zen(req.content, req.context)
-        else:
-            evaluation = {
-                "result": {"hit": True, "actions": [{"type": "log", "message": "zen 未安装，返回占位结果"}]},
-                "trace": None,
-                "performance": None,
-            }
-        return {
-            "context": req.context,
-            "evaluation": evaluation,
-        }
-    except Exception as e:
-        logger.error("[API/rules] evaluate failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def _normalize_table_cell(value: str | None, is_input: bool) -> str:
-    """将决策表空单元格转换为 zen-engine 可识别的表达式。"""
-    if value is None or value == "":
-        return "1 == 1" if is_input else "null"
-    return str(value)
-
-
-def _table_to_graph(jdm_content: dict) -> dict:
-    """将 jdm-editor 决策图/表转换为 zen-engine 可评估的决策图。"""
-    if "nodes" not in jdm_content:
-        # 纯决策表对象：包装成 zen-engine 决策图
-        return _build_zen_graph(
-            jdm_content.get("inputs", []),
-            jdm_content.get("outputs", []),
-            jdm_content.get("rules", []),
-            jdm_content.get("hitPolicy", "first"),
+        result = await _apply_jdm_change(
+            repository,
+            runtime,
+            lambda base_revision: repository.delete(
+                rule_id=rule_id,
+                actor=principal.actor,
+                base_revision=base_revision,
+            ),
         )
-
-    # 决策图格式：转换节点类型并规范化决策表单元格
-    node_type_map = {
-        "startNode": "inputNode",
-        "decisionNode": "decisionTableNode",  # 兼容旧版本 jdm-editor
-        "endNode": "outputNode",
-    }
-    new_nodes = []
-    for node in jdm_content.get("nodes", []):
-        new_node = dict(node)
-        new_node["type"] = node_type_map.get(node.get("type"), node.get("type"))
-        if new_node["type"] == "decisionTableNode" and "content" in new_node:
-            content = new_node["content"]
-            new_node["content"] = _build_zen_table_content(
-                content.get("inputs", []),
-                content.get("outputs", []),
-                content.get("rules", []),
-                content.get("hitPolicy", "first"),
-            )
-        new_nodes.append(new_node)
-
-    return {
-        "nodes": new_nodes,
-        "edges": jdm_content.get("edges", []),
-    }
-
-
-def _build_zen_table_content(inputs: list, outputs: list, rules: list, hit_policy: str) -> dict:
-    """构建 zen-engine 决策表内容，并规范化空单元格。"""
-    normalized_rules = []
-    for rule in rules:
-        new_rule: dict = {"_id": rule.get("_id", str(id(rule)))}
-        for col in inputs:
-            new_rule[col["id"]] = _normalize_table_cell(rule.get(col["id"]), is_input=True)
-        for col in outputs:
-            new_rule[col["id"]] = _normalize_table_cell(rule.get(col["id"]), is_input=False)
-        if rule.get("_description"):
-            new_rule["_description"] = rule["_description"]
-        normalized_rules.append(new_rule)
-
-    return {
-        "hitPolicy": hit_policy,
-        "inputs": inputs,
-        "outputs": outputs,
-        "rules": normalized_rules,
-    }
-
-
-def _build_zen_graph(inputs: list, outputs: list, rules: list, hit_policy: str) -> dict:
-    """用决策表内容构建一个标准的 zen-engine 决策图。"""
-    return {
-        "nodes": [
-            {"id": "input", "type": "inputNode", "name": "Input"},
-            {
-                "id": "table",
-                "type": "decisionTableNode",
-                "name": "决策表",
-                "content": _build_zen_table_content(inputs, outputs, rules, hit_policy),
-            },
-            {"id": "output", "type": "outputNode", "name": "Output"},
-        ],
-        "edges": [
-            {"id": "e1", "sourceId": "input", "targetId": "table", "type": "edge"},
-            {"id": "e2", "sourceId": "table", "targetId": "output", "type": "edge"},
-        ],
-    }
-
-
-def _evaluate_with_zen(jdm_content: dict, context: dict) -> dict:
-    """使用 zen-engine 评估 JDM 决策图/决策表。"""
-    if not ZEN_AVAILABLE or ZenEngine is None:
-        raise RuntimeError("zen 未安装，无法评估规则")
-
-    normalized = _normalize_jdm_content(jdm_content)
-    graph = _table_to_graph(normalized)
-    engine = ZenEngine()
-    decision = engine.create_decision(json.dumps(graph))
-    response = decision.evaluate(context, {"trace": True})
-    return {
-        "result": response.get("result") if isinstance(response, dict) else getattr(response, "result", None),
-        "trace": response.get("trace") if isinstance(response, dict) else getattr(response, "trace", None),
-        "performance": response.get("performance") if isinstance(response, dict) else getattr(response, "performance", None),
-    }
+        return _serialize(result)
+    except Exception as error:
+        _raise_jdm_http(error)
 
 
 @router.post("/rules/{rule_id}/simulate", **protected(CONFIGURATION_WRITE))
-async def simulate_rule(rule_id: UUID, req: SimulateRequest) -> dict:
-    """
-    规则模拟：加载 JDM 内容并使用 zen-engine 评估上下文。
-    若 zen 未安装，返回占位结果以便 UI 联调。
-    """
-    rule = await get_rule(rule_id)
-    logger.info("[API/rules] simulate rule={} context_keys={}", rule_id, list(req.context.keys()))
-
+async def simulate_rule(
+    rule_id: UUID,
+    request: SimulateRequest,
+    repository=Depends(get_jdm_rules),
+) -> dict[str, Any]:
     try:
-        if ZEN_AVAILABLE:
-            evaluation = _evaluate_with_zen(rule.get("jdm_content", {}), req.context)
-        else:
-            evaluation = {
-                "result": {"hit": True, "actions": [{"type": "log", "message": "zen 未安装，返回占位结果"}]},
-                "trace": None,
-                "performance": None,
-            }
+        rule = await asyncio.to_thread(repository.get, rule_id)
+        if rule is None:
+            from app.services.jdm_postgres import JdmRuleError
+
+            raise JdmRuleError("JDM_RULE_NOT_FOUND")
+        _require_runtime_type(str(rule["rule_type"]))
+        evaluation = await asyncio.to_thread(
+            evaluate_model_content,
+            rule["jdm_content"],
+            request.context,
+        )
         return {
             "rule_id": str(rule_id),
-            "rule_name": rule.get("name"),
-            "context": req.context,
+            "rule_name": rule["name"],
+            "context": request.context,
             "evaluation": evaluation,
         }
-    except Exception as e:
-        logger.error("[API/rules] simulate failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as error:
+        _raise_jdm_http(error)
 
-@router.post("/rules/{rule_id}/dry-run", **protected(CONFIGURATION_WRITE))
-async def dry_run_rule_endpoint(rule_id: UUID) -> dict:
-    """用当前真实数据试运行单条规则，不执行告警/控制动作。"""
-    from app.services.rule_engine import dry_run_rule
+
+@router.get("/rules/{rule_id}/executions", **protected(RUNTIME_READ))
+async def list_rule_executions(
+    rule_id: UUID,
+    limit: int = Query(50, ge=1, le=100),
+    repository=Depends(get_jdm_rules),
+) -> dict[str, Any]:
     try:
-        return dry_run_rule(str(rule_id))
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error("[API/rules] dry-run failed: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        rows = await asyncio.to_thread(repository.executions, rule_id, limit)
+        return {"executions": [_serialize(dict(row)) for row in rows]}
+    except Exception as error:
+        _raise_jdm_http(error)
 
+
+__all__ = [
+    "get_jdm_rules",
+    "get_jdm_runtime",
+    "router",
+]
