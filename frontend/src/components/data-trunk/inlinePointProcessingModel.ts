@@ -36,6 +36,15 @@ export interface InlinePointProcessingDraft {
   inputSelections: Record<string, string>
 }
 
+export interface InlinePointProcessingDefaults {
+  mode: InlinePointProcessingMode
+  displayName: string
+  definitionKey: string
+  unit: string
+  dataType: string
+  expression: string
+}
+
 function stableKey(value: string, fallback: string): string {
   const normalized = value
     .normalize('NFKD')
@@ -43,6 +52,38 @@ function stableKey(value: string, fallback: string): string {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
   return normalized || fallback
+}
+
+function pointInputIds(points: readonly InlineRawPoint[]): string[] {
+  const used = new Set<string>()
+  return points.map((point, index) => {
+    const base = stableKey(point.name, `point_${index + 1}`)
+    let inputId = base
+    let suffix = 2
+    while (used.has(inputId)) inputId = `${base}_${suffix++}`
+    used.add(inputId)
+    return inputId
+  })
+}
+
+export function suggestInlinePointProcessingDefaults(
+  points: readonly InlineRawPoint[],
+  deviceCategory: string,
+): InlinePointProcessingDefaults {
+  if (points.length === 0) throw new Error('至少选择一个原始点位')
+  const first = points[0]
+  const category = stableKey(deviceCategory, 'entity')
+  const sourceKey = stableKey(first.name, '')
+  const identityFallback = `point_${stableKey(first.id, 'value')}`
+
+  return {
+    mode: points.length > 1 ? 'formula' : 'passthrough',
+    displayName: first.display_name || first.name,
+    definitionKey: `${/^[a-z]/.test(category) ? category : `device_${category}`}.${sourceKey || identityFallback}`,
+    unit: first.unit || '',
+    dataType: first.data_type.toUpperCase(),
+    expression: pointInputIds(points).join(' + '),
+  }
 }
 
 function finiteNumber(value: unknown, fallback: number, label: string): number {
@@ -85,15 +126,11 @@ export function buildNodePointProcessingDraft(
   const freshnessSeconds = finiteNumber(form.freshnessSeconds, 30, '新鲜时间')
   if (freshnessSeconds <= 0) throw new Error('新鲜时间必须大于 0')
 
-  const used = new Set<string>()
-  const keyedPoints = points.map((point, index) => {
-    const base = stableKey(point.name, `point_${index + 1}`)
-    let inputId = base
-    let suffix = 2
-    while (used.has(inputId)) inputId = `${base}_${suffix++}`
-    used.add(inputId)
-    return { point: { ...point }, inputId }
-  })
+  const inputIds = pointInputIds(points)
+  const keyedPoints = points.map((point, index) => ({
+    point: { ...point },
+    inputId: inputIds[index],
+  }))
   const first = keyedPoints[0]
   const definitionParts = definitionKey.split('.')
   const outputId = stableKey(definitionParts[definitionParts.length - 1] || '', 'entity')

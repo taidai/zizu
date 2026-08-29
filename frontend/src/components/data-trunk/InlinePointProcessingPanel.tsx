@@ -8,16 +8,9 @@ import {
 import { buildDataTrunkViewModel } from './dataTrunkViewModel'
 import {
   buildNodePointProcessingDraft,
+  suggestInlinePointProcessingDefaults,
   type InlinePointProcessingMode,
 } from './inlinePointProcessingModel'
-
-function stableKey(value: string, fallback: string): string {
-  return value
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '') || fallback
-}
 
 export default function InlinePointProcessingPanel({
   nodeId,
@@ -57,15 +50,13 @@ export default function InlinePointProcessingPanel({
 
   const openEditor = () => {
     if (points.length === 0) return
-    const first = points[0]
-    const category = stableKey(deviceCategory, 'entity')
-    const pointKey = stableKey(first.name, 'value')
-    setDisplayName(first.display_name || first.name)
-    setDefinitionKey(`${category}.${pointKey}`)
-    setUnit(first.unit || '')
-    setDataType(first.data_type.toUpperCase())
-    setExpression(points.map((point, index) => stableKey(point.name, `point_${index + 1}`)).join(' + '))
-    setMode(points.length > 1 ? 'formula' : 'passthrough')
+    const defaults = suggestInlinePointProcessingDefaults(points, deviceCategory)
+    setDisplayName(defaults.displayName)
+    setDefinitionKey(defaults.definitionKey)
+    setUnit(defaults.unit)
+    setDataType(defaults.dataType)
+    setExpression(defaults.expression)
+    setMode(defaults.mode)
     setExpanded(true)
   }
 
@@ -158,14 +149,10 @@ export default function InlinePointProcessingPanel({
 
       {expanded && (
         <div className="mt-3 border-t border-blue-100 pt-3">
-          <div className="grid gap-3 lg:grid-cols-4">
+          <div className="grid gap-3 lg:grid-cols-3">
             <label className="text-[11px] font-medium text-gray-700">
               实体名称
               <input value={displayName} onChange={(event) => { setDisplayName(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
-            </label>
-            <label className="text-[11px] font-medium text-gray-700">
-              业务标识
-              <input value={definitionKey} onChange={(event) => { setDefinitionKey(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               加工方法
@@ -195,10 +182,20 @@ export default function InlinePointProcessingPanel({
             </label>
           )}
           {mode === 'formula' && (
-            <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_10rem_8rem]">
+            <div className="mt-3">
               <label className="text-[11px] font-medium text-gray-700">
                 公式
                 <input value={expression} onChange={(event) => { setExpression(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
+              </label>
+            </div>
+          )}
+
+          <details className="mt-3 rounded border border-blue-100 bg-white/60 px-3 py-2">
+            <summary className="cursor-pointer text-[11px] font-semibold text-gray-600">高级设置</summary>
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
+              <label className="text-[11px] font-medium text-gray-700">
+                业务标识
+                <input value={definitionKey} onChange={(event) => { setDefinitionKey(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
               </label>
               <label className="text-[11px] font-medium text-gray-700">
                 结果类型
@@ -211,7 +208,7 @@ export default function InlinePointProcessingPanel({
                 <input value={freshnessSeconds} onChange={(event) => { setFreshnessSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
               </label>
             </div>
-          )}
+          </details>
 
           {error && <div role="alert" className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
           {success && <div className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">{success}</div>}

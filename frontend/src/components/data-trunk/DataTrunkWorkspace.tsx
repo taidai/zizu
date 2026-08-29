@@ -168,8 +168,15 @@ export default function DataTrunkWorkspace({
   return (
     <div className="space-y-3 pb-3">
       <header className="rounded-xl border border-gray-200 bg-white/55 p-4">
-        <h2 className="text-base font-semibold text-gray-900">实体数据</h2>
-        <p className="mt-1 text-xs text-gray-500">查看供告警、JDM、控制和 EMS 工作台使用的实时值与历史值。</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">实体数据</h2>
+            <p className="mt-1 text-xs text-gray-500">查看供告警、JDM、控制和 EMS 工作台使用的实时值与历史值。</p>
+          </div>
+          <div className="text-[10px] text-gray-500">
+            配置修订 {projection?.configurationRevision ?? '等待数据'}
+          </div>
+        </div>
       </header>
       {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">{error}</div>}
       <EntityDataPanel

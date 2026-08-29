@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 const POWER = {
@@ -97,4 +98,32 @@ test('direct mapping cannot relabel units and numeric conversion always outputs 
     scale: 0.001,
   })
   assert.equal(converted.content.outputs[0].dataType, 'FLOAT')
+})
+
+test('Chinese raw point names receive distinct valid entity identities', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const first = model.suggestInlinePointProcessingDefaults([{
+    ...POWER,
+    id: '7d72a1c5-1111-4444-8888-111111111111',
+    name: '交流总有功功率',
+  }], 'PCS')
+  const second = model.suggestInlinePointProcessingDefaults([{
+    ...CURRENT,
+    id: '93fe2d60-2222-4444-8888-222222222222',
+    name: '交流总无功功率',
+  }], 'PCS')
+
+  assert.match(first.definitionKey, /^pcs\.[a-z][a-z0-9_]*$/)
+  assert.match(second.definitionKey, /^pcs\.[a-z][a-z0-9_]*$/)
+  assert.notEqual(first.definitionKey, second.definitionKey)
+  assert.equal(first.displayName, '交流总有功功率')
+})
+
+test('technical identity and freshness inputs stay inside advanced settings', async () => {
+  const source = await readFile(new URL('./InlinePointProcessingPanel.tsx', import.meta.url), 'utf8')
+  const advanced = source.indexOf('高级设置')
+
+  assert.ok(advanced >= 0)
+  assert.ok(source.indexOf('业务标识') > advanced)
+  assert.ok(source.indexOf('超时秒数') > advanced)
 })
