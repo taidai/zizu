@@ -4986,3 +4986,19 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - Browser 控制标签页没有继承用户已登录标签页，当前仍在登录表单，因此发布验收为 `INCOMPLETE`。
   用户在控制页登录后，继续沿节点树→L0→L1→L2→告警→JDM 做无副作用验收。完整证据：
   `docs/deploy-1号机-v0.4.91-http.md`。
+
+## 2026-08-30 — v0.4.91 Browser 主干验收失败：帧处理吞吐不足
+
+- 用户授权登录后，Browser 已完成节点树→L0 实时/历史→L1 只读试算→L2 实时/历史/来源→告警→JDM→
+  EMS 工作台的无副作用验收；未发布配置、未启用规则、未控制或写设备。
+- 页面入口本身可用：PCS 有 45 个 L0；历史点位可选且趋势图渲染；L1 试算返回 `0 / 正常`、来源帧与
+  配置修订；L2 能展开历史、来源和技术详情；告警实体选择来自 L2；JDM 现场暂无 control/linkage 规则。
+- 主干运行没有通过：L2 与 EMS 反复出现 `FRAME_PROCESSING_FAILED` / `ENTITY_DATA_STALE`。最近 20 分钟
+  约 500 个帧 FAILED，约 60 个帧未完成且最老约 60 秒；最近 30 秒 29 个新帧只完成 14 个并失败 14 个。
+  FAILED 帧 attempt_count=0，表明未开始处理就因 60 秒帧龄预算被终结。
+- 没有 Traceback、PoolError 或连接池耗尽；现场 backend 约 94% CPU、TimescaleDB 约 116% CPU、系统
+  load average 10.65。初步边界是生产 1 秒节拍下 frame processor 吞吐不足，而不是设备停止或前端误报。
+- 下一步只做根因专项：比较 v0.4.90 与 v0.4.91 新增 committed-L2 JDM 每帧事务对吞吐的影响，建立能
+  复现“每秒 1 帧且持续积压”的 RED 测试，再做一个最小修复。修复后必须在 1 号机连续观察无未完成帧、
+  无帧龄 FAILED、L2/EMS 连续稳定，再沿 Browser 主干复验；不扩展功能。
+- 完整证据已更新在 `docs/deploy-1号机-v0.4.91-http.md`。
