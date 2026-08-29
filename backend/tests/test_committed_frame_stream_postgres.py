@@ -76,6 +76,111 @@ class _ReusableConnection:
         self.rollbacks += 1
 
 
+class _StaleSnapshotCursor:
+    def __init__(self, *, head_beat: int = 10, accepted_beat: int = 1) -> None:
+        self.sql = ""
+        self.head_beat = head_beat
+        self.accepted_beat = accepted_beat
+        self.tag_id = uuid4()
+        self.node_id = uuid4()
+        self.entity_id = uuid4()
+        self.observation_id = uuid4()
+        self.event_id = uuid4()
+        self.processing_revision_id = uuid4()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def execute(self, sql, _parameters=None) -> None:
+        self.sql = " ".join(str(sql).split())
+
+    def fetchone(self):
+        if self.sql.startswith("SELECT 1 FROM t_nodes"):
+            return (1,)
+        if self.sql.startswith("SELECT frame_sequence"):
+            return (
+                10,
+                NOW + timedelta(seconds=10),
+                7,
+                self.head_beat,
+                NOW + timedelta(seconds=10),
+            )
+        return None
+
+    def fetchall(self):
+        if "FROM t_tags AS tag" in self.sql:
+            return [
+                (
+                    self.tag_id,
+                    "pcs.power",
+                    "PCS power",
+                    "FLOAT",
+                    "kW",
+                    "pcs/data/power",
+                    "neuron",
+                    self.observation_id,
+                    5.0,
+                    None,
+                    None,
+                    None,
+                    192,
+                    NOW + timedelta(seconds=1),
+                    NOW + timedelta(seconds=1),
+                    "a" * 64,
+                    1,
+                    192,
+                    self.accepted_beat,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ]
+        if "FROM t_entity_instances AS entity" in self.sql:
+            return [
+                (
+                    self.entity_id,
+                    "pcs.activePower",
+                    "PCS power",
+                    "FLOAT",
+                    "kW",
+                    self.event_id,
+                    5.0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    192,
+                    None,
+                    NOW,
+                    NOW,
+                    NOW,
+                    self.processing_revision_id,
+                    7,
+                    "b" * 64,
+                    1,
+                    3.0,
+                )
+            ]
+        return []
+
+
+class _StaleSnapshotConnection(_ReusableConnection):
+    def __init__(self, *, head_beat: int = 10, accepted_beat: int = 1) -> None:
+        super().__init__()
+        self.snapshot_cursor = _StaleSnapshotCursor(
+            head_beat=head_beat,
+            accepted_beat=accepted_beat,
+        )
+
+    def cursor(self):
+        return self.snapshot_cursor
+
+
 class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
     def test_snapshot_does_not_return_a_read_only_connection_to_the_pool(self) -> None:
         connection = _ReusableConnection()
@@ -92,6 +197,52 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
         self.assertFalse(connection.readonly)
         self.assertEqual(1, connection.commits)
+
+    def test_resnapshot_marks_l0_stale_from_the_terminal_head_beat(self) -> None:
+        connection = _StaleSnapshotConnection()
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        ).read_snapshot(FrameScope.for_node(connection.snapshot_cursor.node_id))
+
+        self.assertEqual(
+            int(TrunkQuality.STALE),
+            snapshot.l0[0]["effective_quality"],
+        )
+
+    def test_resnapshot_fails_closed_while_runtime_is_warming(self) -> None:
+        connection = _StaleSnapshotConnection(head_beat=1, accepted_beat=1)
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        ).read_snapshot(FrameScope.for_node(connection.snapshot_cursor.node_id))
+
+        self.assertEqual(
+            int(TrunkQuality.STALE),
+            snapshot.l0[0]["effective_quality"],
+        )
+
+    def test_resnapshot_marks_expired_l2_stale_using_entity_freshness(self) -> None:
+        connection = _StaleSnapshotConnection()
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        ).read_snapshot(FrameScope.for_node(connection.snapshot_cursor.node_id))
+
+        self.assertEqual(int(TrunkQuality.STALE), snapshot.l2[0]["quality"])
+        self.assertEqual("STALE", snapshot.l2[0]["reason"])
 
 
 class CommittedFrameLegacyProjectionTest(unittest.TestCase):

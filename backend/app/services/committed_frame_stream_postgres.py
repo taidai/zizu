@@ -60,7 +60,7 @@ class PostgresCommittedFrameStreamRepository:
                 cursor.execute(
                     """
                     SELECT frame_sequence,COALESCE(finished_at,shot_at),
-                           configuration_revision
+                           configuration_revision,capture_beat,CURRENT_TIMESTAMP
                     FROM t_data_frames
                     WHERE status IN ('COMPLETE','FAILED')
                     ORDER BY frame_sequence DESC
@@ -76,6 +76,8 @@ class PostgresCommittedFrameStreamRepository:
                     revision_row = cursor.fetchone()
                     frame_sequence = 0
                     frame_time = None
+                    capture_beat = 0
+                    snapshot_at = datetime.now(UTC)
                     configuration_revision = (
                         0 if revision_row is None else int(revision_row[0])
                     )
@@ -83,10 +85,23 @@ class PostgresCommittedFrameStreamRepository:
                     frame_sequence = int(head[0])
                     frame_time = _optional_iso(head[1])
                     configuration_revision = int(head[2])
+                    capture_beat = int(head[3])
+                    snapshot_at = head[4]
                 if self._on_snapshot_head_read is not None:
                     self._on_snapshot_head_read()
-                l0 = self._read_l0(cursor, scope.node_id, frame_sequence)
-                l2 = self._read_l2(cursor, scope.node_id, frame_sequence)
+                l0 = self._read_l0(
+                    cursor,
+                    scope.node_id,
+                    frame_sequence,
+                    capture_beat,
+                    snapshot_at,
+                )
+                l2 = self._read_l2(
+                    cursor,
+                    scope.node_id,
+                    frame_sequence,
+                    snapshot_at,
+                )
         except FrameStreamError:
             raise
         except Exception as exc:
@@ -237,7 +252,13 @@ class PostgresCommittedFrameStreamRepository:
         return tag_ids, entity_ids
 
     @staticmethod
-    def _read_l0(cursor, node_id: UUID, frame_sequence: int):
+    def _read_l0(
+        cursor,
+        node_id: UUID,
+        frame_sequence: int,
+        capture_beat: int,
+        snapshot_at: datetime,
+    ):
         cursor.execute(
             """
             SELECT tag.id,tag.name,tag.display_name,tag.data_type,tag.unit,
@@ -275,6 +296,10 @@ class PostgresCommittedFrameStreamRepository:
                 frame_sequence_value,
                 has_value=has_value,
                 stored_quality=row[12],
+                capture_beat=capture_beat,
+                accepted_beat=row[18],
+                received_at=row[14],
+                snapshot_at=snapshot_at,
             )
             source_quality = (
                 int(TrunkQuality.STALE)
@@ -322,7 +347,12 @@ class PostgresCommittedFrameStreamRepository:
         return tuple(items)
 
     @staticmethod
-    def _read_l2(cursor, node_id: UUID, frame_sequence: int):
+    def _read_l2(
+        cursor,
+        node_id: UUID,
+        frame_sequence: int,
+        snapshot_at: datetime,
+    ):
         cursor.execute(
             """
             SELECT entity.id,entity.definition_id,entity.display_name,
@@ -332,7 +362,8 @@ class PostgresCommittedFrameStreamRepository:
                    latest.quality,latest.reason,latest.observed_at,
                    latest.received_at,latest.calculated_at,
                    latest.processing_revision_id,latest.configuration_revision,
-                   latest.source_digest,latest.frame_sequence
+                   latest.source_digest,latest.frame_sequence,
+                   entity.freshness_seconds
             FROM t_entity_instances AS entity
             LEFT JOIN t_l2_latest AS latest
               ON latest.entity_instance_id=entity.id
@@ -345,6 +376,19 @@ class PostgresCommittedFrameStreamRepository:
         items = []
         for row in cursor.fetchall():
             has_value = row[5] is not None
+            effective_quality = _l2_snapshot_quality(
+                has_value=has_value,
+                stored_quality=row[12],
+                observed_at=row[14],
+                freshness_seconds=row[21],
+                snapshot_at=snapshot_at,
+            )
+            if not has_value:
+                effective_reason = "WAITING_DATA"
+            elif effective_quality == int(TrunkQuality.STALE) and not row[13]:
+                effective_reason = "STALE"
+            else:
+                effective_reason = row[13]
             items.append(
                 {
                     "entity_instance_id": str(row[0]),
@@ -367,9 +411,9 @@ class PostgresCommittedFrameStreamRepository:
                     ),
                     "unit": row[4],
                     "quality": (
-                        int(TrunkQuality.STALE) if not has_value else int(row[12])
+                        effective_quality
                     ),
-                    "reason": "WAITING_DATA" if not has_value else row[13],
+                    "reason": effective_reason,
                     "observed_at": _optional_iso(row[14]),
                     "received_at": _optional_iso(row[15]),
                     "calculated_at": _optional_iso(row[16]),
@@ -416,11 +460,44 @@ def _l0_snapshot_quality(
     *,
     has_value: bool,
     stored_quality: Any,
+    capture_beat: int = 0,
+    accepted_beat: Any = None,
+    received_at: datetime | None = None,
+    snapshot_at: datetime | None = None,
 ) -> int:
     """Migration-era values are diagnostic history, never current GOOD data."""
     if not has_value or frame_sequence == 0:
         return int(TrunkQuality.STALE)
-    return int(stored_quality)
+    effective = int(stored_quality)
+    expired_by_beat = (
+        accepted_beat is None
+        or capture_beat - int(accepted_beat) >= 3
+    )
+    expired_by_time = (
+        received_at is not None
+        and snapshot_at is not None
+        and (snapshot_at - received_at).total_seconds() >= 3
+    )
+    if expired_by_beat or expired_by_time:
+        return min(effective, int(TrunkQuality.STALE))
+    return effective
+
+
+def _l2_snapshot_quality(
+    *,
+    has_value: bool,
+    stored_quality: Any,
+    observed_at: datetime | None,
+    freshness_seconds: Any,
+    snapshot_at: datetime,
+) -> int:
+    if not has_value or observed_at is None or freshness_seconds is None:
+        return int(TrunkQuality.STALE)
+    effective = int(stored_quality)
+    age_seconds = (snapshot_at - observed_at).total_seconds()
+    if age_seconds > float(freshness_seconds):
+        return min(effective, int(TrunkQuality.STALE))
+    return effective
 
 
 def _l0_snapshot_value(
