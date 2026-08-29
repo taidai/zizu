@@ -4897,3 +4897,10 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   Schema049、outbox 积压 0、真实错误日志 0。
 - 未启动 TLS/Caddy，未执行策略、控制、设备写入或配置发布。未输入业务账号做双角色浏览器 smoke；
   完整部署证据见 `docs/deploy-1号机-v0.4.85-rc.12-http.md`。
+## 2026-08-29 — 最简开发验收三件套
+
+- 已确认停止自定义插件、GitHub 插件和复杂交付门禁设计，只保留一份开发目标、一份验收清单和一个仓库命令。
+- 新增 `docs/development-target.md` 与 `docs/acceptance-checklist.md`：唯一主线仍为“真实节点树 → L0 原始点位 → L1 点位加工 → L2 全局实体 → 告警/JDM/控制/固定 EMS 工作台”；缺少现场或人工证据时不得宣称完成。
+- 新增标准库脚本 `scripts/verify_delivery.py`，运行后端完整单测、scripts 完整单测、前端全部 Node 测试和生产构建；可通过 `--site-url` 追加首页与匿名存活探针，只做 GET，不登录、不配置、不控制。报告记录 commit、VERSION、Schema 和逐项结果；无现场地址返回 `INCOMPLETE`，任一失败返回 `FAILED`，本地及现场自动检查全通过返回 `PASSED`。
+- TDD 证据：专项测试先因 `scripts.verify_delivery` 不存在而 RED，最小实现后 6/6 通过。完整单命令实测：后端 341 tests / 134 skipped / 0 failure，scripts 43/43，前端 42/42，Vite 8184 modules 构建成功；因未在该次命令传现场地址，报告按设计为 `INCOMPLETE`。
+- 另行匿名只读复核 1 号机：公网首页 HTTP 200，`/api/v1/health/live` 为 `alive / 0.4.87`。这只证明站点存活，不替代 `docs/acceptance-checklist.md` 中节点、点位、实体和告警的人工业务闭环。
