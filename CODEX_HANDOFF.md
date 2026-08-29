@@ -4967,3 +4967,22 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   旧值统一超时；交流总有功功率 L1 试算为 `0 / 正常` 且来源正确；L2 PCS `0 kW / 正常`、IGBT
   `33 / 超时`，历史与来源入口可用；告警中心和 3 组规则只读可见。未点击任何发布或控制动作。
 - 完整证据：`docs/deploy-1号机-v0.4.90-http.md`。下一项仍应沿主干打磨已有功能，不扩展新架构。
+
+## 2026-08-30 — v0.4.91 committed-L2 JDM 已部署，Browser 待登录
+
+- 发布提交 `20f00ce`、标签 `v0.4.91`；Actions `33270779281` 成功。1 号机运行 ARM64 固定摘要
+  `sha256:d8d5e8b184e2718cf2e9039a2d8976484376cda107c563ce90923a9334726613`，实际 image ID
+  `sha256:1f6c4f02bf0e23998e2ad0a7e28746a4d4e86c6f2b740ccce24fb934784e6980`。
+- JDM 已硬切为 committed L2 帧消费者；执行收据与事实原子提交、重放幂等、配置修订绑定。旧 L0/latest
+  扫描、JDM 直写告警和模板直接插表旁路已删除；生产 fanout 为告警→JDM→实时流。
+- 门禁：真实 PostgreSQL 37/37、后端 362 tests/142 skipped/0 failure、scripts 43/43、前端 49/49、
+  TypeScript/Vite 8186 modules 构建成功。
+- 切换前 Schema051 备份为 `/opt/zizu-backups/pre-v0.4.91-schema051/omnithings.dump`，118,232,614
+  bytes，SHA-256 `7b35f4f4e96049cdac7e8d3eddeafb7990f9b0a477a3f625a9317060df2be914`，`pg_restore -l`
+  826 项通过。
+- 运行复核：healthy、restart 0、Schema052、outbox 0、frame head 45789、JDM 收据已前进到 45789、
+  执行事实 0（现场没有启用的 control/linkage 规则）、真实错误日志 0。未启用 TLS/Caddy、策略、控制或
+  设备写；保留 v0.4.90 回滚镜像。
+- Browser 控制标签页没有继承用户已登录标签页，当前仍在登录表单，因此发布验收为 `INCOMPLETE`。
+  用户在控制页登录后，继续沿节点树→L0→L1→L2→告警→JDM 做无副作用验收。完整证据：
+  `docs/deploy-1号机-v0.4.91-http.md`。
