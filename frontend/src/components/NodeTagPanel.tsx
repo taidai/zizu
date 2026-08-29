@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchTags, type Tag } from '../api/client'
+import { fetchTags, type Node, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
   fetchCommittedFrameSnapshot,
@@ -11,9 +11,11 @@ import {
 } from './data-trunk/committedFrameProjection'
 import { projectRawPointValue, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
 import RawPointHistoryPanel from './RawPointHistoryPanel'
+import InlinePointProcessingPanel from './data-trunk/InlinePointProcessingPanel'
 
 interface NodeTagPanelProps {
-  nodeId: string
+  node: Node
+  readOnly: boolean
 }
 
 type RawPointView = 'realtime' | 'history'
@@ -24,7 +26,8 @@ function formatTime(timestamp: string | null | undefined): string {
   return timestamp ? new Date(timestamp).toLocaleString('zh-CN') : '未收到'
 }
 
-export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
+export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
+  const nodeId = node.id
   const [view, setView] = useState<RawPointView>('realtime')
   const [tags, setTags] = useState<Tag[]>([])
   const [projection, setProjection] = useState<CommittedFrameProjection | null>(null)
@@ -35,6 +38,7 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [selected, setSelected] = useState<Map<string, Tag>>(new Map())
   const activeNodeIdRef = useRef(nodeId)
   const tagRequestGenerationRef = useRef(0)
   activeNodeIdRef.current = nodeId
@@ -84,6 +88,10 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
     tagRequestGenerationRef.current += 1
     setPage(1)
   }, [nodeId, search, dataType])
+
+  useEffect(() => {
+    setSelected(new Map())
+  }, [nodeId])
 
   useEffect(() => {
     void loadTags()
@@ -138,6 +146,29 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
       stopStream()
     }
   }, [nodeId])
+
+  const selectedPoints = [...selected.values()]
+  const selectableTags = tags.filter((tag) => tag.enabled)
+  const allVisibleSelected = selectableTags.length > 0
+    && selectableTags.every((tag) => selected.has(tag.id))
+
+  const togglePoint = (tag: Tag) => {
+    setSelected((current) => {
+      const next = new Map(current)
+      if (next.has(tag.id)) next.delete(tag.id)
+      else next.set(tag.id, tag)
+      return next
+    })
+  }
+
+  const toggleVisible = () => {
+    setSelected((current) => {
+      const next = new Map(current)
+      if (allVisibleSelected) selectableTags.forEach((tag) => next.delete(tag.id))
+      else selectableTags.forEach((tag) => next.set(tag.id, tag))
+      return next
+    })
+  }
 
   return (
     <section className="neu-card min-h-full p-4" aria-label="原始点位">
@@ -204,10 +235,24 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
             </div>
           )}
 
+          {!readOnly && (
+            <InlinePointProcessingPanel
+              nodeId={nodeId}
+              deviceCategory={node.node_type || 'PCS'}
+              points={selectedPoints}
+              onPublished={() => undefined}
+            />
+          )}
+
           <div className="overflow-x-auto rounded border border-gray-200 bg-white">
             <table className="w-full text-left text-xs">
               <thead className="bg-gray-50 text-gray-500">
                 <tr>
+                  {!readOnly && (
+                    <th className="w-10 px-3 py-2 text-center font-medium">
+                      <input type="checkbox" aria-label="选择当前页原始点位" checked={allVisibleSelected} onChange={toggleVisible} />
+                    </th>
+                  )}
                   {RAW_POINT_COLUMNS.map((label) => (
                     <th key={label} className="whitespace-nowrap px-3 py-2 font-medium">{label}</th>
                   ))}
@@ -229,6 +274,11 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                         : 'font-semibold text-red-700'
                   return (
                     <tr key={tag.id} className="text-gray-700 hover:bg-gray-50">
+                      {!readOnly && (
+                        <td className="px-3 py-2 text-center">
+                          <input type="checkbox" aria-label={`选择 ${tag.display_name || tag.name}`} checked={selected.has(tag.id)} disabled={!tag.enabled} onChange={() => togglePoint(tag)} />
+                        </td>
+                      )}
                       <td className="px-3 py-2 font-medium text-gray-800">{tag.display_name || tag.name}</td>
                       <td className="px-3 py-2 font-mono">{point.displayValue}</td>
                       <td className="px-3 py-2">{current?.unit || tag.unit || '-'}</td>
@@ -241,10 +291,10 @@ export default function NodeTagPanel({ nodeId }: NodeTagPanelProps) {
                   )
                 })}
                 {loading && (
-                  <tr><td colSpan={RAW_POINT_COLUMNS.length} className="px-3 py-12 text-center text-gray-400">正在读取原始点位...</td></tr>
+                  <tr><td colSpan={RAW_POINT_COLUMNS.length + (readOnly ? 0 : 1)} className="px-3 py-12 text-center text-gray-400">正在读取原始点位...</td></tr>
                 )}
                 {!loading && tags.length === 0 && !error && (
-                  <tr><td colSpan={RAW_POINT_COLUMNS.length} className="px-3 py-12 text-center text-gray-400">当前节点还没有原始点位</td></tr>
+                  <tr><td colSpan={RAW_POINT_COLUMNS.length + (readOnly ? 0 : 1)} className="px-3 py-12 text-center text-gray-400">当前节点还没有原始点位</td></tr>
                 )}
               </tbody>
             </table>

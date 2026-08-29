@@ -1283,6 +1283,19 @@ export async function createPointProcessingPlan(
   return response.json()
 }
 
+export async function createPointProcessingDraftPlan(
+  nodeId: string,
+  body: { content: Record<string, unknown>; input_selections: Record<string, string> },
+): Promise<PointProcessingPlan> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-drafts/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `检查点位加工失败：${response.status}`)
+  return response.json()
+}
+
 export async function previewPointProcessingFormula(
   nodeId: string,
   body: { template_revision_id: string; expression: string },
