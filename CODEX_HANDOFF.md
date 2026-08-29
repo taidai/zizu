@@ -1,5 +1,19 @@
 ---
 
+## Session 2026-08-29 — PCS 标准实体闭环已本地合并到 main（未推送、未部署）
+
+- 已将 `ticket/v0.4.85-node-data-trunk-hard-cut` 快进合并到本地 `main`，合并后代码提交为
+  `cde8e76`。远端 `origin/main` 未改动，1 号机仍运行 v0.4.86。
+- 合并前主工作区的未提交内容已保存到 `stash@{0}`（`codex-pre-merge-safety-20260829-170157`）。
+  恢复时，旧 Pipeline 告警代码与新 L2 告警主干冲突，按架构硬切保留 committed L2 消费链；部署脚本
+  保留较新的无内置凭据、固定主机校验和 `/health/live` 探针。保险 stash 未删除。
+- 原工作区独有的 `.scratch/`、架构评估、交付安全证据和运行模型证据均已恢复为未跟踪文件；与新主干
+  重名的旧文档草稿没有覆盖新版本，其原内容仍完整保存在保险 stash。
+- 合并结果新鲜验证：后端 `270 passed / 134 skipped / 57 subtests`；前端 `42 passed`；TypeScript 与
+  Vite 生产构建通过（仅既有大 chunk 警告）；`git diff --check` 无错误。
+- 后续最短路径：构建固定 ARM64 摘要并部署 1 号机，现场复验真实 PCS 的原始数据、内联加工、标准实体
+  实时/历史及 committed L2 告警消费；不得自动验证策略或执行设备写。
+
 ## Session 2026-08-29 — 真实 PCS 标准实体闭环本地验收通过（未部署）
 
 - 从 1 号机只读复制生产库到本地隔离 TimescaleDB，备份文件 SHA256 为
