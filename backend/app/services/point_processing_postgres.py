@@ -540,6 +540,35 @@ class PostgresPointProcessingCatalog:
             with connection.cursor() as cursor:
                 return self._load_template(cursor, revision_id)
 
+    def import_node_definition(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        node_id: UUID,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        return PostgresPointProcessingTemplates().import_node_definition(
+            raw,
+            node_id=node_id,
+            actor=actor,
+        )
+
+    def template_owner_node(self, revision_id: UUID) -> UUID | None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT template.owner_node_id
+                    FROM t_point_processing_revisions AS revision
+                    JOIN t_point_processing_templates AS template
+                      ON template.id = revision.template_id
+                    WHERE revision.id = %s
+                    """,
+                    (revision_id,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row is not None else None
+
     def list_templates(
         self,
         device_category: str,

@@ -243,6 +243,41 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
             exported.headers["etag"],
         )
 
+    async def test_engineer_can_plan_a_node_draft_without_a_shared_template(self) -> None:
+        from copy import deepcopy
+
+        from tests.test_point_processing_templates import template_json
+
+        app, _, repository = self.build_app()
+        raw = deepcopy(template_json())
+        raw["id"] = "node.pcs-active-power"
+        raw["outputs"][0]["id"] = "custom_active_power"
+        raw["outputs"][0]["entityDefinition"] = "pcs.custom_active_power"
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            operator_headers = await self.login(client, "operator")
+            engineer_headers = await self.login(client, "engineer")
+            denied = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-drafts/plan",
+                headers=operator_headers,
+                json={"content": raw, "input_selections": {}},
+            )
+            planned = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-drafts/plan",
+                headers=engineer_headers,
+                json={"content": raw, "input_selections": {}},
+            )
+
+        self.assertEqual(403, denied.status_code, denied.text)
+        self.assertEqual(201, planned.status_code, planned.text)
+        self.assertEqual(str(NODE_ID), planned.json()["node_id"])
+        self.assertEqual([], planned.json()["blockers"])
+        self.assertEqual(1, repository.configuration_revision())
+        self.assertEqual(1, repository.application_count())
+
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
         app, identity_repository, repository = self.build_app()
         transport = httpx.ASGITransport(app=app)

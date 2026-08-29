@@ -24,7 +24,14 @@ from app.services.data_trunk_contracts import (
     NumericTransform,
     ValueKind,
 )
-from app.services.point_processing_templates import PointProcessingTemplate
+from app.services.point_processing_templates import (
+    PointProcessingTemplate,
+    PointProcessingTemplateError,
+    RegisteredPointProcessingTemplate,
+    canonical_point_processing_content,
+    parse_point_processing_template,
+    point_processing_revision_id,
+)
 from app.services.point_processing_dag import (
     PointProcessingDagError,
     validate_processing_dag,
@@ -240,6 +247,16 @@ class NodeDataTrunkView:
 class PointProcessingCatalog(Protocol):
     def get_template(self, revision_id: UUID) -> PointProcessingTemplate | None: ...
 
+    def import_node_definition(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        node_id: UUID,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate: ...
+
+    def template_owner_node(self, revision_id: UUID) -> UUID | None: ...
+
     def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]: ...
 
     def list_templates(
@@ -311,6 +328,14 @@ class PointProcessingService:
         self._runtime_gate = runtime_gate
 
     def preview(self, command: PreviewPointProcessing) -> PointProcessingPlan:
+        owner_node_id = self._catalog.template_owner_node(
+            command.template_revision_id
+        )
+        if owner_node_id is not None and owner_node_id != command.node_id:
+            raise PointProcessingError(
+                "POINT_PROCESSING_NODE_OWNER_MISMATCH",
+                "Node-private point processing belongs to another node",
+            )
         node_source_key = self._catalog.node_source_key(command.node_id)
         template = self._catalog.get_template(command.template_revision_id)
         scan = None
@@ -334,6 +359,37 @@ class PointProcessingService:
             scan=scan,
         )
         return self._repository.save_plan(plan)
+
+    def preview_node_definition(
+        self,
+        *,
+        node_id: UUID,
+        content: Mapping[str, Any],
+        input_selections: Mapping[str, UUID],
+        actor: str,
+    ) -> PointProcessingPlan:
+        content = _node_private_definition_content(
+            node_id=node_id,
+            draft=content,
+            current=(
+                self._catalog.get_template(current.revision_id)
+                if (current := self._repository.current_context(node_id)) is not None
+                else None
+            ),
+        )
+        registered = self._catalog.import_node_definition(
+            content,
+            node_id=node_id,
+            actor=actor,
+        )
+        return self.preview(
+            PreviewPointProcessing(
+                node_id=node_id,
+                template_revision_id=registered.revision_id,
+                input_selections=input_selections,
+                actor=actor,
+            )
+        )
 
     def preview_formula(
         self,
@@ -674,6 +730,7 @@ class InMemoryPointProcessingCatalog:
         dependency_edges: tuple[tuple[UUID, UUID], ...] = (),
     ) -> None:
         self._templates = dict(templates)
+        self._template_owners: dict[UUID, UUID] = {}
         self._sources = tuple(sources)
         self._node_source_keys = dict(node_source_keys or {})
         self._selector_members = dict(selector_members or {})
@@ -681,6 +738,42 @@ class InMemoryPointProcessingCatalog:
 
     def get_template(self, revision_id: UUID) -> PointProcessingTemplate | None:
         return self._templates.get(revision_id)
+
+    def import_node_definition(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        node_id: UUID,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        if not actor.strip():
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_ACTOR_INVALID",
+                "Point processing actor is required",
+            )
+        template = parse_point_processing_template(raw)
+        revision_id = point_processing_revision_id(template)
+        existing = self._templates.get(revision_id)
+        existing_owner = self._template_owners.get(revision_id)
+        if existing is not None and (
+            existing.content_digest != template.content_digest
+            or existing_owner != node_id
+        ):
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_REVISION_IMMUTABLE",
+                "Immutable point-processing revision has different content or owner",
+            )
+        self._templates.setdefault(revision_id, template)
+        self._template_owners.setdefault(revision_id, node_id)
+        return RegisteredPointProcessingTemplate(
+            revision_id,
+            self._templates[revision_id],
+            reuse_scope="node",
+            owner_node_id=node_id,
+        )
+
+    def template_owner_node(self, revision_id: UUID) -> UUID | None:
+        return self._template_owners.get(revision_id)
 
     def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]:
         return tuple(
@@ -699,7 +792,9 @@ class InMemoryPointProcessingCatalog:
                 self._templates.items(),
                 key=lambda item: (item[1].asset_id, item[1].revision, str(item[0])),
             )
-            if asset.device_category == device_category and asset.status == "active"
+            if asset.device_category == device_category
+            and asset.status == "active"
+            and revision_id not in self._template_owners
         )
 
     def node_source_key(self, node_id: UUID) -> str | None:
@@ -1281,7 +1376,10 @@ def compile_point_processing_plan(
             if current_template is not None
             else {}
         )
-        if current_output_contract != target_output_contract:
+        if any(
+            target_output_contract.get(output_id) != definition_id
+            for output_id, definition_id in current_output_contract.items()
+        ):
             blockers.append(
                 MappingProxyType(
                     {
@@ -1312,18 +1410,7 @@ def compile_point_processing_plan(
             ),
         )
         entity_id = expected_id
-        if current is not None and output.output_id not in current_outputs:
-            blockers.append(
-                MappingProxyType(
-                    {
-                        "code": "POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH",
-                        "input_id": output.output_id,
-                    }
-                )
-            )
-            action = "block"
-        else:
-            action = "preserve" if output.output_id in current_outputs else "add"
+        action = "preserve" if output.output_id in current_outputs else "add"
         output_ids[output.output_id] = entity_id
         items.append(
             MappingProxyType(
@@ -1628,6 +1715,72 @@ def _stable_output_entity_id(
         NAMESPACE_URL,
         f"zizu/entity/{node_id}/{definition_id}",
     )
+
+
+def _node_private_definition_content(
+    *,
+    node_id: UUID,
+    draft: Mapping[str, Any],
+    current: PointProcessingTemplate | None,
+) -> dict[str, Any]:
+    """Create one immutable full-node L1 revision from a small inline draft."""
+    draft_template = parse_point_processing_template(draft)
+    draft_content = canonical_point_processing_content(draft_template)
+    if current is None:
+        merged = draft_content
+    else:
+        if current.device_category != draft_template.device_category:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_DEVICE_CATEGORY_MISMATCH",
+                "Inline processing must use the selected node device category",
+            )
+        merged = canonical_point_processing_content(current)
+        merged["displayName"] = draft_content["displayName"]
+
+        inputs = {item["id"]: item for item in merged["inputs"]}
+        inputs.update({item["id"]: item for item in draft_content["inputs"]})
+        merged["inputs"] = [inputs[key] for key in sorted(inputs)]
+
+        outputs_by_definition = {
+            item["entityDefinition"]: item for item in merged["outputs"]
+        }
+        output_ids = {item["id"]: item["entityDefinition"] for item in merged["outputs"]}
+        for proposed in draft_content["outputs"]:
+            definition_id = proposed["entityDefinition"]
+            existing = outputs_by_definition.get(definition_id)
+            if existing is not None:
+                proposed = {**proposed, "id": existing["id"]}
+            elif (
+                proposed["id"] in output_ids
+                and output_ids[proposed["id"]] != definition_id
+            ):
+                raise PointProcessingTemplateError(
+                    "POINT_PROCESSING_OUTPUT_CONTRACT_MISMATCH",
+                    "Inline output key is already used by another entity",
+                )
+            outputs_by_definition[definition_id] = proposed
+        merged["outputs"] = [
+            outputs_by_definition[key] for key in sorted(outputs_by_definition)
+        ]
+
+    merged["brand"] = "ZiZu"
+    merged["model"] = "NODE-INLINE"
+    merged["revision"] = 1
+    merged["status"] = "active"
+    identity_basis = {
+        key: value for key, value in merged.items()
+        if key not in {"id", "revision"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity_basis,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    merged["id"] = f"node.{node_id}.{digest[:24]}"
+    return merged
 
 
 def _source_catalog_digest(sources: tuple[PointProcessingSource, ...]) -> str:

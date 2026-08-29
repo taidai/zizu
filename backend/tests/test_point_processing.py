@@ -137,6 +137,91 @@ def _assets():
 
 
 class PointProcessingTest(unittest.TestCase):
+    def test_node_draft_is_persisted_and_planned_without_a_shared_template(self) -> None:
+        from copy import deepcopy
+
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingSource,
+            PointProcessingService,
+        )
+        from tests.test_point_processing_templates import template_json
+
+        raw = deepcopy(template_json())
+        raw["id"] = "node.pcs-active-power"
+        catalog = InMemoryPointProcessingCatalog(
+            templates={},
+            sources=(
+                PointProcessingSource(
+                    UUID("85000000-0000-0000-0000-000000000101"),
+                    "l0",
+                    NODE_ID,
+                    "ActivePowerRaw",
+                    "FLOAT",
+                    "W",
+                    True,
+                ),
+            ),
+        )
+        service = PointProcessingService(
+            InMemoryPointProcessingRepository(),
+            catalog,
+        )
+
+        plan = service.preview_node_definition(
+            node_id=NODE_ID,
+            content=raw,
+            input_selections={},
+            actor="user:engineer",
+        )
+
+        self.assertEqual("ready", plan.status, plan.public_dict())
+        self.assertEqual(NODE_ID, catalog.template_owner_node(plan.template_revision_id))
+        self.assertEqual((), catalog.list_templates("PCS"))
+
+    def test_node_private_revision_cannot_be_planned_for_another_node(self) -> None:
+        from copy import deepcopy
+
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingError,
+            PointProcessingService,
+            PreviewPointProcessing,
+        )
+        from tests.test_point_processing_templates import template_json
+
+        other_node_id = UUID("81000000-0000-0000-0000-000000000099")
+        raw = deepcopy(template_json())
+        raw["id"] = "node.pcs-active-power"
+        catalog = InMemoryPointProcessingCatalog(templates={})
+        service = PointProcessingService(
+            InMemoryPointProcessingRepository(),
+            catalog,
+        )
+        owned_plan = service.preview_node_definition(
+            node_id=NODE_ID,
+            content=raw,
+            input_selections={},
+            actor="user:engineer",
+        )
+
+        with self.assertRaises(PointProcessingError) as caught:
+            service.preview(
+                PreviewPointProcessing(
+                    node_id=other_node_id,
+                    template_revision_id=owned_plan.template_revision_id,
+                    input_selections={},
+                    actor="user:engineer",
+                )
+            )
+
+        self.assertEqual(
+            "POINT_PROCESSING_NODE_OWNER_MISMATCH",
+            caught.exception.code,
+        )
+
     def test_formula_plan_accepts_selector_and_single_l2_inputs(self) -> None:
         from app.services.data_trunk_contracts import InputReference
         from app.services.point_processing import (

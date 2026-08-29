@@ -74,6 +74,12 @@ class PointProcessingPlanRequest(BaseModel):
         )
 
 
+class PointProcessingDraftPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: dict[str, Any]
+    input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=256)
+
+
 class ApplyPointProcessingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
@@ -232,6 +238,30 @@ async def create_point_processing_plan(
         return service.preview(
             body.to_command(node_id=node_id, actor=principal.actor)
         ).public_dict()
+    except PointProcessingError as exc:
+        _raise_point_processing_http(exc)
+
+
+@router.post(
+    "/nodes/{node_id}/point-processing-drafts/plan",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def create_point_processing_draft_plan(
+    node_id: UUID,
+    body: PointProcessingDraftPlanRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    service: PointProcessingService = Depends(get_point_processings),
+) -> dict:
+    try:
+        return service.preview_node_definition(
+            node_id=node_id,
+            content=body.content,
+            input_selections=body.input_selections,
+            actor=principal.actor,
+        ).public_dict()
+    except PointProcessingTemplateError as exc:
+        _raise_template_http(exc)
     except PointProcessingError as exc:
         _raise_point_processing_http(exc)
 
