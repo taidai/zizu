@@ -80,6 +80,14 @@ class PointProcessingDraftPlanRequest(BaseModel):
     input_selections: dict[str, UUID] = Field(default_factory=dict, max_length=256)
 
 
+class PromotePointProcessingTemplateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(min_length=1, max_length=160)
+    display_name: str = Field(min_length=1, max_length=160)
+    brand: str = Field(min_length=1, max_length=120)
+    model: str = Field(min_length=1, max_length=120)
+
+
 class ApplyPointProcessingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan_digest: str = Field(pattern="^[0-9a-f]{64}$")
@@ -258,6 +266,32 @@ async def create_point_processing_draft_plan(
             node_id=node_id,
             content=body.content,
             input_selections=body.input_selections,
+            actor=principal.actor,
+        ).public_dict()
+    except PointProcessingTemplateError as exc:
+        _raise_template_http(exc)
+    except PointProcessingError as exc:
+        _raise_point_processing_http(exc)
+
+
+@router.post(
+    "/nodes/{node_id}/point-processing-templates/promote",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(SYSTEM_MANAGE),
+)
+async def promote_point_processing_template(
+    node_id: UUID,
+    body: PromotePointProcessingTemplateRequest,
+    principal: Principal = Depends(principal_for(SYSTEM_MANAGE)),
+    service: PointProcessingService = Depends(get_point_processings),
+) -> dict:
+    try:
+        return service.promote_node_definition(
+            node_id=node_id,
+            asset_id=body.asset_id,
+            display_name=body.display_name,
+            brand=body.brand,
+            model=body.model,
             actor=principal.actor,
         ).public_dict()
     except PointProcessingTemplateError as exc:

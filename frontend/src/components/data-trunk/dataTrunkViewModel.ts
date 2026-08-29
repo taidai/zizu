@@ -41,20 +41,18 @@ export const ENTITY_HISTORY_RANGES = [
   ['7d', '7天'],
 ] as const
 
-export type NodeDataTabKey = 'raw-points' | 'point-processing' | 'entities'
+export type NodeDataTabKey = 'raw-points' | 'entities'
 
 export interface NodeDataTab {
   key: NodeDataTabKey
   label: string
 }
 
-export function nodeDataTabs(readOnly: boolean): readonly NodeDataTab[] {
-  const tabs: NodeDataTab[] = [
+export function nodeDataTabs(_readOnly: boolean): readonly NodeDataTab[] {
+  return [
     { key: 'raw-points', label: '原始点位' },
-    { key: 'point-processing', label: '点位加工' },
     { key: 'entities', label: '实体数据' },
   ]
-  return readOnly ? tabs.filter((item) => item.key !== 'point-processing') : tabs
 }
 
 interface TemplateCandidate {

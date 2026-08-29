@@ -126,13 +126,12 @@ test('visual formula builder and text parser share one canonical expression', as
   )
 })
 
-test('node data tabs use task names and hide processing from operators', async () => {
+test('node data tabs expose only raw points and entities', async () => {
   const model = await import('./dataTrunkViewModel.ts')
   assert.deepEqual(
     model.nodeDataTabs(false).map((item) => [item.key, item.label]),
     [
       ['raw-points', '原始点位'],
-      ['point-processing', '点位加工'],
       ['entities', '实体数据'],
     ],
   )

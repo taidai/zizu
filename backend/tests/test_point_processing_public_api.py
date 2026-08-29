@@ -278,6 +278,69 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, repository.configuration_revision())
         self.assertEqual(1, repository.application_count())
 
+    async def test_admin_can_promote_current_node_definition_without_switching_it(self) -> None:
+        from copy import deepcopy
+
+        from tests.test_point_processing_templates import template_json
+
+        app, _, repository = self.build_app()
+        raw = deepcopy(template_json())
+        raw["id"] = "node.pcs-custom-power"
+        raw["outputs"][0]["id"] = "custom_active_power"
+        raw["outputs"][0]["entityDefinition"] = "pcs.custom_active_power"
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            engineer_headers = await self.login(client, "engineer")
+            admin_headers = await self.login(client, "admin")
+            planned = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-drafts/plan",
+                headers=engineer_headers,
+                json={"content": raw, "input_selections": {}},
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            applied = await client.post(
+                f"/api/v1/point-processing-plans/{planned.json()['id']}/apply",
+                headers={**engineer_headers, "Idempotency-Key": "apply-node-draft"},
+                json={"plan_digest": planned.json()["digest"]},
+            )
+            self.assertEqual(201, applied.status_code, applied.text)
+            revision_before = repository.configuration_revision()
+            applications_before = repository.application_count()
+            denied = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-templates/promote",
+                headers=engineer_headers,
+                json={
+                    "asset_id": "pcs.site-custom",
+                    "display_name": "站点 PCS 通用加工",
+                    "brand": "Site",
+                    "model": "PCS",
+                },
+            )
+            promoted = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-templates/promote",
+                headers=admin_headers,
+                json={
+                    "asset_id": "pcs.site-custom",
+                    "display_name": "站点 PCS 通用加工",
+                    "brand": "Site",
+                    "model": "PCS",
+                },
+            )
+            templates = await client.get(
+                "/api/v1/point-processing-templates?device_category=PCS",
+                headers=engineer_headers,
+            )
+
+        self.assertEqual(403, denied.status_code, denied.text)
+        self.assertEqual(201, promoted.status_code, promoted.text)
+        self.assertEqual("pcs.site-custom", promoted.json()["content"]["id"])
+        self.assertEqual(revision_before, repository.configuration_revision())
+        self.assertEqual(applications_before, repository.application_count())
+        self.assertEqual(3, templates.json()["total"])
+
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
         app, identity_repository, repository = self.build_app()
         transport = httpx.ASGITransport(app=app)

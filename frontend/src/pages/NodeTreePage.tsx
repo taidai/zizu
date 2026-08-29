@@ -497,11 +497,9 @@ function ImportNeuronModal({
 
 export default function NodeTreePage({
   readOnly = false,
-  actorId,
   canManageTemplates = false,
 }: {
   readOnly?: boolean
-  actorId: string
   canManageTemplates?: boolean
 }) {
   const [nodes, setNodes] = useState<Node[]>([])
@@ -559,10 +557,6 @@ export default function NodeTreePage({
       loadCategories()
     }
   }, [readOnly])
-
-  useEffect(() => {
-    if (readOnly && activeTab === 'point-processing') setActiveTab('raw-points')
-  }, [activeTab, readOnly])
 
   useEffect(() => {
     if (nodes.length === 0) return
@@ -761,11 +755,8 @@ export default function NodeTreePage({
 
             <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw`} node={selectedNode} readOnly={readOnly} />}
-              {activeTab === 'point-processing' && !readOnly && (
-                <DataTrunkWorkspace key={`${selectedNode.id}:processing`} node={selectedNode} readOnly={false} actorId={actorId} canManageTemplates={canManageTemplates} view="processing" />
-              )}
               {activeTab === 'entities' && (
-                <DataTrunkWorkspace key={`${selectedNode.id}:entities`} node={selectedNode} readOnly={readOnly} actorId={actorId} canManageTemplates={canManageTemplates} view="entities" />
+                <DataTrunkWorkspace key={`${selectedNode.id}:entities`} node={selectedNode} canManageTemplates={canManageTemplates} />
               )}
             </div>
           </>

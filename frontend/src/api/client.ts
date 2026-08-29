@@ -1104,6 +1104,7 @@ export interface NodeDataTrunk {
       source_key: string
     }>
     input_bindings?: Record<string, string>
+    can_promote?: boolean
   }
   l2: Array<{
     output_key: string
@@ -1261,6 +1262,19 @@ export async function importPointProcessingTemplate(
     body: JSON.stringify(content),
   })
   if (!response.ok) throw await dataTrunkError(response, `发布模板失败：${response.status}`)
+  return response.json()
+}
+
+export async function promotePointProcessingTemplate(
+  nodeId: string,
+  body: { asset_id: string; display_name: string; brand: string; model: string },
+): Promise<PointProcessingTemplateDocumentResult> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-templates/promote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw await dataTrunkError(response, `保存共享模板失败：${response.status}`)
   return response.json()
 }
 

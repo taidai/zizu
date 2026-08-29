@@ -268,7 +268,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
-            {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} actorId={session.user.id} canManageTemplates={session.user.role === 'admin'} />}
+            {activePage === 'tree' && <NodeTreePage readOnly={session.user.role === 'operator'} canManageTemplates={session.user.role === 'admin'} />}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={CONFIG_ROLES.includes(session.user.role)} />}
           </Suspense>

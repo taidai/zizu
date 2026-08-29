@@ -553,6 +553,17 @@ class PostgresPointProcessingCatalog:
             actor=actor,
         )
 
+    def import_shared_template(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        return PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor=actor,
+        )
+
     def template_owner_node(self, revision_id: UUID) -> UUID | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:

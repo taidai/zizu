@@ -255,6 +255,13 @@ class PointProcessingCatalog(Protocol):
         actor: str,
     ) -> RegisteredPointProcessingTemplate: ...
 
+    def import_shared_template(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate: ...
+
     def template_owner_node(self, revision_id: UUID) -> UUID | None: ...
 
     def list_sources(self, node_id: UUID) -> tuple[PointProcessingSource, ...]: ...
@@ -390,6 +397,45 @@ class PointProcessingService:
                 actor=actor,
             )
         )
+
+    def promote_node_definition(
+        self,
+        *,
+        node_id: UUID,
+        asset_id: str,
+        display_name: str,
+        brand: str,
+        model: str,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        current = self._repository.current_context(node_id)
+        if current is None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_NODE_DEFINITION_NOT_FOUND",
+                "The node has no active point processing definition",
+            )
+        if self._catalog.template_owner_node(current.revision_id) != node_id:
+            raise PointProcessingError(
+                "POINT_PROCESSING_NODE_DEFINITION_NOT_PRIVATE",
+                "Only node-private point processing can be promoted",
+            )
+        template = self._catalog.get_template(current.revision_id)
+        if template is None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_NODE_DEFINITION_NOT_FOUND",
+                "The active node definition is unavailable",
+            )
+        content = canonical_point_processing_content(template)
+        content.update(
+            {
+                "id": asset_id,
+                "displayName": display_name,
+                "brand": brand,
+                "model": model,
+                "revision": 1,
+            }
+        )
+        return self._catalog.import_shared_template(content, actor=actor)
 
     def preview_formula(
         self,
@@ -633,6 +679,15 @@ class PointProcessingService:
             "revision_id": str(current.revision_id) if current is not None else None,
             "output_count": len(current.output_entity_ids) if current is not None else 0,
             "source_summary": source_summary,
+            **(
+                {
+                    "can_promote": self._catalog.template_owner_node(
+                        current.revision_id
+                    ) == node_id,
+                }
+                if include_engineering and current is not None
+                else {}
+            ),
             **({"input_bindings": input_bindings} if include_engineering else {}),
         }
         l2 = (
@@ -770,6 +825,34 @@ class InMemoryPointProcessingCatalog:
             self._templates[revision_id],
             reuse_scope="node",
             owner_node_id=node_id,
+        )
+
+    def import_shared_template(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        if not actor.strip():
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_ACTOR_INVALID",
+                "Point processing actor is required",
+            )
+        template = parse_point_processing_template(raw)
+        revision_id = point_processing_revision_id(template)
+        existing = self._templates.get(revision_id)
+        if existing is not None and (
+            existing.content_digest != template.content_digest
+            or revision_id in self._template_owners
+        ):
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_REVISION_IMMUTABLE",
+                "Immutable shared point-processing revision conflicts with stored evidence",
+            )
+        self._templates.setdefault(revision_id, template)
+        return RegisteredPointProcessingTemplate(
+            revision_id,
+            self._templates[revision_id],
         )
 
     def template_owner_node(self, revision_id: UUID) -> UUID | None:
