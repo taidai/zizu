@@ -123,6 +123,9 @@ def persist_point_processing_template(
     cursor: Any,
     asset: PointProcessingTemplate,
     actor: str,
+    *,
+    reuse_scope: str = "shared",
+    owner_node_id: UUID | None = None,
 ) -> RegisteredPointProcessingTemplate:
     """Persist one standalone immutable L1 template in the caller transaction."""
     if not actor.strip():
@@ -130,14 +133,21 @@ def persist_point_processing_template(
             "POINT_PROCESSING_ACTOR_INVALID",
             "Template import actor is required",
         )
+    if reuse_scope not in {"node", "shared"} or (
+        (reuse_scope == "node") != (owner_node_id is not None)
+    ):
+        raise PointProcessingTemplateError(
+            "POINT_PROCESSING_REUSE_SCOPE_INVALID",
+            "Node-private processing requires one owner node; shared templates cannot have one",
+        )
     try:
         template_id = point_processing_template_id(asset)
         cursor.execute(
             """
             INSERT INTO t_point_processing_templates
               (id, asset_id, device_category, brand, model,
-               display_name, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+               display_name, status, reuse_scope, owner_node_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (asset_id, brand, model) DO NOTHING
             """,
             (
@@ -148,11 +158,14 @@ def persist_point_processing_template(
                 asset.model,
                 asset.display_name,
                 asset.status,
+                reuse_scope,
+                owner_node_id,
             ),
         )
         cursor.execute(
             """
-            SELECT id, device_category, display_name, status
+            SELECT id, device_category, display_name, status,
+                   reuse_scope, owner_node_id
             FROM t_point_processing_templates
             WHERE asset_id = %s AND brand = %s AND model = %s
             FOR UPDATE
@@ -169,6 +182,8 @@ def persist_point_processing_template(
         if (
             template_row[1] != asset.device_category
             or template_row[2] != asset.display_name
+            or template_row[4] != reuse_scope
+            or template_row[5] != owner_node_id
         ):
             raise PointProcessingTemplateError(
                 "POINT_PROCESSING_TEMPLATE_CONFLICT",
@@ -424,7 +439,12 @@ def persist_point_processing_template(
                         transform["controlEligible"],
                     ),
                 )
-        return RegisteredPointProcessingTemplate(revision_id, asset)
+        return RegisteredPointProcessingTemplate(
+            revision_id,
+            asset,
+            reuse_scope=reuse_scope,
+            owner_node_id=owner_node_id,
+        )
     except PointProcessingTemplateError:
         raise
     except psycopg2.Error as exc:
@@ -455,6 +475,39 @@ class PostgresPointProcessingTemplates:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 registered = persist_point_processing_template(cursor, template, actor)
+            connection.commit()
+        return registered
+
+    def import_node_definition(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        node_id: UUID,
+        actor: str,
+    ) -> RegisteredPointProcessingTemplate:
+        template = parse_point_processing_template(raw)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM t_nodes
+                    WHERE id=%s AND enabled=TRUE AND retired_at IS NULL
+                    """,
+                    (node_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise PointProcessingTemplateError(
+                        "POINT_PROCESSING_NODE_UNAVAILABLE",
+                        "Node-private processing owner must be an active node",
+                    )
+                registered = persist_point_processing_template(
+                    cursor,
+                    template,
+                    actor,
+                    reuse_scope="node",
+                    owner_node_id=node_id,
+                )
             connection.commit()
         return registered
 
@@ -501,6 +554,7 @@ class PostgresPointProcessingCatalog:
                       ON template.id = revision.template_id
                     WHERE upper(template.device_category) = upper(%s)
                       AND template.status = 'active'
+                      AND template.reuse_scope = 'shared'
                       {"AND revision.internal_kind IS NULL" if _supports_internal_revision_kind(cursor) else ""}
                     ORDER BY template.asset_id, revision.revision, revision.id
                     """,

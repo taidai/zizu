@@ -18,6 +18,8 @@ from tests import test_node_data_trunk_hard_cut_migration_postgres as migration
 
 
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "reference-point-processings"
+MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050_node_l0_usability.sql"
+MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
 NODE_ID = UUID("92000000-0000-0000-0000-000000000001")
 
 
@@ -47,6 +49,8 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     cursor
                 )
                 migration.NodeDataTrunkHardCutMigrationPostgresTest._apply_044(cursor)
+                cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
         from app.services.telemetry_store import init_db_pool
 
         init_db_pool(1, 4)
@@ -75,8 +79,8 @@ class PointProcessingPostgresTest(unittest.TestCase):
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO t_nodes(id,name,node_type,enabled) "
-                    "VALUES(%s,'PCS-TEST','PCS',TRUE)",
+                    "INSERT INTO t_nodes(id,name,node_type,enabled,layer) "
+                    "VALUES(%s,'PCS-TEST','PCS',TRUE,1)",
                     (NODE_ID,),
                 )
                 for key, (data_type, unit) in sorted(contracts.items()):

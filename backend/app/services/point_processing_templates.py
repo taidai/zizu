@@ -8,7 +8,7 @@ import json
 import math
 import re
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import FormulaSource, ValueKind
@@ -75,6 +75,8 @@ class PointProcessingTemplateError(ValueError):
 class RegisteredPointProcessingTemplate:
     revision_id: UUID
     template: PointProcessingTemplate
+    reuse_scope: Literal["node", "shared"] = "shared"
+    owner_node_id: UUID | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
