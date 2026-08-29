@@ -713,6 +713,7 @@ export interface Rule {
   rule_type: 'alarm' | 'control' | 'fault_map' | 'linkage'
   jdm_content: Record<string, any>
   version: number
+  configuration_revision: number
   enabled: boolean
   created_at: string
   updated_at: string
@@ -720,7 +721,7 @@ export interface Rule {
 
 export interface RuleCreateRequest {
   name: string
-  rule_type: Rule['rule_type']
+  rule_type: 'control' | 'linkage'
   jdm_content?: Record<string, any>
   enabled?: boolean
 }
@@ -772,6 +773,29 @@ export async function simulateRule(ruleId: string, context: Record<string, any>)
   })
   if (!res.ok) throw new Error(`Simulate rule failed: ${res.status}`)
   return res.json()
+}
+
+export interface JdmExecutionSummary {
+  id: string
+  rule_id: string
+  rule_version: number
+  frame_id: string
+  frame_sequence: number
+  configuration_revision: number
+  status: 'executed' | 'rejected'
+  reason_code: string | null
+  outputs: Record<string, any>
+  executed_at: string
+}
+
+export async function fetchRuleExecutions(
+  ruleId: string,
+  limit = 1,
+): Promise<JdmExecutionSummary[]> {
+  const res = await apiFetch(`${API_BASE}/rules/${ruleId}/executions?limit=${limit}`)
+  if (!res.ok) throw new Error(`Fetch rule executions failed: ${res.status}`)
+  const data = await res.json()
+  return data.executions || []
 }
 
 export async function evaluateGraph(graph: Record<string, any>, context: Record<string, any>): Promise<any> {

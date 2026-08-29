@@ -3,9 +3,10 @@ import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-e
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
-  fetchRules, fetchEntityInstances, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, submitControlCommand, fetchRuleTemplates,
-  type Rule, type RuleCreateRequest, type EntityInstance, type RuleTemplate,
+  fetchRules, fetchEntityInstances, createRule, updateRule, deleteRule, simulateRule, evaluateGraph, submitControlCommand, fetchRuleTemplates, fetchRuleExecutions,
+  type Rule, type RuleCreateRequest, type EntityInstance, type RuleTemplate, type JdmExecutionSummary,
 } from '../api/client'
+import { isEditableJdmRuleType, jdmExecutionLabel } from '../components/rule-engine/jdmExecutionModel.mjs'
 
 type DecisionGraphType = {
   nodes: any[]
@@ -142,7 +143,7 @@ function bindingsToActions(bindings: OutputBinding[]): ControlAction[] {
 
 const RULE_TYPES: RuleCreateRequest['rule_type'][] = ['control', 'linkage']
 
-const TYPE_LABELS: Record<RuleCreateRequest['rule_type'], string> = {
+const TYPE_LABELS: Record<Rule['rule_type'], string> = {
   alarm: '告警 alarm',
   control: '控制 control',
   fault_map: '故障映射 fault_map',
@@ -166,7 +167,9 @@ function RuleForm({
   const initialConfig = extractConfig(initial?.jdm_content)
 
   const [name, setName] = useState(initial?.name || '')
-  const [ruleType, setRuleType] = useState<RuleCreateRequest['rule_type']>(initial?.rule_type || 'control')
+  const [ruleType, setRuleType] = useState<RuleCreateRequest['rule_type']>(
+    initial?.rule_type === 'linkage' ? 'linkage' : 'control',
+  )
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [graph, setGraph] = useState<DecisionGraphType>(initialGraph)
   const [config, setConfig] = useState<RuleConfig>(initialConfig)
@@ -225,7 +228,7 @@ function RuleForm({
     if (!tmpl) return
     setGraph(ensureGraph(tmpl.graph))
     setConfig(extractConfig({ _config: tmpl.config }))
-    setRuleType(tmpl.rule_type)
+    setRuleType(tmpl.rule_type === 'linkage' ? 'linkage' : 'control')
   }
 
   const panels = useMemo(
@@ -836,6 +839,7 @@ export default function RuleEnginePage() {
   const [editing, setEditing] = useState<Rule | null>(null)
   const [creating, setCreating] = useState(false)
   const [simulating, setSimulating] = useState<Rule | null>(null)
+  const [latestExecutions, setLatestExecutions] = useState<Record<string, JdmExecutionSummary | null>>({})
 
   const load = async () => {
     setLoading(true)
@@ -843,6 +847,15 @@ export default function RuleEnginePage() {
       const [rulesData, templatesData] = await Promise.all([fetchRules(), fetchRuleTemplates()])
       setRules(rulesData)
       setTemplates(templatesData)
+      const executionPairs = await Promise.all(rulesData.map(async (rule) => {
+        try {
+          const executions = await fetchRuleExecutions(rule.id, 1)
+          return [rule.id, executions[0] || null] as const
+        } catch {
+          return [rule.id, null] as const
+        }
+      }))
+      setLatestExecutions(Object.fromEntries(executionPairs))
     } finally {
       setLoading(false)
     }
@@ -902,6 +915,17 @@ export default function RuleEnginePage() {
               </span>
               更新于 {new Date(rule.updated_at).toLocaleString('zh-CN', { hour12: false })}
             </div>
+            <div className="mt-3 rounded-md bg-gray-50 px-3 py-2 text-[11px] text-gray-600">
+              <div className="font-medium text-gray-700">
+                {jdmExecutionLabel(latestExecutions[rule.id])}
+              </div>
+              {latestExecutions[rule.id] && (
+                <div className="mt-1 text-gray-400">
+                  数据帧 #{latestExecutions[rule.id]?.frame_sequence} ·{' '}
+                  {new Date(latestExecutions[rule.id]!.executed_at).toLocaleString('zh-CN', { hour12: false })}
+                </div>
+              )}
+            </div>
             <div className="mt-3 flex items-center gap-2">
               <button
                 onClick={() => setSimulating(rule)}
@@ -911,13 +935,16 @@ export default function RuleEnginePage() {
               </button>
               <button
                 onClick={() => setEditing(rule)}
-                className="neu-btn px-3 py-1 text-xs text-gray-600"
+                disabled={!isEditableJdmRuleType(rule.rule_type)}
+                title={isEditableJdmRuleType(rule.rule_type) ? '编辑规则' : '历史规则只读'}
+                className="neu-btn px-3 py-1 text-xs text-gray-600 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                编辑
+                {isEditableJdmRuleType(rule.rule_type) ? '编辑' : '历史只读'}
               </button>
               <button
                 onClick={() => handleDelete(rule.id)}
-                className="neu-btn px-3 py-1 text-xs text-red-500 hover:bg-red-50"
+                disabled={!isEditableJdmRuleType(rule.rule_type)}
+                className="neu-btn px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 删除
               </button>

@@ -37,6 +37,13 @@ _data_trunk_tasks = []
 _data_trunk_stop = None
 
 
+def build_committed_frame_fanout(alarm_consumer, jdm_consumer, stream):
+    """Keep the production committed-frame consumer order explicit."""
+    from app.services.data_trunk_outbox import CommittedFrameFanout
+
+    return CommittedFrameFanout((alarm_consumer, jdm_consumer, stream))
+
+
 def _load_version() -> str:
     """从当前文件所在目录向上查找 VERSION 文件。"""
     here = Path(__file__).resolve().parent
@@ -166,20 +173,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runtime = _pipeline.data_trunk
     from app.api.committed_frames import get_committed_frame_stream
     from app.services.data_trunk_outbox import (
-        CommittedFrameFanout,
         FrameOutboxDispatcher,
         PostgresFrameOutboxRepository,
     )
     from app.services.committed_l2_alarm_consumer import (
         build_postgres_committed_l2_alarm_consumer,
     )
+    from app.services.committed_l2_jdm_consumer import (
+        build_postgres_committed_l2_jdm_consumer,
+    )
 
     committed_frame_stream = get_committed_frame_stream()
-    committed_frame_fanout = CommittedFrameFanout(
-        (
-            build_postgres_committed_l2_alarm_consumer(),
-            committed_frame_stream,
-        )
+    committed_frame_fanout = build_committed_frame_fanout(
+        build_postgres_committed_l2_alarm_consumer(),
+        build_postgres_committed_l2_jdm_consumer(),
+        committed_frame_stream,
     )
     frame_outbox_dispatcher = FrameOutboxDispatcher(
         PostgresFrameOutboxRepository(),

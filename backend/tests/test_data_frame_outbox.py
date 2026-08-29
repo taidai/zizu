@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import os
 import unittest
 from uuid import uuid4
+
+
+os.environ.setdefault("DB_PASSWORD", "database-secret-value")
+os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
+os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-at-least-32-chars")
 
 from app.services.data_trunk_contracts import (
     FrameStatus,
@@ -85,6 +92,21 @@ class _FailingPublisher:
 
 
 class DataFrameOutboxTest(unittest.IsolatedAsyncioTestCase):
+    async def test_production_fanout_delivers_alarm_jdm_then_stream(self) -> None:
+        from app.main import build_committed_frame_fanout
+
+        calls: list[str] = []
+        event = _event(10)
+        fanout = build_committed_frame_fanout(
+            _CallbackPublisher(lambda _value: calls.append("alarm")),
+            _CallbackPublisher(lambda _value: calls.append("jdm")),
+            _CallbackPublisher(lambda _value: calls.append("stream")),
+        )
+
+        await fanout.publish(event)
+
+        self.assertEqual(["alarm", "jdm", "stream"], calls)
+
     async def test_fanout_delivers_one_frame_in_registration_order(self) -> None:
         calls: list[tuple[str, int]] = []
         event = _event(10)
