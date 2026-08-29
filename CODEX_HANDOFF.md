@@ -4946,3 +4946,24 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 尚存独立质量缺陷：部分数小时未更新的 L0/L2 数据仍显示“正常”，逐点 STALE 判定不一致。下一步优先
   按原始观测时间与统一节拍复现并修正质量传播，不扩展新功能。
 - 完整记录：`docs/deploy-1号机-v0.4.89-http.md`。
+
+## 2026-08-30 — v0.4.90 snapshot freshness 修复、部署与验收
+
+- 根因是 `PostgresCommittedFrameStreamRepository` 重建 snapshot 时直接使用数据库保存的 quality，忽略
+  L0 `accepted_beat`/接收时间和 L2 `freshness_seconds`；页面刷新或重连后，过期数据可能重新显示 GOOD。
+- 已按 TDD 修复：L0 按帧头节拍、accepted beat 和接收年龄重判 STALE，旧数据/WARMING 失败关闭；L2
+  按观测年龄和实体 freshness 重判 STALE。行为测试先得到 3 个预期失败，修复后专项 7/7、真实
+  PostgreSQL 12/12、后端完整 345 tests/134 skipped/0 failure、scripts 43/43、前端 45/45、构建通过。
+- 发布提交 `cfbbbf57`、标签 `v0.4.90`；Actions `33265724519` 成功。1 号机运行 ARM64 固定摘要
+  `sha256:bca774c2c5b50df85ca33bdd2552002091439ccdfa4cb11a3ae9f976fe415b94`，实际 image ID
+  `sha256:e444717ca41319861c53fc9c5c826693540eed4ba7f7b5b2961ce93499820198`。
+- 切换前 Schema051 备份为 `/opt/zizu-backups/pre-v0.4.90-schema051/omnithings.dump`，101,266,755
+  bytes，SHA-256 `061220d6774c653ec6b265850d79e620dece2e7e92734b122a80e7c495b1b50a`，`pg_restore -l`
+  792 项通过。只重建 backend；保持 host 网络、`/dev/mqueue`、旧 runtime env 和卷；未启用 TLS/Caddy，
+  未执行策略、控制、设备写或配置发布。
+- 运行复核：healthy、restart 0、Schema051、outbox 0、frame head 41233、近 30 分钟错误 0；v0.4.89
+  回滚镜像仍保留。传输临时镜像文件验收后已精确删除，释放约 403 MiB，根分区约 5.0 GiB 可用。
+- Browser 已沿节点→L0→L1→L2→告警验收：PCS 45 个 L0；实时点正常，IGBT/环境温度/输出相电流等
+  旧值统一超时；交流总有功功率 L1 试算为 `0 / 正常` 且来源正确；L2 PCS `0 kW / 正常`、IGBT
+  `33 / 超时`，历史与来源入口可用；告警中心和 3 组规则只读可见。未点击任何发布或控制动作。
+- 完整证据：`docs/deploy-1号机-v0.4.90-http.md`。下一项仍应沿主干打磨已有功能，不扩展新架构。
