@@ -1940,6 +1940,10 @@ def _node_private_definition_content(
             outputs_by_definition[key] for key in sorted(outputs_by_definition)
         ]
 
+    for input_contract in merged["inputs"]:
+        if input_contract.get("sourceKind") == "l0":
+            input_contract.pop("sourceContract", None)
+
     merged["brand"] = "ZiZu"
     merged["model"] = "NODE-INLINE"
     merged["revision"] = 1

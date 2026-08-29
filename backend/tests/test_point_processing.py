@@ -337,6 +337,138 @@ class PointProcessingTest(unittest.TestCase):
         self.assertEqual(NODE_ID, catalog.template_owner_node(plan.template_revision_id))
         self.assertEqual((), catalog.list_templates("PCS"))
 
+    def test_inline_node_definition_reuses_existing_l0_without_neuron_rescan(self) -> None:
+        from copy import deepcopy
+
+        from app.services.neuron_point_processing_catalog import (
+            ScannedPoint,
+            ScannedPointCatalog,
+        )
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingSource,
+            PointProcessingService,
+            PreviewPointProcessing,
+        )
+        from tests.test_point_processing_templates import template_json
+
+        current_raw = deepcopy(template_json())
+        current_raw["inputs"][0]["sourceContract"] = {
+            "group": "data",
+            "address": "1!1",
+            "wireDataType": "FLOAT",
+            "decimal": None,
+            "readOnly": True,
+        }
+        current_asset = parse_point_processing_template(current_raw)
+        active_source = PointProcessingSource(
+            UUID("85000000-0000-0000-0000-000000000101"),
+            "l0",
+            NODE_ID,
+            "ActivePowerRaw",
+            "FLOAT",
+            "W",
+            True,
+        )
+        reactive_source = PointProcessingSource(
+            UUID("85000000-0000-0000-0000-000000000102"),
+            "l0",
+            NODE_ID,
+            "ReactivePowerRaw",
+            "FLOAT",
+            "W",
+            True,
+        )
+
+        class InstalledPointScanner:
+            def scan(self, node_name: str) -> ScannedPointCatalog:
+                return ScannedPointCatalog(
+                    node_name=node_name,
+                    group_interval_ms=1000,
+                    digest="a" * 64,
+                    points=(
+                        ScannedPoint(
+                            group="data",
+                            group_interval_ms=1000,
+                            name="ActivePowerRaw",
+                            address="1!1",
+                            wire_data_type="FLOAT",
+                            value_data_type="FLOAT",
+                            decimal=None,
+                            read_only=True,
+                        ),
+                    ),
+                    blockers=(),
+                )
+
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={BRAND_A_REVISION_ID: current_asset},
+            sources=(active_source, reactive_source),
+            node_source_keys={NODE_ID: "pcs"},
+        )
+        installer = PointProcessingService(
+            repository,
+            catalog,
+            point_scanner=InstalledPointScanner(),
+        )
+        current_plan = installer.preview(
+            PreviewPointProcessing(
+                node_id=NODE_ID,
+                template_revision_id=BRAND_A_REVISION_ID,
+                input_selections={},
+                actor="user:engineer",
+            )
+        )
+        installer.apply(
+            ApplyPointProcessingPlan(
+                current_plan.id,
+                current_plan.digest,
+                "install-current",
+                "user:engineer",
+            )
+        )
+
+        draft = deepcopy(template_json())
+        draft["id"] = "node.reactive-power"
+        draft["displayName"] = "PCS reactive power"
+        draft["inputs"][0].update(
+            {"id": "reactive_power_raw", "sourceKey": "ReactivePowerRaw"}
+        )
+        draft["outputs"][0].update(
+            {
+                "id": "reactive_power",
+                "entityDefinition": "pcs.reactive_power",
+            }
+        )
+        draft["outputs"][0]["transform"]["input"] = "reactive_power_raw"
+
+        class NoScanExpected:
+            calls = 0
+
+            def scan(self, _node_name: str) -> ScannedPointCatalog:
+                self.calls += 1
+                raise AssertionError("inline processing must reuse selected L0")
+
+        no_scan = NoScanExpected()
+        service = PointProcessingService(
+            repository,
+            catalog,
+            point_scanner=no_scan,
+        )
+
+        plan = service.preview_node_definition(
+            node_id=NODE_ID,
+            content=draft,
+            input_selections={"reactive_power_raw": reactive_source.source_id},
+            actor="user:engineer",
+        )
+
+        self.assertEqual("ready", plan.status, plan.public_dict())
+        self.assertEqual(0, no_scan.calls)
+
     def test_node_private_revision_cannot_be_planned_for_another_node(self) -> None:
         from copy import deepcopy
 
