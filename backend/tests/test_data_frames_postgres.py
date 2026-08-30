@@ -371,6 +371,33 @@ class DataFramesPostgresTest(unittest.TestCase):
             self.assertEqual(pending.frame_sequence, payload["frame_sequence"])
             self.assertEqual(str(self.node_id), payload["l0_changes"][0]["node_id"])
 
+    def test_l0_outbox_resolves_latest_source_by_frame_sequence(self) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=107))
+        terminal = FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+
+        self.assertEqual("COMPLETE", terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "UPDATE t_l0_observation_dedup "
+                "SET created_at=created_at + INTERVAL '1 second' "
+                "WHERE observation_id IN ("
+                "SELECT observation_id FROM t_telemetry WHERE frame_id=%s)",
+                (str(pending.frame_id),),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            latest_state = PostgresFrameOutboxRepository._load_l0_latest_state(
+                cursor,
+                capture_beat=107,
+            )
+
+        self.assertEqual((self.tag_id,), tuple(latest_state))
+        self.assertEqual(107.0, latest_state[self.tag_id].value.value)
+
     def test_terminal_frame_outbox_rebuilds_atomic_event_and_acks_token(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=108))
         FrameProcessor(

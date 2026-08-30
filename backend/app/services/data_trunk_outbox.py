@@ -624,10 +624,8 @@ class PostgresFrameOutboxRepository:
                    tag.source_path,tag.source_type
             FROM t_telemetry_latest AS latest
             JOIN t_tags AS tag ON tag.id=latest.tag_id
-            JOIN t_l0_observation_dedup AS dedup
-              ON dedup.observation_id=latest.observation_id
             JOIN t_data_frames AS source_frame
-              ON source_frame.created_at=dedup.created_at
+              ON source_frame.frame_sequence=latest.frame_sequence
             WHERE latest.frame_sequence > 0
             ORDER BY latest.tag_id
             """
