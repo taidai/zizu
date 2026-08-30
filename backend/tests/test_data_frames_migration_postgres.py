@@ -25,6 +25,11 @@ MIGRATION_054 = (
     / "init-db"
     / "migration_054_l0_latest_accepted_beat.sql"
 )
+MIGRATION_055 = (
+    Path(__file__).resolve().parents[2]
+    / "init-db"
+    / "migration_055_l0_write_path_indexes.sql"
+)
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
 
 
@@ -479,6 +484,41 @@ class DataFramesMigrationPostgresTest(unittest.TestCase):
                 "AND column_name='accepted_beat'"
             )
             self.assertIsNone(cursor.fetchone())
+
+    def test_055_removes_only_redundant_l0_write_indexes(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._apply_046(cursor)
+            connection.commit()
+
+            cursor.execute(MIGRATION_055.read_text(encoding="utf-8"))
+            connection.commit()
+            cursor.execute(MIGRATION_055.read_text(encoding="utf-8"))
+            connection.commit()
+
+            cursor.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname='public' AND tablename='t_telemetry'"
+            )
+            telemetry_indexes = {row[0] for row in cursor.fetchall()}
+            self.assertNotIn(
+                "uq_telemetry_source_observation", telemetry_indexes
+            )
+            self.assertNotIn("idx_tel_node_tag", telemetry_indexes)
+            self.assertIn("idx_tel_tag_ts", telemetry_indexes)
+            self.assertIn(
+                "ix_telemetry_observation_time", telemetry_indexes
+            )
+            self.assertIn(
+                "ix_telemetry_tag_frame_sequence", telemetry_indexes
+            )
+
+            cursor.execute(
+                "SELECT count(*) FROM pg_indexes "
+                "WHERE schemaname='public' "
+                "AND tablename='t_l0_observation_dedup' "
+                "AND indexdef LIKE 'CREATE UNIQUE INDEX%%(source_digest)'"
+            )
+            self.assertEqual((1,), cursor.fetchone())
 
 
 if __name__ == "__main__":
