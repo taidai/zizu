@@ -5002,3 +5002,23 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   复现“每秒 1 帧且持续积压”的 RED 测试，再做一个最小修复。修复后必须在 1 号机连续观察无未完成帧、
   无帧龄 FAILED、L2/EMS 连续稳定，再沿 Browser 主干复验；不扩展功能。
 - 完整证据已更新在 `docs/deploy-1号机-v0.4.91-http.md`。
+
+## 2026-08-30 — v0.4.93 已部署，吞吐验收等待活数据补证
+
+- v0.4.92 停止零规则场景的逐帧空 JDM 收据写入；v0.4.93 再按配置修订缓存“无活动 JDM 模型”，同一
+  修订的后续帧不再打开数据库事务，修订变化会重新查询。提交 `9b96a13`、标签 `v0.4.93`、Actions
+  `33284415513` 成功。
+- 1 号机运行 ARM64 固定摘要
+  `sha256:a0a6e21161b50819fcd3d916f090ea2fa012ad281e77a07d140f8a6ad13c76ea`，实际 image ID
+  `sha256:27e680b9b18570ca3678e89f92005273492c829fabed8cd4e74ece4f2d6ae37a`；healthy、restart 0、host 网络、
+  `/dev/mqueue`、unless-stopped、Schema052，错误日志 0。
+- 切换前备份位于 `/opt/zizu-backups/pre-v0.4.93-schema052/omnithings.dump`，92,722,591 bytes，SHA-256
+  `c1efad0fe17ee8f579100bacffe4c97ade7f9442f209c79677f3dec84be2280f`，`pg_restore -l` 766 项通过。
+- Browser 已只读走通节点树→L0 实时/历史→L1 选择与检查→L2 实时/历史/来源→告警→JDM→EMS；未发布
+  实体、未启停规则、未控制或写设备。前后端均为 0.4.93，Browser 控制台 error 0。
+- 必须保留真实结论：切换时 93 个 v0.4.92 超龄帧按 60 秒预算结算为 FAILED；之后队列/outbox 为 0，
+  JDM 收据保持 16,158 条不再增长，但现场 01:03:26 UTC 后没有新帧、最后 5 分钟无新 telemetry，未形成
+  持续 1 秒活负载。因此部署通过，吞吐生产验收为 `INCOMPLETE`，不能宣称已完全修复。
+- 下一步只在真实点位恢复变化后补 5 分钟运行证据：frame head 持续前进，未完成帧/最老帧龄不增长，
+  无新增 `FRAME_PROCESSING_FAILED`，再更新结论；不扩展功能。完整证据见
+  `docs/deploy-1号机-v0.4.93-http.md`。
