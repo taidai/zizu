@@ -234,7 +234,7 @@ class RealtimeBlackboard:
         *,
         configuration_revision: int,
     ) -> None:
-        """Restore order/value baselines without marking required inputs seen."""
+        """Restore committed order/value baselines for the active revision."""
         with self._lock:
             if self._cells or self._frozen is not None:
                 raise _error("DATA_FRAME_RECOVERY_ALREADY_APPLIED")
@@ -250,6 +250,7 @@ class RealtimeBlackboard:
                     accepted_beat=framed.accepted_beat,
                     effective_quality=framed.effective_quality,
                 )
+                self._seen_this_revision.add(observation.tag_id)
             self._configuration_revision = configuration_revision
 
     def reset_revision(

@@ -8,6 +8,7 @@ from app.services.realtime_blackboard import RealtimeBlackboard
 from app.services.data_trunk_contracts import (
     BlackboardState,
     DataTrunkError,
+    FramedRawObservation,
     RawObservation,
     SourceOrder,
     SourceOrderMode,
@@ -93,6 +94,40 @@ def _ready_board(
 
 
 class RealtimeBlackboardTest(unittest.TestCase):
+    def test_restart_uses_complete_committed_baseline_without_waiting_for_sparse_inputs(self):
+        board = RealtimeBlackboard(
+            active_input_contracts={
+                TAG_A: SourceOrderMode.SEQUENCE,
+                TAG_B: SourceOrderMode.SEQUENCE,
+            },
+            required_tag_ids=frozenset({TAG_A, TAG_B}),
+            capture_beat=20,
+        )
+        board.restore(
+            (
+                FramedRawObservation(
+                    observation=_raw(TAG_A, 1, 10.0),
+                    accepted_beat=20,
+                    effective_quality=TrunkQuality.GOOD,
+                ),
+                FramedRawObservation(
+                    observation=_raw(TAG_B, 1, 20.0),
+                    accepted_beat=10,
+                    effective_quality=TrunkQuality.GOOD,
+                ),
+            ),
+            configuration_revision=7,
+        )
+
+        self.assertEqual(BlackboardState.READY, board.state)
+        recovered = board.tick(NOW, configuration_revision=7)
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(TrunkQuality.GOOD, recovered.cells[TAG_A].effective_quality)
+        self.assertEqual(TrunkQuality.STALE, recovered.cells[TAG_B].effective_quality)
+        self.assertEqual((), recovered.changed_l0)
+
     def test_warms_until_required_inputs_arrive_and_keeps_last_sample_per_beat(self):
         board = RealtimeBlackboard(
             active_input_contracts={
