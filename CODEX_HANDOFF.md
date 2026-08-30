@@ -1,5 +1,23 @@
 ---
 
+## Session 2026-08-30 — v0.4.97 已部署，重启恢复通过，主干 Browser 验收完成
+
+- `v0.4.97` 发布提交为 `942a2ef710b5eec7c7cdf12299b8ac65eab86e86`，Actions `33296893256`
+  成功；1 号机已运行 ARM64 固定摘要
+  `sha256:3cd6c383c408a1d18b2cd80671031c20764e0f84fcbe58f7590897d29cb09889`，backend healthy、restart 0。
+- 修复实时黑板重启后未恢复“当前配置修订已齐全基线”的根因。部署后 frame head 从 76111 持续前进到
+  77570；最后 5 分钟 COMPLETE 276、未完成队尾 20、FAILED 0、outbox 0。Schema 053 claim 查询命中
+  `ix_data_frames_claim`，执行约 0.228 ms。
+- 切换前完整备份位于 `/opt/zizu-backups/pre-v0.4.97-schema053/omnithings.dump`，SHA-256 为
+  `f47d4f05e0d68bd2715a0bead27a4aa2839b5e3126cc4504d779add946a67848`；远端临时镜像传输包已删除，
+  备份与业务数据保留。
+- Browser 只读走通节点树、PCS 45 点 L0 实时与历史、L0 内联 L1 加工表单、L2 实时/历史/来源、告警规则、
+  JDM、控制和固定 EMS 工作台；没有发布、启停、确认或设备写。JDM 暂无规则，控制暂无可控 L2。
+- 新发现的首要待办：L2 标准实体卡片把较旧 IGBT 保存质量显示为“正常”，EMS 工作台却按当前新鲜度显示
+  `ENTITY_DATA_STALE`。下一轮先统一所有页面的 L2 当前有效质量投影，不扩展新功能。
+- 完整证据见 `docs/deploy-1号机-v0.4.97-http.md`。公网 HTTP 测试环境仍提示 development/example
+  credentials，不能宣称生产安全。
+
 ## Session 2026-08-29 — L0 实时自恢复与连接池突发保护（本地候选，未部署）
 
 - Browser 在 1 号机真实 PCS 节点复现：Pipeline/MQTT 持续运行时，45 个 L0 一度全部显示“超时 / 未收到”；
