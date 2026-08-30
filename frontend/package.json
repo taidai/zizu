@@ -1,24 +1,27 @@
 {
   "name": "zizu-frontend",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e:node": "playwright test e2e/node-management.spec.ts",
+    "test:e2e:node:list": "playwright test e2e/node-management.spec.ts --list"
   },
   "dependencies": {
     "@gorules/jdm-editor": "^1.52.0",
-    "react-dnd": "^16.0.1",
-    "react-dnd-html5-backend": "^16.0.1",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
     "monaco-editor": "^0.52.2",
     "react": "^18.3.1",
+    "react-dnd": "^16.0.1",
+    "react-dnd-html5-backend": "^16.0.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

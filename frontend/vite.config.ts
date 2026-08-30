@@ -5,6 +5,7 @@ import { resolve } from 'path'
 
 const rootVersionPath = resolve(__dirname, '..', 'VERSION')
 const appVersion = readFileSync(rootVersionPath, 'utf-8').trim()
+const developmentProxyTarget = process.env.ZIZU_DEV_PROXY_TARGET || 'http://localhost:9000'
 
 export default defineConfig({
   plugins: [react()],
@@ -16,11 +17,11 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:9000',
+        target: developmentProxyTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:9000',
+        target: developmentProxyTarget,
         ws: true,
       },
     },

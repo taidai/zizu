@@ -38,6 +38,8 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+playwright-report/
+test-results/
 
 # ---- Node.js ----
 node_modules/

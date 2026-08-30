@@ -75,13 +75,30 @@ class NeuronClient:
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         """发送 API 请求。"""
-        token = self._ensure_token()
-        headers = kwargs.pop("headers", {})
-        headers["Authorization"] = f"Bearer {token}"
-
+        headers = dict(kwargs.pop("headers", {}))
         data = kwargs.pop("json", None)
         url = f"{self.config.url}{path}"
-        return self._http_request(method, url, data=data, headers=headers)
+
+        def send(token: str) -> Any:
+            authenticated_headers = {
+                **headers,
+                "Authorization": f"Bearer {token}",
+            }
+            return self._http_request(
+                method,
+                url,
+                data=data,
+                headers=authenticated_headers,
+            )
+
+        try:
+            return send(self._ensure_token())
+        except urllib.error.HTTPError as error:
+            if error.code not in {401, 403}:
+                raise
+            logger.warning("[Neuron] Cached token rejected; authenticating once more")
+            self._token = None
+            return send(self._ensure_token())
 
     # ══════════════════════════════════════════
     # 节点管理 (Driver Nodes)

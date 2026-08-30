@@ -754,7 +754,7 @@ export default function NodeTreePage({
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw`} node={selectedNode} readOnly={readOnly} />}
+              {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw:${selectedNode.tag_count}`} node={selectedNode} readOnly={readOnly} />}
               {activeTab === 'entities' && (
                 <DataTrunkWorkspace key={`${selectedNode.id}:entities`} node={selectedNode} canManageTemplates={canManageTemplates} />
               )}

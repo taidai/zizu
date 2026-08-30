@@ -1,0 +1,57 @@
+import { execFile } from 'node:child_process'
+import path from 'node:path'
+import { promisify } from 'node:util'
+
+import {
+  buildAcceptanceEnvironment,
+  buildTemporaryResourceName,
+} from './acceptanceEnvironment.mjs'
+
+const execFileAsync = promisify(execFile)
+
+export type FixtureCommand = 'preflight' | 'setup' | 'publish' | 'cleanup'
+
+export function fixtureNames() {
+  const environment = buildAcceptanceEnvironment(process.env)
+  const neuronRunId = environment.runId.replaceAll('-', '_')
+  return {
+    root: environment.writeRoot,
+    platformNode: buildTemporaryResourceName(environment, '设备'),
+    neuronNode: `zizu_e2e_${neuronRunId}`,
+    neuronGroup: 'e2e_data',
+    neuronTag: 'e2e_active_power',
+  }
+}
+
+export async function runFixture(command: FixtureCommand, value?: number) {
+  const environment = buildAcceptanceEnvironment(process.env)
+  const repositoryRoot = path.resolve(process.cwd(), '..')
+  const script = path.join(repositoryRoot, 'backend', 'scripts', 'node_management_e2e_fixture.py')
+  const commandArguments = [script, command]
+  if (value !== undefined) {
+    commandArguments.push('--value', String(value))
+  }
+  try {
+    const { stdout } = await execFileAsync('python', commandArguments, {
+      cwd: repositoryRoot,
+      env: {
+        ...process.env,
+        ZIZU_E2E_RUN_ID: environment.runId,
+      },
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    })
+    const line = stdout.trim().split(/\r?\n/).at(-1)
+    if (!line) {
+      throw new Error(`E2E fixture ${command} returned no result`)
+    }
+    return JSON.parse(line)
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error)
+    const safe = raw
+      .split(environment.username).join('[REDACTED]')
+      .split(environment.password).join('[REDACTED]')
+    throw new Error(`E2E fixture ${command} failed: ${safe}`)
+  }
+}
