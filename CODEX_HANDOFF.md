@@ -5022,3 +5022,25 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 下一步只在真实点位恢复变化后补 5 分钟运行证据：frame head 持续前进，未完成帧/最老帧龄不增长，
   无新增 `FRAME_PROCESSING_FAILED`，再更新结论；不扩展功能。完整证据见
   `docs/deploy-1号机-v0.4.93-http.md`。
+
+## 2026-08-30 — v0.4.94 帧关联热查询修复已部署
+
+- 生产根因收窄为 `data_trunk_outbox._load_l0_latest_state()`：每个完成帧两次以
+  `frame.created_at = dedup.created_at` 关联，并顺序扫描约 6.4 万帧。旧查询执行约 111.9 ms；改用
+  `t_telemetry_latest.frame_sequence` 唯一帧身份后约 14.8 ms。真实 PostgreSQL 回归测试先 RED 后 GREEN。
+- 发布提交 `e9e1d1e`、标签 `v0.4.94`、Actions `33287783502` 成功。1 号机运行 ARM64 固定摘要
+  `sha256:f92214998ade4eea106db3c922d5c15edc60020487b9653b28759f303536255e`，实际 image ID
+  `sha256:9c3e7bdea20de95a86f28be063e22389db6228102cee848c291786e633e99365`；healthy、restart 0、host 网络、
+  `/dev/mqueue`、unless-stopped、Schema052。
+- 门禁：数据帧 PostgreSQL 17/17、后端 367 tests/145 skipped/0 failure、scripts 43/43、前端 49/49、
+  production build 成功。切换前备份为 `/opt/zizu-backups/pre-v0.4.94-schema052/omnithings.dump`，
+  99,606,431 bytes，SHA-256 `017cfce59a9cbf1b1e406095ebb9f1e9290727849845ce44a399fb79d7d1445c`，
+  `pg_restore -l` 可读。只重建 backend；其余现场容器不动。
+- Browser 已沿节点→L0 实时/历史→L1 试算→L2 实时/历史/来源→告警→JDM→EMS 无副作用验收；前后端
+  均为 0.4.94、控制台日志空，未发布配置、启停规则、控制或写设备。
+- 不得冒充吞吐完成：现场最后 telemetry 为 02:42:59 UTC，03:14 UTC 前 10 分钟无新帧。队列/outbox
+  为 0，但没有持续活负载，吞吐生产验收仍为 `INCOMPLETE`。
+- Browser 新发现独立质量缺陷：L0 已显示“超时”时，L1 当前试算仍显示“正常”，而 L2/EMS 正确 fail
+  closed。下一步先以 TDD 修复候选 L1 试算的 STALE 重判，再等待真实点位恢复变化后做连续 5 分钟吞吐补证。
+- 启动日志仍提示 insecure development mode 和示例凭据；1 号机只可作为测试部署，不可宣称生产安全。
+  完整证据见 `docs/deploy-1号机-v0.4.94-http.md`。
