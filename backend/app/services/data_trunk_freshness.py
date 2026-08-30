@@ -22,6 +22,7 @@ def effective_l0_quality(
     effective = TrunkQuality(int(stored_quality))
     expired_by_beat = (
         accepted_beat is None
+        or int(accepted_beat) <= 0
         or capture_beat - int(accepted_beat) >= 3
     )
     expired_by_time = (

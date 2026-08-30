@@ -78,6 +78,7 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("ix_data_frames_claim", calls[0])
         self.assertIn("ix_data_frame_outbox_pending", calls[0])
         self.assertIn("payload_version", calls[0])
+        self.assertIn("('t_telemetry_latest','accepted_beat')", calls[0])
         self.assertIn("ix_data_frame_outbox_replay", calls[0])
         self.assertIn("l2_agg_1h", calls[0])
         self.assertIn("zizu_internal.retention_guard", calls[0])
@@ -162,8 +163,9 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("t_l2_stream_outbox", postgres_source)
         self.assertNotIn("_select_history_observations", postgres_source)
         self.assertIn("FROM t_telemetry_latest AS latest", postgres_source)
-        self.assertIn("JOIN t_data_frames AS latest_frame", postgres_source)
-        self.assertIn("latest_frame.capture_beat", postgres_source)
+        self.assertIn("latest.accepted_beat", postgres_source)
+        self.assertNotIn("JOIN t_data_frames AS latest_frame", postgres_source)
+        self.assertNotIn("latest_frame.capture_beat", postgres_source)
         self.assertIn("WITH current_frame AS MATERIALIZED", postgres_source)
         self.assertIn("SELECT tag_id FROM current_frame", postgres_source)
         self.assertIn("FROM t_l0_observation_dedup AS dedup", postgres_source)
@@ -185,6 +187,8 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         )
         self.assertIn("def capture_previous_l0_state", outbox_source)
         self.assertIn("FROM t_telemetry_latest AS latest", outbox_source)
+        self.assertIn("latest.accepted_beat", outbox_source)
+        self.assertNotIn("source_frame.capture_beat", outbox_source)
         self.assertIn(
             "previous_l0 = capture_previous_l0_state(", postgres_source
         )

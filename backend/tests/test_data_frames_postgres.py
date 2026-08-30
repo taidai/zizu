@@ -76,6 +76,9 @@ class DataFramesPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
                 cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
+                cursor.execute(
+                    frame_migration.MIGRATION_054.read_text(encoding="utf-8")
+                )
             connection.commit()
 
     def setUp(self) -> None:
@@ -252,6 +255,150 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (str(pending.frame_id),),
             )
             self.assertEqual((0,), cursor.fetchone())
+
+    def test_stale_l0_remains_stale_after_latest_advances_without_new_sample(self) -> None:
+        installation_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_installed_point_processings"
+                "(id,node_id,revision_id,source_plan_id,configuration_revision,"
+                " installed_by,current) VALUES(%s,%s,%s,%s,0,'test:frame',TRUE)",
+                (
+                    str(installation_id),
+                    str(self.node_id),
+                    str(uuid4()),
+                    str(uuid4()),
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO t_point_processing_input_bindings"
+                "(installed_processing_id,input_id,source_kind,l0_tag_id,confirmed_by) "
+                "VALUES(%s,%s,'l0',%s,'test:frame')",
+                (str(installation_id), str(uuid4()), str(self.tag_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+
+        first = self._candidate(capture_beat=1)
+        self.repository.commit_pending(first)
+        first_claim = self.repository.claim_next(datetime.now(UTC))
+        first_snapshot = self.repository.load_processing_snapshot(first_claim)
+        self.repository.complete(first_claim, first_snapshot, ())
+
+        for beat in (2, 3):
+            unchanged = replace(
+                first,
+                frame_id=uuid4(),
+                candidate_digest=hashlib.sha256(
+                    f"unchanged-beat-{beat}".encode()
+                ).hexdigest(),
+                generation=beat,
+                capture_beat=beat,
+                changed_l0=(),
+            )
+            self.repository.commit_pending(unchanged)
+            claim = self.repository.claim_next(datetime.now(UTC))
+            snapshot = self.repository.load_processing_snapshot(claim)
+            self.assertIs(
+                TrunkQuality.GOOD,
+                snapshot.l0_by_tag[self.tag_id].effective_quality,
+            )
+            self.repository.complete(claim, snapshot, ())
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT accepted_beat FROM t_telemetry_latest WHERE tag_id=%s",
+                    (str(self.tag_id),),
+                )
+                self.assertEqual((1,), cursor.fetchone())
+                cursor.execute(
+                    "SELECT payload->'l0_changes' FROM t_data_frame_outbox "
+                    "WHERE frame_id=%s",
+                    (str(claim.frame_id),),
+                )
+                self.assertEqual(([],), cursor.fetchone())
+
+        stale = replace(
+            first,
+            frame_id=uuid4(),
+            candidate_digest=hashlib.sha256(b"unchanged-beat-4").hexdigest(),
+            generation=4,
+            capture_beat=4,
+            changed_l0=(),
+        )
+        self.repository.commit_pending(stale)
+        stale_claim = self.repository.claim_next(datetime.now(UTC))
+        stale_snapshot = self.repository.load_processing_snapshot(stale_claim)
+
+        self.assertIs(
+            TrunkQuality.STALE,
+            stale_snapshot.l0_by_tag[self.tag_id].effective_quality,
+        )
+        self.repository.complete(stale_claim, stale_snapshot, ())
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT payload->'l0_changes' FROM t_data_frame_outbox "
+                "WHERE frame_id=%s",
+                (str(stale_claim.frame_id),),
+            )
+            changes = cursor.fetchone()[0]
+        self.assertEqual(1, len(changes))
+        self.assertEqual(1, changes[0]["accepted_beat"])
+        self.assertEqual(int(TrunkQuality.STALE), changes[0]["effective_quality"])
+
+    def test_legacy_zero_accepted_beat_is_stale_in_the_first_frame(self) -> None:
+        installation_id = uuid4()
+        observation_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_installed_point_processings"
+                "(id,node_id,revision_id,source_plan_id,configuration_revision,"
+                " installed_by,current) VALUES(%s,%s,%s,%s,0,'test:frame',TRUE)",
+                (
+                    str(installation_id),
+                    str(self.node_id),
+                    str(uuid4()),
+                    str(uuid4()),
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO t_point_processing_input_bindings"
+                "(installed_processing_id,input_id,source_kind,l0_tag_id,confirmed_by) "
+                "VALUES(%s,%s,'l0',%s,'test:frame')",
+                (str(installation_id), str(uuid4()), str(self.tag_id)),
+            )
+            cursor.execute(
+                "INSERT INTO t_telemetry_latest"
+                "(node_id,tag_id,ts,value_float,raw_value_float,quality,"
+                " observation_id,source_message_id,source_sequence,source_digest,"
+                " event_time_basis,event_received_at,source_order_key,"
+                " frame_sequence,accepted_beat,source_order_mode) "
+                "VALUES(%s,%s,%s,1.0,1.0,192,%s,'legacy',1,%s,'received_at',"
+                " %s,'legacy',1,0,'sequence')",
+                (
+                    str(self.node_id),
+                    str(self.tag_id),
+                    self.now,
+                    str(observation_id),
+                    "a" * 64,
+                    self.now,
+                ),
+            )
+            cursor.execute("SET session_replication_role=origin")
+
+        empty = replace(
+            self._candidate(capture_beat=1),
+            candidate_digest=hashlib.sha256(b"legacy-first-frame").hexdigest(),
+            changed_l0=(),
+        )
+        self.repository.commit_pending(empty)
+        claim = self.repository.claim_next(datetime.now(UTC))
+        snapshot = self.repository.load_processing_snapshot(claim)
+
+        self.assertIs(
+            TrunkQuality.STALE,
+            snapshot.l0_by_tag[self.tag_id].effective_quality,
+        )
 
     def test_second_writer_is_rejected_while_first_lease_is_held(self) -> None:
         first = self.repository.acquire_writer()

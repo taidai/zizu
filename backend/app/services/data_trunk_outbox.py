@@ -620,12 +620,10 @@ class PostgresFrameOutboxRepository:
                    latest.raw_value_float,latest.raw_value_int,
                    latest.raw_value_bool,latest.raw_value_text,
                    latest.quality,latest.ts,latest.event_received_at,
-                   source_frame.capture_beat,tag.node_id,tag.unit,
+                   latest.accepted_beat,tag.node_id,tag.unit,
                    tag.source_path,tag.source_type
             FROM t_telemetry_latest AS latest
             JOIN t_tags AS tag ON tag.id=latest.tag_id
-            JOIN t_data_frames AS source_frame
-              ON source_frame.frame_sequence=latest.frame_sequence
             WHERE latest.frame_sequence > 0
             ORDER BY latest.tag_id
             """
@@ -666,7 +664,7 @@ class PostgresFrameOutboxRepository:
             accepted_beat = int(row[10])
             effective_quality = (
                 TrunkQuality.STALE
-                if capture_beat - accepted_beat >= 3
+                if accepted_beat <= 0 or capture_beat - accepted_beat >= 3
                 else source_quality
             )
             change = CommittedL0Change(

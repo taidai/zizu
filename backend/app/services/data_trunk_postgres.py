@@ -130,6 +130,7 @@ def verify_data_trunk_contract_gate(
                       ('t_telemetry','source_order_mode'),
                       ('t_telemetry','source_receive_ordinal'),
                       ('t_telemetry_latest','frame_sequence'),
+                      ('t_telemetry_latest','accepted_beat'),
                       ('t_l2_observations','frame_id'),
                       ('t_l2_observations','commit_sequence'),
                       ('t_l2_latest','frame_sequence'),
@@ -797,13 +798,11 @@ class PostgresFrameRepository:
                              latest.raw_value_text,latest.quality,latest.ts,
                              latest.event_received_at,latest.source_message_id,
                              latest.source_sequence,latest.source_digest,
-                             latest.event_time_basis,latest_frame.capture_beat,
+                             latest.event_time_basis,latest.accepted_beat,
                              latest.source_order_mode,
                              latest.source_receive_ordinal
                       FROM t_telemetry_latest AS latest
                       JOIN relevant_tags USING(tag_id)
-                      JOIN t_data_frames AS latest_frame
-                        ON latest_frame.frame_sequence=latest.frame_sequence
                       WHERE NOT EXISTS (
                         SELECT 1 FROM current_frame
                         WHERE current_frame.tag_id=latest.tag_id
@@ -866,15 +865,19 @@ class PostgresFrameRepository:
                         event_time_basis=str(row[16]),
                         source_order=order,
                     )
+                    accepted_beat = int(row[17])
                     effective_quality = TrunkQuality(int(row[10]))
-                    if claimed.capture_beat - int(row[17]) >= 3:
+                    if (
+                        accepted_beat <= 0
+                        or claimed.capture_beat - accepted_beat >= 3
+                    ):
                         effective_quality = min(
                             effective_quality,
                             TrunkQuality.STALE,
                         )
                     cells[tag_id] = FramedRawObservation(
                         observation=raw,
-                        accepted_beat=int(row[17]),
+                        accepted_beat=accepted_beat,
                         effective_quality=effective_quality,
                     )
                 legacy_snapshot = self._load_conversion_snapshot(
@@ -1788,6 +1791,7 @@ class PostgresFrameRepository:
                     observation.received_at,
                     _raw_order_key(observation),
                     frame_sequence,
+                    framed.accepted_beat,
                     order.mode.value,
                     None
                     if order.mode is SourceOrderMode.SEQUENCE
@@ -1803,7 +1807,7 @@ class PostgresFrameRepository:
                source_digest,raw_unit,raw_value_float,raw_value_int,
                raw_value_bool,raw_value_text,event_time_basis,
                event_received_at,source_order_key,frame_sequence,
-               source_order_mode,source_receive_ordinal)
+               accepted_beat,source_order_mode,source_receive_ordinal)
             VALUES %s
             ON CONFLICT (node_id,tag_id) DO UPDATE SET
               ts=EXCLUDED.ts,value_float=EXCLUDED.value_float,
@@ -1821,6 +1825,7 @@ class PostgresFrameRepository:
               event_received_at=EXCLUDED.event_received_at,
               source_order_key=EXCLUDED.source_order_key,
               frame_sequence=EXCLUDED.frame_sequence,
+              accepted_beat=EXCLUDED.accepted_beat,
               source_order_mode=EXCLUDED.source_order_mode,
               source_receive_ordinal=EXCLUDED.source_receive_ordinal
             WHERE EXCLUDED.frame_sequence > t_telemetry_latest.frame_sequence
@@ -1831,8 +1836,8 @@ class PostgresFrameRepository:
                 "%s::bigint,%s::boolean,%s::text,%s::smallint,%s::uuid,"
                 "%s::text,%s::bigint,%s::char(64),%s::text,"
                 "%s::double precision,%s::bigint,%s::boolean,%s::text,"
-                "%s::text,%s::timestamptz,%s::text,%s::bigint,%s::text,"
-                "%s::bigint)"
+                "%s::text,%s::timestamptz,%s::text,%s::bigint,%s::bigint,"
+                "%s::text,%s::bigint)"
             ),
             page_size=len(rows),
         )

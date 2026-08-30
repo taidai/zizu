@@ -20,6 +20,11 @@ MIGRATION_053 = (
     / "init-db"
     / "migration_053_frame_head_index.sql"
 )
+MIGRATION_054 = (
+    Path(__file__).resolve().parents[2]
+    / "init-db"
+    / "migration_054_l0_latest_accepted_beat.sql"
+)
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
 
 
@@ -383,6 +388,97 @@ class DataFramesMigrationPostgresTest(unittest.TestCase):
             )
             self.assertEqual(0, scan.get("Rows Removed by Filter", 0))
             self.assertLess(scan["Actual Rows"], 2)
+
+    def test_054_persists_true_accepted_beat_in_l0_latest(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._apply_046(cursor)
+            connection.commit()
+            node_id, tag_id = (
+                edge_retention.EdgeStorageRetentionMigrationPostgresTest
+                ._insert_node_and_tag(cursor)
+            )
+            _, legacy_tag_id = (
+                edge_retention.EdgeStorageRetentionMigrationPostgresTest
+                ._insert_node_and_tag(cursor)
+            )
+            frame_id = self._insert_pending_frame(cursor, capture_beat=7)
+            cursor.execute(
+                "SELECT frame_sequence FROM t_data_frames WHERE frame_id=%s",
+                (str(frame_id),),
+            )
+            frame_sequence = int(cursor.fetchone()[0])
+            observation_id = uuid4()
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_telemetry"
+                "(ts,node_id,tag_id,value_float,observation_id,frame_id,"
+                " frame_sequence,accepted_beat,source_order_mode) "
+                "VALUES(%s,%s,%s,1.0,%s,%s,%s,7,'sequence')",
+                (
+                    NOW,
+                    str(node_id),
+                    str(tag_id),
+                    str(observation_id),
+                    str(frame_id),
+                    frame_sequence,
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO t_telemetry_latest"
+                "(node_id,tag_id,ts,value_float,observation_id,frame_sequence,"
+                " source_order_mode) VALUES(%s,%s,%s,1.0,%s,%s,'sequence')",
+                (
+                    str(node_id),
+                    str(tag_id),
+                    NOW,
+                    str(observation_id),
+                    frame_sequence,
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO t_telemetry_latest"
+                "(node_id,tag_id,ts,value_float,frame_sequence) "
+                "VALUES(%s,%s,%s,2.0,0)",
+                (str(node_id), str(legacy_tag_id), NOW),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            connection.commit()
+
+            cursor.execute(MIGRATION_054.read_text(encoding="utf-8"))
+            connection.commit()
+            cursor.execute(MIGRATION_054.read_text(encoding="utf-8"))
+            connection.commit()
+
+            cursor.execute(
+                "SELECT tag_id,accepted_beat FROM t_telemetry_latest "
+                "WHERE tag_id IN (%s,%s) ORDER BY tag_id",
+                (str(tag_id), str(legacy_tag_id)),
+            )
+            self.assertEqual(
+                sorted([(tag_id, 7), (legacy_tag_id, 0)], key=lambda item: item[0]),
+                [(UUID(str(row[0])), int(row[1])) for row in cursor.fetchall()],
+            )
+            cursor.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='t_telemetry_latest' "
+                "AND column_name='accepted_beat'"
+            )
+            self.assertEqual(("NO",), cursor.fetchone())
+
+    def test_054_rejects_pre_frame_schema_without_partial_ddl(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            with self.assertRaisesRegex(
+                psycopg2.Error,
+                "SCHEMA_054_REQUIRES_046",
+            ):
+                cursor.execute(MIGRATION_054.read_text(encoding="utf-8"))
+            connection.rollback()
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='t_telemetry_latest' "
+                "AND column_name='accepted_beat'"
+            )
+            self.assertIsNone(cursor.fetchone())
 
 
 if __name__ == "__main__":

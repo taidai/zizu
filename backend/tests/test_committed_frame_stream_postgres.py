@@ -246,6 +246,20 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
 
 class CommittedFrameLegacyProjectionTest(unittest.TestCase):
+    def test_zero_accepted_beat_is_immediately_stale(self) -> None:
+        self.assertEqual(
+            int(TrunkQuality.STALE),
+            effective_l0_quality(
+                1,
+                has_value=True,
+                stored_quality=TrunkQuality.GOOD,
+                capture_beat=1,
+                accepted_beat=0,
+                received_at=NOW,
+                evaluated_at=NOW + timedelta(seconds=1),
+            ),
+        )
+
     def test_legacy_int_point_uses_its_nonempty_float_column_for_diagnostics(self) -> None:
         self.assertEqual(
             34.1,
@@ -325,6 +339,9 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
                 migration_test._apply_046(cursor)
                 payload_migration.CommittedFramePayloadMigrationPostgresTest._apply_047(
                     cursor
+                )
+                cursor.execute(
+                    frame_migration.MIGRATION_054.read_text(encoding="utf-8")
                 )
             connection.commit()
 
@@ -492,8 +509,8 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
                 """
                 INSERT INTO t_telemetry_latest(
                   node_id,tag_id,ts,value_float,quality,frame_sequence,
-                  event_time_basis,event_received_at
-                ) VALUES(%s,%s,%s,34.1,192,0,'received_at',%s)
+                  accepted_beat,event_time_basis,event_received_at
+                ) VALUES(%s,%s,%s,34.1,192,0,0,'received_at',%s)
                 """,
                 (str(self.node_a), str(self.tag_a), NOW, NOW),
             )
