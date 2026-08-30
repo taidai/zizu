@@ -15,6 +15,11 @@ from tests import test_node_data_trunk_hard_cut_migration_postgres as hard_cut
 MIGRATION_046 = (
     Path(__file__).resolve().parents[2] / "init-db" / "migration_046_data_frames.sql"
 )
+MIGRATION_053 = (
+    Path(__file__).resolve().parents[2]
+    / "init-db"
+    / "migration_053_frame_head_index.sql"
+)
 NOW = datetime(2026, 8, 27, tzinfo=UTC)
 
 
@@ -323,6 +328,61 @@ class DataFramesMigrationPostgresTest(unittest.TestCase):
                     "VALUES(%s,%s,'COMPLETE',%s)",
                     (str(frame_id), sequence, str(uuid4())),
                 )
+
+    def test_053_claims_oldest_unfinished_frame_without_scanning_terminal_history(
+        self,
+    ) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._apply_046(cursor)
+            connection.commit()
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                """
+                INSERT INTO t_data_frames
+                  (frame_id,candidate_digest,capture_beat,shot_at,
+                   configuration_revision,status,finished_at)
+                SELECT gen_random_uuid(),repeat(md5(item::text),2),item,
+                       %s-make_interval(secs=>item),0,'COMPLETE',%s
+                FROM generate_series(1,2000) AS item
+                """,
+                (NOW, NOW),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            self._insert_pending_frame(cursor, capture_beat=2001)
+            connection.commit()
+
+            cursor.execute(MIGRATION_053.read_text(encoding="utf-8"))
+            connection.commit()
+            cursor.execute(MIGRATION_053.read_text(encoding="utf-8"))
+            connection.commit()
+
+            cursor.execute(
+                """
+                EXPLAIN (ANALYZE, FORMAT JSON)
+                SELECT frame_id,frame_sequence,capture_beat,shot_at,
+                       configuration_revision,attempt_count,processing_owner,
+                       processing_token,lease_until,created_at,status
+                FROM t_data_frames
+                WHERE status IN ('PENDING','PROCESSING')
+                ORDER BY frame_sequence
+                LIMIT 1
+                FOR UPDATE
+                """
+            )
+            root = cursor.fetchone()[0][0]["Plan"]
+            pending = [root]
+            nodes: list[dict] = []
+            while pending:
+                node = pending.pop()
+                nodes.append(node)
+                pending.extend(node.get("Plans", []))
+            scan = next(
+                node
+                for node in nodes
+                if node.get("Index Name") == "ix_data_frames_claim"
+            )
+            self.assertEqual(0, scan.get("Rows Removed by Filter", 0))
+            self.assertLess(scan["Actual Rows"], 2)
 
 
 if __name__ == "__main__":
