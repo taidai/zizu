@@ -5044,3 +5044,23 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   closed。下一步先以 TDD 修复候选 L1 试算的 STALE 重判，再等待真实点位恢复变化后做连续 5 分钟吞吐补证。
 - 启动日志仍提示 insecure development mode 和示例凭据；1 号机只可作为测试部署，不可宣称生产安全。
   完整证据见 `docs/deploy-1号机-v0.4.94-http.md`。
+
+## 2026-08-30 — v0.4.95 L1 试算质量统一已部署并验收
+
+- 根因是 L1 候选试算直接使用数据库保存的 L0 quality，没有按当前帧节拍、`accepted_beat` 和接收年龄
+  重判时效；因此 L0 已超时时，L1 仍可能错误显示 GOOD。v0.4.95 抽出共享
+  `effective_l0_quality`，由 committed L0 投影和 L1 试算共同调用；回归测试先 RED 后 GREEN。
+- 发布提交 `141309b96badd3b0d655756cf9cfad34c4707e40`、标签 `v0.4.95`、Actions `33291009972`
+  成功。1 号机运行 ARM64 固定摘要
+  `sha256:0fcb2466e6c4311c49000db28de63c612d428b98601cf092e0b1f19d11503db9`，实际 image ID
+  `sha256:10689b5f38411d789f5195ac02659f3926846f20952f68c6cda5ca895a0bf4af4`；healthy、restart 0、Schema052。
+- 门禁：相关 PostgreSQL 19/19、后端 368 tests/146 skipped/0 failure、scripts 43/43、前端 49/49、
+  production build 成功。切换前备份位于 `/opt/zizu-backups/pre-v0.4.95-schema052/omnithings.dump`，
+  105,279,255 bytes，SHA-256 `dbff8c95778a3af112504e109f6a0f73e62c3342ed1673625365b8335c5c6998`，
+  `pg_restore -l` 806 项可读。只重建 backend，保留 host 网络与 `/dev/mqueue`。
+- Browser 已只读走通节点树→L0 实时/历史→L1 试算→L2 实时/历史/来源→告警→JDM→EMS。PCS L0 为
+  `0 / 超时 / 11:58:30`，对应 L1 试算明确为 `0 / 超时 / INPUT_STALE`，L2 和 EMS 同样 fail closed；
+  旧假 GOOD 已在真实站点关闭。未发布实体、启停规则、运行 JDM、控制或写设备。
+- 现场最终 frame head 69,894、无未完成帧、outbox 0，但最后 telemetry 为 03:58:30 UTC，之后没有持续
+  业务遥测。吞吐生产验收仍为 `INCOMPLETE`；点位恢复后补连续 5 分钟活负载证据。完整记录见
+  `docs/deploy-1号机-v0.4.95-http.md`。
