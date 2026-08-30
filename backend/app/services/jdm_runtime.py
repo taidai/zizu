@@ -203,14 +203,18 @@ def evaluate_model_content(
 class JdmRuntime:
     def __init__(self, repository: JdmRepository) -> None:
         self._repository = repository
+        self._empty_configuration_revision: int | None = None
 
     def submit_frame(
         self,
         event: FrameOutboxEvent,
     ) -> tuple[JdmExecution, ...]:
+        if self._empty_configuration_revision == event.configuration_revision:
+            return ()
         with self._repository.transaction() as transaction:
             models = transaction.active_models(event.configuration_revision)
             if not models:
+                self._empty_configuration_revision = event.configuration_revision
                 return ()
             if not transaction.begin_committed_frame(
                 "jdm",

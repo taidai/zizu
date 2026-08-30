@@ -119,6 +119,7 @@ class _Transaction:
         return True
 
     def active_models(self, configuration_revision: int) -> tuple[JdmModel, ...]:
+        self._repository.active_models_calls += 1
         return tuple(
             model
             for model in self._repository.models
@@ -145,6 +146,7 @@ class _Repository:
         self.fail_on_save_number = fail_on_save_number
         self.receipts: set[tuple[str, UUID, int, int]] = set()
         self.executions = []
+        self.active_models_calls = 0
 
     @contextmanager
     def transaction(self):
@@ -262,6 +264,17 @@ class CommittedL2JdmConsumerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(set(), repository.receipts)
         self.assertEqual([], repository.executions)
+
+    async def test_empty_revision_is_loaded_once_for_following_frames(self) -> None:
+        repository = _Repository()
+        consumer = _consumer(repository)
+
+        await consumer.publish(_frame(_change(), sequence=7001))
+        await consumer.publish(_frame(_change(), sequence=7002))
+        await consumer.publish(_frame(_change(), revision=8, sequence=8001))
+
+        self.assertEqual(2, repository.active_models_calls)
+        self.assertEqual(set(), repository.receipts)
 
     async def test_second_save_failure_rolls_back_receipt_and_first_execution(self) -> None:
         repository = _Repository(
