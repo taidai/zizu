@@ -120,12 +120,38 @@ def _nonempty(name: str, value: str) -> str:
 
 def _source_version(build_context: Path) -> str:
     try:
-        return _nonempty(
-            "source VERSION",
-            (build_context / "VERSION").read_text(encoding="utf-8").strip(),
+        package = json.loads(
+            (build_context / "frontend" / "package.json").read_text(encoding="utf-8")
         )
-    except OSError as error:
-        raise ReleaseBuildError("release source VERSION is not readable") from error
+        package_lock = json.loads(
+            (build_context / "frontend" / "package-lock.json").read_text(encoding="utf-8")
+        )
+        pyproject = (build_context / "backend" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        pyproject_match = re.search(
+            r'^version\s*=\s*"([^"]+)"', pyproject, flags=re.MULTILINE
+        )
+        lock_root = package_lock.get("packages", {}).get("", {})
+        values = {
+            "VERSION": (build_context / "VERSION").read_text(encoding="utf-8").strip(),
+            "backend/app/VERSION": (
+                build_context / "backend" / "app" / "VERSION"
+            ).read_text(encoding="utf-8").strip(),
+            "backend/pyproject.toml": pyproject_match.group(1) if pyproject_match else "",
+            "frontend/package.json": package.get("version", ""),
+            "frontend/package-lock.json": package_lock.get("version", ""),
+            "frontend/package-lock.json#root": lock_root.get("version", ""),
+        }
+        normalized = {
+            name: _nonempty(f"source {name}", value) for name, value in values.items()
+        }
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError) as error:
+        raise ReleaseBuildError("release source versions are not readable") from error
+    if len(set(normalized.values())) != 1:
+        details = ", ".join(f"{name}={value!r}" for name, value in normalized.items())
+        raise ReleaseBuildError(f"release version sources disagree: {details}")
+    return normalized["VERSION"]
 
 
 def _metadata_digest(path: Path, architecture: str) -> str:

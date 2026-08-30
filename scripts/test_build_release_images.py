@@ -137,6 +137,30 @@ class BuildReleaseImagesTest(unittest.TestCase):
                 )
         self.assertEqual([], calls)
 
+    def test_refuses_release_when_internal_version_sources_disagree(self) -> None:
+        from scripts.build_release_images import ReleaseBuildError, _source_version
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "backend" / "app").mkdir(parents=True)
+            (source / "backend").mkdir(exist_ok=True)
+            (source / "frontend").mkdir()
+            (source / "VERSION").write_text("0.5.0\n", encoding="utf-8")
+            (source / "backend" / "app" / "VERSION").write_text("0.4.9\n", encoding="utf-8")
+            (source / "backend" / "pyproject.toml").write_text(
+                '[project]\nversion = "0.5.0"\n', encoding="utf-8"
+            )
+            (source / "frontend" / "package.json").write_text(
+                '{"version":"0.5.0"}\n', encoding="utf-8"
+            )
+            (source / "frontend" / "package-lock.json").write_text(
+                '{"version":"0.5.0","packages":{"":{"version":"0.5.0"}}}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ReleaseBuildError, "version sources disagree"):
+                _source_version(source)
+
 
 if __name__ == "__main__":
     unittest.main()
