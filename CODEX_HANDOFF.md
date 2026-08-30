@@ -1,5 +1,26 @@
 ---
 
+## Session 2026-08-31 — v0.5.1 节点管理主干已部署并完成无头验收
+
+- 工作树：`C:\Users\chent\Documents\zizu-node-e2e`，分支
+  `test/node-management-headless-e2e`。运行功能提交 `cd86073`，分支最新提交 `9d92f4e`；后两次提交只改
+  E2E 竞态和测试资产清理，不进入运行容器。
+- Actions `33328038424` 成功；1 号机运行 ARM64 固定摘要
+  `sha256:07261d665d1e4d73c42132cb71a67570c46997bca66158b1da3e9ccc8adb840b`，Schema055，backend
+  healthy、restart 0、host 网络、`/dev/mqueue`、unless-stopped，Pipeline RUNNING，近 30 分钟错误 0。
+- 修复并验收：Neuron 认证过期自动重登；节点 CRUD/刷新；Neuron 点位导入；L0 实时/历史/筛选/分页；
+  单位为空的 L0 可在直接加工时声明 L2 单位；L1 试算/发布；L2 实时/历史/质量/来源；规则绑定刷新；
+  本地 Vite WebSocket 代理。默认验收改为 Playwright 无头主干。
+- 门禁：后端完整 388 tests / 152 skipped / 0 failure；发布脚本 51/51；前端 55/55；production build
+  成功。最终公网无头主干 6/6，100.5 秒，覆盖节点→L0→L1→L2、共享模板保存和禁用无动作规则绑定；
+  未执行控制、自动策略或真实设备写。
+- 测试资产已收净：仅保留唯一空 `E2E验证` 边界根；活动 E2E 规则、Neuron 节点、共享模板均为 0。
+  早期 11 个空重复根已精确退役，6 个 E2E 模板经正式 API 发布 retired 修订；脚本已自动化该清理。
+- 运行配置备份：`/opt/zizu-release-test-0.5.0/release.env.pre-v0.5.1-final-cd86073-20260831`；
+  数据库备份仍为 `/opt/zizu-backups/pre-v0.5.1-schema055-20260831/omnithings.dump`。
+- 详细证据：`docs/deploy-1号机-v0.5.1-http.md`。仍未交付的明确缺口是共享模板目录的选择、安装和版本
+  维护页面闭环；当前只证明“保存为共享模板”可用。未启用 Caddy/TLS。
+
 ## Session 2026-08-30 — v0.4.97 已部署，重启恢复通过，主干 Browser 验收完成
 
 - `v0.4.97` 发布提交为 `942a2ef710b5eec7c7cdf12299b8ac65eab86e86`，Actions `33296893256`
