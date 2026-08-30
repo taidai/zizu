@@ -50,9 +50,20 @@ test.describe.serial('节点管理主干', () => {
     const tree = nodeTree(page)
     const search = page.getByPlaceholder('搜索节点...')
 
+    await Promise.all([
+      page.waitForResponse((response) => (
+        response.request().method() === 'GET'
+        && response.url().includes('/api/v1/nodes')
+        && response.ok()
+      )),
+      page.getByRole('button', { name: '刷新', exact: true }).click(),
+    ])
+
     await search.fill(environment.writeRoot)
     const writeRoot = tree.getByTitle(environment.writeRoot, { exact: true }).first()
-    if (await writeRoot.count() === 0) {
+    const writeRootExists = await writeRoot.waitFor({ state: 'visible', timeout: 1_500 })
+      .then(() => true, () => false)
+    if (!writeRootExists) {
       await search.fill('')
       await page.getByRole('button', { name: '+ 节点', exact: true }).click()
       const modal = nodeModal(page, '新建节点')
