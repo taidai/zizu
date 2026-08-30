@@ -255,6 +255,14 @@ class CommittedL2JdmConsumerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(repository.receipts))
         self.assertEqual(1, len(repository.executions))
 
+    async def test_no_active_models_does_not_persist_an_empty_receipt(self) -> None:
+        repository = _Repository()
+
+        await _consumer(repository).publish(_frame(_change()))
+
+        self.assertEqual(set(), repository.receipts)
+        self.assertEqual([], repository.executions)
+
     async def test_second_save_failure_rolls_back_receipt_and_first_execution(self) -> None:
         repository = _Repository(
             _model(rule_id=uuid4()),

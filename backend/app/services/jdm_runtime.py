@@ -209,6 +209,9 @@ class JdmRuntime:
         event: FrameOutboxEvent,
     ) -> tuple[JdmExecution, ...]:
         with self._repository.transaction() as transaction:
+            models = transaction.active_models(event.configuration_revision)
+            if not models:
+                return ()
             if not transaction.begin_committed_frame(
                 "jdm",
                 event.frame_id,
@@ -218,9 +221,7 @@ class JdmRuntime:
                 return ()
             executions = tuple(
                 evaluate_model(model, event)
-                for model in transaction.active_models(
-                    event.configuration_revision
-                )
+                for model in models
             )
             for execution in executions:
                 transaction.save_execution(execution)

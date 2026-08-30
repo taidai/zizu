@@ -347,6 +347,22 @@ class JdmRuntimePostgresTest(unittest.TestCase):
             ),
         )
 
+    def test_no_active_models_does_not_persist_an_empty_receipt(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM t_rules")
+
+        executions = self._runtime().submit_frame(self.event)
+
+        self.assertEqual((), executions)
+        self.assertEqual(
+            0,
+            self._count(
+                "t_committed_frame_consumers "
+                "WHERE consumer_key='jdm' AND frame_id=%s",
+                (self.event.frame_id,),
+            ),
+        )
+
     def test_active_revision_mismatch_writes_nothing(self) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -359,6 +375,37 @@ class JdmRuntimePostgresTest(unittest.TestCase):
             event = self._insert_frame(
                 cursor,
                 capture_beat=520002,
+                configuration_revision=1,
+            )
+
+        with self.assertRaisesRegex(
+            Exception,
+            "JDM_FRAME_CONFIGURATION_MISMATCH",
+        ):
+            self._runtime().submit_frame(event)
+
+        self.assertEqual(
+            0,
+            self._count(
+                "t_committed_frame_consumers "
+                "WHERE consumer_key='jdm' AND frame_id=%s",
+                (event.frame_id,),
+            ),
+        )
+
+    def test_no_models_still_rejects_active_revision_mismatch(self) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM t_rules")
+            cursor.execute(
+                "INSERT INTO t_configuration_revisions"
+                "(revision,previous_revision,actor,action,resource_kind,"
+                "resource_id,after_digest) "
+                "VALUES(1,0,'test','test.publish','test','jdm',%s)",
+                ("d" * 64,),
+            )
+            event = self._insert_frame(
+                cursor,
+                capture_beat=520003,
                 configuration_revision=1,
             )
 

@@ -304,14 +304,6 @@ class _PostgresJdmTransaction:
     ) -> bool:
         with self._connection.cursor() as cursor:
             cursor.execute(
-                "SELECT current_revision FROM t_configuration_state "
-                "WHERE singleton=TRUE FOR SHARE"
-            )
-            row = cursor.fetchone()
-            current_revision = None if row is None else int(row[0])
-            if current_revision != configuration_revision:
-                raise JdmRuntimeError("JDM_FRAME_CONFIGURATION_MISMATCH")
-            cursor.execute(
                 """
                 INSERT INTO t_committed_frame_consumers
                   (consumer_key,frame_id,frame_sequence,configuration_revision)
@@ -333,6 +325,14 @@ class _PostgresJdmTransaction:
         configuration_revision: int,
     ) -> tuple[JdmModel, ...]:
         with self._connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT current_revision FROM t_configuration_state "
+                "WHERE singleton=TRUE FOR SHARE"
+            )
+            row = cursor.fetchone()
+            current_revision = None if row is None else int(row[0])
+            if current_revision != configuration_revision:
+                raise JdmRuntimeError("JDM_FRAME_CONFIGURATION_MISMATCH")
             cursor.execute(
                 """
                 SELECT id,version,configuration_revision,jdm_content
