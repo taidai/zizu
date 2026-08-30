@@ -10,7 +10,7 @@
 #
 # 说明:
 #   - 正式构建使用 Docker Official Images；镜像平台摘要由 release.json 锁定
-#   - pip 走清华源 (pypi.org 直连慢)
+#   - pip 使用官方 PyPI，避免单一第三方镜像故障阻断发布
 #   - F0 精简依赖: zen-engine/pandas/sympy/sqlalchemy 等 F1/F2 组件后置
 # ============================================================
 
@@ -44,9 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# F0 核心依赖 + F3 运行时依赖 (清华镜像加速)
-RUN pip install --no-cache-dir \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+# F0 核心依赖 + F3 运行时依赖
+RUN pip install --no-cache-dir --retries 5 --timeout 30 \
         fastapi \
         "uvicorn[standard]" \
         psycopg2-binary \

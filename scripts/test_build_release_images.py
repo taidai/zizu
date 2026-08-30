@@ -23,6 +23,14 @@ class BuildReleaseImagesTest(unittest.TestCase):
         )
         self.assertIn("FROM python:3.12-slim", dockerfile)
 
+    def test_backend_dependency_install_has_no_single_mirror_dependency(self) -> None:
+        dockerfile = (REPO_ROOT / "backend" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("pypi.tuna.tsinghua.edu.cn", dockerfile)
+        self.assertIn("--retries 5", dockerfile)
+
     def test_builds_each_required_architecture_and_writes_a_verified_manifest(self) -> None:
         from scripts.build_release_images import build_release_images
 
