@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from scripts.node_management_e2e_fixture import (
     _mqtt_host,
+    _retire_run_templates,
     build_neuron_tags,
     build_resource_names,
     build_telemetry_payload,
@@ -13,6 +14,46 @@ from scripts.node_management_e2e_fixture import (
 
 
 class NodeManagementE2EFixtureTest(unittest.TestCase):
+    @patch("scripts.node_management_e2e_fixture._request")
+    def test_cleanup_retires_only_the_current_run_shared_template(
+        self,
+        request: MagicMock,
+    ) -> None:
+        request.side_effect = [
+            {
+                "items": [
+                    {
+                        "asset_id": "e2e.template.run_20260831_18",
+                        "revision_id": "revision-18",
+                    },
+                    {
+                        "asset_id": "pcs.production",
+                        "revision_id": "production-revision",
+                    },
+                ]
+            },
+            {
+                "schemaVersion": "zizu.point-processing/v1alpha1",
+                "revision": 1,
+                "status": "active",
+            },
+            {"status": "imported"},
+        ]
+
+        retired = _retire_run_templates("token", "run-20260831-18")
+
+        self.assertEqual(1, retired)
+        export_call = request.call_args_list[1]
+        self.assertEqual(
+            "/point-processing-templates/revision-18/export",
+            export_call.args[1],
+        )
+        import_call = request.call_args_list[2]
+        self.assertEqual("POST", import_call.args[0])
+        self.assertEqual("/point-processing-templates/import", import_call.args[1])
+        self.assertEqual(2, import_call.kwargs["body"]["revision"])
+        self.assertEqual("retired", import_call.kwargs["body"]["status"])
+
     @patch.dict(
         "os.environ",
         {

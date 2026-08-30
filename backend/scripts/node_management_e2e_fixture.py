@@ -371,9 +371,51 @@ def _run_backend_script_via_ssh(remote_script: str) -> None:
         client.close()
 
 
+def _retire_run_templates(token: str, run_id: str) -> int:
+    if not SAFE_RUN_ID.fullmatch(run_id):
+        raise ValueError("run id may contain only ASCII letters, digits, underscore or hyphen")
+    asset_id = f"e2e.template.{run_id.replace('-', '_')}"
+    items = _request(
+        "GET",
+        "/point-processing-templates?device_category=PCS",
+        token=token,
+    ).get("items", [])
+    matches = [item for item in items if item.get("asset_id") == asset_id]
+    if not matches:
+        return 0
+    current = max(matches, key=lambda item: int(item.get("revision", 0)))
+    revision_id = str(current.get("revision_id", "")).strip()
+    if not revision_id:
+        raise RuntimeError(f"E2E template {asset_id} has no revision id")
+    content = _request(
+        "GET",
+        f"/point-processing-templates/{revision_id}/export",
+        token=token,
+    )
+    revision = content.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        raise RuntimeError(f"E2E template {asset_id} has an invalid revision")
+    if content.get("status") == "retired":
+        return 0
+    retired = dict(content)
+    retired["revision"] = revision + 1
+    retired["status"] = "retired"
+    _request(
+        "POST",
+        "/point-processing-templates/import",
+        token=token,
+        body=retired,
+    )
+    return 1
+
+
 def cleanup() -> dict[str, Any]:
     names = _environment_names()
     token = _token()
+    retired_templates = _retire_run_templates(
+        token,
+        os.environ["ZIZU_E2E_RUN_ID"],
+    )
     retired_rules = 0
     rule_name = f"E2E规则-{os.environ['ZIZU_E2E_RUN_ID']}"
     for rule in _request("GET", "/rules", token=token).get("rules", []):
@@ -401,6 +443,7 @@ def cleanup() -> dict[str, Any]:
         "neuron_node": names.neuron_node,
         "retired_nodes": len(targets),
         "retired_rules": retired_rules,
+        "retired_templates": retired_templates,
     }
 
 
