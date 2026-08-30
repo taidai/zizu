@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 import unittest
@@ -383,6 +383,82 @@ class PointProcessingPostgresTest(unittest.TestCase):
         self.assertIsInstance(installed[0].transform, FormulaTransform)
         self.assertEqual((InputReference.l0(active_id),), installed[0].transform.sources["active"])
         self.assertEqual((InputReference.l0(auxiliary_id),), installed[0].transform.sources["reactive"])
+
+    def test_trial_marks_expired_l0_input_stale(self) -> None:
+        from app.services.data_trunk_contracts import (
+            FramedRawObservation,
+            FrozenFrameCandidate,
+            RawObservation,
+            SourceOrder,
+            TrunkQuality,
+            TypedValue,
+        )
+        from app.services.data_trunk_conversion import evaluate_processing
+        from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.frame_processor import FrameProcessor
+        from app.services.point_processing import PointProcessingService
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTrialEvaluator,
+        )
+
+        tag_id = uuid5(NAMESPACE_URL, f"test/tag/{NODE_ID}/ActivePowerRaw")
+        observed_at = datetime.now(UTC) - timedelta(seconds=10)
+        raw = RawObservation(
+            observation_id=uuid4(),
+            node_id=NODE_ID,
+            tag_id=tag_id,
+            source_key="ActivePowerRaw",
+            value=TypedValue.float(20.0),
+            raw_unit="W",
+            quality=TrunkQuality.GOOD,
+            source_timestamp=observed_at,
+            received_at=observed_at,
+            source_message_id="expired-trial-source",
+            source_sequence=1,
+            source_digest=hashlib.sha256(b"expired-trial-source").hexdigest(),
+            event_time_basis="received_at",
+            source_order=SourceOrder.received_at(observed_at, 1),
+        )
+        framed = FramedRawObservation(raw, 1, TrunkQuality.GOOD)
+        frame_repository = PostgresFrameRepository()
+        frame_repository.commit_pending(
+            FrozenFrameCandidate(
+                frame_id=uuid4(),
+                candidate_digest=hashlib.sha256(b"expired-trial-frame").hexdigest(),
+                generation=1,
+                capture_beat=1,
+                shot_at=observed_at,
+                configuration_revision=0,
+                cells=MappingProxyType({tag_id: framed}),
+                changed_l0=(framed,),
+            )
+        )
+        terminal = FrameProcessor(
+            frame_repository,
+            evaluator=evaluate_processing,
+            clock=lambda: observed_at,
+        ).process_next(observed_at)
+        self.assertEqual("COMPLETE", terminal.status.value)
+
+        registered = self._service_and_revision("pcs-brand-a")[2]
+        service = PointProcessingService(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+            trial_evaluator=PostgresPointProcessingTrialEvaluator(),
+        )
+        trial = service.trial(self._plan(service, registered))
+        self.assertIsNotNone(trial)
+        output = next(
+            item
+            for item in trial.outputs
+            if item["entity_definition_id"] == "pcs.active_power"
+        )
+
+        self.assertEqual(20.0, output["value"] * 1000)
+        self.assertEqual(int(TrunkQuality.STALE), output["quality"])
+        self.assertEqual("INPUT_STALE", output["reason"])
 
     def test_trial_reads_current_processing_revision_for_l2_formula_input(self) -> None:
         from app.services.point_processing import (

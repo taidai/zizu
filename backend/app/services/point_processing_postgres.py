@@ -1975,6 +1975,7 @@ class PostgresPointProcessingTrialEvaluator:
             ValueKind,
         )
         from app.services.data_trunk_conversion import evaluate_processing
+        from app.services.data_trunk_freshness import effective_l0_quality
         from app.services.data_trunk_postgres import (
             _l2_value_from_columns,
             _raw_value_from_columns,
@@ -2012,7 +2013,8 @@ class PostgresPointProcessingTrialEvaluator:
                     )
                     cursor.execute(
                         """
-                        SELECT frame_sequence,shot_at,configuration_revision
+                        SELECT frame_sequence,shot_at,configuration_revision,
+                               capture_beat,CURRENT_TIMESTAMP
                         FROM t_data_frames
                         WHERE status='COMPLETE'
                           AND configuration_revision=%s
@@ -2027,7 +2029,13 @@ class PostgresPointProcessingTrialEvaluator:
                             "POINT_PROCESSING_TRIAL_FRAME_UNAVAILABLE",
                             "No committed frame is available for the planned configuration",
                         )
-                    frame_sequence, frame_time, frame_revision = frame
+                    (
+                        frame_sequence,
+                        frame_time,
+                        frame_revision,
+                        capture_beat,
+                        evaluated_at,
+                    ) = frame
                     if l0_ids:
                         cursor.execute(
                             """
@@ -2038,9 +2046,15 @@ class PostgresPointProcessingTrialEvaluator:
                                    latest.raw_value_text,latest.quality,latest.ts,
                                    latest.event_received_at,latest.source_message_id,
                                    latest.source_sequence,latest.source_digest,
-                                   latest.event_time_basis
+                                   latest.event_time_basis,history.accepted_beat
                             FROM t_telemetry_latest AS latest
                             JOIN t_tags AS tag ON tag.id=latest.tag_id
+                            LEFT JOIN LATERAL (
+                              SELECT telemetry.accepted_beat
+                              FROM t_telemetry AS telemetry
+                              WHERE telemetry.observation_id=latest.observation_id
+                              ORDER BY telemetry.ts DESC LIMIT 1
+                            ) AS history ON TRUE
                             WHERE latest.tag_id=ANY(%s::uuid[])
                               AND latest.frame_sequence <= %s
                             ORDER BY latest.tag_id
@@ -2057,7 +2071,15 @@ class PostgresPointProcessingTrialEvaluator:
                                     str(row[4]), row[6], row[7], row[8], row[9]
                                 ),
                                 raw_unit=row[5],
-                                quality=TrunkQuality(int(row[10])),
+                                quality=effective_l0_quality(
+                                    int(frame_sequence),
+                                    has_value=True,
+                                    stored_quality=row[10],
+                                    capture_beat=int(capture_beat),
+                                    accepted_beat=row[17],
+                                    received_at=row[12],
+                                    evaluated_at=evaluated_at,
+                                ),
                                 source_timestamp=row[11],
                                 received_at=row[12],
                                 source_message_id=row[13],

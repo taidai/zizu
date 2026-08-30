@@ -13,7 +13,6 @@ import psycopg2
 from app.services.committed_frame_stream import FrameScope, FrameStreamError
 from app.services.committed_frame_stream_postgres import (
     PostgresCommittedFrameStreamRepository,
-    _l0_snapshot_quality,
     _l0_snapshot_value,
 )
 from app.services.data_trunk_contracts import (
@@ -24,6 +23,7 @@ from app.services.data_trunk_contracts import (
     TrunkQuality,
     TypedValue,
 )
+from app.services.data_trunk_freshness import effective_l0_quality
 from app.services.data_trunk_postgres import PostgresFrameRepository
 from tests import test_data_frames_migration_postgres as frame_migration
 from tests import test_committed_frame_payload_migration_postgres as payload_migration
@@ -264,7 +264,7 @@ class CommittedFrameLegacyProjectionTest(unittest.TestCase):
         )
         self.assertEqual(
             int(TrunkQuality.STALE),
-            _l0_snapshot_quality(0, has_value=True, stored_quality=192),
+            effective_l0_quality(0, has_value=True, stored_quality=192),
         )
 
     def test_committed_frame_keeps_strict_declared_type(self) -> None:

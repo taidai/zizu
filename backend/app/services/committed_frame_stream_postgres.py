@@ -16,6 +16,7 @@ from app.services.committed_frame_stream import (
     ReplayWindow,
 )
 from app.services.data_trunk_contracts import TrunkQuality, ValueKind
+from app.services.data_trunk_freshness import effective_l0_quality
 from app.services.data_trunk_outbox import FrameOutboxEvent
 
 
@@ -292,14 +293,14 @@ class PostgresCommittedFrameStreamRepository:
                 value is not None for value in row[19:23]
             )
             has_value = row[7] is not None or legacy_has_value
-            effective_quality = _l0_snapshot_quality(
+            effective_quality = effective_l0_quality(
                 frame_sequence_value,
                 has_value=has_value,
                 stored_quality=row[12],
                 capture_beat=capture_beat,
                 accepted_beat=row[18],
                 received_at=row[14],
-                snapshot_at=snapshot_at,
+                evaluated_at=snapshot_at,
             )
             source_quality = (
                 int(TrunkQuality.STALE)
@@ -453,34 +454,6 @@ def _typed_value(
     else:
         value = None if value_codes is None else list(value_codes)
     return float(value) if isinstance(value, Decimal) else value
-
-
-def _l0_snapshot_quality(
-    frame_sequence: int,
-    *,
-    has_value: bool,
-    stored_quality: Any,
-    capture_beat: int = 0,
-    accepted_beat: Any = None,
-    received_at: datetime | None = None,
-    snapshot_at: datetime | None = None,
-) -> int:
-    """Migration-era values are diagnostic history, never current GOOD data."""
-    if not has_value or frame_sequence == 0:
-        return int(TrunkQuality.STALE)
-    effective = int(stored_quality)
-    expired_by_beat = (
-        accepted_beat is None
-        or capture_beat - int(accepted_beat) >= 3
-    )
-    expired_by_time = (
-        received_at is not None
-        and snapshot_at is not None
-        and (snapshot_at - received_at).total_seconds() >= 3
-    )
-    if expired_by_beat or expired_by_time:
-        return min(effective, int(TrunkQuality.STALE))
-    return effective
 
 
 def _l2_snapshot_quality(
