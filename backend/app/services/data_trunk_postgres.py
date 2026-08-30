@@ -633,6 +633,11 @@ class PostgresFrameRepository:
             with self._connection() as connection:
                 try:
                     with connection.cursor() as cursor:
+                        # A lost claim is safely replayed from PENDING or by lease
+                        # recovery.  Do not make slow edge storage fsync ownership
+                        # metadata that the durable completion transaction will
+                        # supersede.
+                        cursor.execute("SET LOCAL synchronous_commit TO OFF")
                         cursor.execute(
                             "SELECT pg_advisory_xact_lock("
                             "hashtextextended('zizu:data-frame-processor',0))"

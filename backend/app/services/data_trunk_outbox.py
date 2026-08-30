@@ -360,6 +360,9 @@ class PostgresFrameOutboxRepository:
             with self._connection() as connection:
                 try:
                     with connection.cursor() as cursor:
+                        # Outbox delivery is at-least-once.  A claim lost with the
+                        # process is safe to repeat after its lease expires.
+                        cursor.execute("SET LOCAL synchronous_commit TO OFF")
                         cursor.execute(
                             "SELECT pg_advisory_xact_lock("
                             "hashtextextended('zizu:data-frame-outbox',0))"
@@ -473,6 +476,10 @@ class PostgresFrameOutboxRepository:
             with self._connection() as connection:
                 try:
                     with connection.cursor() as cursor:
+                        # Losing an acknowledgement can only cause a duplicate
+                        # delivery (or an earlier retry), which is already part of
+                        # the outbox contract.  The frame payload remains durable.
+                        cursor.execute("SET LOCAL synchronous_commit TO OFF")
                         cursor.execute(statement, parameters)
                         if cursor.fetchone() is None:
                             raise DataTrunkError(
