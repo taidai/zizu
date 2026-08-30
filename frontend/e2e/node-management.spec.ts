@@ -7,6 +7,8 @@ test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
   const names = fixtureNames()
   const editedPlatformNode = `${names.platformNode}-已编辑`
+  const entityDisplayName = `E2E有功功率-${environment.runId}`
+  const entityDefinitionKey = `e2e.active_power_${environment.runId.replaceAll('-', '_')}`
   let context: BrowserContext
   let page: Page
 
@@ -128,6 +130,94 @@ test.describe.serial('节点管理主干', () => {
     await page.getByLabel('选择一个原始点位').selectOption({ label: names.neuronTag })
     await page.getByRole('button', { name: '明细', exact: true }).click()
     await expect(page.getByRole('cell', { name: '12.5', exact: true }).first()).toBeVisible()
+  })
+
+  test('L1 可检查发布且 L2 可查看实时、历史、质量和来源证据', async () => {
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByRole('button', { name: '实时', exact: true }).click()
+    await page.getByLabel('数据类型').selectOption('FLOAT')
+    await page.getByPlaceholder('搜索点位名称').fill(names.neuronTag)
+    await page.getByRole('checkbox', { name: `选择 ${names.neuronTag}` }).check()
+    await page.getByRole('button', { name: '加工为实体', exact: true }).click()
+
+    const editor = page.getByLabel('加工为实体')
+    await editor.getByLabel('实体名称').fill(entityDisplayName)
+    await editor.getByLabel('加工方法').selectOption('passthrough')
+    await editor.getByLabel('单位').fill('kW')
+    await editor.getByText('高级设置', { exact: true }).click()
+    await editor.getByLabel('业务标识').fill(entityDefinitionKey)
+    await editor.getByLabel('结果类型').selectOption('FLOAT')
+    await editor.getByLabel('超时秒数').fill('30')
+
+    await editor.getByRole('button', { name: '检查结果', exact: true }).click()
+    await expect(editor.getByText('检查通过，可以发布。', { exact: true })).toBeVisible()
+    await expect(editor.getByText('当前试算结果', { exact: true })).toBeVisible()
+    await expect(editor).toContainText('12.5')
+    await expect(editor).toContainText('1 个来源')
+
+    await editor.getByRole('button', { name: '发布实体', exact: true }).click()
+    await expect(editor.getByText(/标准实体已发布/)).toBeVisible()
+    await runFixture('publish', 13.5)
+
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
+    const entity = page.getByRole('button', { name: new RegExp(entityDisplayName) })
+    await expect(entity).toBeVisible()
+    await expect(entity).toContainText('13.5', { timeout: 15_000 })
+    await expect(entity).toContainText('正常')
+    await entity.click()
+    await expect(page.getByRole('region', { name: '实体历史' })).toBeVisible()
+    await expect(page.getByRole('region', { name: '实体来源' })).toContainText(names.neuronTag)
+    await page.getByText('技术详情', { exact: true }).click()
+    await expect(page.getByText(/processing_revision_id:/)).toBeVisible()
+    await expect(page.getByText(/source_digest:/)).toBeVisible()
+  })
+
+  test('共享模板可保存，规则可指定再取消且不会执行', async () => {
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    await page.getByRole('button', { name: '保存为共享模板', exact: true }).click()
+    await page.getByPlaceholder('模板名称').fill(`E2E模板-${environment.runId}`)
+    await page.getByPlaceholder('模板标识，如 pcs.site').fill(`e2e.template.${environment.runId.replaceAll('-', '_')}`)
+    await page.getByPlaceholder('品牌').fill('E2E')
+    await page.getByPlaceholder('型号').fill(environment.runId)
+    await page.getByRole('button', { name: '确认保存', exact: true }).click()
+    await expect(page.getByText('已保存为共享模板；当前节点运行配置没有改变。', { exact: true })).toBeVisible()
+
+    await runFixture('ensure-rule')
+    await page.getByRole('button', { name: '刷新', exact: true }).click()
+    await page.getByRole('button', { name: '指定规则', exact: true }).click()
+    let modal = nodeModal(page, '为节点指定规则')
+    const ruleName = `E2E规则-${environment.runId}`
+    const e2eRule = modal.locator('label').filter({ hasText: ruleName }).getByRole('checkbox')
+    await expect(e2eRule).toBeVisible()
+    await e2eRule.check()
+    await modal.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(page.getByText('已绑定规则:', { exact: true })).toBeVisible()
+    await expect(page.getByText(ruleName, { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '指定规则', exact: true }).click()
+    modal = nodeModal(page, '为节点指定规则')
+    await modal.locator('label').filter({ hasText: ruleName }).getByRole('checkbox').uncheck()
+    await modal.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(page.getByText('已绑定规则:', { exact: true })).toBeHidden()
+  })
+
+  test('读取失败必须可见，临时节点最终退役', async () => {
+    await page.route('**/api/v1/tags?**', async (route) => route.abort('failed'))
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await expect(page.getByText('原始点位读取失败，请稍后重试', { exact: true })).toBeVisible()
+    await page.unroute('**/api/v1/tags?**')
+
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '退役', exact: true }).click()
+    const modal = nodeModal(page, '确认退役节点？')
+    await expect(modal).toContainText(editedPlatformNode)
+    await modal.getByRole('button', { name: '确认退役', exact: true }).click()
+    await page.getByPlaceholder('搜索节点...').fill(editedPlatformNode)
+    await expect(nodeTree(page).getByTitle(editedPlatformNode)).toHaveCount(0)
   })
 })
 

@@ -19,6 +19,7 @@ export default defineConfig({
       '/api': {
         target: developmentProxyTarget,
         changeOrigin: true,
+        ws: true,
       },
       '/ws': {
         target: developmentProxyTarget,

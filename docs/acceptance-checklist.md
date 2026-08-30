@@ -8,6 +8,7 @@
 - [ ] `scripts` 完整测试退出码为 0。
 - [ ] 前端全部 `*.test.mjs` 通过。
 - [ ] 前端生产构建 `npm run build` 成功。
+- [ ] 节点管理改动默认运行 Playwright 无头主干，结果为 0 失败且总耗时低于 5 分钟。
 - [ ] 提供站点地址时，首页和匿名存活接口均为 HTTP 200，运行版本与仓库 `VERSION` 一致。
 - [ ] 报告记录 Git commit、平台版本、最新 Schema 和各检查结果。
 
@@ -18,6 +19,14 @@ python scripts/verify_delivery.py --site-url http://zizu-host:9000
 ```
 
 没有可访问站点时可省略 `--site-url`；结果必须是 `INCOMPLETE`，不能冒充通过。
+
+节点管理无头验收在 `frontend` 目录运行：
+
+```powershell
+npm run test:e2e:node
+```
+
+站点地址、登录凭据、本次运行 ID 和写入确认只通过 `ZIZU_E2E_*` 环境变量传入，不得写入命令、仓库或报告。测试只能在 `E2E验证` 根节点下创建带运行 ID 的临时资源，不启用规则、不执行控制，结束后必须完成清理。失败证据保存在 `frontend/test-results/`。
 
 ## 人工业务闭环
 
@@ -31,6 +40,8 @@ python scripts/verify_delivery.py --site-url http://zizu-host:9000
 - [ ] 若本轮涉及 JDM、控制或 EMS 工作台，必须分别完成其专项闭环；未涉及时不得顺带宣称完成。
 
 默认在真实站点做只读浏览；若本轮改动涉及配置写入，则在隔离测试节点完成“检查 → 发布 → 结果查看”，不执行策略、控制或设备写。浏览器缺少有效登录会话时，保留页面并请用户登录，验收状态记为 `INCOMPLETE`。
+
+普通节点管理改动以无头浏览器主干为默认验收；正式版本、Schema、数据帧、控制链等里程碑发布，再增加一次可见 Browser 抽查。无头测试失败时才用可见 Browser 复现和定位，避免每轮重复手工等待。
 
 ## 判定
 

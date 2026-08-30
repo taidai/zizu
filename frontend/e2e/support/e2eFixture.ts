@@ -9,7 +9,7 @@ import {
 
 const execFileAsync = promisify(execFile)
 
-export type FixtureCommand = 'preflight' | 'setup' | 'publish' | 'cleanup'
+export type FixtureCommand = 'preflight' | 'setup' | 'publish' | 'ensure-rule' | 'cleanup'
 
 export function fixtureNames() {
   const environment = buildAcceptanceEnvironment(process.env)

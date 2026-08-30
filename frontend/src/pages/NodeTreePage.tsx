@@ -360,14 +360,17 @@ function ImportNeuronModal({
   const [importing, setImporting] = useState(false)
 
   useEffect(() => {
+    let active = true
     setLoading(true)
     fetchNeuronNodes()
       .then((ns) => {
+        if (!active) return
         setNeuronNodes(ns)
-        if (ns.length > 0) setSelectedNode(ns[0].name)
+        if (ns.length > 0) setSelectedNode((current) => current || ns[0].name)
       })
-      .catch(() => alert('获取 Neuron 节点失败'))
-      .finally(() => setLoading(false))
+      .catch(() => { if (active) alert('获取 Neuron 节点失败') })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [])
 
   useEffect(() => {
@@ -375,13 +378,22 @@ function ImportNeuronModal({
       setGroups([])
       return
     }
+    let active = true
+    setGroups([])
+    setSelectedGroups([])
+    setPreview(null)
     fetchNeuronGroups(selectedNode)
       .then((gs) => {
+        if (!active) return
         setGroups(gs)
         setSelectedGroups(gs.map((group) => group.name))
-        setPreview(null)
       })
-      .catch(() => { setGroups([]); setSelectedGroups([]); setPreview(null) })
+      .catch(() => {
+        if (!active) return
+        setGroups([])
+        setSelectedGroups([])
+      })
+    return () => { active = false }
   }, [selectedNode])
 
   const handlePreview = async () => {
@@ -599,6 +611,14 @@ export default function NodeTreePage({
     setExpanded(next)
   }
 
+  const refreshWorkspace = () => {
+    void loadNodes()
+    if (!readOnly) {
+      void loadRules()
+      void loadCategories()
+    }
+  }
+
   const assignedRules = useMemo(() => {
     const ids = selectedNode?.config?.rule_ids
     if (!Array.isArray(ids)) return []
@@ -637,7 +657,7 @@ export default function NodeTreePage({
               </button>
             )}
             <button
-              onClick={loadNodes}
+              onClick={refreshWorkspace}
               disabled={loading}
               className="neu-btn px-2 py-1 text-[10px] text-gray-500 disabled:opacity-50"
             >

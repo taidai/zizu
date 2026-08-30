@@ -100,6 +100,21 @@ test('direct mapping cannot relabel units and numeric conversion always outputs 
   assert.equal(converted.content.outputs[0].dataType, 'FLOAT')
 })
 
+test('direct mapping may declare a unit when the raw point has none', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const result = model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
+    mode: 'passthrough',
+    definitionKey: 'pcs.active_power',
+    displayName: 'PCS 有功功率',
+    deviceCategory: 'PCS',
+    unit: 'kW',
+    freshnessSeconds: 30,
+  })
+
+  assert.equal(result.content.outputs[0].unit, 'kW')
+  assert.equal(result.content.outputs[0].transform.kind, 'numeric')
+})
+
 test('Chinese raw point names receive distinct valid entity identities', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
   const first = model.suggestInlinePointProcessingDefaults([{

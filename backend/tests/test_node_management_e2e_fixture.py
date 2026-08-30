@@ -2,15 +2,59 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from scripts.node_management_e2e_fixture import (
+    _mqtt_host,
     build_neuron_tags,
     build_resource_names,
     build_telemetry_payload,
+    ensure_rule,
     publish,
     setup,
 )
 
 
 class NodeManagementE2EFixtureTest(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {
+            "ZIZU_E2E_BASE_URL": "http://127.0.0.1:3002",
+            "ZIZU_E2E_SSH_HOST": "e606.hlszh.com",
+        },
+        clear=True,
+    )
+    def test_remote_mqtt_host_wins_when_the_browser_uses_a_local_proxy(self) -> None:
+        self.assertEqual("e606.hlszh.com", _mqtt_host())
+
+    @patch.dict(
+        "os.environ",
+        {
+            "ZIZU_E2E_WRITE_ROOT": "E2E验证",
+            "ZIZU_E2E_RUN_ID": "run-20260831-13",
+        },
+        clear=True,
+    )
+    @patch("scripts.node_management_e2e_fixture._request")
+    @patch("scripts.node_management_e2e_fixture._token", return_value="token")
+    def test_rule_fixture_is_disabled_and_has_no_actions(
+        self,
+        _token: MagicMock,
+        request: MagicMock,
+    ) -> None:
+        request.side_effect = [
+            {"rules": []},
+            {"items": [{"id": "entity-1", "node_display_name": "E2E验证-设备-run-20260831-13-已编辑"}]},
+            {"id": "rule-1", "name": "E2E规则-run-20260831-13", "enabled": False},
+        ]
+
+        result = ensure_rule()
+
+        self.assertEqual("rule-1", result["rule_id"])
+        create_call = request.call_args_list[-1]
+        self.assertEqual("POST", create_call.args[0])
+        self.assertEqual("/rules", create_call.args[1])
+        body = create_call.kwargs["body"]
+        self.assertFalse(body["enabled"])
+        self.assertEqual([], body["jdm_content"]["_config"]["actions"])
+
     def test_resource_names_are_deterministic_and_namespaced(self) -> None:
         names = build_resource_names("E2E验证", "20260830T120000Z")
 
@@ -41,15 +85,12 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         )
 
         self.assertEqual("/neuron/zizu_e2e_20260830T120000Z/telemetry", topic)
-        self.assertEqual(
-            {
-                "node_name": names.neuron_node,
-                "group": names.neuron_group,
-                "timestamp": 1_777_777_777_000,
-                "tags": {"e2e_active_power": 12.5},
-            },
-            payload,
-        )
+        self.assertEqual(names.neuron_node, payload["node_name"])
+        self.assertEqual(names.neuron_group, payload["group"])
+        self.assertEqual(1_777_777_777_000, payload["timestamp"])
+        self.assertEqual(51, len(payload["tags"]))
+        self.assertEqual(12.5, payload["tags"]["e2e_active_power"])
+        self.assertEqual(0.0, payload["tags"]["e2e_spare_050"])
 
     def test_neuron_catalog_has_two_pages_without_touching_real_points(self) -> None:
         names = build_resource_names("E2E验证", "20260830T120000Z")
@@ -57,9 +98,10 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
 
         self.assertEqual(51, len(tags))
         self.assertEqual(
-            {"name": names.neuron_tag, "address": "1!400001", "attribute": 1, "type": 4},
+            {"name": names.neuron_tag, "address": "1!400001", "attribute": 1, "type": 9},
             tags[0],
         )
+        self.assertTrue(all(tag["type"] == 9 for tag in tags))
         self.assertEqual("e2e_spare_050", tags[-1]["name"])
         self.assertEqual(51, len({tag["address"] for tag in tags}))
 

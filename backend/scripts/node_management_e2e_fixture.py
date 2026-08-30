@@ -52,13 +52,15 @@ def build_telemetry_payload(
     if not names.neuron_node.startswith("zizu_e2e_"):
         raise ValueError("refusing to publish a non-E2E Neuron source")
     observed_at = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
+    tags = {names.neuron_tag: value}
+    tags.update({f"e2e_spare_{index:03d}": 0.0 for index in range(1, 51)})
     return (
         f"/neuron/{names.neuron_node}/telemetry",
         {
             "node_name": names.neuron_node,
             "group": names.neuron_group,
             "timestamp": observed_at,
-            "tags": {names.neuron_tag: value},
+            "tags": tags,
         },
     )
 
@@ -69,7 +71,7 @@ def build_neuron_tags(names: FixtureNames) -> list[dict[str, Any]]:
             "name": names.neuron_tag,
             "address": "1!400001",
             "attribute": 1,
-            "type": 4,
+            "type": 9,
         }
     ]
     tags.extend(
@@ -77,7 +79,7 @@ def build_neuron_tags(names: FixtureNames) -> list[dict[str, Any]]:
             "name": f"e2e_spare_{index:03d}",
             "address": f"1!{400001 + index}",
             "attribute": 1,
-            "type": 4,
+            "type": 9,
         }
         for index in range(1, 51)
     )
@@ -99,6 +101,15 @@ def _base_url() -> str:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise RuntimeError("ZIZU_E2E_BASE_URL must not contain credentials, query or fragment")
     return raw
+
+
+def _mqtt_host() -> str:
+    return (
+        os.environ.get("ZIZU_E2E_MQTT_HOST", "").strip()
+        or os.environ.get("ZIZU_E2E_SSH_HOST", "").strip()
+        or urllib.parse.urlsplit(_base_url()).hostname
+        or ""
+    )
 
 
 def _request(
@@ -164,12 +175,51 @@ def setup() -> dict[str, Any]:
     return {"status": "ready", "resources": asdict(names)}
 
 
+def ensure_rule() -> dict[str, Any]:
+    names = _environment_names()
+    token = _token()
+    rule_name = f"E2E规则-{os.environ['ZIZU_E2E_RUN_ID']}"
+    rules = _request("GET", "/rules", token=token).get("rules", [])
+    existing = next((rule for rule in rules if rule.get("name") == rule_name), None)
+    if existing is not None:
+        return {"status": "existing", "rule_id": str(existing["id"]), "rule_name": rule_name}
+
+    edited_node_name = f"{names.platform_node}-已编辑"
+    entities = _request("GET", "/entity-instances", token=token).get("items", [])
+    matches = [
+        entity for entity in entities
+        if entity.get("node_display_name") == edited_node_name
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one E2E entity for {edited_node_name}, found {len(matches)}"
+        )
+    entity_id = str(matches[0]["id"])
+    created = _request(
+        "POST",
+        "/rules",
+        token=token,
+        body={
+            "name": rule_name,
+            "rule_type": "control",
+            "enabled": False,
+            "jdm_content": {
+                "when": "e2e_source > 1e308",
+                "_config": {
+                    "sourceEntityInstanceIds": [entity_id],
+                    "inputMappings": {"e2e_source": entity_id},
+                    "actions": [],
+                },
+            },
+        },
+    )
+    return {"status": "created", "rule_id": str(created["id"]), "rule_name": rule_name}
+
+
 def publish(value: float) -> dict[str, Any]:
     names = _environment_names()
     topic, payload = build_telemetry_payload(names, value=value)
-    host = os.environ.get("ZIZU_E2E_MQTT_HOST", "").strip()
-    if not host:
-        host = urllib.parse.urlsplit(_base_url()).hostname or ""
+    host = _mqtt_host()
     if not host:
         raise RuntimeError("ZIZU_E2E_MQTT_HOST is required")
     port = int(os.environ.get("ZIZU_E2E_MQTT_PORT", "1883"))
@@ -324,16 +374,42 @@ def _run_backend_script_via_ssh(remote_script: str) -> None:
 def cleanup() -> dict[str, Any]:
     names = _environment_names()
     token = _token()
+    retired_rules = 0
+    rule_name = f"E2E规则-{os.environ['ZIZU_E2E_RUN_ID']}"
+    for rule in _request("GET", "/rules", token=token).get("rules", []):
+        if rule.get("name") == rule_name:
+            _request("DELETE", f"/rules/{rule['id']}", token=token)
+            retired_rules += 1
+
+    nodes = _request("GET", "/nodes", token=token).get("nodes", [])
+    by_id = {str(item["id"]): item for item in nodes}
+    accepted_names = {names.platform_node, f"{names.platform_node}-已编辑"}
+    targets = [
+        item for item in nodes
+        if item.get("name") in accepted_names
+        and by_id.get(str(item.get("parent_id")), {}).get("name") == REQUIRED_ROOT
+    ]
+    for item in targets:
+        _request("DELETE", f"/nodes/{item['id']}", token=token)
+
     current = _request("GET", "/neuron/nodes", token=token).get("nodes", [])
     existing_names = {str(item.get("name", "")) for item in current}
     if names.neuron_node in existing_names:
         _cleanup_neuron_via_ssh(names)
-    return {"status": "clean", "neuron_node": names.neuron_node}
+    return {
+        "status": "clean",
+        "neuron_node": names.neuron_node,
+        "retired_nodes": len(targets),
+        "retired_rules": retired_rules,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("preflight", "setup", "publish", "cleanup"))
+    parser.add_argument(
+        "command",
+        choices=("preflight", "setup", "publish", "ensure-rule", "cleanup"),
+    )
     parser.add_argument("--value", type=float, default=12.5)
     arguments = parser.parse_args()
     if os.environ.get("ZIZU_E2E_ALLOW_LIVE_WRITES") != "1":
@@ -342,6 +418,7 @@ def main() -> int:
         "preflight": preflight,
         "setup": setup,
         "publish": lambda: publish(arguments.value),
+        "ensure-rule": ensure_rule,
         "cleanup": cleanup,
     }[arguments.command]
     print(json.dumps(action(), ensure_ascii=False))

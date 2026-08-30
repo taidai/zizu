@@ -214,6 +214,7 @@ export function buildNodePointProcessingDraft(
   const outputUnit = form.unit === undefined ? first.point.unit : form.unit
   if (
     form.mode === 'passthrough'
+    && first.point.unit
     && (outputUnit || null) !== (first.point.unit || null)
   ) {
     throw new Error('直接使用不能改变单位，请选择倍率与偏移')
