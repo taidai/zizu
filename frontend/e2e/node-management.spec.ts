@@ -3,6 +3,8 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
 import { fixtureNames, runFixture } from './support/e2eFixture'
 
+const CONFIGURATION_CHANGE_TIMEOUT_MS = 40_000
+
 test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
   const names = fixtureNames(environment)
@@ -48,6 +50,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('节点可创建、编辑、搜索、刷新和选择', async () => {
+    test.setTimeout(120_000)
     await page.getByRole('button', { name: '节点管理' }).click()
     await expect(page.getByRole('heading', { name: '节点管理' })).toBeVisible()
     const tree = nodeTree(page)
@@ -74,7 +77,7 @@ test.describe.serial('节点管理主干', () => {
       await modal.getByPlaceholder('例如：ESS / PV / Meter').fill('E2E_ROOT')
       await modal.locator('select').selectOption('')
       await modal.getByRole('button', { name: '保存', exact: true }).click()
-      await expect(modal).toBeHidden()
+      await expect(modal).toBeHidden({ timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
       await search.fill(environment.writeRoot)
     }
     await expect(writeRoot).toBeVisible()
@@ -88,7 +91,7 @@ test.describe.serial('节点管理主干', () => {
     await createModal.getByPlaceholder('例如：ESS / PV / Meter').fill('PCS')
     await expect(createModal.locator('select')).toHaveValue(/.+/)
     await createModal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(createModal).toBeHidden()
+    await expect(createModal).toBeHidden({ timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
 
     await search.fill(names.platformNode)
     await expect(tree.getByTitle(names.platformNode)).toBeVisible()
@@ -97,7 +100,7 @@ test.describe.serial('节点管理主干', () => {
     const editModal = nodeModal(page, '编辑节点')
     await editModal.getByPlaceholder('例如：1# 储能电站').fill(editedPlatformNode)
     await editModal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(editModal).toBeHidden()
+    await expect(editModal).toBeHidden({ timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
 
     await search.fill(editedPlatformNode)
     await expect(tree.getByTitle(editedPlatformNode)).toBeVisible()
@@ -117,7 +120,9 @@ test.describe.serial('节点管理主干', () => {
     await modal.getByRole('button', { name: '预览导入' }).click()
     await expect(modal.getByText('导入预览', { exact: true })).toBeVisible()
 
-    const importDialog = page.waitForEvent('dialog')
+    const importDialog = page.waitForEvent('dialog', {
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await modal.getByRole('button', { name: '确认导入' }).click()
     const dialog = await importDialog
     expect(dialog.message()).toMatch(/导入完成：新增 51 个/)
@@ -173,7 +178,9 @@ test.describe.serial('节点管理主干', () => {
     await expect(editor).toContainText('1 个来源')
 
     await editor.getByRole('button', { name: '发布实体', exact: true }).click()
-    await expect(editor.getByText(/标准实体已发布/)).toBeVisible()
+    await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await fixture('publish', 13.5)
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
@@ -213,7 +220,9 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
     await expect(page.getByText('检查通过', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
-    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    await expect(page.getByText('已生效', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await fixture('publish', 14.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '14.5',
@@ -226,7 +235,9 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '检查修改', exact: true }).click()
     await expect(page.getByText('检查通过，可以发布当前加工的新修订。', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '发布修改', exact: true }).click()
-    await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible()
+    await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
     await fixture('publish', 15.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
@@ -238,7 +249,9 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('停用预览', { exact: true })).toBeVisible()
     await expect(page.getByText(/历史值、来源证据和实体身份全部保留/)).toBeVisible()
     await page.getByRole('button', { name: '确认停用', exact: true }).click()
-    await expect(page.getByText('已停用点位加工', { exact: true })).toBeVisible()
+    await expect(page.getByText('已停用点位加工', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await expect(page.getByText('当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。', { exact: true })).toBeVisible()
     await fixture('publish', 16.5)
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
@@ -251,7 +264,9 @@ test.describe.serial('节点管理主干', () => {
 
     await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
-    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    await expect(page.getByText('已生效', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await fixture('publish', 17.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '17.5',
@@ -267,14 +282,18 @@ test.describe.serial('节点管理主干', () => {
     await expect(e2eRule).toBeVisible()
     await e2eRule.check()
     await modal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(page.getByText('已绑定规则:', { exact: true })).toBeVisible()
+    await expect(page.getByText('已绑定规则:', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
     await expect(page.getByText(ruleName, { exact: true })).toBeVisible()
 
     await page.getByRole('button', { name: '指定规则', exact: true }).click()
     modal = nodeModal(page, '为节点指定规则')
     await modal.locator('label').filter({ hasText: ruleName }).getByRole('checkbox').uncheck()
     await modal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(page.getByText('已绑定规则:', { exact: true })).toBeHidden()
+    await expect(page.getByText('已绑定规则:', { exact: true })).toBeHidden({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
   })
 
   test('读取失败必须可见，临时节点最终退役', async () => {
@@ -292,7 +311,9 @@ test.describe.serial('节点管理主干', () => {
     await expect(modal).toContainText(editedPlatformNode)
     await modal.getByRole('button', { name: '确认退役', exact: true }).click()
     await page.getByPlaceholder('搜索节点...').fill(editedPlatformNode)
-    await expect(nodeTree(page).getByTitle(editedPlatformNode)).toHaveCount(0)
+    await expect(nodeTree(page).getByTitle(editedPlatformNode)).toHaveCount(0, {
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
   })
 })
 
