@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import inspect
 from threading import Event
 from types import MappingProxyType
 import unittest
@@ -18,6 +19,10 @@ from app.services.data_trunk_contracts import (
     SourceOrderMode,
     TrunkQuality,
     TypedValue,
+)
+from app.services.configuration_revision import (
+    CONFIGURATION_DRAIN_TIMEOUT_SECONDS,
+    ConfigurationRuntimeGate,
 )
 from app.services.realtime_blackboard import RealtimeBlackboard
 
@@ -101,6 +106,13 @@ def _runtime(repository=None) -> DataTrunk:
 
 
 class DataFrameRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_configuration_drain_budget_covers_normal_edge_backlog(self) -> None:
+        self.assertEqual(30.0, CONFIGURATION_DRAIN_TIMEOUT_SECONDS)
+        timeout = inspect.signature(
+            ConfigurationRuntimeGate.begin_configuration_publish
+        ).parameters["timeout_seconds"]
+        self.assertEqual(CONFIGURATION_DRAIN_TIMEOUT_SECONDS, timeout.default)
+
     async def test_configuration_publish_without_consumer_fails_immediately(self) -> None:
         gate = _runtime().configuration_gate
         started = time.monotonic()

@@ -16,6 +16,7 @@ from app.services.data_trunk_contracts import (
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+CONFIGURATION_DRAIN_TIMEOUT_SECONDS = 30.0
 
 
 class ConfigurationRevisionError(ValueError):
@@ -84,7 +85,10 @@ class ConfigurationRuntimeGate:
             self._condition.notify_all()
 
     def begin_configuration_publish(
-        self, base_revision: int, *, timeout_seconds: float = 5.0
+        self,
+        base_revision: int,
+        *,
+        timeout_seconds: float = CONFIGURATION_DRAIN_TIMEOUT_SECONDS,
     ) -> None:
         with self._condition:
             if not self._consumer_registered:
@@ -206,4 +210,8 @@ def validate_configuration_publish(
         )
 
 
-__all__ = ["ConfigurationRevisionError", "validate_configuration_publish"]
+__all__ = [
+    "CONFIGURATION_DRAIN_TIMEOUT_SECONDS",
+    "ConfigurationRevisionError",
+    "validate_configuration_publish",
+]
