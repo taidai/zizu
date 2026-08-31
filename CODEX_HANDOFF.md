@@ -5121,3 +5121,14 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 现场最终 frame head 69,894、无未完成帧、outbox 0，但最后 telemetry 为 03:58:30 UTC，之后没有持续
   业务遥测。吞吐生产验收仍为 `INCOMPLETE`；点位恢复后补连续 5 分钟活负载证据。完整记录见
   `docs/deploy-1号机-v0.4.95-http.md`。
+
+---
+## 2026-08-31 ZiZu v0.5.7 已部署，无头主干验收 6/6
+
+- 工作仓库：`C:\Users\chent\Documents\zizu-node-e2e`；运行功能提交 `1574462`，验收脚本后续提交 `324bb62`，远端 main 已推送。
+- 1 号机运行 `0.5.7` ARM64 固定摘要 `sha256:5cc9734b2959655dcbb8cf98e3a48b20efc7eb379fccb0d8c4669a6a535bdbea`，image ID `sha256:d3fe79d1e3ff2121ce2f0a07e22664066251f4cdd470d77621718f069268d0cc`；healthy、restart 0、host 网络、`/dev/mqueue`、Schema056。
+- 修复点位加工停用计划错误试算导致的 HTTP 500；配置栅栏有界排空从 5 秒改为 30 秒。现场冷启动队列实测 26.6 秒排空，旧上限会误报超时；新上限成功后立即返回，不改变安全栅栏语义。
+- 验证：后端 397 tests/153 skipped/0 failure，发布脚本 51/51，TypeScript 通过；公网无头浏览器沿节点→L0→L1→L2→告警完成 6/6，0 跳过、0 重试，未执行规则动作、JDM、控制或设备写。
+- 最终健康：Pipeline RUNNING，TimescaleDB/MQTT/Neuron connected，解析成功率 100%，DB 写错误 0；抽样未完成帧 1（约 1.1 秒）、outbox 0，发布后无 ERROR/CRITICAL/Traceback/tick failure。
+- 测试资源已按正式 API 清理；只保留 `E2E验证` 根，活动临时设备/规则/模板/Neuron E2E 节点均为 0。
+- 可见 Browser 新会话停在登录页。按 Browser 凭据传输规则已向用户请求即时“确认登录”；收到后只读点击主干补证，不执行配置或控制。完整部署记录：`docs/deploy-1号机-v0.5.7-http.md`。
