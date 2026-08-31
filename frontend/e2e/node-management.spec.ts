@@ -184,7 +184,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText(/source_digest:/)).toBeVisible()
   })
 
-  test('共享模板可保存，规则可指定再取消且不会执行', async () => {
+  test('L1 模板可维护、升级、停用再恢复，规则可指定再取消且不会执行', async () => {
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await page.getByRole('button', { name: '保存为共享模板', exact: true }).click()
     await page.getByPlaceholder('模板名称').fill(`E2E模板-${environment.runId}`)
@@ -193,6 +193,37 @@ test.describe.serial('节点管理主干', () => {
     await page.getByPlaceholder('型号').fill(environment.runId)
     await page.getByRole('button', { name: '确认保存', exact: true }).click()
     await expect(page.getByText('已保存为共享模板；当前节点运行配置没有改变。', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '模板与版本', exact: true }).click()
+    await page.getByRole('button', { name: '复制为下一修订', exact: true }).click()
+    await page.getByRole('button', { name: '检查模板', exact: true }).click()
+    await expect(page.getByText('检查通过，可以发布这个新版本。', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '发布新版本', exact: true }).click()
+    await expect(page.getByRole('button', { name: '检查加工结果', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
+    await expect(page.getByText('检查通过', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '检查并发布', exact: true }).click()
+    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '模板与版本', exact: true }).click()
+    await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
+    await page.getByLabel('模板名称').fill(`${entityDisplayName}-加工`)
+    await page.getByRole('button', { name: '检查修改', exact: true }).click()
+    await expect(page.getByText('检查通过，可以发布当前加工的新修订。', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '发布修改', exact: true }).click()
+    await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '本节点配置', exact: true }).click()
+
+    await page.getByRole('button', { name: '准备停用', exact: true }).click()
+    await expect(page.getByText('停用预览', { exact: true })).toBeVisible()
+    await expect(page.getByText(/历史值、来源证据和实体身份全部保留/)).toBeVisible()
+    await page.getByRole('button', { name: '确认停用', exact: true }).click()
+    await expect(page.getByText('已停用点位加工', { exact: true })).toBeVisible()
+    await expect(page.getByText('当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
+    await page.getByRole('button', { name: '检查并发布', exact: true }).click()
+    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
 
     await runFixture('ensure-rule')
     await page.getByRole('button', { name: '刷新', exact: true }).click()
