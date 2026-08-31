@@ -214,6 +214,11 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('检查通过', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
     await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    await fixture('publish', 14.5)
+    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+      '14.5',
+      { timeout: 15_000 },
+    )
 
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
@@ -223,6 +228,11 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '发布修改', exact: true }).click()
     await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
+    await fixture('publish', 15.5)
+    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+      '15.5',
+      { timeout: 15_000 },
+    )
 
     await page.getByRole('button', { name: '准备停用', exact: true }).click()
     await expect(page.getByText('停用预览', { exact: true })).toBeVisible()
@@ -230,10 +240,23 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '确认停用', exact: true }).click()
     await expect(page.getByText('已停用点位加工', { exact: true })).toBeVisible()
     await expect(page.getByText('当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。', { exact: true })).toBeVisible()
+    await fixture('publish', 16.5)
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByPlaceholder('搜索点位名称').fill(names.neuronTag)
+    await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toContainText(
+      '16.5',
+      { timeout: 15_000 },
+    )
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
 
     await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
     await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    await fixture('publish', 17.5)
+    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+      '17.5',
+      { timeout: 15_000 },
+    )
 
     await fixture('ensure-rule')
     await page.getByRole('button', { name: '刷新', exact: true }).click()
