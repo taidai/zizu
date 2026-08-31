@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import {
   createPointProcessingDraftPlan,
@@ -71,6 +71,10 @@ export default function PointProcessingTemplateManager({
   const [success, setSuccess] = useState('')
 
   const activeBaseRevision = baseRevisionId || selectedRevisionId || templates[0]?.revision_id || ''
+
+  useEffect(() => {
+    if (selectedRevisionId) setBaseRevisionId(selectedRevisionId)
+  }, [selectedRevisionId])
 
   const createFromCurrentNode = () => {
     const key = nodeName.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'device'

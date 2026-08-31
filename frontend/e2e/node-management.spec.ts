@@ -202,6 +202,9 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已保存为共享模板；当前节点运行配置没有改变。', { exact: true })).toBeVisible()
 
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
+    await expect(page.getByLabel('从哪个模板开始').locator('option:checked')).toContainText(
+      `E2E模板-${environment.runId}`,
+    )
     await page.getByRole('button', { name: '复制为下一修订', exact: true }).click()
     await page.getByRole('button', { name: '检查模板', exact: true }).click()
     await expect(page.getByText('检查通过，可以发布这个新版本。', { exact: true })).toBeVisible()
