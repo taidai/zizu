@@ -436,6 +436,95 @@ class PointProcessingService:
             )
         )
 
+    def preview_deactivation(
+        self,
+        *,
+        node_id: UUID,
+        actor: str,
+    ) -> PointProcessingPlan:
+        if not actor.strip():
+            raise PointProcessingError(
+                "POINT_PROCESSING_ACTOR_INVALID",
+                "Point processing plan actor is required",
+            )
+        current = self._repository.current_context(node_id)
+        if current is None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_NOT_INSTALLED",
+                "The node has no active point processing to deactivate",
+            )
+        template = self._catalog.get_template(current.revision_id)
+        if template is None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "The active point processing revision is unavailable",
+            )
+
+        output_ids = set(current.output_entity_ids.values())
+        blockers = tuple(
+            MappingProxyType(
+                {
+                    "code": "POINT_PROCESSING_OUTPUT_IN_USE",
+                    "input_id": str(source_id),
+                }
+            )
+            for source_id, target_id in self._catalog.dependency_edges()
+            if source_id in output_ids and target_id not in output_ids
+        )
+        items = tuple(
+            MappingProxyType(
+                {
+                    "item_key": f"output:{output_id}",
+                    "layer": "L2",
+                    "kind": "output_binding",
+                    "action": "delete_candidate",
+                    "output_id": output_id,
+                    "entity_definition_id": next(
+                        output.entity_definition_id
+                        for output in template.outputs
+                        if output.output_id == output_id
+                    ),
+                    "output_entity_instance_id": str(entity_id),
+                }
+            )
+            for output_id, entity_id in sorted(current.output_entity_ids.items())
+        )
+        base_configuration_revision = self._repository.configuration_revision()
+        source_catalog_digest = _digest(
+            {
+                "node_id": str(node_id),
+                "revision_id": str(current.revision_id),
+                "output_entity_ids": {
+                    key: str(value)
+                    for key, value in sorted(current.output_entity_ids.items())
+                },
+            }
+        )
+        content = {
+            "node_id": str(node_id),
+            "template_revision_id": str(current.revision_id),
+            "base_configuration_revision": base_configuration_revision,
+            "source_catalog_digest": source_catalog_digest,
+            "items": [_plain(item) for item in items],
+            "blockers": [_plain(item) for item in blockers],
+            "planned_by": actor,
+        }
+        digest = _digest(content)
+        return self._repository.save_plan(
+            PointProcessingPlan(
+                id=uuid5(NAMESPACE_URL, f"zizu/point-processing-plan/{digest}"),
+                node_id=node_id,
+                template_revision_id=current.revision_id,
+                base_configuration_revision=base_configuration_revision,
+                source_catalog_digest=source_catalog_digest,
+                status="blocked" if blockers else "ready",
+                items=items,
+                blockers=blockers,
+                digest=digest,
+                planned_by=actor,
+            )
+        )
+
     def promote_node_definition(
         self,
         *,
@@ -1216,6 +1305,48 @@ class InMemoryPointProcessingRepository:
                     "POINT_PROCESSING_PLAN_BLOCKED",
                     "Point processing plan is not ready",
                 )
+            if _is_deactivation_plan(plan):
+                current = self._current.get(plan.node_id)
+                installed_id = self._installed_ids.get(plan.node_id)
+                planned_outputs = {
+                    item["output_id"]: UUID(item["output_entity_instance_id"])
+                    for item in plan.items
+                }
+                if (
+                    plan.base_configuration_revision != self._configuration_revision
+                    or current is None
+                    or installed_id is None
+                    or current.revision_id != plan.template_revision_id
+                    or dict(current.output_entity_ids) != planned_outputs
+                ):
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_PLAN_STALE",
+                        "Active point processing changed after planning",
+                    )
+                next_version = self._configuration_revision + 1
+                application_id = uuid5(
+                    NAMESPACE_URL,
+                    f"zizu/point-processing-application/{command.actor}/{command.idempotency_key}",
+                )
+                application = PointProcessingApplication(
+                    id=application_id,
+                    plan_id=plan.id,
+                    installed_processing_id=installed_id,
+                    revision_id=plan.template_revision_id,
+                    configuration_revision=next_version,
+                    output_entity_instance_ids=tuple(
+                        sorted(planned_outputs.values(), key=str)
+                    ),
+                    actor=command.actor,
+                )
+                self._on_applied(application)
+                self._applications[application.id] = application
+                self._idempotency[key] = (request_digest, application.id)
+                self._current.pop(plan.node_id, None)
+                self._installed_ids.pop(plan.node_id, None)
+                self._configuration_revision = next_version
+                self._plans[plan.id] = replace(plan, status="applied")
+                return application
             template = catalog.get_template(plan.template_revision_id)
             if template is None or template.status != "active":
                 raise PointProcessingError(
@@ -1340,6 +1471,14 @@ class InMemoryPointProcessingRepository:
             self._configuration_revision = next_version
             self._plans[plan.id] = replace(plan, status="applied")
             return application
+
+
+def _is_deactivation_plan(plan: PointProcessingPlan) -> bool:
+    return bool(plan.items) and all(
+        item.get("kind") == "output_binding"
+        and item.get("action") == "delete_candidate"
+        for item in plan.items
+    )
 
 
 def compile_point_processing_plan(

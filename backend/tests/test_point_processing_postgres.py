@@ -24,6 +24,7 @@ from tests import test_committed_frame_consumers_migration_postgres as frame_con
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "reference-point-processings"
 MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050_node_l0_usability.sql"
 MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
+MIGRATION_056 = Path(__file__).resolve().parents[2] / "init-db" / "migration_056_point_processing_deactivation.sql"
 NODE_ID = UUID("92000000-0000-0000-0000-000000000001")
 
 
@@ -59,6 +60,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 )
                 cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
                 cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_056.read_text(encoding="utf-8"))
         from app.services.telemetry_store import init_db_pool
 
         init_db_pool(1, 4)
@@ -165,6 +167,112 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     (list(application.output_entity_instance_ids),),
                 )
                 self.assertEqual([(NODE_ID,)], cursor.fetchall())
+
+    def test_deactivation_preserves_evidence_and_reactivation_reuses_entity_ids(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.telemetry_store import get_connection
+
+        service, repository, revision_id = self._service_and_revision("pcs-brand-a")
+        install_plan = self._plan(service, revision_id)
+        installed = service.apply(ApplyPointProcessingPlan(
+            install_plan.id,
+            install_plan.digest,
+            "install-before-deactivation",
+            "test:engineer",
+        ))
+        observed_at = datetime.now(UTC)
+        observed_entity_id = installed.output_entity_instance_ids[0]
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM t_installed_point_processings "
+                    "WHERE node_id=%s AND current=TRUE",
+                    (NODE_ID,),
+                )
+                installed_id = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    INSERT INTO t_l2_latest
+                      (entity_instance_id,event_id,observed_at,received_at,
+                       calculated_at,value_float,quality,processing_revision_id,
+                       configuration_revision,source_digest,source_order_key,
+                       event_time_basis,frame_sequence)
+                    VALUES(%s,%s,%s,%s,%s,12.5,192,%s,%s,%s,'deactivation-evidence',
+                           'received_at',0)
+                    """,
+                    (
+                        observed_entity_id,
+                        uuid4(),
+                        observed_at,
+                        observed_at,
+                        observed_at,
+                        revision_id,
+                        installed.configuration_revision,
+                        "a" * 64,
+                    ),
+                )
+            connection.commit()
+
+        stop_plan = service.preview_deactivation(
+            node_id=NODE_ID,
+            actor="test:engineer",
+        )
+        stopped = service.apply(ApplyPointProcessingPlan(
+            stop_plan.id,
+            stop_plan.digest,
+            "deactivate-current",
+            "test:engineer",
+        ))
+        replayed = service.apply(ApplyPointProcessingPlan(
+            stop_plan.id,
+            stop_plan.digest,
+            "deactivate-current",
+            "test:engineer",
+        ))
+
+        self.assertEqual(stopped, replayed)
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current FROM t_installed_point_processings WHERE id=%s",
+                    (installed_id,),
+                )
+                self.assertEqual((False,), cursor.fetchone())
+                cursor.execute(
+                    "SELECT count(*) FROM t_entity_instances "
+                    "WHERE id=ANY(%s) AND active=FALSE",
+                    (list(installed.output_entity_instance_ids),),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_point_processing_output_bindings "
+                    "WHERE installed_processing_id=%s",
+                    (installed_id,),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_l2_latest WHERE entity_instance_id=%s",
+                    (observed_entity_id,),
+                )
+                self.assertEqual(1, cursor.fetchone()[0])
+
+        reactivation_plan = self._plan(service, revision_id)
+        reactivated = service.apply(ApplyPointProcessingPlan(
+            reactivation_plan.id,
+            reactivation_plan.digest,
+            "reactivate-current",
+            "test:engineer",
+        ))
+
+        self.assertEqual(installed.output_entity_instance_ids, reactivated.output_entity_instance_ids)
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM t_entity_instances "
+                    "WHERE id=ANY(%s) AND active=TRUE",
+                    (list(installed.output_entity_instance_ids),),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
 
     def test_stale_plan_writes_no_installation(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingError

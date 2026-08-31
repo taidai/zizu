@@ -1247,6 +1247,134 @@ class PointProcessingTest(unittest.TestCase):
             second.output_entity_instance_ids,
         )
 
+    def test_deactivation_plan_stops_current_outputs_without_deleting_evidence(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingService,
+            PointProcessingSource,
+            PreviewPointProcessing,
+        )
+
+        assets = _assets()
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={BRAND_A_REVISION_ID: assets["pcs.brand-a"]},
+            sources=(
+                PointProcessingSource(UUID(int=101), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                PointProcessingSource(UUID(int=102), "l0", NODE_ID, "RunningState", "STRING", None, True),
+                PointProcessingSource(UUID(int=103), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
+            ),
+        )
+        service = PointProcessingService(repository, catalog)
+        install_plan = service.preview(PreviewPointProcessing(
+            NODE_ID,
+            BRAND_A_REVISION_ID,
+            {},
+            "user:engineer",
+        ))
+        installed = service.apply(ApplyPointProcessingPlan(
+            install_plan.id,
+            install_plan.digest,
+            "install-before-stop",
+            "user:engineer",
+        ))
+
+        stop_plan = service.preview_deactivation(
+            node_id=NODE_ID,
+            actor="user:engineer",
+        )
+
+        self.assertEqual("ready", stop_plan.status, stop_plan.public_dict())
+        self.assertEqual(
+            set(installed.output_entity_instance_ids),
+            {
+                UUID(item["output_entity_instance_id"])
+                for item in stop_plan.items
+                if item["kind"] == "output_binding"
+            },
+        )
+        self.assertEqual(
+            {"delete_candidate"},
+            {item["action"] for item in stop_plan.items},
+        )
+
+        stopped = service.apply(ApplyPointProcessingPlan(
+            stop_plan.id,
+            stop_plan.digest,
+            "stop-current-processing",
+            "user:engineer",
+        ))
+
+        self.assertEqual(installed.output_entity_instance_ids, stopped.output_entity_instance_ids)
+        self.assertIsNone(repository.current_context(NODE_ID))
+        self.assertEqual((), repository.installed_processings(catalog))
+
+    def test_deactivation_requires_an_active_processing(self) -> None:
+        from app.services.point_processing import (
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingError,
+            PointProcessingService,
+        )
+
+        service = PointProcessingService(
+            InMemoryPointProcessingRepository(),
+            InMemoryPointProcessingCatalog(templates={}),
+        )
+
+        with self.assertRaises(PointProcessingError) as caught:
+            service.preview_deactivation(node_id=NODE_ID, actor="user:engineer")
+
+        self.assertEqual("POINT_PROCESSING_NOT_INSTALLED", caught.exception.code)
+
+    def test_deactivation_is_blocked_when_another_processing_depends_on_output(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository,
+            PointProcessingService,
+            PointProcessingSource,
+            PreviewPointProcessing,
+        )
+
+        assets = _assets()
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={BRAND_A_REVISION_ID: assets["pcs.brand-a"]},
+            sources=(
+                PointProcessingSource(UUID(int=111), "l0", NODE_ID, "ActivePowerRaw", "FLOAT", "W", True),
+                PointProcessingSource(UUID(int=112), "l0", NODE_ID, "RunningState", "STRING", None, True),
+                PointProcessingSource(UUID(int=113), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
+            ),
+        )
+        service = PointProcessingService(repository, catalog)
+        install_plan = service.preview(PreviewPointProcessing(
+            NODE_ID,
+            BRAND_A_REVISION_ID,
+            {},
+            "user:engineer",
+        ))
+        installed = service.apply(ApplyPointProcessingPlan(
+            install_plan.id,
+            install_plan.digest,
+            "install-for-dependent",
+            "user:engineer",
+        ))
+        catalog.record_dependencies(((installed.output_entity_instance_ids[0], UUID(int=999)),))
+
+        stop_plan = service.preview_deactivation(
+            node_id=NODE_ID,
+            actor="user:engineer",
+        )
+
+        self.assertEqual("blocked", stop_plan.status)
+        self.assertEqual(
+            {"POINT_PROCESSING_OUTPUT_IN_USE"},
+            {item["code"] for item in stop_plan.blockers},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -343,6 +343,52 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applications_before, repository.application_count())
         self.assertEqual(3, templates.json()["total"])
 
+    async def test_engineer_can_review_and_apply_safe_deactivation(self) -> None:
+        app, _, repository = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            operator_headers = await self.login(client, "operator")
+            engineer_headers = await self.login(client, "engineer")
+            denied = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-deactivation-plan",
+                headers=operator_headers,
+            )
+            planned = await client.post(
+                f"/api/v1/nodes/{NODE_ID}/point-processing-deactivation-plan",
+                headers=engineer_headers,
+            )
+            self.assertEqual(201, planned.status_code, planned.text)
+            applied = await client.post(
+                f"/api/v1/point-processing-plans/{planned.json()['id']}/apply",
+                headers={**engineer_headers, "Idempotency-Key": "stop-current"},
+                json={"plan_digest": planned.json()["digest"]},
+            )
+            replayed = await client.post(
+                f"/api/v1/point-processing-plans/{planned.json()['id']}/apply",
+                headers={**engineer_headers, "Idempotency-Key": "stop-current"},
+                json={"plan_digest": planned.json()["digest"]},
+            )
+            trunk = await client.get(
+                f"/api/v1/nodes/{NODE_ID}/data-trunk",
+                headers=engineer_headers,
+            )
+
+        self.assertEqual(403, denied.status_code, denied.text)
+        self.assertEqual("ready", planned.json()["status"])
+        self.assertTrue(planned.json()["items"])
+        self.assertEqual(
+            {"delete_candidate"},
+            {item["action"] for item in planned.json()["items"]},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual(applied.json(), replayed.json())
+        self.assertEqual(2, repository.application_count())
+        self.assertEqual(False, trunk.json()["l1_summary"]["installed"])
+        self.assertEqual([], trunk.json()["l2"])
+
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
         app, identity_repository, repository = self.build_app()
         transport = httpx.ASGITransport(app=app)

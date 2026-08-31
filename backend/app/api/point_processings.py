@@ -299,6 +299,28 @@ async def create_point_processing_draft_plan(
 
 
 @router.post(
+    "/nodes/{node_id}/point-processing-deactivation-plan",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def create_point_processing_deactivation_plan(
+    node_id: UUID,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    service: PointProcessingService = Depends(get_point_processings),
+) -> dict:
+    try:
+        return _plan_with_trial(
+            service,
+            service.preview_deactivation(
+                node_id=node_id,
+                actor=principal.actor,
+            ),
+        )
+    except PointProcessingError as exc:
+        _raise_point_processing_http(exc)
+
+
+@router.post(
     "/nodes/{node_id}/point-processing-templates/promote",
     status_code=status.HTTP_201_CREATED,
     openapi_extra=capability_metadata(SYSTEM_MANAGE),

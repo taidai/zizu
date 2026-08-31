@@ -24,6 +24,7 @@ from app.services.point_processing import (
     PointProcessingSource,
     PointProcessingTemplateSummary,
     PointProcessingTrial,
+    _is_deactivation_plan,
     _template_source_catalog_digest,
     trial_installed_processings,
 )
@@ -1382,6 +1383,15 @@ class PostgresPointProcessingRepository:
                         )
 
                     lock_point_processing_authoritative_catalog(cursor)
+                    if _is_deactivation_plan(plan):
+                        return self._apply_deactivation(
+                            cursor=cursor,
+                            connection=connection,
+                            command=command,
+                            plan=plan,
+                            current_version=current_version,
+                            request_digest=request_digest,
+                        )
                     template = PostgresPointProcessingCatalog._load_template(
                         cursor,
                         plan.template_revision_id,
@@ -1626,6 +1636,182 @@ class PostgresPointProcessingRepository:
                 "DATA_TRUNK_UNAVAILABLE",
                 "Point processing application could not be committed",
             ) from exc
+
+    @staticmethod
+    def _apply_deactivation(
+        *,
+        cursor: Any,
+        connection: Any,
+        command: ApplyPointProcessingPlan,
+        plan: PointProcessingPlan,
+        current_version: int,
+        request_digest: str,
+    ) -> PointProcessingApplication:
+        cursor.execute(
+            """
+            SELECT installed.id, installed.revision_id,
+                   output.output_key, binding.entity_instance_id
+            FROM t_installed_point_processings AS installed
+            JOIN t_point_processing_output_bindings AS binding
+              ON binding.installed_processing_id = installed.id
+            JOIN t_point_processing_outputs AS output
+              ON output.id = binding.output_id
+            WHERE installed.node_id = %s AND installed.current = TRUE
+            ORDER BY output.output_key
+            FOR UPDATE OF installed
+            """,
+            (plan.node_id,),
+        )
+        rows = cursor.fetchall()
+        planned_outputs = {
+            item["output_id"]: UUID(item["output_entity_instance_id"])
+            for item in plan.items
+        }
+        current_outputs = {row[2]: row[3] for row in rows}
+        installed_ids = {row[0] for row in rows}
+        revision_ids = {row[1] for row in rows}
+        if (
+            len(installed_ids) != 1
+            or revision_ids != {plan.template_revision_id}
+            or current_outputs != planned_outputs
+        ):
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Active point processing changed after planning",
+            )
+        installed_id = next(iter(installed_ids))
+        output_ids = tuple(sorted(planned_outputs.values(), key=str))
+        cursor.execute(
+            """
+            SELECT 1
+            FROM t_point_processing_dependencies AS dependency
+            JOIN t_installed_point_processings AS installed
+              ON installed.id = dependency.installed_processing_id
+            WHERE installed.current = TRUE
+              AND dependency.source_entity_instance_id = ANY(%s)
+              AND NOT (dependency.target_entity_instance_id = ANY(%s))
+            LIMIT 1
+            """,
+            (list(output_ids), list(output_ids)),
+        )
+        if cursor.fetchone() is not None:
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Another active processing depends on this output",
+            )
+
+        try:
+            next_version = PostgresConfigurationRevisions().publish(
+                transaction=connection,
+                base_revision=current_version,
+                actor=command.actor,
+                action="point_processing.deactivate",
+                resource_kind="node",
+                resource_id=str(plan.node_id),
+                before_digest=plan.source_catalog_digest,
+                after_digest=plan.digest,
+                details={
+                    "plan_id": str(plan.id),
+                    "template_revision_id": str(plan.template_revision_id),
+                    "output_entity_instance_ids": [str(item) for item in output_ids],
+                },
+            )
+        except ConfigurationRevisionError as exc:
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Configuration changed after planning",
+            ) from exc
+
+        cursor.execute(
+            "UPDATE t_entity_instances SET active=FALSE "
+            "WHERE id=ANY(%s) AND active=TRUE",
+            (list(output_ids),),
+        )
+        if cursor.rowcount != len(output_ids):
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Point processing outputs changed after planning",
+            )
+        cursor.execute(
+            "UPDATE t_installed_point_processings SET current=FALSE "
+            "WHERE id=%s AND current=TRUE",
+            (installed_id,),
+        )
+        if cursor.rowcount != 1:
+            raise PointProcessingError(
+                "POINT_PROCESSING_PLAN_STALE",
+                "Active point processing changed after planning",
+            )
+
+        application_id = uuid5(
+            NAMESPACE_URL,
+            "zizu/point-processing-application/"
+            f"{command.actor}/{command.idempotency_key}",
+        )
+        cursor.execute(
+            """
+            INSERT INTO t_point_processing_applications
+              (id, plan_id, installed_processing_id,
+               configuration_revision, actor, output_entity_instance_ids)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                application_id,
+                plan.id,
+                installed_id,
+                next_version,
+                command.actor,
+                list(output_ids),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO t_point_processing_idempotency
+              (actor, idempotency_key, request_digest, application_id)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                command.actor,
+                command.idempotency_key,
+                request_digest,
+                application_id,
+            ),
+        )
+        cursor.execute(
+            "UPDATE t_point_processing_plans SET status='applied' WHERE id=%s",
+            (plan.id,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO t_audit_events
+              (id, event, outcome, reason, actor, target, details)
+            VALUES (%s, 'configuration.change', 'applied',
+                    'reviewed point processing deactivation', %s, %s, %s)
+            """,
+            (
+                uuid4(),
+                command.actor,
+                f"POST /api/v1/point-processing-plans/{plan.id}/apply",
+                Json(
+                    {
+                        "kind": "point_processing_deactivation",
+                        "plan_id": str(plan.id),
+                        "plan_digest": plan.digest,
+                        "node_id": str(plan.node_id),
+                        "configuration_revision": next_version,
+                    }
+                ),
+            ),
+        )
+        return PointProcessingApplication(
+            id=application_id,
+            plan_id=plan.id,
+            installed_processing_id=installed_id,
+            revision_id=plan.template_revision_id,
+            configuration_revision=next_version,
+            output_entity_instance_ids=output_ids,
+            actor=command.actor,
+        )
 
     @staticmethod
     def _apply_l0_plan_items(cursor: Any, plan: PointProcessingPlan) -> None:
@@ -1893,6 +2079,11 @@ class PostgresPointProcessingRepository:
                     "POINT_PROCESSING_PLAN_STALE",
                     "Point processing output entity contract changed after planning",
                 )
+            cursor.execute(
+                "UPDATE t_entity_instances SET active=TRUE "
+                "WHERE id=%s AND active=FALSE",
+                (entity_id,),
+            )
             cursor.execute(
                 """
                 INSERT INTO t_point_processing_output_bindings
