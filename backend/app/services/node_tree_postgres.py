@@ -253,24 +253,12 @@ class PostgresNodeTree:
                         (node_ids,),
                     )
                     installed_ids = [str(row[0]) for row in cursor.fetchall()]
-                    output_ids: list[str] = []
-                    if installed_ids:
-                        cursor.execute(
-                            """
-                            SELECT DISTINCT entity_instance_id
-                            FROM t_point_processing_output_bindings
-                            WHERE installed_processing_id=ANY(%s::uuid[])
-                            ORDER BY entity_instance_id
-                            """,
-                            (installed_ids,),
-                        )
-                        output_ids = [str(row[0]) for row in cursor.fetchall()]
-                    if output_ids:
-                        cursor.execute(
-                            "UPDATE t_entity_instances SET active=FALSE "
-                            "WHERE id=ANY(%s::uuid[]) AND active=TRUE",
-                            (output_ids,),
-                        )
+                    cursor.execute(
+                        "UPDATE t_entity_instances SET active=FALSE "
+                        "WHERE node_id=ANY(%s::uuid[]) AND active=TRUE",
+                        (node_ids,),
+                    )
+                    stopped_entities = cursor.rowcount
                     if installed_ids:
                         cursor.execute(
                             "UPDATE t_installed_point_processings SET current=FALSE "
@@ -304,7 +292,7 @@ class PostgresNodeTree:
                     details={
                         "retired_nodes": len(node_ids),
                         "stopped_point_processings": len(installed_ids),
-                        "stopped_entities": len(output_ids),
+                        "stopped_entities": stopped_entities,
                     },
                 )
                 connection.commit()

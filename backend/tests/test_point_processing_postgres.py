@@ -26,6 +26,7 @@ MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050
 MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
 MIGRATION_056 = Path(__file__).resolve().parents[2] / "init-db" / "migration_056_point_processing_deactivation.sql"
 MIGRATION_057 = Path(__file__).resolve().parents[2] / "init-db" / "migration_057_retired_node_processing.sql"
+MIGRATION_058 = Path(__file__).resolve().parents[2] / "init-db" / "migration_058_retired_node_entities.sql"
 NODE_ID = UUID("92000000-0000-0000-0000-000000000001")
 
 
@@ -382,6 +383,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
             "install-before-node-retirement",
             "test:engineer",
         ))
+        legacy_entity_id = uuid4()
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -390,6 +392,17 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     (NODE_ID,),
                 )
                 installed_id = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instances
+                      (id,node_id,definition_id,display_name,data_type,direction,
+                       freshness_seconds,active,source_kind)
+                    VALUES(%s,%s,'test.legacy','Legacy entity','INT','R',30,TRUE,
+                           'legacy_tag')
+                    """,
+                    (legacy_entity_id, NODE_ID),
+                )
+            connection.commit()
 
         result = PostgresNodeTree().retire(
             node_id=NODE_ID,
@@ -411,6 +424,11 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     (list(installed.output_entity_instance_ids),),
                 )
                 self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT active FROM t_entity_instances WHERE id=%s",
+                    (legacy_entity_id,),
+                )
+                self.assertEqual((False,), cursor.fetchone())
                 cursor.execute(
                     "SELECT count(*) FROM t_point_processing_output_bindings "
                     "WHERE installed_processing_id=%s",
@@ -465,6 +483,43 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     (list(installed.output_entity_instance_ids),),
                 )
                 self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+
+    def test_schema_058_deactivates_every_entity_on_a_retired_node(self) -> None:
+        from app.services.telemetry_store import get_connection
+
+        legacy_entity_id = uuid4()
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_entity_instances
+                      (id,node_id,definition_id,display_name,data_type,direction,
+                       freshness_seconds,active,source_kind)
+                    VALUES(%s,%s,'test.legacy','Legacy entity','INT','R',30,TRUE,
+                           'legacy_tag')
+                    """,
+                    (legacy_entity_id, NODE_ID),
+                )
+                cursor.execute(
+                    "UPDATE t_nodes SET enabled=FALSE,retired_at=clock_timestamp() "
+                    "WHERE id=%s",
+                    (NODE_ID,),
+                )
+            connection.commit()
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(MIGRATION_058.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_058.read_text(encoding="utf-8"))
+
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT active FROM t_entity_instances WHERE id=%s",
+                    (legacy_entity_id,),
+                )
+                self.assertEqual((False,), cursor.fetchone())
 
     def test_stale_plan_writes_no_installation(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingError
