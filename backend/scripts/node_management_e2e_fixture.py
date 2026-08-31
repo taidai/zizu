@@ -17,6 +17,7 @@ import paho.mqtt.client as mqtt
 
 
 REQUIRED_ROOT = "E2E验证"
+POINT_PROCESSING_DEVICE_CATEGORY = "E2E_DEVICE"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -377,7 +378,10 @@ def _retire_run_templates(token: str, run_id: str) -> int:
     asset_id = f"e2e.template.{run_id.replace('-', '_')}"
     items = _request(
         "GET",
-        "/point-processing-templates?device_category=PCS",
+        (
+            "/point-processing-templates?device_category="
+            f"{POINT_PROCESSING_DEVICE_CATEGORY}"
+        ),
         token=token,
     ).get("items", [])
     matches = [item for item in items if item.get("asset_id") == asset_id]

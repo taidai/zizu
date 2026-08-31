@@ -4,6 +4,7 @@ import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
 import { fixtureNames, runFixture } from './support/e2eFixture'
 
 const CONFIGURATION_CHANGE_TIMEOUT_MS = 40_000
+const POINT_PROCESSING_DEVICE_CATEGORY = 'E2E_DEVICE'
 
 test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
@@ -88,7 +89,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '+ 节点', exact: true }).click()
     const createModal = nodeModal(page, '新建节点')
     await createModal.getByPlaceholder('例如：1# 储能电站').fill(names.platformNode)
-    await createModal.getByPlaceholder('例如：ESS / PV / Meter').fill('PCS')
+    await createModal.getByPlaceholder('例如：ESS / PV / Meter').fill(POINT_PROCESSING_DEVICE_CATEGORY)
     await expect(createModal.locator('select')).toHaveValue(/.+/)
     await createModal.getByRole('button', { name: '保存', exact: true }).click()
     await expect(createModal).toBeHidden({ timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })

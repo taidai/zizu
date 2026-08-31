@@ -43,6 +43,10 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         retired = _retire_run_templates("token", "run-20260831-18")
 
         self.assertEqual(1, retired)
+        self.assertEqual(
+            "/point-processing-templates?device_category=E2E_DEVICE",
+            request.call_args_list[0].args[1],
+        )
         export_call = request.call_args_list[1]
         self.assertEqual(
             "/point-processing-templates/revision-18/export",

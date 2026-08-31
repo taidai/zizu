@@ -294,7 +294,7 @@ class PointProcessingTest(unittest.TestCase):
         self.assertIs(catalog, evaluator.catalog)
         self.assertEqual(0, repository.application_count())
 
-    def test_node_draft_is_persisted_and_planned_without_a_shared_template(self) -> None:
+    def test_node_draft_accepts_custom_node_type_as_device_category(self) -> None:
         from copy import deepcopy
 
         from app.services.point_processing import (
@@ -307,6 +307,7 @@ class PointProcessingTest(unittest.TestCase):
 
         raw = deepcopy(template_json())
         raw["id"] = "node.pcs-active-power"
+        raw["deviceCategory"] = "E2E_ROOT"
         catalog = InMemoryPointProcessingCatalog(
             templates={},
             sources=(
@@ -335,7 +336,7 @@ class PointProcessingTest(unittest.TestCase):
 
         self.assertEqual("ready", plan.status, plan.public_dict())
         self.assertEqual(NODE_ID, catalog.template_owner_node(plan.template_revision_id))
-        self.assertEqual((), catalog.list_templates("PCS"))
+        self.assertEqual((), catalog.list_templates("E2E_ROOT"))
 
     def test_inline_node_definition_reuses_existing_l0_without_neuron_rescan(self) -> None:
         from copy import deepcopy
