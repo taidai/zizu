@@ -1267,7 +1267,19 @@ class PointProcessingTest(unittest.TestCase):
                 PointProcessingSource(UUID(int=103), "l0", NODE_ID, "FaultCodeText", "STRING", None, True),
             ),
         )
-        service = PointProcessingService(repository, catalog)
+        class ExplodingTrialEvaluator:
+            called = False
+
+            def evaluate(self, plan, point_processing_catalog):
+                self.called = True
+                raise AssertionError("deactivation must not evaluate output values")
+
+        trial_evaluator = ExplodingTrialEvaluator()
+        service = PointProcessingService(
+            repository,
+            catalog,
+            trial_evaluator=trial_evaluator,
+        )
         install_plan = service.preview(PreviewPointProcessing(
             NODE_ID,
             BRAND_A_REVISION_ID,
@@ -1299,6 +1311,8 @@ class PointProcessingTest(unittest.TestCase):
             {"delete_candidate"},
             {item["action"] for item in stop_plan.items},
         )
+        self.assertIsNone(service.trial(stop_plan))
+        self.assertFalse(trial_evaluator.called)
 
         stopped = service.apply(ApplyPointProcessingPlan(
             stop_plan.id,

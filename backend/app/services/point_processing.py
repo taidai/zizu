@@ -370,6 +370,8 @@ class PointProcessingService:
     def trial(self, plan: PointProcessingPlan) -> PointProcessingTrial | None:
         if plan.status != "ready" or self._trial_evaluator is None:
             return None
+        if any(item.get("action") == "delete_candidate" for item in plan.items):
+            return None
         return self._trial_evaluator.evaluate(plan, self._catalog)
 
     def preview(self, command: PreviewPointProcessing) -> PointProcessingPlan:
