@@ -19,6 +19,7 @@ from app.services.data_trunk_contracts import (
     FramedRawObservation,
     FrozenFrameCandidate,
     InputReference,
+    L2Observation,
     RawObservation,
     SourceOrder,
     SourceOrderMode,
@@ -545,13 +546,61 @@ class DataFramesPostgresTest(unittest.TestCase):
         self.assertEqual((self.tag_id,), tuple(latest_state))
         self.assertEqual(107.0, latest_state[self.tag_id].value.value)
 
+    def test_l2_source_evidence_uses_retained_l0_latest_after_pruning(
+        self,
+    ) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=107))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        snapshot = self.repository.load_processing_snapshot(claim)
+        self.repository.complete(claim, snapshot, ())
+        source = snapshot.l0_by_tag[self.tag_id].observation
+        observation = L2Observation(
+            event_id=uuid4(),
+            entity_instance_id=uuid4(),
+            definition_id="test.retained_latest",
+            value=TypedValue.float(107.0),
+            unit="kW",
+            quality=TrunkQuality.GOOD,
+            reason=None,
+            observed_at=self.now,
+            received_at=self.now,
+            calculated_at=self.now,
+            processing_revision_id=uuid4(),
+            configuration_revision=0,
+            source_observation_ids=(source.observation_id,),
+            source_digest=source.source_digest,
+            source_order_key="retained-latest",
+            event_time_basis="received_at",
+            frame_id=pending.frame_id,
+            frame_sequence=pending.frame_sequence,
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            self.repository._insert_frame_l2(cursor, (observation,))
+            cursor.execute(
+                "DELETE FROM t_l0_observation_dedup WHERE observation_id=%s",
+                (str(source.observation_id),),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            self.repository._insert_sources(cursor, (observation,))
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT l0_observation_id FROM t_l2_observation_sources "
+                "WHERE l2_event_id=%s",
+                (str(observation.event_id),),
+            )
+            self.assertEqual((str(source.observation_id),), cursor.fetchone())
+
     def test_terminal_frame_outbox_rebuilds_atomic_event_and_acks_token(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=108))
-        FrameProcessor(
+        terminal = FrameProcessor(
             self.repository,
             evaluator=evaluate_processing,
             clock=lambda: datetime.now(UTC),
         ).process_next(datetime.now(UTC))
+        self.assertIsNotNone(terminal)
+        self.assertEqual("COMPLETE", terminal.status.value)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
             cursor.execute("DELETE FROM t_l2_observation_sources")
@@ -562,7 +611,7 @@ class DataFramesPostgresTest(unittest.TestCase):
             connection_factory=self._connection_factory(),
         )
 
-        claim_at = datetime.now(UTC) + timedelta(seconds=1)
+        claim_at = datetime.now(UTC) + timedelta(seconds=10)
         claim = outbox.claim_unpublished(claim_at)
 
         self.assertIsNotNone(claim)
@@ -575,7 +624,7 @@ class DataFramesPostgresTest(unittest.TestCase):
         outbox.mark_published(claim.event.frame_id, claim.claim_token)
         self.assertIsNone(outbox.claim_unpublished(claim_at))
 
-    def test_transaction_b_rolls_back_all_publication_on_fault(self) -> None:
+    def test_transaction_b_rolls_back_and_retries_immediately_on_fault(self) -> None:
         def fault(stage: str) -> None:
             if stage == "source":
                 raise RuntimeError("injected source failure")
@@ -584,18 +633,18 @@ class DataFramesPostgresTest(unittest.TestCase):
             connection_factory=self._connection_factory(), fault_hook=fault
         )
         pending = repository.commit_pending(self._candidate(capture_beat=107))
-        with self.assertRaisesRegex(DataTrunkError, "DATA_FRAME_COMPLETE_FAILED"):
-            FrameProcessor(
-                repository,
-                evaluator=evaluate_processing,
-                clock=lambda: datetime.now(UTC),
-            ).process_next(datetime.now(UTC))
+        terminal = FrameProcessor(
+            repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+        self.assertIsNone(terminal)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT status FROM t_data_frames WHERE frame_id=%s",
                 (str(pending.frame_id),),
             )
-            self.assertEqual(("PROCESSING",), cursor.fetchone())
+            self.assertEqual(("PENDING",), cursor.fetchone())
             cursor.execute(
                 "SELECT count(*) FROM t_telemetry_latest WHERE frame_sequence=%s",
                 (pending.frame_sequence,),
@@ -692,7 +741,7 @@ class DataFramesPostgresTest(unittest.TestCase):
                     str(old_id),
                     "e" * 64,
                     self.now,
-                    datetime.now(UTC) - timedelta(seconds=61),
+                    datetime.now(UTC) - timedelta(seconds=70),
                 ),
             )
         next_pending = self.repository.commit_pending(
@@ -712,7 +761,7 @@ class DataFramesPostgresTest(unittest.TestCase):
         )
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
-            expired_at = datetime.now(UTC) - timedelta(seconds=61)
+            expired_at = datetime.now(UTC) - timedelta(seconds=70)
             cursor.execute(
                 "UPDATE t_data_frames SET created_at=%s WHERE frame_id=%s",
                 (expired_at, str(pending.frame_id)),
@@ -754,7 +803,7 @@ class DataFramesPostgresTest(unittest.TestCase):
                     str(uuid4()),
                     str(uuid4()),
                     datetime.now(UTC) - timedelta(seconds=1),
-                    datetime.now(UTC) - timedelta(seconds=61),
+                    datetime.now(UTC) - timedelta(seconds=70),
                 ),
             )
         budget = self.repository.claim_next(datetime.now(UTC))
@@ -979,7 +1028,10 @@ class DataFramesPostgresTest(unittest.TestCase):
                 cursor.execute("SET session_replication_role=replica")
                 cursor.execute(
                     "UPDATE t_data_frames SET created_at=%s WHERE frame_id=%s",
-                    (datetime.now(UTC) - timedelta(seconds=61), str(expired.frame_id)),
+                    (
+                        datetime.now(UTC) - timedelta(seconds=70),
+                        str(expired.frame_id),
+                    ),
                 )
                 cursor.execute("SET session_replication_role=origin")
             budget = self.repository.claim_next(datetime.now(UTC))

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from app.services.data_trunk_contracts import (
     ClaimedFrame,
+    DataTrunkError,
     FrameStatus,
     InstalledPointProcessing,
     L2Observation,
@@ -166,6 +167,59 @@ class FrameProcessorTest(unittest.TestCase):
         ).process_next(NOW)
 
         self.assertIsNone(result)
+        self.assertEqual(
+            frozenset({FIRST_ENTITY, SECOND_ENTITY}),
+            repository.failure.failed_entity_ids,
+        )
+
+    def test_completion_failure_is_retried_without_leaving_claim_stuck(self) -> None:
+        repository = _Repository()
+
+        def evaluator(*, installed, configuration_revision, calculated_at,
+                      frame_id=None, frame_sequence=0, **_kwargs):
+            item = installed[0]
+            return (
+                L2Observation(
+                    event_id=UUID("40000000-0000-0000-0000-000000000099"),
+                    entity_instance_id=item.entity_instance_id,
+                    definition_id=item.entity_definition_id,
+                    value=TypedValue.float(1.0),
+                    unit="kW",
+                    quality=TrunkQuality.GOOD,
+                    reason=None,
+                    observed_at=NOW,
+                    received_at=NOW,
+                    calculated_at=NOW,
+                    processing_revision_id=item.revision_id,
+                    configuration_revision=configuration_revision,
+                    source_observation_ids=(),
+                    source_digest="a" * 64,
+                    source_order_key="frame",
+                    event_time_basis="calculated_at",
+                    frame_id=frame_id,
+                    frame_sequence=frame_sequence,
+                ),
+            )
+
+        def fail_complete(*_args, **_kwargs):
+            raise DataTrunkError(
+                "POINT_PROCESSING_SOURCE_MISSING",
+                "source evidence was pruned",
+            )
+
+        repository.complete = fail_complete
+
+        result = FrameProcessor(
+            repository,
+            evaluator=evaluator,
+            clock=lambda: NOW,
+        ).process_next(NOW)
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            "POINT_PROCESSING_SOURCE_MISSING",
+            repository.failure.code,
+        )
         self.assertEqual(
             frozenset({FIRST_ENTITY, SECOND_ENTITY}),
             repository.failure.failed_entity_ids,

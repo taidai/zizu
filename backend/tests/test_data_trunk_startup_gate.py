@@ -175,7 +175,10 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             "item.ts >= %s - interval '5 minutes'", postgres_source
         )
         self.assertIn(
-            "JOIN t_telemetry_latest AS telemetry", postgres_source
+            "FROM t_telemetry_latest AS telemetry", postgres_source
+        )
+        self.assertIn(
+            "WHERE telemetry.observation_id = ANY", postgres_source
         )
         self.assertNotIn(
             "FROM t_telemetry\n                       WHERE frame_id=%s",

@@ -129,4 +129,16 @@ class FrameProcessor:
                 FrameFailure(code, affected),
                 calculated_at,
             )
-        return self._repository.complete(claimed, snapshot, tuple(outputs))
+        try:
+            return self._repository.complete(claimed, snapshot, tuple(outputs))
+        except Exception as exc:
+            code = (
+                exc.code
+                if isinstance(exc, DataTrunkError)
+                else "FRAME_PROCESSING_FAILED"
+            )
+            return self._repository.retry_or_fail(
+                claimed,
+                FrameFailure(code, frozenset(snapshot.installed_by_entity_id)),
+                calculated_at,
+            )

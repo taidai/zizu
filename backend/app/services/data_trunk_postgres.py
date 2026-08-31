@@ -2237,14 +2237,12 @@ class PostgresFrameRepository:
                 continue
             cursor.execute(
                 """
-                SELECT DISTINCT ON (dedup.observation_id)
-                       dedup.observation_id, dedup.source_digest,
+                SELECT DISTINCT ON (telemetry.observation_id)
+                       telemetry.observation_id, telemetry.source_digest,
                        telemetry.event_time_basis
-                FROM t_l0_observation_dedup AS dedup
-                JOIN t_telemetry_latest AS telemetry
-                  ON telemetry.observation_id = dedup.observation_id
-                WHERE dedup.observation_id = ANY(%s::uuid[])
-                ORDER BY dedup.observation_id, telemetry.ts DESC
+                FROM t_telemetry_latest AS telemetry
+                WHERE telemetry.observation_id = ANY(%s::uuid[])
+                ORDER BY telemetry.observation_id, telemetry.ts DESC
                 """,
                 ([str(item) for item in observation.source_observation_ids],),
             )
