@@ -7,6 +7,7 @@ PUT    /api/v1/tags/{tag_id}     → 修改 scale_factor / value_offset / unit �
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -207,6 +208,7 @@ async def list_tags(
     read_write: str | None = Query(None, description="按读写权限过滤 R/RW/W"),
     search: str | None = Query(None, description="按名称/显示名模糊搜索"),
     enabled: bool = Query(True, description="只看启用点位"),
+    include_disabled: bool = Query(False, description="维护时同时返回已停用点位"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(50, ge=1, le=200, description="每页条数"),
     sort_by: str = Query("sort_order", description="排序字段"),
@@ -220,7 +222,7 @@ async def list_tags(
     """
     from app.services.telemetry_store import get_connection
 
-    conditions = ["t.enabled = TRUE"] if enabled else []
+    conditions = ["t.enabled = TRUE"] if enabled and not include_disabled else []
     params: list = []
 
     if node_id:
@@ -607,6 +609,83 @@ class BatchUpdateRequest(BaseModel):
     alarm_type: Any = None
     alarm_threshold: Any = None
     fault_map_id: Any = None
+
+
+class RawPointMaintenanceRequest(BaseModel):
+    tag_ids: list[UUID] = Field(..., min_length=1, description="原始点位 ID")
+    display_name: str | None = Field(None, max_length=255, description="单点显示名称")
+    enabled: bool | None = Field(None, description="批量启用或停用")
+
+
+def get_raw_point_maintenance():
+    from app.services.raw_point_maintenance import PostgresRawPointMaintenance
+
+    return PostgresRawPointMaintenance()
+
+
+def get_raw_point_maintenance_runtime():
+    from app.main import get_pipeline
+
+    pipeline = get_pipeline()
+    if pipeline is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "DATA_TRUNK_UNAVAILABLE", "message": "数据主干尚未启动"},
+        )
+    return pipeline
+
+
+def _raise_raw_point_maintenance_http(error: Exception) -> None:
+    from app.services.configuration_revision import ConfigurationRevisionError
+    from app.services.data_trunk_contracts import DataTrunkError
+    from app.services.raw_point_maintenance import RawPointMaintenanceError
+
+    if isinstance(error, (RawPointMaintenanceError, ConfigurationRevisionError, DataTrunkError)):
+        code = error.code
+    else:
+        raise error
+    status_by_code = {
+        "RAW_POINT_NOT_FOUND": status.HTTP_404_NOT_FOUND,
+        "RAW_POINT_IN_USE": status.HTTP_409_CONFLICT,
+        "CONFIGURATION_REVISION_STALE": status.HTTP_409_CONFLICT,
+        "DATA_FRAME_CONFIGURATION_STALE": status.HTTP_409_CONFLICT,
+        "CONFIGURATION_RUNTIME_BUSY": status.HTTP_409_CONFLICT,
+    }
+    raise HTTPException(
+        status_code=status_by_code.get(code, status.HTTP_422_UNPROCESSABLE_CONTENT),
+        detail={"code": code, "message": str(error)},
+    )
+
+
+@router.put("/tags/maintenance", **protected(CONFIGURATION_WRITE))
+async def maintain_raw_points(
+    request: RawPointMaintenanceRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    repository=Depends(get_raw_point_maintenance),
+    runtime=Depends(get_raw_point_maintenance_runtime),
+) -> dict:
+    changes: dict[str, Any] = {}
+    if request.display_name is not None:
+        changes["display_name"] = request.display_name.strip()
+    if request.enabled is not None:
+        changes["enabled"] = request.enabled
+    base_revision = await asyncio.to_thread(repository.current_revision)
+    gate = runtime.data_trunk.configuration_gate
+    try:
+        await asyncio.to_thread(gate.begin_configuration_publish, base_revision)
+        result = await asyncio.to_thread(
+            repository.update,
+            tag_ids=tuple(request.tag_ids),
+            changes=changes,
+            actor=principal.actor,
+            base_revision=base_revision,
+        )
+    except Exception as error:
+        gate.cancel_configuration_publish()
+        _raise_raw_point_maintenance_http(error)
+    await runtime.reload_rules_now()
+    await asyncio.to_thread(gate.reconcile_configuration_runtime)
+    return result
 
 
 

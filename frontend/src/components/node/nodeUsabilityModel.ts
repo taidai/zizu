@@ -42,3 +42,21 @@ export function importPreviewSummary(preview: {
     label: `新增 ${create} · 更新 ${update} · 不变 ${unchanged} · 冲突 ${conflict}`,
   }
 }
+
+export function rawPointSelectionSummary(points: { id: string; enabled: boolean }[]) {
+  return {
+    count: points.length,
+    canEditDisplayName: points.length === 1,
+    canEnable: points.some((point) => !point.enabled),
+    canDisable: points.some((point) => point.enabled),
+  }
+}
+
+export function rawPointDisplayNameChange(tagId: string, displayName: string) {
+  const normalized = displayName.trim()
+  if (!normalized) throw new Error('请输入点位显示名称')
+  return {
+    tagIds: [tagId],
+    changes: { display_name: normalized },
+  }
+}

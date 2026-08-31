@@ -15,9 +15,9 @@ test('physical point catalog uses legal 200-row pages and follows pagination', a
     }
   })
 
-  assert.deepEqual(calls.map((args) => [args[0], args[1], args[2], args[5]]), [
-    ['node-a', 1, 200, 'PHYSICAL'],
-    ['node-a', 2, 200, 'PHYSICAL'],
+  assert.deepEqual(calls.map((args) => [args[0], args[1], args[2], args[5], args[10]]), [
+    ['node-a', 1, 200, 'PHYSICAL', true],
+    ['node-a', 2, 200, 'PHYSICAL', true],
   ])
   assert.deepEqual(tags.map((tag) => tag.id), ['float', 'int'])
 })

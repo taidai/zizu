@@ -148,6 +148,38 @@ test.describe.serial('节点管理主干', () => {
       `${names.neuronNode}/${names.neuronGroup}/${names.neuronTag}`,
     )
 
+    const maintainedName = `${names.neuronTag}（维护验证）`
+    await page.getByRole('checkbox', { name: `选择 ${names.neuronTag}` }).check()
+    await page.getByRole('button', { name: '编辑名称', exact: true }).click()
+    const nameEditor = page.getByLabel('编辑原始点位名称')
+    await nameEditor.getByLabel('点位显示名称').fill(maintainedName)
+    await nameEditor.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(page.getByText('点位名称已更新', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+    await expect(page.getByRole('row').filter({ hasText: maintainedName })).toBeVisible()
+
+    await page.getByRole('checkbox', { name: `选择 ${maintainedName}` }).check()
+    const stopDialog = page.waitForEvent('dialog')
+    await page.getByRole('button', { name: '停用', exact: true }).click()
+    await (await stopDialog).accept()
+    await expect(page.getByRole('row').filter({ hasText: maintainedName })).toContainText('已停用', {
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+
+    await page.getByRole('checkbox', { name: `选择 ${maintainedName}` }).check()
+    await page.getByRole('button', { name: '启用', exact: true }).click()
+    await expect(page.getByText('原始点位已启用', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+    await expect(page.getByRole('row').filter({ hasText: maintainedName })).not.toContainText('已停用')
+
+    await page.getByRole('checkbox', { name: `选择 ${maintainedName}` }).check()
+    await page.getByRole('button', { name: '编辑名称', exact: true }).click()
+    await page.getByLabel('编辑原始点位名称').getByLabel('点位显示名称').fill(names.neuronTag)
+    await page.getByLabel('编辑原始点位名称').getByRole('button', { name: '保存', exact: true }).click()
+    await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toBeVisible()
+
     await page.getByRole('button', { name: '历史', exact: true }).click()
     await page.getByLabel('选择一个原始点位').selectOption({ label: names.neuronTag })
     await page.getByRole('button', { name: '明细', exact: true }).click()

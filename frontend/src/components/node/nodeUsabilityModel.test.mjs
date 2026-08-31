@@ -39,3 +39,42 @@ test('group selection is unique and stable', async () => {
   const model = await import('./nodeUsabilityModel.ts')
   assert.deepEqual(model.normalizedGroups(['status', 'data', 'status', '']), ['data', 'status'])
 })
+
+test('raw point selection exposes only maintenance actions that can change state', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+
+  assert.deepEqual(
+    model.rawPointSelectionSummary([
+      { id: 'enabled', enabled: true },
+      { id: 'disabled', enabled: false },
+    ]),
+    {
+      count: 2,
+      canEditDisplayName: false,
+      canEnable: true,
+      canDisable: true,
+    },
+  )
+  assert.deepEqual(
+    model.rawPointSelectionSummary([{ id: 'one', enabled: true }]),
+    {
+      count: 1,
+      canEditDisplayName: true,
+      canEnable: false,
+      canDisable: true,
+    },
+  )
+})
+
+test('raw point display-name change trims input and rejects an empty name', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+
+  assert.deepEqual(
+    model.rawPointDisplayNameChange('point-1', '  PCS 有功功率  '),
+    { tagIds: ['point-1'], changes: { display_name: 'PCS 有功功率' } },
+  )
+  assert.throws(
+    () => model.rawPointDisplayNameChange('point-1', '   '),
+    /请输入点位显示名称/,
+  )
+})

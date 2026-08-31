@@ -221,6 +221,7 @@ class NodeUsabilityPostgresTest(unittest.TestCase):
                 read_write=None,
                 search=None,
                 enabled=True,
+                include_disabled=False,
                 page=1,
                 page_size=50,
                 sort_by="sort_order",
@@ -231,6 +232,51 @@ class NodeUsabilityPostgresTest(unittest.TestCase):
         self.assertNotIn("error", response)
         self.assertEqual(1, response["total"])
         self.assertEqual(tag_id, response["tags"][0]["id"])
+
+    def test_raw_point_catalog_can_include_disabled_points_for_maintenance(self) -> None:
+        self._apply_050()
+        from app.api.tags import list_tags
+        from app.services.identity import Principal
+
+        enabled_id = str(uuid4())
+        disabled_id = str(uuid4())
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_tags
+                      (id,node_id,name,data_type,source_type,source_path,enabled)
+                    VALUES
+                      (%s,%s,'P1','FLOAT','neuron','PCS/data/P1',TRUE),
+                      (%s,%s,'P2','FLOAT','neuron','PCS/data/P2',FALSE)
+                    """,
+                    (enabled_id, self.child_id, disabled_id, self.child_id),
+                )
+            connection.commit()
+
+        principal = Principal(uuid4(), "engineer", "engineer", uuid4())
+        with patch(
+            "app.services.telemetry_store.get_connection",
+            new=lambda: psycopg2.connect(**self.connection_kwargs),
+        ):
+            response = asyncio.run(list_tags(
+                node_id=self.child_id,
+                data_type=None,
+                tag_type="PHYSICAL",
+                read_write=None,
+                search=None,
+                enabled=True,
+                include_disabled=True,
+                page=1,
+                page_size=50,
+                sort_by="sort_order",
+                sort_order="asc",
+                principal=principal,
+            ))
+
+        self.assertNotIn("error", response)
+        self.assertEqual(2, response["total"])
+        self.assertEqual({enabled_id, disabled_id}, {tag["id"] for tag in response["tags"]})
 
 
 if __name__ == "__main__":

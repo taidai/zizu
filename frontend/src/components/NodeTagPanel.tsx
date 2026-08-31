@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchTags, type Node, type Tag } from '../api/client'
+import { fetchTags, maintainRawPoints, type Node, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
   fetchCommittedFrameSnapshot,
@@ -13,6 +13,10 @@ import {
 import { projectRawPointValue, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
 import RawPointHistoryPanel from './RawPointHistoryPanel'
 import InlinePointProcessingPanel from './data-trunk/InlinePointProcessingPanel'
+import {
+  rawPointDisplayNameChange,
+  rawPointSelectionSummary,
+} from './node/nodeUsabilityModel'
 
 interface NodeTagPanelProps {
   node: Node
@@ -40,6 +44,10 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Map<string, Tag>>(new Map())
+  const [editingPoint, setEditingPoint] = useState<Tag | null>(null)
+  const [displayNameDraft, setDisplayNameDraft] = useState('')
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState('')
   const activeNodeIdRef = useRef(nodeId)
   const tagRequestGenerationRef = useRef(0)
   activeNodeIdRef.current = nodeId
@@ -66,6 +74,7 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
         true,
         'sort_order',
         'asc',
+        true,
       )
       if (generation === tagRequestGenerationRef.current
         && activeNodeIdRef.current === expectedNodeId) {
@@ -153,8 +162,10 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
     }
   }, [nodeId])
 
-  const selectedPoints = [...selected.values()]
-  const selectableTags = tags.filter((tag) => tag.enabled)
+  const selectedRows = [...selected.values()]
+  const selectionSummary = rawPointSelectionSummary(selectedRows)
+  const selectedPoints = selectedRows.filter((tag) => tag.enabled)
+  const selectableTags = tags
   const allVisibleSelected = selectableTags.length > 0
     && selectableTags.every((tag) => selected.has(tag.id))
 
@@ -174,6 +185,55 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
       else selectableTags.forEach((tag) => next.set(tag.id, tag))
       return next
     })
+  }
+
+  const applyMaintenance = async (
+    tagIds: string[],
+    changes: { display_name?: string; enabled?: boolean },
+    successMessage: string,
+  ) => {
+    setMaintenanceBusy(true)
+    setMaintenanceMessage('')
+    try {
+      await maintainRawPoints({ tag_ids: tagIds, ...changes })
+      setSelected(new Map())
+      setEditingPoint(null)
+      setMaintenanceMessage(successMessage)
+      await loadTags()
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : '原始点位维护失败')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
+  const startEditingDisplayName = () => {
+    const point = selectedRows[0]
+    if (!point || !selectionSummary.canEditDisplayName) return
+    setEditingPoint(point)
+    setDisplayNameDraft(point.display_name || point.name)
+    setMaintenanceMessage('')
+  }
+
+  const saveDisplayName = async () => {
+    if (!editingPoint) return
+    try {
+      const change = rawPointDisplayNameChange(editingPoint.id, displayNameDraft)
+      await applyMaintenance(change.tagIds, change.changes, '点位名称已更新')
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : '点位名称更新失败')
+    }
+  }
+
+  const changeSelectedEnabled = async (enabled: boolean) => {
+    const targets = selectedRows.filter((tag) => tag.enabled !== enabled)
+    if (targets.length === 0) return
+    if (!enabled && !window.confirm(`确认停用选中的 ${targets.length} 个原始点位？`)) return
+    await applyMaintenance(
+      targets.map((tag) => tag.id),
+      { enabled },
+      enabled ? '原始点位已启用' : '原始点位已停用',
+    )
   }
 
   return (
@@ -242,6 +302,62 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
           )}
 
           {!readOnly && (
+            <div className="mb-3 rounded border border-gray-200 bg-gray-50 px-3 py-2" aria-label="原始点位维护">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-gray-600">
+                  已选 {selectionSummary.count} 个
+                </span>
+                <button
+                  type="button"
+                  disabled={!selectionSummary.canEditDisplayName || maintenanceBusy}
+                  onClick={startEditingDisplayName}
+                  className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40"
+                >
+                  编辑名称
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectionSummary.canEnable || maintenanceBusy}
+                  onClick={() => { void changeSelectedEnabled(true) }}
+                  className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40"
+                >
+                  启用
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectionSummary.canDisable || maintenanceBusy}
+                  onClick={() => { void changeSelectedEnabled(false) }}
+                  className="neu-btn px-3 py-1.5 text-xs text-red-700 disabled:opacity-40"
+                >
+                  停用
+                </button>
+                <span className="text-[11px] text-gray-500">停用不会删除点位或历史数据</span>
+              </div>
+
+              {editingPoint && (
+                <div className="mt-2 flex flex-wrap items-end gap-2 border-t border-gray-200 pt-2" aria-label="编辑原始点位名称">
+                  <label className="text-xs text-gray-600">
+                    点位显示名称
+                    <input
+                      value={displayNameDraft}
+                      onChange={(event) => setDisplayNameDraft(event.target.value)}
+                      className="neu-inset ml-2 w-56 rounded px-3 py-1.5 text-xs text-gray-800 outline-none"
+                    />
+                  </label>
+                  <button type="button" disabled={maintenanceBusy} onClick={() => { void saveDisplayName() }} className="neu-btn px-3 py-1.5 text-xs text-green-700 disabled:opacity-40">保存</button>
+                  <button type="button" disabled={maintenanceBusy} onClick={() => setEditingPoint(null)} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">取消</button>
+                </div>
+              )}
+
+              {maintenanceMessage && (
+                <p className={`mt-2 text-xs ${maintenanceMessage.includes('已') ? 'text-green-700' : 'text-red-700'}`}>
+                  {maintenanceMessage}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!readOnly && (
             <InlinePointProcessingPanel
               nodeId={nodeId}
               deviceCategory={node.node_type || 'PCS'}
@@ -289,10 +405,13 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
                     <tr key={tag.id} className="text-gray-700 hover:bg-gray-50">
                       {!readOnly && (
                         <td className="px-3 py-2 text-center">
-                          <input type="checkbox" aria-label={`选择 ${tag.display_name || tag.name}`} checked={selected.has(tag.id)} disabled={!tag.enabled} onChange={() => togglePoint(tag)} />
+                          <input type="checkbox" aria-label={`选择 ${tag.display_name || tag.name}`} checked={selected.has(tag.id)} onChange={() => togglePoint(tag)} />
                         </td>
                       )}
-                      <td className="px-3 py-2 font-medium text-gray-800">{tag.display_name || tag.name}</td>
+                      <td className="px-3 py-2 font-medium text-gray-800">
+                        {tag.display_name || tag.name}
+                        {!tag.enabled && <span className="ml-2 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-normal text-gray-600">已停用</span>}
+                      </td>
                       <td className="px-3 py-2 font-mono">{point.displayValue}</td>
                       <td className="px-3 py-2">{current?.unit || tag.unit || '-'}</td>
                       <td className={`px-3 py-2 ${qualityClass}`}>{point.qualityLabel}</td>

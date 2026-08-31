@@ -168,6 +168,100 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual([(NODE_ID,)], cursor.fetchall())
 
+    def test_raw_point_maintenance_blocks_disabling_a_current_l1_input(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.raw_point_maintenance import (
+            PostgresRawPointMaintenance,
+            RawPointMaintenanceError,
+        )
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, revision_id = self._service_and_revision("pcs-brand-a")
+        plan = self._plan(service, revision_id)
+        installed = service.apply(ApplyPointProcessingPlan(
+            plan.id,
+            plan.digest,
+            "install-before-l0-stop",
+            "test:engineer",
+        ))
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT binding.l0_tag_id
+                    FROM t_point_processing_input_bindings AS binding
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id=binding.installed_processing_id
+                     AND installed.current=TRUE
+                    WHERE binding.source_kind='l0'
+                    ORDER BY binding.l0_tag_id
+                    LIMIT 1
+                    """
+                )
+                tag_id = cursor.fetchone()[0]
+
+        maintenance = PostgresRawPointMaintenance()
+        with self.assertRaisesRegex(RawPointMaintenanceError, "RAW_POINT_IN_USE"):
+            maintenance.update(
+                tag_ids=(tag_id,),
+                changes={"enabled": False},
+                actor="test:engineer",
+                base_revision=installed.configuration_revision,
+            )
+
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT enabled FROM t_tags WHERE id=%s", (tag_id,))
+                self.assertEqual((True,), cursor.fetchone())
+                cursor.execute("SELECT current_revision FROM t_configuration_state")
+                self.assertEqual((installed.configuration_revision,), cursor.fetchone())
+
+    def test_raw_point_maintenance_updates_and_restores_an_unused_point(self) -> None:
+        from app.services.raw_point_maintenance import PostgresRawPointMaintenance
+        from app.services.telemetry_store import get_connection
+
+        tag_id = uuid4()
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_tags
+                      (id,node_id,name,display_name,data_type,source_type,
+                       source_path,enabled)
+                    VALUES(%s,%s,'Spare','备用点','FLOAT','neuron',
+                           'PCS/data/Spare',TRUE)
+                    """,
+                    (tag_id, NODE_ID),
+                )
+            connection.commit()
+
+        maintenance = PostgresRawPointMaintenance()
+        stopped = maintenance.update(
+            tag_ids=(tag_id,),
+            changes={"display_name": "  备用测量  ", "enabled": False},
+            actor="test:engineer",
+            base_revision=0,
+        )
+        restored = maintenance.update(
+            tag_ids=(tag_id,),
+            changes={"enabled": True},
+            actor="test:engineer",
+            base_revision=stopped["configuration_revision"],
+        )
+
+        self.assertEqual(1, stopped["configuration_revision"])
+        self.assertEqual(2, restored["configuration_revision"])
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id,name,display_name,source_path,enabled FROM t_tags WHERE id=%s",
+                    (tag_id,),
+                )
+                self.assertEqual(
+                    (tag_id, "Spare", "备用测量", "PCS/data/Spare", True),
+                    cursor.fetchone(),
+                )
+
     def test_deactivation_preserves_evidence_and_reactivation_reuses_entity_ids(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection

@@ -477,6 +477,7 @@ export async function fetchTags(
   enabled?: boolean,
   sortBy?: string,
   sortOrder?: 'asc' | 'desc',
+  includeDisabled = false,
 ): Promise<{ tags: Tag[]; total: number; page: number; page_size: number; total_pages: number }> {
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
   if (nodeId) params.set('node_id', nodeId)
@@ -487,6 +488,7 @@ export async function fetchTags(
   if (enabled !== undefined) params.set('enabled', String(enabled))
   if (sortBy) params.set('sort_by', sortBy)
   if (sortOrder) params.set('sort_order', sortOrder)
+  if (includeDisabled) params.set('include_disabled', 'true')
   const res = await apiFetch(`${API_BASE}/tags?${params}`)
   if (!res.ok) throw await authError(res, `Tag list fetch failed: ${res.status}`)
   return res.json()
@@ -1347,6 +1349,38 @@ export async function createPointProcessingDraftPlan(
   })
   if (!response.ok) throw await dataTrunkError(response, `检查点位加工失败：${response.status}`)
   return response.json()
+}
+
+export interface RawPointMaintenanceInput {
+  tag_ids: string[]
+  display_name?: string
+  enabled?: boolean
+}
+
+export interface RawPointMaintenanceResult {
+  updated: number
+  configuration_revision: number
+  items: Pick<Tag, 'id' | 'node_id' | 'name' | 'display_name' | 'enabled' | 'source_path'>[]
+}
+
+export async function maintainRawPoints(
+  input: RawPointMaintenanceInput,
+): Promise<RawPointMaintenanceResult> {
+  const res = await apiFetch(`${API_BASE}/tags/maintenance`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    const detail = error.detail
+    throw new Error(
+      typeof detail === 'string'
+        ? detail
+        : detail?.message || `原始点位维护失败：${res.status}`,
+    )
+  }
+  return res.json()
 }
 
 export async function createPointProcessingDeactivationPlan(

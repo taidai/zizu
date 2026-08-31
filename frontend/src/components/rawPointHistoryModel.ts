@@ -18,6 +18,7 @@ type FetchTagPage = (
   enabled: boolean,
   sortBy: string,
   sortOrder: 'asc',
+  includeDisabled: boolean,
 ) => Promise<TagPage>
 
 export async function loadPhysicalNumericTags(
@@ -30,7 +31,7 @@ export async function loadPhysicalNumericTags(
   do {
     const result = await fetchPage(
       nodeId, page, RAW_POINT_PAGE_SIZE, undefined, undefined, 'PHYSICAL',
-      undefined, true, 'sort_order', 'asc',
+      undefined, true, 'sort_order', 'asc', true,
     )
     tags.push(...result.tags)
     totalPages = Math.max(1, result.total_pages || 1)
