@@ -882,6 +882,31 @@ class DataFramesPostgresTest(unittest.TestCase):
                 "WHERE installed.current=TRUE ORDER BY 1"
             )
             affected = frozenset(UUID(str(row[0])) for row in cursor.fetchall())
+
+        # A committed BAD state is a real latest event, but it is not a typed
+        # value that a later failed frame can preserve as its safety baseline.
+        missing_pending = self.repository.commit_pending(
+            self._multi_candidate(
+                capture_beat=107,
+                configuration_revision=applied.configuration_revision,
+                tag_specs=(),
+            )
+        )
+        missing_terminal = FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+        self.assertEqual("COMPLETE", missing_terminal.status.value)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER (WHERE "
+                "num_nonnulls(value_float,value_int,value_numeric,value_bool,value_text,value_codes)=0) "
+                "FROM t_l2_observations WHERE frame_id=%s AND quality=0",
+                (str(missing_pending.frame_id),),
+            )
+            self.assertEqual((1, 1), cursor.fetchone())
+
         first_failed = self.repository.commit_pending(
             self._multi_candidate(
                 capture_beat=108,

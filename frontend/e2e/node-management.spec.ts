@@ -71,6 +71,7 @@ test.describe.serial('节点管理主干', () => {
       await modal.getByPlaceholder('例如：ESS / PV / Meter').fill('E2E_ROOT')
       await modal.locator('select').selectOption('')
       await modal.getByRole('button', { name: '保存', exact: true }).click()
+      await expect(modal).toBeHidden()
       await search.fill(environment.writeRoot)
     }
     await expect(writeRoot).toBeVisible()
@@ -84,6 +85,7 @@ test.describe.serial('节点管理主干', () => {
     await createModal.getByPlaceholder('例如：ESS / PV / Meter').fill('PCS')
     await expect(createModal.locator('select')).toHaveValue(/.+/)
     await createModal.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(createModal).toBeHidden()
 
     await search.fill(names.platformNode)
     await expect(tree.getByTitle(names.platformNode)).toBeVisible()
@@ -92,6 +94,7 @@ test.describe.serial('节点管理主干', () => {
     const editModal = nodeModal(page, '编辑节点')
     await editModal.getByPlaceholder('例如：1# 储能电站').fill(editedPlatformNode)
     await editModal.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(editModal).toBeHidden()
 
     await search.fill(editedPlatformNode)
     await expect(tree.getByTitle(editedPlatformNode)).toBeVisible()

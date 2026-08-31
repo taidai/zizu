@@ -1590,29 +1590,77 @@ class PostgresFrameRepository:
                 [str(item) for item in sorted(affected_ids, key=str)],
             ),
         )
-        outputs: list[L2Observation] = []
-        for row in cursor.fetchall():
-            entity_id = UUID(str(row[0]))
-            has_baseline = row[5] is not None
-            if (
+        rows = [
+            row
+            for row in cursor.fetchall()
+            if not (
                 row[16] == int(TrunkQuality.STALE)
                 and row[17]
                 in {
                     "FRAME_PROCESSING_FAILED",
                     "FRAME_PROCESSING_FAILED_NO_BASELINE",
                 }
-            ):
-                continue
+            )
+        ]
+        missing_baseline_ids = [
+            UUID(str(row[0]))
+            for row in rows
+            if not any(value is not None for value in row[9:15])
+        ]
+        historical_baselines: dict[UUID, tuple[object, ...]] = {}
+        if missing_baseline_ids:
+            cursor.execute(
+                """
+                SELECT DISTINCT ON (entity_instance_id)
+                       entity_instance_id,event_id,value_float,value_int,
+                       value_numeric,value_bool,value_text,value_codes,source_digest
+                FROM t_l2_observations
+                WHERE entity_instance_id=ANY(%s::uuid[])
+                  AND commit_sequence < %s
+                  AND quality IN (1,64,192)
+                  AND num_nonnulls(
+                    value_float,value_int,value_numeric,value_bool,
+                    value_text,value_codes
+                  ) = 1
+                ORDER BY entity_instance_id,commit_sequence DESC,calculated_at DESC
+                """,
+                (
+                    [str(item) for item in sorted(missing_baseline_ids, key=str)],
+                    claimed.frame_sequence,
+                ),
+            )
+            historical_baselines = {
+                UUID(str(row[0])): tuple(row[1:]) for row in cursor.fetchall()
+            }
+        outputs: list[L2Observation] = []
+        for row in rows:
+            entity_id = UUID(str(row[0]))
+            baseline = (
+                (
+                    row[5], row[9], row[10], row[11],
+                    row[12], row[13], row[14], row[15],
+                )
+                if any(value is not None for value in row[9:15])
+                else historical_baselines.get(entity_id)
+            )
+            has_baseline = baseline is not None
             value = (
                 _l2_value_from_columns(
-                    str(row[2]), row[9], row[10], row[11], row[12], row[13], row[14]
+                    str(row[2]),
+                    baseline[1],
+                    baseline[2],
+                    baseline[3],
+                    baseline[4],
+                    baseline[5],
+                    baseline[6],
                 )
                 if has_baseline
                 else TypedValue(ValueKind(str(row[2])), None)
             )
-            source_ids = (UUID(str(row[5])),) if has_baseline else ()
+            source_ids = (UUID(str(baseline[0])),) if has_baseline else ()
+            baseline_digest = baseline[7] if has_baseline else ""
             digest = hashlib.sha256(
-                f"{claimed.frame_id}:{entity_id}:{row[15] or ''}".encode()
+                f"{claimed.frame_id}:{entity_id}:{baseline_digest}".encode()
             ).hexdigest()
             outputs.append(
                 L2Observation(
