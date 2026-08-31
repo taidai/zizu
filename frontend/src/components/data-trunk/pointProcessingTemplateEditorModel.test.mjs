@@ -58,6 +58,19 @@ test('unknown template fields survive draft cloning', async () => {
   assert.equal(draft.deliveryNote, 'keep-me')
 })
 
+test('editing current node processing keeps its complete immutable source as an isolated draft', async () => {
+  const model = await import('./pointProcessingTemplateEditorModel.ts')
+  const extended = { ...source, ownerEvidence: { node: 'pcs-1' } }
+
+  const draft = model.createNodeProcessingEditDraft(extended)
+
+  assert.deepEqual(draft, extended)
+  assert.notEqual(draft, extended)
+  assert.notEqual(draft.inputs, extended.inputs)
+  draft.displayName = 'edited'
+  assert.equal(extended.displayName, 'EN9 PCS')
+})
+
 test('a bounded numeric rule is not mislabeled as pass-through', async () => {
   const model = await import('./pointProcessingTemplateEditorModel.ts')
 

@@ -41,6 +41,12 @@ export function cloneTemplateDraft(
   return draft
 }
 
+export function createNodeProcessingEditDraft(
+  source: TemplateDocument,
+): TemplateDocument {
+  return deepCopy(source)
+}
+
 function finiteNumber(value: unknown, label: string): number {
   const parsed = typeof value === 'number' ? value : Number(String(value ?? '').trim())
   if (!Number.isFinite(parsed)) throw new Error(`${label}必须是数字`)

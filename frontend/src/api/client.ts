@@ -1349,6 +1349,16 @@ export async function createPointProcessingDraftPlan(
   return response.json()
 }
 
+export async function createPointProcessingDeactivationPlan(
+  nodeId: string,
+): Promise<PointProcessingPlan> {
+  const response = await apiFetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/point-processing-deactivation-plan`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await dataTrunkError(response, `准备停用点位加工失败：${response.status}`)
+  return response.json()
+}
+
 export async function previewPointProcessingFormula(
   nodeId: string,
   body: { template_revision_id: string; expression: string },

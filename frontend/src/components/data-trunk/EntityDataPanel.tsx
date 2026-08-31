@@ -19,6 +19,7 @@ interface EntityDataPanelProps {
   selectedRange: EntityHistoryRange
   history: EntityInstanceObservation[]
   historyLoading: boolean
+  onTemplatePromoted?: (revisionId: string) => void
   onSelectEntity: (entityId: string) => void
   onRangeChange: (range: EntityHistoryRange) => void
 }
@@ -37,6 +38,7 @@ export default function EntityDataPanel({
   selectedRange,
   history,
   historyLoading,
+  onTemplatePromoted,
   onSelectEntity,
   onRangeChange,
 }: EntityDataPanelProps) {
@@ -85,8 +87,9 @@ export default function EntityDataPanel({
               display_name: templateName.trim(),
               brand: brand.trim(),
               model: model.trim(),
-            }).then(() => {
+            }).then((result) => {
               setPromotionMessage('已保存为共享模板；当前节点运行配置没有改变。')
+              onTemplatePromoted?.(result.revision_id)
             }).catch((reason: unknown) => {
               setPromotionError(reason instanceof Error ? reason.message : '保存共享模板失败')
             }).finally(() => setPromotionBusy(false))

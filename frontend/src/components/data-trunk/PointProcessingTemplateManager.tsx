@@ -1,14 +1,17 @@
 import { useMemo, useState } from 'react'
 
 import {
+  createPointProcessingDraftPlan,
   exportPointProcessingTemplate,
   importPointProcessingTemplate,
   validatePointProcessingTemplate,
+  type PointProcessingPlan,
   type PointProcessingTemplate,
 } from '../../api/client'
 import {
   buildTransform,
   cloneTemplateDraft,
+  createNodeProcessingEditDraft,
   createTemplateDraftFromL0,
   formatEnumEntries,
   parseEnumEntries,
@@ -17,6 +20,7 @@ import {
   type TemplateDocument,
   type VisualTransformKind,
 } from './pointProcessingTemplateEditorModel'
+import { buildDataTrunkViewModel } from './dataTrunkViewModel'
 
 const DATA_TYPES = ['FLOAT', 'INT', 'BOOL', 'STRING', 'ENUM', 'CODE_SET']
 
@@ -26,7 +30,16 @@ export default function PointProcessingTemplateManager({
   l0Points,
   nodeName,
   deviceCategory,
+  nodeId,
+  currentRevisionId,
+  currentInputBindings,
+  currentPlan,
+  currentApplyBusy,
+  currentResultUnknown,
+  canConfigure,
   canManage,
+  onCurrentPlan,
+  onApplyCurrentPlan,
   onPublished,
 }: {
   templates: PointProcessingTemplate[]
@@ -34,13 +47,22 @@ export default function PointProcessingTemplateManager({
   l0Points: Array<{ source_key: string; data_type: string; unit: string | null }>
   nodeName: string
   deviceCategory: string
+  nodeId: string
+  currentRevisionId: string | null
+  currentInputBindings: Record<string, string>
+  currentPlan: PointProcessingPlan | null
+  currentApplyBusy: boolean
+  currentResultUnknown: boolean
+  canConfigure: boolean
   canManage: boolean
+  onCurrentPlan: (plan: PointProcessingPlan | null) => void
+  onApplyCurrentPlan: () => void
   onPublished: (revisionId: string) => Promise<void>
 }) {
   const [open, setOpen] = useState(true)
   const [baseRevisionId, setBaseRevisionId] = useState(selectedRevisionId)
   const [draft, setDraft] = useState<TemplateDocument | null>(null)
-  const [draftMode, setDraftMode] = useState<TemplateCopyMode>('next-revision')
+  const [draftMode, setDraftMode] = useState<TemplateCopyMode | 'node-edit'>('next-revision')
   const [enumTexts, setEnumTexts] = useState<Record<number, string>>({})
   const [checkedContent, setCheckedContent] = useState<Record<string, unknown> | null>(null)
   const [checkedDigest, setCheckedDigest] = useState('')
@@ -71,6 +93,7 @@ export default function PointProcessingTemplateManager({
   const markDirty = () => {
     setCheckedContent(null)
     setCheckedDigest('')
+    if (draftMode === 'node-edit') onCurrentPlan(null)
     setSuccess('')
   }
 
@@ -102,6 +125,31 @@ export default function PointProcessingTemplateManager({
     }
   }
 
+  const loadCurrentProcessing = async () => {
+    if (!currentRevisionId) return
+    setBusy('load')
+    setError('')
+    setSuccess('')
+    try {
+      const raw = await exportPointProcessingTemplate(currentRevisionId) as TemplateDocument
+      const next = createNodeProcessingEditDraft(raw)
+      setDraftMode('node-edit')
+      setDraft(next)
+      setEnumTexts(Object.fromEntries(next.outputs.map((output, index) => [
+        index,
+        output.transform.kind === 'enum' ? formatEnumEntries(output.transform.entries) : '',
+      ])))
+      setCheckedContent(null)
+      setCheckedDigest('')
+      onCurrentPlan(null)
+      setSuccess('已打开当前加工。修改后先检查，再发布为本节点的新修订。')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '读取当前加工失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const materializeDraft = (): TemplateDocument => {
     if (!draft) throw new Error('请先复制一个模板')
     return {
@@ -122,6 +170,17 @@ export default function PointProcessingTemplateManager({
     setSuccess('')
     try {
       const content = materializeDraft()
+      if (draftMode === 'node-edit') {
+        const result = await createPointProcessingDraftPlan(nodeId, {
+          content,
+          input_selections: currentInputBindings,
+        })
+        onCurrentPlan(result)
+        setSuccess(result.status === 'ready'
+          ? '检查通过，可以发布当前加工的新修订。'
+          : '检查发现需要处理的项目，请先修正。')
+        return
+      }
       const result = await validatePointProcessingTemplate(content)
       setCheckedContent(result.content)
       setCheckedDigest(result.content_digest)
@@ -144,6 +203,14 @@ export default function PointProcessingTemplateManager({
       return false
     }
   }, [checkedContent, draft, enumTexts])
+
+  const canApplyCurrent = draftMode === 'node-edit'
+    && currentPlan?.status === 'ready'
+    && currentPlan.blockers.length === 0
+  const currentPlanSummary = useMemo(
+    () => buildDataTrunkViewModel({ plan: currentPlan }),
+    [currentPlan],
+  )
 
   const handlePublish = async () => {
     if (!checkedContent || !canPublish) return
@@ -212,8 +279,8 @@ export default function PointProcessingTemplateManager({
 
       {open && (
         <div className="space-y-4 border-t border-gray-200 p-4">
-          {!canManage && <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">当前账号可查看模板；创建和发布模板需要配置管理权限。</p>}
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-end">
+          {!canManage && <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">实施工程师可以编辑本节点加工和安装模板；创建共享模板版本需要管理员权限。</p>}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] lg:items-end">
             <label className="text-xs text-gray-600">
               从哪个模板开始
               <select
@@ -229,6 +296,9 @@ export default function PointProcessingTemplateManager({
                 ))}
               </select>
             </label>
+            <button type="button" disabled={!canConfigure || !currentRevisionId || busy !== null} onClick={() => void loadCurrentProcessing()} className="rounded-lg bg-[#52c41a] px-3 py-2 text-xs font-medium text-white disabled:opacity-40">
+              编辑当前加工
+            </button>
             <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={() => void loadDraft('next-revision')} className="neu-btn px-3 py-2 text-xs text-blue-700 disabled:opacity-50">
               复制为下一修订
             </button>
@@ -243,11 +313,19 @@ export default function PointProcessingTemplateManager({
           {templates.length === 0 && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">当前设备类型还没有模板。点击“从当前设备创建”，平台会把已有原始点位变成可编辑草稿。</p>}
           {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
           {success && <p className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{success}</p>}
+          {!draft && currentPlan && currentResultUnknown && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+              <p className="text-xs text-amber-800">上次发布结果未知。原请求已保留，可安全重试，不会重复执行。</p>
+              <button type="button" disabled={currentApplyBusy} onClick={onApplyCurrentPlan} className="rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                {currentApplyBusy ? '正在确认…' : '继续上次发布'}
+              </button>
+            </div>
+          )}
 
           {draft && (
-            <fieldset disabled={!canManage || busy !== null} className="space-y-4 disabled:opacity-70">
+            <fieldset disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} className="space-y-4 disabled:opacity-70">
               <div className="rounded-lg border border-gray-200 bg-white/60 p-3">
-                <h4 className="text-xs font-semibold text-gray-800">1. 模板是谁</h4>
+                <h4 className="text-xs font-semibold text-gray-800">1. {draftMode === 'node-edit' ? '当前加工' : '模板是谁'}</h4>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   {([
                     ['displayName', '模板名称'],
@@ -259,14 +337,14 @@ export default function PointProcessingTemplateManager({
                       {label}
                       <input
                         value={String(draft[field])}
-                        readOnly={draftMode === 'next-revision' && field !== 'displayName'}
+                        readOnly={draftMode !== 'new-template' && field !== 'displayName'}
                         onChange={(event) => patchDraft((current) => ({ ...current, [field]: event.target.value }))}
                         className="neu-input mt-1 w-full bg-transparent px-2 py-1.5 text-xs read-only:bg-gray-100 read-only:text-gray-500"
                       />
                     </label>
                   ))}
                   <label className="text-[11px] text-gray-500">
-                    新修订号
+                    {draftMode === 'node-edit' ? '当前来源修订' : '新修订号'}
                     <input type="number" min={1} value={draft.revision} readOnly className="neu-input mt-1 w-full bg-gray-100 px-2 py-1.5 text-xs text-gray-500" />
                   </label>
                 </div>
@@ -278,15 +356,15 @@ export default function PointProcessingTemplateManager({
                 <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
                   {draft.inputs.map((input, index) => (
                     <div key={`${input.id}:${index}`} className="grid gap-2 rounded border border-gray-100 bg-gray-50/70 p-2 lg:grid-cols-[1fr_1.2fr_1.4fr_.8fr_.7fr_auto]">
-                      <input aria-label="输入标识" value={String(input.id)} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs" />
-                      <input aria-label="来源名称" value={String(input.sourceKey ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, sourceKey: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs" />
-                      <input aria-label="别名" value={Array.isArray(input.aliases) ? input.aliases.join(', ') : ''} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, aliases: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) } : item) }))} placeholder="别名，用逗号分开" className="neu-input bg-transparent px-2 py-1 text-xs" />
-                      <select aria-label="数据类型" value={String(input.dataType ?? 'FLOAT')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, dataType: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs">
+                      <input aria-label="输入标识" readOnly={draftMode === 'node-edit'} value={String(input.id)} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                      <input aria-label="来源名称" readOnly={draftMode === 'node-edit'} value={String(input.sourceKey ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, sourceKey: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                      <input aria-label="别名" readOnly={draftMode === 'node-edit'} value={Array.isArray(input.aliases) ? input.aliases.join(', ') : ''} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, aliases: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) } : item) }))} placeholder="别名，用逗号分开" className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                      <select aria-label="数据类型" disabled={draftMode === 'node-edit'} value={String(input.dataType ?? 'FLOAT')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, dataType: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs disabled:bg-gray-100">
                         {DATA_TYPES.map((item) => <option key={item}>{item}</option>)}
                       </select>
-                      <input aria-label="单位" value={String(input.unit ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) }))} placeholder="单位" className="neu-input bg-transparent px-2 py-1 text-xs" />
-                      <label className="flex items-center gap-1 text-[11px] text-gray-600"><input type="checkbox" checked={Boolean(input.required)} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item) }))} />必需</label>
-                      {Boolean(input.sourceContract) && typeof input.sourceContract === 'object' && (
+                      <input aria-label="单位" readOnly={draftMode === 'node-edit'} value={String(input.unit ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) }))} placeholder="单位" className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                      <label className="flex items-center gap-1 text-[11px] text-gray-600"><input type="checkbox" disabled={draftMode === 'node-edit'} checked={Boolean(input.required)} onChange={(event) => patchDraft((current) => ({ ...current, inputs: current.inputs.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item) }))} />必需</label>
+                      {draftMode !== 'node-edit' && Boolean(input.sourceContract) && typeof input.sourceContract === 'object' && (
                         <div className="grid gap-2 border-t border-gray-200 pt-2 lg:col-span-6 lg:grid-cols-4">
                           <input aria-label="协议组" value={String((input.sourceContract as Record<string, unknown>).group ?? '')} onChange={(event) => patchInputContract(index, 'group', event.target.value)} placeholder="协议组，例如 data" className="neu-input bg-transparent px-2 py-1 text-xs" />
                           <input aria-label="协议地址" value={String((input.sourceContract as Record<string, unknown>).address ?? '')} onChange={(event) => patchInputContract(index, 'address', event.target.value)} placeholder="寄存器地址" className="neu-input bg-transparent px-2 py-1 text-xs" />
@@ -308,10 +386,10 @@ export default function PointProcessingTemplateManager({
                     return (
                       <div key={`${output.id}:${index}`} className="rounded border border-gray-100 bg-gray-50/70 p-3">
                         <div className="grid gap-2 lg:grid-cols-5">
-                          <input aria-label="输出标识" value={String(output.id)} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs" />
-                          <input aria-label="实体定义" value={String(output.entityDefinition ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, entityDefinition: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs" />
-                          <select aria-label="输出类型" value={String(output.dataType ?? 'FLOAT')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, dataType: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs">{DATA_TYPES.map((item) => <option key={item}>{item}</option>)}</select>
-                          <input aria-label="输出单位" value={String(output.unit ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) }))} placeholder="单位" className="neu-input bg-transparent px-2 py-1 text-xs" />
+                          <input aria-label="输出标识" readOnly={draftMode === 'node-edit'} value={String(output.id)} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                          <input aria-label="实体定义" readOnly={draftMode === 'node-edit'} value={String(output.entityDefinition ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, entityDefinition: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                          <select aria-label="输出类型" disabled={draftMode === 'node-edit'} value={String(output.dataType ?? 'FLOAT')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, dataType: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs disabled:bg-gray-100">{DATA_TYPES.map((item) => <option key={item}>{item}</option>)}</select>
+                          <input aria-label="输出单位" readOnly={draftMode === 'node-edit'} value={String(output.unit ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) }))} placeholder="单位" className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
                           <input aria-label="保鲜时间" value={String(output.freshness ?? '30s')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, freshness: event.target.value } : item) }))} placeholder="30s" className="neu-input bg-transparent px-2 py-1 text-xs" />
                         </div>
                         <div className="mt-2 grid gap-2 lg:grid-cols-[180px_180px_minmax(0,1fr)]">
@@ -341,11 +419,21 @@ export default function PointProcessingTemplateManager({
 
               <div className="flex flex-col gap-2 rounded-lg border border-blue-100 bg-blue-50/50 p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-[11px] text-gray-600">
-                  {checkedDigest ? `已检查：${checkedDigest.slice(0, 12)}…` : '先检查，检查通过后才能发布。发布只新增版本，不覆盖旧版本。'}
+                  {draftMode === 'node-edit'
+                    ? currentResultUnknown
+                      ? '上次发布结果未知；使用同一按钮重试，系统不会重复执行。'
+                      : currentPlan
+                        ? currentPlan.status === 'applied' ? '当前加工的新修订已发布。' : currentPlanSummary.nextAction
+                        : '先检查，检查通过后才能发布；旧修订和历史证据不会被覆盖。'
+                    : checkedDigest ? `已检查：${checkedDigest.slice(0, 12)}…` : '先检查，检查通过后才能发布。发布只新增版本，不覆盖旧版本。'}
                 </div>
                 <div className="flex gap-2">
-                  <button type="button" disabled={!canManage || busy !== null} onClick={() => void handleCheck()} className="neu-btn px-4 py-2 text-xs font-medium text-blue-700 disabled:opacity-50">{busy === 'check' ? '检查中…' : '检查模板'}</button>
-                  <button type="button" disabled={!canManage || !canPublish || busy !== null} onClick={() => void handlePublish()} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
+                  <button type="button" disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} onClick={() => void handleCheck()} className="neu-btn px-4 py-2 text-xs font-medium text-blue-700 disabled:opacity-50">{busy === 'check' ? '检查中…' : draftMode === 'node-edit' ? '检查修改' : '检查模板'}</button>
+                  {draftMode === 'node-edit' ? (
+                    <button type="button" disabled={!canApplyCurrent || busy !== null || currentApplyBusy} onClick={onApplyCurrentPlan} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{currentApplyBusy ? '发布中…' : currentResultUnknown ? '继续上次发布' : '发布修改'}</button>
+                  ) : (
+                    <button type="button" disabled={!canManage || !canPublish || busy !== null} onClick={() => void handlePublish()} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
+                  )}
                 </div>
               </div>
             </fieldset>

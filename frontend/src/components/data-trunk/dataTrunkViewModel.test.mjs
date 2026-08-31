@@ -210,3 +210,52 @@ test('scan templates still allow manual binding and raw history starts idle', as
   })
   assert.equal(model.RAW_HISTORY_INITIAL_SELECTION, null)
 })
+
+test('processing lifecycle keeps valid bindings and auto-selects one exact raw point', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  const template = {
+    inputs: [
+      { input_id: 'power', source_kind: 'l0', source_key: 'ActivePower', aliases: ['P'], data_type: 'FLOAT', unit: 'kW' },
+      { input_id: 'state', source_kind: 'l0', source_key: 'State', aliases: [], data_type: 'INT', unit: null },
+      { input_id: 'site_power', source_kind: 'l2', source_key: 'site.power', aliases: [], data_type: 'FLOAT', unit: 'kW' },
+    ],
+  }
+  const trunk = {
+    l0: [
+      { source_id: 'raw-power', source_key: 'P', data_type: 'FLOAT', unit: 'kW' },
+      { source_id: 'raw-state-old', source_key: 'State', data_type: 'INT', unit: null },
+      { source_id: 'raw-state-current', source_key: 'State', data_type: 'INT', unit: null },
+    ],
+    l1_summary: { input_bindings: { state: 'raw-state-current' } },
+  }
+
+  assert.deepEqual(model.initialPointProcessingSelections(template, trunk), {
+    power: 'raw-power',
+    state: 'raw-state-current',
+  })
+})
+
+test('deactivation review says exactly what stops and what stays', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  const ready = model.pointProcessingDeactivationSummary({
+    status: 'ready',
+    items: [
+      { action: 'delete_candidate', layer: 'L2' },
+      { action: 'delete_candidate', layer: 'L2' },
+    ],
+    blockers: [],
+  })
+  assert.deepEqual(ready, {
+    canApply: true,
+    outputCount: 2,
+    message: '将停止 2 个实体继续产生新数据；历史值、来源证据和实体身份全部保留。',
+  })
+
+  const blocked = model.pointProcessingDeactivationSummary({
+    status: 'blocked',
+    items: [{ action: 'delete_candidate', layer: 'L2' }],
+    blockers: [{ code: 'POINT_PROCESSING_OUTPUT_IN_USE' }],
+  })
+  assert.equal(blocked.canApply, false)
+  assert.equal(blocked.outputCount, 1)
+})

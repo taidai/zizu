@@ -509,9 +509,11 @@ function ImportNeuronModal({
 
 export default function NodeTreePage({
   readOnly = false,
+  actorId,
   canManageTemplates = false,
 }: {
   readOnly?: boolean
+  actorId: string
   canManageTemplates?: boolean
 }) {
   const [nodes, setNodes] = useState<Node[]>([])
@@ -776,7 +778,13 @@ export default function NodeTreePage({
             <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw:${selectedNode.tag_count}`} node={selectedNode} readOnly={readOnly} />}
               {activeTab === 'entities' && (
-                <DataTrunkWorkspace key={`${selectedNode.id}:entities`} node={selectedNode} canManageTemplates={canManageTemplates} />
+                <DataTrunkWorkspace
+                  key={`${selectedNode.id}:entities`}
+                  node={selectedNode}
+                  readOnly={readOnly}
+                  actorId={actorId}
+                  canManageTemplates={canManageTemplates}
+                />
               )}
             </div>
           </>

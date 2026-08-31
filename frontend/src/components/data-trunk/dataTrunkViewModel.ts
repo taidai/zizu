@@ -123,6 +123,61 @@ export function selectedInputBindings(
   return Object.fromEntries(Object.entries(selections).filter(([, sourceId]) => sourceId))
 }
 
+export function initialPointProcessingSelections(
+  template: {
+    inputs: Array<{
+      input_id: string
+      source_kind: 'l0' | 'l2'
+      source_key: string
+      aliases: string[]
+      data_type: string
+      unit: string | null
+    }>
+  },
+  trunk: {
+    l0: Array<{
+      source_id: string
+      source_key: string
+      data_type: string
+      unit: string | null
+    }>
+    l1_summary: { input_bindings?: Record<string, string> }
+  },
+): Record<string, string> {
+  const selections: Record<string, string> = {}
+  for (const input of template.inputs) {
+    if (input.source_kind !== 'l0') continue
+    const current = trunk.l1_summary.input_bindings?.[input.input_id]
+    if (current && trunk.l0.some((source) => source.source_id === current)) {
+      selections[input.input_id] = current
+      continue
+    }
+    const keys = new Set([input.source_key, ...input.aliases].map((value) => value.toLocaleLowerCase()))
+    const candidates = trunk.l0.filter((source) => (
+      keys.has(source.source_key.toLocaleLowerCase())
+      && source.data_type === input.data_type
+      && (source.unit || null) === (input.unit || null)
+    ))
+    if (candidates.length === 1) selections[input.input_id] = candidates[0].source_id
+  }
+  return selections
+}
+
+export function pointProcessingDeactivationSummary(plan: PlanLike): {
+  canApply: boolean
+  outputCount: number
+  message: string
+} {
+  const outputCount = plan.items.filter((item) => (
+    item.action === 'delete_candidate' && item.layer === 'L2'
+  )).length
+  return {
+    canApply: plan.status === 'ready' && plan.blockers.length === 0 && outputCount > 0,
+    outputCount,
+    message: `将停止 ${outputCount} 个实体继续产生新数据；历史值、来源证据和实体身份全部保留。`,
+  }
+}
+
 export function scannedInputCandidates(
   items: Array<{
     kind: string
