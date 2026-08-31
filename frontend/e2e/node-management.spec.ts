@@ -161,8 +161,10 @@ test.describe.serial('节点管理主干', () => {
 
     await page.getByRole('checkbox', { name: `选择 ${maintainedName}` }).check()
     const stopDialog = page.waitForEvent('dialog')
-    await page.getByRole('button', { name: '停用', exact: true }).click()
-    await (await stopDialog).accept()
+    await Promise.all([
+      stopDialog.then((dialog) => dialog.accept()),
+      page.getByRole('button', { name: '停用', exact: true }).click(),
+    ])
     await expect(page.getByRole('row').filter({ hasText: maintainedName })).toContainText('已停用', {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
@@ -178,7 +180,9 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '编辑名称', exact: true }).click()
     await page.getByLabel('编辑原始点位名称').getByLabel('点位显示名称').fill(names.neuronTag)
     await page.getByLabel('编辑原始点位名称').getByRole('button', { name: '保存', exact: true }).click()
-    await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toBeVisible()
+    await expect(page.getByRole('cell', { name: names.neuronTag, exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
 
     await page.getByRole('button', { name: '历史', exact: true }).click()
     await page.getByLabel('选择一个原始点位').selectOption({ label: names.neuronTag })

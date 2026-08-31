@@ -25,6 +25,7 @@ REFERENCE_DIR = Path(__file__).resolve().parents[2] / "reference-point-processin
 MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050_node_l0_usability.sql"
 MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
 MIGRATION_056 = Path(__file__).resolve().parents[2] / "init-db" / "migration_056_point_processing_deactivation.sql"
+MIGRATION_057 = Path(__file__).resolve().parents[2] / "init-db" / "migration_057_retired_node_processing.sql"
 NODE_ID = UUID("92000000-0000-0000-0000-000000000001")
 
 
@@ -368,6 +369,103 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 )
                 self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
 
+    def test_retiring_node_stops_its_current_processing_and_keeps_evidence(self) -> None:
+        from app.services.node_tree_postgres import PostgresNodeTree
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, revision_id = self._service_and_revision("pcs-brand-a")
+        install_plan = self._plan(service, revision_id)
+        installed = service.apply(ApplyPointProcessingPlan(
+            install_plan.id,
+            install_plan.digest,
+            "install-before-node-retirement",
+            "test:engineer",
+        ))
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM t_installed_point_processings "
+                    "WHERE node_id=%s AND current=TRUE",
+                    (NODE_ID,),
+                )
+                installed_id = cursor.fetchone()[0]
+
+        result = PostgresNodeTree().retire(
+            node_id=NODE_ID,
+            actor="test:engineer",
+            base_revision=installed.configuration_revision,
+        )
+
+        self.assertEqual(installed.configuration_revision + 1, result["configuration_revision"])
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current FROM t_installed_point_processings WHERE id=%s",
+                    (installed_id,),
+                )
+                self.assertEqual((False,), cursor.fetchone())
+                cursor.execute(
+                    "SELECT count(*) FROM t_entity_instances "
+                    "WHERE id=ANY(%s) AND active=FALSE",
+                    (list(installed.output_entity_instance_ids),),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_point_processing_output_bindings "
+                    "WHERE installed_processing_id=%s",
+                    (installed_id,),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+
+    def test_schema_057_stops_processing_left_active_by_legacy_node_retirement(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, revision_id = self._service_and_revision("pcs-brand-a")
+        install_plan = self._plan(service, revision_id)
+        installed = service.apply(ApplyPointProcessingPlan(
+            install_plan.id,
+            install_plan.digest,
+            "install-before-retirement-repair",
+            "test:engineer",
+        ))
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_nodes SET enabled=FALSE,retired_at=clock_timestamp() "
+                    "WHERE id=%s",
+                    (NODE_ID,),
+                )
+            connection.commit()
+
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(MIGRATION_057.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_057.read_text(encoding="utf-8"))
+
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM t_installed_point_processings "
+                    "WHERE node_id=%s AND current=TRUE",
+                    (NODE_ID,),
+                )
+                self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_entity_instances "
+                    "WHERE id=ANY(%s) AND active=FALSE",
+                    (list(installed.output_entity_instance_ids),),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT count(*) FROM t_point_processing_output_bindings "
+                    "WHERE entity_instance_id=ANY(%s)",
+                    (list(installed.output_entity_instance_ids),),
+                )
+                self.assertEqual(len(installed.output_entity_instance_ids), cursor.fetchone()[0])
+
     def test_stale_plan_writes_no_installation(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingError
         from app.services.telemetry_store import get_connection
@@ -481,10 +579,15 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 cursor.execute(
                     """
                     INSERT INTO t_tags
-                      (id,node_id,name,data_type,unit,read_write,enabled,timestamp_trusted)
-                    VALUES(%s,%s,'ReactivePowerRaw','FLOAT','W','R',TRUE,FALSE)
+                      (id,node_id,name,data_type,unit,read_write,enabled,
+                       timestamp_trusted,freshness_seconds)
+                    VALUES(%s,%s,'ReactivePowerRaw','FLOAT','W','R',TRUE,FALSE,60)
                     """,
                     (auxiliary_id, NODE_ID),
+                )
+                cursor.execute(
+                    "UPDATE t_tags SET freshness_seconds=60 WHERE id=%s",
+                    (active_id,),
                 )
             connection.commit()
         observed_at = datetime.now(UTC)
@@ -550,7 +653,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
                 "entityDefinition": "pcs.combined_power",
                 "dataType": "FLOAT",
                 "unit": "W",
-                "freshness": "5s",
+                "freshness": "60s",
                 "transform": {"kind": "formula", "expression": "active + reactive", "scheduleSeconds": 1, "controlEligible": False},
             }],
         }
@@ -564,6 +667,15 @@ class PointProcessingPostgresTest(unittest.TestCase):
             trial_evaluator=PostgresPointProcessingTrialEvaluator(),
         )
         plan = self._plan(service, revision)
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE t_telemetry_latest "
+                    "SET ts=clock_timestamp(),event_received_at=clock_timestamp() "
+                    "WHERE tag_id=ANY(%s)",
+                    ([active_id, auxiliary_id],),
+                )
+            connection.commit()
         trial = service.trial(plan)
         self.assertIsNotNone(trial)
         self.assertEqual(42.0, trial.outputs[0]["value"])

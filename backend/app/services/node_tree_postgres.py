@@ -243,6 +243,41 @@ class PostgresNodeTree:
                     node_ids = [str(row[0]) for row in rows]
                     before_digest = canonical_digest(node_ids)
                     cursor.execute(
+                        """
+                        SELECT id
+                        FROM t_installed_point_processings
+                        WHERE node_id=ANY(%s::uuid[]) AND current=TRUE
+                        ORDER BY id
+                        FOR UPDATE
+                        """,
+                        (node_ids,),
+                    )
+                    installed_ids = [str(row[0]) for row in cursor.fetchall()]
+                    output_ids: list[str] = []
+                    if installed_ids:
+                        cursor.execute(
+                            """
+                            SELECT DISTINCT entity_instance_id
+                            FROM t_point_processing_output_bindings
+                            WHERE installed_processing_id=ANY(%s::uuid[])
+                            ORDER BY entity_instance_id
+                            """,
+                            (installed_ids,),
+                        )
+                        output_ids = [str(row[0]) for row in cursor.fetchall()]
+                    if output_ids:
+                        cursor.execute(
+                            "UPDATE t_entity_instances SET active=FALSE "
+                            "WHERE id=ANY(%s::uuid[]) AND active=TRUE",
+                            (output_ids,),
+                        )
+                    if installed_ids:
+                        cursor.execute(
+                            "UPDATE t_installed_point_processings SET current=FALSE "
+                            "WHERE id=ANY(%s::uuid[]) AND current=TRUE",
+                            (installed_ids,),
+                        )
+                    cursor.execute(
                         "UPDATE t_tags SET enabled=FALSE WHERE node_id=ANY(%s::uuid[])",
                         (node_ids,),
                     )
@@ -266,7 +301,11 @@ class PostgresNodeTree:
                     resource_id=node_key,
                     before_digest=before_digest,
                     after_digest=after_digest,
-                    details={"retired_nodes": len(node_ids)},
+                    details={
+                        "retired_nodes": len(node_ids),
+                        "stopped_point_processings": len(installed_ids),
+                        "stopped_entities": len(output_ids),
+                    },
                 )
                 connection.commit()
             except Exception:
