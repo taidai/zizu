@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import {
   fetchNodes, fetchRules, updateNode, createNode, deleteNode, fetchAlarmCounts,
   fetchCategories, fetchNeuronNodes, fetchNeuronGroups, previewNeuronTags, importNeuronTags,
@@ -6,9 +6,10 @@ import {
   type NeuronImportPreview,
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
-import DataTrunkWorkspace from '../components/data-trunk/DataTrunkWorkspace'
 import { nodeDataTabs, type NodeDataTabKey } from '../components/data-trunk/dataTrunkViewModel'
 import { importPreviewSummary, normalizedGroups, parentCandidates } from '../components/node/nodeUsabilityModel'
+
+const DataTrunkWorkspace = lazy(() => import('../components/data-trunk/DataTrunkWorkspace'))
 
 type FormMode = 'create' | 'edit'
 
@@ -778,13 +779,15 @@ export default function NodeTreePage({
             <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw:${selectedNode.tag_count}`} node={selectedNode} readOnly={readOnly} />}
               {activeTab === 'entities' && (
-                <DataTrunkWorkspace
-                  key={`${selectedNode.id}:entities`}
-                  node={selectedNode}
-                  readOnly={readOnly}
-                  actorId={actorId}
-                  canManageTemplates={canManageTemplates}
-                />
+                <Suspense fallback={<div className="neu-card p-8 text-center text-xs text-gray-400">实体数据加载中...</div>}>
+                  <DataTrunkWorkspace
+                    key={`${selectedNode.id}:entities`}
+                    node={selectedNode}
+                    readOnly={readOnly}
+                    actorId={actorId}
+                    canManageTemplates={canManageTemplates}
+                  />
+                </Suspense>
               )}
             </div>
           </>

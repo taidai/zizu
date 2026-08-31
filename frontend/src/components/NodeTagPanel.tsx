@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { fetchTags, maintainRawPoints, type Node, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
@@ -11,12 +11,13 @@ import {
   type CommittedFrameProjection,
 } from './data-trunk/committedFrameProjection'
 import { projectRawPointValue, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
-import RawPointHistoryPanel from './RawPointHistoryPanel'
 import InlinePointProcessingPanel from './data-trunk/InlinePointProcessingPanel'
 import {
   rawPointDisplayNameChange,
   rawPointSelectionSummary,
 } from './node/nodeUsabilityModel'
+
+const RawPointHistoryPanel = lazy(() => import('./RawPointHistoryPanel'))
 
 interface NodeTagPanelProps {
   node: Node
@@ -265,7 +266,9 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
       </div>
 
       {view === 'history' ? (
-        <RawPointHistoryPanel nodeId={nodeId} />
+        <Suspense fallback={<div className="py-8 text-center text-xs text-gray-400">历史数据加载中...</div>}>
+          <RawPointHistoryPanel nodeId={nodeId} />
+        </Suspense>
       ) : (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">

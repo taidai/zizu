@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { DecisionGraph, GraphSimulator, JdmConfigProvider } from '@gorules/jdm-editor'
+import { DecisionGraph, GraphSimulator, JdmConfigProvider, ensureWasmLoaded } from '@gorules/jdm-editor'
+import '../monaco'
+import '@gorules/jdm-editor/dist/style.css'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
@@ -7,6 +9,9 @@ import {
   type Rule, type RuleCreateRequest, type EntityInstance, type RuleTemplate, type JdmExecutionSummary,
 } from '../api/client'
 import { isEditableJdmRuleType, jdmExecutionLabel } from '../components/rule-engine/jdmExecutionModel.mjs'
+
+// 规则编辑器体积很大，只在用户真正进入规则引擎时初始化。
+ensureWasmLoaded().catch(() => {})
 
 type DecisionGraphType = {
   nodes: any[]

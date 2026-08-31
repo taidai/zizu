@@ -31,17 +31,5 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: false,
     chunkSizeWarningLimit: 1000,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes('node_modules')) {
-            if (id.includes('monaco-editor')) return 'monaco'
-            if (id.includes('@gorules')) return 'gorules'
-            if (id.includes('echarts')) return 'echarts'
-            return 'vendor'
-          }
-        },
-      },
-    },
   },
 })

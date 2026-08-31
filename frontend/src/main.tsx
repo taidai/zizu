@@ -1,8 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-import './monaco'
-import '@gorules/jdm-editor/dist/style.css'
 import './index.css'
 
 // 在非 HTTPS（如 e606 现网 http://...）环境下，crypto.randomUUID 不可用，
@@ -15,10 +13,6 @@ if (typeof crypto !== 'undefined' && !('randomUUID' in crypto)) {
     })
   }
 }
-
-// 预加载 zen-engine wasm，供 jdm-editor 做类型推断
-import { ensureWasmLoaded } from '@gorules/jdm-editor'
-ensureWasmLoaded().catch(() => {})
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
