@@ -11,8 +11,9 @@ const execFileAsync = promisify(execFile)
 
 export type FixtureCommand = 'preflight' | 'setup' | 'publish' | 'ensure-rule' | 'cleanup'
 
-export function fixtureNames() {
-  const environment = buildAcceptanceEnvironment(process.env)
+export function fixtureNames(
+  environment = buildAcceptanceEnvironment(process.env),
+) {
   const neuronRunId = environment.runId.replaceAll('-', '_')
   return {
     root: environment.writeRoot,
@@ -23,8 +24,11 @@ export function fixtureNames() {
   }
 }
 
-export async function runFixture(command: FixtureCommand, value?: number) {
-  const environment = buildAcceptanceEnvironment(process.env)
+export async function runFixture(
+  command: FixtureCommand,
+  value?: number,
+  environment = buildAcceptanceEnvironment(process.env),
+) {
   const repositoryRoot = path.resolve(process.cwd(), '..')
   const script = path.join(repositoryRoot, 'backend', 'scripts', 'node_management_e2e_fixture.py')
   const commandArguments = [script, command]

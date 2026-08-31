@@ -414,7 +414,7 @@ export default function DataTrunkWorkspace({
     }
   }
 
-  const handleTemplatePublished = async (revisionId: string) => {
+  const refreshTemplates = async (revisionId: string, openNodeConfiguration: boolean) => {
     const nextTemplates = await fetchPointProcessingTemplates((node.node_type || 'DEVICE').toUpperCase())
     if (activeNodeIdRef.current !== node.id) return
     setTemplates(nextTemplates)
@@ -422,7 +422,7 @@ export default function DataTrunkWorkspace({
     setPlan(null)
     setEditPlan(null)
     setResultUnknownPlanId(null)
-    setLifecycleSection('node')
+    if (openNodeConfiguration) setLifecycleSection('node')
   }
 
   if (loading) {
@@ -531,7 +531,7 @@ export default function DataTrunkWorkspace({
                     canManage={canManageTemplates}
                     onCurrentPlan={setEditPlan}
                     onApplyCurrentPlan={() => { if (editPlan) void applyPreparedPlan(editPlan, 'edit-apply') }}
-                    onPublished={handleTemplatePublished}
+                    onPublished={(revisionId) => refreshTemplates(revisionId, true)}
                   />
                 )}
 
@@ -619,7 +619,7 @@ export default function DataTrunkWorkspace({
         history={entityHistory}
         historyLoading={historyLoading}
         onTemplatePromoted={(revisionId) => {
-          void handleTemplatePublished(revisionId).catch((reason) => {
+          void refreshTemplates(revisionId, false).catch((reason) => {
             setError(reason instanceof Error ? reason.message : '刷新模板列表失败')
           })
         }}

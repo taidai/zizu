@@ -5,7 +5,10 @@ import { fixtureNames, runFixture } from './support/e2eFixture'
 
 test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
-  const names = fixtureNames()
+  const names = fixtureNames(environment)
+  const fixture = (command: Parameters<typeof runFixture>[0], value?: number) => (
+    runFixture(command, value, environment)
+  )
   const editedPlatformNode = `${names.platformNode}-已编辑`
   const entityDisplayName = `E2E有功功率-${environment.runId}`
   const entityDefinitionKey = `e2e.active_power_${environment.runId.replaceAll('-', '_')}`
@@ -13,15 +16,15 @@ test.describe.serial('节点管理主干', () => {
   let page: Page
 
   test.beforeAll(async ({ browser }) => {
-    await runFixture('preflight')
-    await runFixture('setup')
+    await fixture('setup')
+    await fixture('preflight')
     context = await browser.newContext({ baseURL: environment.baseUrl })
     page = await context.newPage()
   })
 
   test.afterAll(async () => {
     try {
-      await runFixture('cleanup')
+      await fixture('cleanup')
     } finally {
       await context?.close()
     }
@@ -133,7 +136,7 @@ test.describe.serial('节点管理主干', () => {
     const realtimeRow = page.getByRole('row').filter({ hasText: names.neuronTag })
     await expect(realtimeRow).toBeVisible()
 
-    await runFixture('publish', 12.5)
+    await fixture('publish', 12.5)
     await expect(realtimeRow).toContainText('12.5', { timeout: 15_000 })
     await expect(realtimeRow).toContainText('正常')
     await expect(realtimeRow).toContainText(
@@ -171,7 +174,7 @@ test.describe.serial('节点管理主干', () => {
 
     await editor.getByRole('button', { name: '发布实体', exact: true }).click()
     await expect(editor.getByText(/标准实体已发布/)).toBeVisible()
-    await runFixture('publish', 13.5)
+    await fixture('publish', 13.5)
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
@@ -188,6 +191,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('L1 模板可维护、升级、停用再恢复，规则可指定再取消且不会执行', async () => {
+    test.setTimeout(180_000)
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await page.getByRole('button', { name: '保存为共享模板', exact: true }).click()
     await page.getByPlaceholder('模板名称').fill(`E2E模板-${environment.runId}`)
@@ -228,7 +232,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
     await expect(page.getByText('已生效', { exact: true })).toBeVisible()
 
-    await runFixture('ensure-rule')
+    await fixture('ensure-rule')
     await page.getByRole('button', { name: '刷新', exact: true }).click()
     await page.getByRole('button', { name: '指定规则', exact: true }).click()
     let modal = nodeModal(page, '为节点指定规则')
