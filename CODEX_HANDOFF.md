@@ -1,5 +1,21 @@
 ---
 
+## Session 2026-09-01 — v0.6.2 修复自定义节点类型无法加工并部署验收
+
+- 根因是节点允许自定义 `node_type`，但 L1 模板解析器仍残留 8 类固定白名单；现场 `E2E_ROOT` 被错误
+  拒绝为 `Point processing device category is unsupported`。源码提交
+  `39b8420aa577d8b357c2d0bb609974eda6836229` 已推送 `main`，删除冲突白名单，其他强类型和安全校验不变。
+- Actions `33442895637` 成功；1 号机运行 v0.6.2 / Schema 058 / ARM64 固定摘要
+  `sha256:4a0989613e731b1a832d0b7a9373883354de8cfe0ed852da81578d9d344f424d`，backend healthy、restart 0，
+  保持 host 网络和 `/dev/mqueue`。本轮无 Schema 变化，只备份 release.env，未重复制作数据库备份。
+- TDD 先在 `E2E_ROOT` 复现失败再转绿；完整门禁为后端 406（160 skip）、脚本 51、前端 55、真实
+  PostgreSQL 加工专项 15、生产构建及公网版本检查全通过，`verify_delivery` 为 `PASSED`、missing 空。
+- Playwright 主干改用白名单外的 `E2E_DEVICE` 并 6/6 通过（229.3 秒），真实走通 L0→L1→L2、模板
+  生命周期和无动作规则绑定；未执行控制、设备写或自动策略。二次清理确认临时节点、当前加工、活动实体、
+  活动模板、规则和 Neuron 测试节点均为 0；outbox 0，帧队尾 2、最大龄 2.1 秒。
+- 当前仍只有空活动根 `E2E验证`，没有真实 PCS/光储充项目配置；公网 HTTP/development 不安全告警仍在。
+  完整证据见 `docs/deploy-1号机-v0.6.2-http.md`。
+
 ## Session 2026-09-01 — v0.6.1 已部署，节点主干无头验收 6/6
 
 - 最终源码 `7961563a5b23dc5efd269897da6b4dee1985fc82` 已推送 `main`；Actions
