@@ -1,5 +1,27 @@
 ---
 
+## Session 2026-09-01 — v0.6.1 已部署，节点主干无头验收 6/6
+
+- 最终源码 `7961563a5b23dc5efd269897da6b4dee1985fc82` 已推送 `main`；Actions
+  `33426123305` 成功，1 号机运行 ARM64 固定摘要
+  `sha256:6a181ea4cb9f3d4d745cf9db4312bde5198c287b322add62f2ddef18e57827f2`，版本 `0.6.1`、Schema 058。
+- 根因闭环：退役节点仍保留 current L1，造成帧处理积压和配置排空超时；Schema 057 停止遗留的 17 个
+  加工实例。随后现场发现退役节点仍有 1 个 legacy L2 活动，Schema 058 与运行代码统一改为节点退役时
+  停用子树全部 L2。绑定、历史、latest 和来源证据均保留。
+- 新鲜门禁：后端 406/406（160 环境 skip）、真实 PostgreSQL 节点/加工 20/20、脚本 51/51、前端
+  契约 61/61、生产构建通过；最终 `verify_delivery` 为 `PASSED`、missing 空。
+- 公网 Playwright 无头主干 6/6，216 秒，覆盖节点 CRUD、Neuron 点位导入、L0 实时/历史、L1 发布与
+  模板生命周期、L2 实时/历史/质量/来源、禁用无动作规则绑定；没有执行控制、设备写或自动策略。
+- 验收后活动临时节点、当前 E2E 加工、退役节点活动实体、当前 E2E 告警、活动 E2E 共享模板、Neuron
+  测试节点均为 0；帧抽样 COMPLETE 58/60 秒，未完成 2、最大龄 2 秒，outbox 0；backend healthy、
+  restart 0、错误日志 0。
+- Schema 057 切换前可读备份：
+  `/opt/zizu-backups/pre-v0.6.1-schema057-20260901-0243/omnithings.dump`，SHA-256
+  `beb52c7e0aa55e4b562b57f9de469b1a7a3d3d0a21f8cd51bfbf5e615ede5378`。更早 Schema 056 备份也保留。
+- 现场当前只有空活动根 `E2E验证`，没有真实活动设备节点；因此平台主干功能已验收，但真实 PCS/EMS
+  项目配置尚未交付。公网 HTTP/development 不安全凭据告警仍在，不能宣称生产安全。完整证据见
+  `docs/deploy-1号机-v0.6.1-http.md`。
+
 ## Session 2026-08-31 — L1/L2 生命周期界面本地候选完成（未部署）
 
 - 隔离工作树：`C:\Users\chent\Documents\zizu-node-e2e`；分支 `feature/l1-l2-lifecycle-ui`；安全停用提交
