@@ -54,12 +54,15 @@ def _raw(sequence: int) -> RawObservation:
 class _Repository:
     def __init__(self) -> None:
         self.pending_write_count = 0
+        self.unfinished_count = 0
+        self.committed_candidates = []
 
     def current_configuration_revision(self) -> int:
         return 0
 
     def commit_pending(self, candidate):
         self.pending_write_count += 1
+        self.committed_candidates.append(candidate)
         return PendingFrame(
             frame_id=candidate.frame_id,
             frame_sequence=self.pending_write_count,
@@ -70,7 +73,7 @@ class _Repository:
         )
 
     def unfinished_frame_count(self) -> int:
-        return 0
+        return self.unfinished_count
 
     def unpublished_frame_outbox_count(self) -> int:
         return 0
@@ -106,6 +109,39 @@ def _runtime(repository=None) -> DataTrunk:
 
 
 class DataFrameRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_busy_processor_skips_old_photo_and_later_captures_latest_value(self) -> None:
+        repository = _Repository()
+        repository.unfinished_count = 1
+        runtime = _runtime(repository)
+
+        runtime.accept((_raw(1),))
+        self.assertIsNone(runtime.capture_tick(NOW))
+        self.assertEqual(0, repository.pending_write_count)
+
+        runtime.accept((_raw(2),))
+        repository.unfinished_count = 0
+        runtime.capture_tick(NOW + timedelta(seconds=1))
+
+        committed = repository.committed_candidates[0]
+        self.assertEqual(1, repository.pending_write_count)
+        self.assertEqual(2.0, committed.changed_l0[0].observation.value.value)
+
+    async def test_busy_ticks_still_age_an_old_value_to_stale(self) -> None:
+        repository = _Repository()
+        repository.unfinished_count = 1
+        runtime = _runtime(repository)
+        runtime.accept((_raw(1),))
+
+        for second in range(4):
+            self.assertIsNone(runtime.capture_tick(NOW + timedelta(seconds=second)))
+
+        repository.unfinished_count = 0
+        runtime.capture_tick(NOW + timedelta(seconds=4))
+
+        committed = repository.committed_candidates[0]
+        self.assertEqual(5, committed.capture_beat)
+        self.assertEqual(TrunkQuality.STALE, committed.changed_l0[0].effective_quality)
+
     async def test_configuration_drain_budget_covers_normal_edge_backlog(self) -> None:
         self.assertEqual(30.0, CONFIGURATION_DRAIN_TIMEOUT_SECONDS)
         timeout = inspect.signature(

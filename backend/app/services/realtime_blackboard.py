@@ -165,6 +165,7 @@ class RealtimeBlackboard:
         shot_at: datetime,
         *,
         configuration_revision: int,
+        allow_freeze: bool = True,
     ) -> FrozenFrameCandidate | None:
         _timestamp_material(shot_at)
         with self._lock:
@@ -177,6 +178,8 @@ class RealtimeBlackboard:
             self._advance_freshness()
             if self._frozen is not None:
                 return self._frozen
+            if not allow_freeze:
+                return None
             if self._required_tag_ids - self._seen_this_revision:
                 return None
             if not self._state_dirty:

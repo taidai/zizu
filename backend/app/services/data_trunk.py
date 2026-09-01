@@ -74,6 +74,7 @@ class DataTrunk:
                 configuration_revision=(
                     self._repository.current_configuration_revision()
                 ),
+                allow_freeze=self._repository.unfinished_frame_count() == 0,
             )
             if candidate is None:
                 return None
