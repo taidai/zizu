@@ -36,6 +36,15 @@ test('history stays idle until one point is selected then makes exactly one requ
   assert.deepEqual(calls, [['tag-a', '24h']])
 })
 
+test('raw BIT history keeps numeric 0 and 1 distinct from boolean values', async () => {
+  const model = await import('./rawPointHistoryModel.ts')
+
+  assert.equal(model.formatRawHistoryValue(0), '0')
+  assert.equal(model.formatRawHistoryValue(1), '1')
+  assert.equal(model.formatRawHistoryValue(false), 'false')
+  assert.equal(model.formatRawHistoryValue('0'), '0')
+})
+
 test('a delayed response from the previous node cannot commit after node switch', async () => {
   const model = await import('./rawPointHistoryModel.ts')
   let resolveA

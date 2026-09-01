@@ -6,6 +6,7 @@ import { RAW_HISTORY_INITIAL_SELECTION } from './data-trunk/dataTrunkViewModel'
 import {
   loadPhysicalNumericTags,
   loadSelectedRawPointHistory,
+  formatRawHistoryValue,
   requestResultIsCurrent,
 } from './rawPointHistoryModel'
 
@@ -166,7 +167,7 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-gray-100 text-gray-600"><tr><th className="px-3 py-2 text-left">时间</th><th className="px-3 py-2 text-right">原始值</th><th className="px-3 py-2 text-right">工程值</th></tr></thead>
             <tbody>
-              {points.map((point) => <tr key={point.ts} className="border-t border-gray-100"><td className="px-3 py-2">{new Date(point.ts).toLocaleString('zh-CN')}</td><td className="px-3 py-2 text-right font-mono-value">{point.raw_value ?? '无'}</td><td className="px-3 py-2 text-right font-mono-value">{point.eng_value ?? '无'}</td></tr>)}
+              {points.map((point) => <tr key={point.ts} className="border-t border-gray-100"><td className="px-3 py-2">{new Date(point.ts).toLocaleString('zh-CN')}</td><td className="px-3 py-2 text-right font-mono-value">{formatRawHistoryValue(point.raw_value)}</td><td className="px-3 py-2 text-right font-mono-value">{point.eng_value ?? '无'}</td></tr>)}
               {points.length === 0 && <tr><td colSpan={3} className="px-3 py-10 text-center text-gray-400">该时段没有历史数据</td></tr>}
             </tbody>
           </table>

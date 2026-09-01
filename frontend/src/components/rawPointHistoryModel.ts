@@ -49,6 +49,12 @@ export async function loadSelectedRawPointHistory(
   return (await fetchHistory(tagId, range)).points
 }
 
+export function formatRawHistoryValue(value: unknown): string {
+  if (value === null || value === undefined) return '无'
+  if (Array.isArray(value)) return value.join('、')
+  return String(value)
+}
+
 export function requestResultIsCurrent({
   requestGeneration,
   currentGeneration,

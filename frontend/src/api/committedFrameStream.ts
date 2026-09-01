@@ -33,6 +33,7 @@ export interface L2FrameItem {
   quality: number
   reason: string | null
   observed_at: string | null
+  value_observed_at: string | null
   received_at: string | null
   calculated_at: string | null
   processing_revision_id: string | null

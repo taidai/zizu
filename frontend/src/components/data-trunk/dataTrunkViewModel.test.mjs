@@ -22,20 +22,26 @@ test('blockers disable apply and expose one concrete next action', async () => {
 test('quality and invalid-current-value projection are explicit', async () => {
   const viewModel = await import('./dataTrunkViewModel.ts')
 
-  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 192 }), {
+  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 192, value_observed_at: '2026-09-01T05:29:59Z' }), {
     currentValue: '18.4',
     qualityLabel: '正常',
     currentUsable: true,
+    availabilityLabel: '当前可用',
+    retained: false,
   })
-  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 0 }), {
-    currentValue: '无当前值',
+  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 0, value_observed_at: '2026-09-01T05:20:00Z' }), {
+    currentValue: '上次值 18.4',
     qualityLabel: '无效',
     currentUsable: false,
+    availabilityLabel: '当前不可用',
+    retained: true,
   })
-  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 64 }), {
+  assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 64, value_observed_at: '2026-09-01T05:20:00Z' }), {
     currentValue: '18.4',
     qualityLabel: '存疑',
     currentUsable: true,
+    availabilityLabel: '当前可用',
+    retained: false,
   })
 })
 
@@ -203,7 +209,7 @@ test('node data tabs expose only raw points and entities', async () => {
     ['raw-points', 'entities'],
   )
   assert.deepEqual(model.RAW_POINT_COLUMNS, [
-    '点位名称', '当前值', '单位', '质量', '原因', '数据时间', '来源',
+    '点位名称', '协议类型', '当前值', '单位', '质量', '原因', '数据时间', '来源',
   ])
 })
 
@@ -237,6 +243,12 @@ test('entity reason is human readable and technical kind stays a label', async (
   assert.equal(model.processingKindLabel(null), '未标注')
   assert.equal(model.entityReasonLabel('FRAME_PROCESSING_FAILED', 0), '本次点位加工失败，当前值不可用')
   assert.equal(model.entityReasonLabel('STALE', 17 * 60_000), '原始数据已 17 分钟未更新')
+  assert.equal(model.rawPointReasonLabel({
+    reason: 'BIT_VALUE_OUT_OF_RANGE', receivedAt: null, frameStatus: 'COMPLETE', frameFailureCode: null,
+  }), '设备返回的 BIT 值不是 0 或 1')
+  assert.equal(model.rawPointReasonLabel({
+    reason: 'TYPE_MISMATCH', receivedAt: null, frameStatus: 'COMPLETE', frameFailureCode: null,
+  }), '设备返回值类型与协议点位不一致')
 })
 
 test('async results fail closed when the selected node changed', async () => {

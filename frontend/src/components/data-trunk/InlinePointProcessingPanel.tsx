@@ -35,12 +35,16 @@ export default function InlinePointProcessingPanel({
   const [offset, setOffset] = useState('0')
   const [entries, setEntries] = useState('0=STOPPED\n1=RUNNING')
   const [expression, setExpression] = useState('')
+  const [trueWhen, setTrueWhen] = useState<'0' | '1'>('1')
   const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
   const [idempotencyKey, setIdempotencyKey] = useState('')
   const [busy, setBusy] = useState<'plan' | 'apply' | null>(null)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const pointIdentity = points.map((point) => point.id).join(',')
+  const booleanMapEligible = points.length === 1
+    && points[0].wire_data_type?.toUpperCase() === 'BIT'
+    && points[0].data_type.toUpperCase() === 'INT'
 
   useEffect(() => {
     setPlan(null)
@@ -58,6 +62,7 @@ export default function InlinePointProcessingPanel({
     setDataType(defaults.dataType)
     setExpression(defaults.expression)
     setMode(defaults.mode)
+    setTrueWhen('1')
     setExpanded(true)
   }
 
@@ -75,11 +80,12 @@ export default function InlinePointProcessingPanel({
         offset,
         entries,
         expression,
+        trueWhen: Number(trueWhen),
       })
     } catch {
       return null
     }
-  }, [dataType, definitionKey, deviceCategory, displayName, entries, expression, freshnessSeconds, mode, offset, points, scale, unit])
+  }, [dataType, definitionKey, deviceCategory, displayName, entries, expression, freshnessSeconds, mode, offset, points, scale, trueWhen, unit])
 
   const handlePlan = async () => {
     setBusy('plan')
@@ -98,6 +104,7 @@ export default function InlinePointProcessingPanel({
         offset,
         entries,
         expression,
+        trueWhen: Number(trueWhen),
       })
       const nextPlan = await createPointProcessingDraftPlan(nodeId, {
         content: nextDraft.content,
@@ -160,8 +167,20 @@ export default function InlinePointProcessingPanel({
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               加工方法
-              <select value={mode} onChange={(event) => { setMode(event.target.value as InlinePointProcessingMode); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs">
+              <select value={mode} onChange={(event) => {
+                const nextMode = event.target.value as InlinePointProcessingMode
+                setMode(nextMode)
+                if (nextMode === 'boolean_map') {
+                  setDataType('BOOL')
+                  setUnit('')
+                } else if (nextMode === 'passthrough' && points[0]) {
+                  setDataType(points[0].data_type.toUpperCase())
+                  setUnit(points[0].unit || '')
+                }
+                setPlan(null)
+              }} className="neu-input mt-1 w-full px-3 py-2 text-xs">
                 <option value="passthrough">直接使用</option>
+                <option value="boolean_map" disabled={!booleanMapEligible}>0/1 转布尔</option>
                 <option value="numeric" disabled={points.length !== 1}>倍率与偏移</option>
                 <option value="state" disabled={points.length !== 1}>状态映射</option>
                 <option value="formula">公式计算</option>
@@ -169,9 +188,24 @@ export default function InlinePointProcessingPanel({
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               单位
-              <input value={unit} onChange={(event) => { setUnit(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" placeholder="无单位可留空" />
+              <input disabled={mode === 'passthrough' || mode === 'boolean_map'} value={unit} onChange={(event) => { setUnit(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100" placeholder="无单位可留空" />
             </label>
           </div>
+
+          {mode === 'boolean_map' && (
+            <div className="mt-3 rounded border border-blue-100 bg-white px-3 py-3">
+              <label className="text-[11px] font-medium text-gray-700">
+                哪个原值表示 true
+                <select value={trueWhen} onChange={(event) => { setTrueWhen(event.target.value as '0' | '1'); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs sm:w-56">
+                  <option value="1">1 表示 true（推荐）</option>
+                  <option value="0">0 表示 true</option>
+                </select>
+              </label>
+              <p className="mt-2 text-[11px] text-gray-600">
+                设备原值 {points[0]?.raw_value ?? '—'} → 原值等于 {trueWhen} → 实体值 {typeof points[0]?.raw_value === 'number' ? String(points[0].raw_value === Number(trueWhen)) : '等待试算'}
+              </p>
+            </div>
+          )}
 
           {mode === 'numeric' && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -203,7 +237,7 @@ export default function InlinePointProcessingPanel({
               </label>
               <label className="text-[11px] font-medium text-gray-700">
                 结果类型
-                <select value={dataType} onChange={(event) => { setDataType(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs">
+                <select disabled={mode === 'passthrough' || mode === 'boolean_map'} value={dataType} onChange={(event) => { setDataType(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100">
                   {['FLOAT', 'INT', 'BOOL', 'STRING'].map((value) => <option key={value}>{value}</option>)}
                 </select>
               </label>

@@ -1,11 +1,12 @@
 import type { PointProcessingTrial } from '../../api/client'
 
-export type InlinePointProcessingMode = 'passthrough' | 'numeric' | 'state' | 'formula'
+export type InlinePointProcessingMode = 'passthrough' | 'boolean_map' | 'numeric' | 'state' | 'formula'
 
 export interface InlineRawPoint {
   id: string
   name: string
   display_name: string | null
+  wire_data_type: string | null
   data_type: string
   unit: string | null
 }
@@ -24,6 +25,7 @@ export interface InlinePointProcessingForm {
   maximum?: number | string
   entries?: string
   expression?: string
+  trueWhen?: number
 }
 
 export interface InlinePointProcessingDraft {
@@ -157,13 +159,16 @@ export function suggestInlinePointProcessingDefaults(
   const category = stableKey(deviceCategory, 'entity')
   const sourceKey = stableKey(first.name, '')
   const identityFallback = `point_${stableKey(first.id, 'value')}`
+  const isBit = points.length === 1
+    && first.wire_data_type?.toUpperCase() === 'BIT'
+    && first.data_type.toUpperCase() === 'INT'
 
   return {
-    mode: points.length > 1 ? 'formula' : 'passthrough',
+    mode: points.length > 1 ? 'formula' : isBit ? 'boolean_map' : 'passthrough',
     displayName: first.display_name || first.name,
     definitionKey: `${/^[a-z]/.test(category) ? category : `device_${category}`}.${sourceKey || identityFallback}`,
-    unit: first.unit || '',
-    dataType: first.data_type.toUpperCase(),
+    unit: isBit ? '' : first.unit || '',
+    dataType: isBit ? 'BOOL' : first.data_type.toUpperCase(),
     expression: pointInputIds(points).join(' + '),
   }
 }
@@ -196,6 +201,9 @@ export function buildNodePointProcessingDraft(
   form: InlinePointProcessingForm,
 ): InlinePointProcessingDraft {
   if (points.length === 0) throw new Error('至少选择一个原始点位')
+  if (form.mode === 'boolean_map' && points.length !== 1) {
+    throw new Error('0/1 转布尔一次只能选择一个原始点位')
+  }
   if (points.length > 1 && form.mode !== 'formula') {
     throw new Error('多点加工请选择公式')
   }
@@ -216,21 +224,42 @@ export function buildNodePointProcessingDraft(
   const first = keyedPoints[0]
   const definitionParts = definitionKey.split('.')
   const outputId = stableKey(definitionParts[definitionParts.length - 1] || '', 'entity')
-  const outputType = form.mode === 'state'
+  const outputType = form.mode === 'boolean_map'
+    ? 'BOOL'
+    : form.mode === 'state'
     ? 'ENUM'
     : form.mode === 'numeric'
       ? 'FLOAT'
     : String(form.dataType || first.point.data_type).toUpperCase()
-  const outputUnit = form.unit === undefined ? first.point.unit : form.unit
-  if (
-    form.mode === 'passthrough'
-    && first.point.unit
-    && (outputUnit || null) !== (first.point.unit || null)
-  ) {
+  const outputUnit = form.mode === 'boolean_map'
+    ? null
+    : form.unit === undefined ? first.point.unit : form.unit
+  if (form.mode === 'passthrough' && (
+    outputType !== first.point.data_type.toUpperCase()
+    || (outputUnit || null) !== (first.point.unit || null)
+  )) {
     throw new Error('直接使用不能改变单位，请选择倍率与偏移')
   }
   let transform: Record<string, unknown>
-  if (form.mode === 'numeric') {
+  if (form.mode === 'boolean_map') {
+    const point = first.point
+    const trueWhen = form.trueWhen ?? 1
+    if (
+      point.wire_data_type?.toUpperCase() !== 'BIT'
+      || point.data_type.toUpperCase() !== 'INT'
+      || point.unit !== null
+    ) {
+      throw new Error('0/1 转布尔只适用于 BIT 协议的整数点位')
+    }
+    if (trueWhen !== 0 && trueWhen !== 1) {
+      throw new Error('请选择 0 或 1 表示 true')
+    }
+    transform = {
+      kind: 'boolean_map',
+      input: first.inputId,
+      trueWhen,
+    }
+  } else if (form.mode === 'numeric') {
     transform = {
       kind: 'numeric',
       input: first.inputId,
@@ -254,21 +283,10 @@ export function buildNodePointProcessingDraft(
       scheduleSeconds: 1,
       controlEligible: false,
     }
-  } else if (first.point.data_type.toUpperCase() === 'FLOAT') {
-    transform = {
-      kind: 'numeric',
-      input: first.inputId,
-      scale: 1,
-      offset: 0,
-      minimum: -1000000000,
-      maximum: 1000000000,
-    }
   } else {
     transform = {
-      kind: 'formula',
-      expression: first.inputId,
-      scheduleSeconds: 1,
-      controlEligible: false,
+      kind: 'passthrough',
+      input: first.inputId,
     }
   }
 

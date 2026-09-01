@@ -18,6 +18,7 @@ export const DATA_TRUNK_LAYERS = ['L0', 'L1', 'L2'] as const
 
 export const RAW_POINT_COLUMNS = [
   '点位名称',
+  '协议类型',
   '当前值',
   '单位',
   '质量',
@@ -303,6 +304,8 @@ export function rawPointReasonLabel({
     return elapsed ? `${elapsed}未收到新数据` : '未收到新数据'
   }
   if (reason === 'SOURCE_QUALITY_BAD') return '设备上报质量异常'
+  if (reason === 'BIT_VALUE_OUT_OF_RANGE') return '设备返回的 BIT 值不是 0 或 1'
+  if (reason === 'TYPE_MISMATCH') return '设备返回值类型与协议点位不一致'
   return reason ? '当前数据不可用' : '—'
 }
 
@@ -421,19 +424,35 @@ export function projectRawPointValue(
   }
 }
 
-export function projectEntityValue(observation: { value: unknown; quality: number }): {
+export function projectEntityValue(observation: {
+  value: unknown
+  quality: number
+  value_observed_at?: string | null
+}): {
   currentValue: string
   qualityLabel: string
   currentUsable: boolean
+  availabilityLabel: string
+  retained: boolean
 } {
   const currentUsable = observation.quality === 192 || observation.quality === 64
   const value = observation.value
+  const valueText = Array.isArray(value)
+    ? value.join('、')
+    : value === null || value === undefined ? '无当前值' : String(value)
+  const retained = !currentUsable
+    && observation.value_observed_at !== null
+    && observation.value_observed_at !== undefined
+    && value !== null
+    && value !== undefined
   return {
     currentValue: currentUsable
-      ? Array.isArray(value) ? value.join('、') : value === null ? '无当前值' : String(value)
-      : '无当前值',
+      ? valueText
+      : retained ? `上次值 ${valueText}` : '无当前值',
     qualityLabel: qualityLabel(observation.quality),
     currentUsable,
+    availabilityLabel: currentUsable ? '当前可用' : '当前不可用',
+    retained,
   }
 }
 

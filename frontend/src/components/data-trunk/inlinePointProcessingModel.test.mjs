@@ -6,6 +6,7 @@ const POWER = {
   id: 'tag-power',
   name: 'ActivePowerRaw',
   display_name: '交流总有功功率',
+  wire_data_type: 'FLOAT',
   data_type: 'FLOAT',
   unit: 'W',
 }
@@ -14,6 +15,7 @@ const CURRENT = {
   id: 'tag-current',
   name: 'CurrentRaw',
   display_name: '交流电流',
+  wire_data_type: 'FLOAT',
   data_type: 'FLOAT',
   unit: 'A',
 }
@@ -33,7 +35,10 @@ test('one selected L0 becomes one direct L2 draft', async () => {
   assert.equal(result.content.inputs.length, 1)
   assert.equal(result.content.outputs[0].entityDefinition, 'pcs.active_power')
   assert.deepEqual(result.inputSelections, { activepowerraw: 'tag-power' })
-  assert.equal(result.content.outputs[0].transform.kind, 'numeric')
+  assert.deepEqual(result.content.outputs[0].transform, {
+    kind: 'passthrough',
+    input: 'activepowerraw',
+  })
 })
 
 test('formula draft binds every selected L0 and never mutates points', async () => {
@@ -100,19 +105,16 @@ test('direct mapping cannot relabel units and numeric conversion always outputs 
   assert.equal(converted.content.outputs[0].dataType, 'FLOAT')
 })
 
-test('direct mapping may declare a unit when the raw point has none', async () => {
+test('direct mapping rejects adding a unit when the raw point has none', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
-  const result = model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
+  assert.throws(() => model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
     mode: 'passthrough',
     definitionKey: 'pcs.active_power',
     displayName: 'PCS 有功功率',
     deviceCategory: 'PCS',
     unit: 'kW',
     freshnessSeconds: 30,
-  })
-
-  assert.equal(result.content.outputs[0].unit, 'kW')
-  assert.equal(result.content.outputs[0].transform.kind, 'numeric')
+  }), /直接使用不能改变单位/)
 })
 
 test('direct BOOL mapping makes digit-leading raw names safe for formulas', async () => {
@@ -121,6 +123,7 @@ test('direct BOOL mapping makes digit-leading raw names safe for formulas', asyn
     id: 'tag-15v-fault',
     name: '15V电源故障',
     display_name: '15V电源故障',
+    wire_data_type: 'BOOL',
     data_type: 'BOOL',
     unit: null,
   }], {
@@ -136,10 +139,8 @@ test('direct BOOL mapping makes digit-leading raw names safe for formulas', asyn
   assert.equal(result.content.inputs[0].id, 'point_15v')
   assert.deepEqual(result.inputSelections, { point_15v: 'tag-15v-fault' })
   assert.deepEqual(result.content.outputs[0].transform, {
-    kind: 'formula',
-    expression: 'point_15v',
-    scheduleSeconds: 1,
-    controlEligible: false,
+    kind: 'passthrough',
+    input: 'point_15v',
   })
 })
 
@@ -149,6 +150,7 @@ test('direct mapping makes formula keywords safe as input identities', async () 
     id: 'tag-and',
     name: 'and',
     display_name: 'AND 状态',
+    wire_data_type: 'BOOL',
     data_type: 'BOOL',
     unit: null,
   }], {
@@ -162,7 +164,65 @@ test('direct mapping makes formula keywords safe as input identities', async () 
   })
 
   assert.equal(result.content.inputs[0].id, 'point_and')
-  assert.equal(result.content.outputs[0].transform.expression, 'point_and')
+  assert.equal(result.content.outputs[0].transform.input, 'point_and')
+})
+
+test('BIT INT defaults to explicit 0/1 boolean mapping and supports both meanings', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const bit = {
+    id: 'tag-fault',
+    name: '15V电源故障',
+    display_name: '15V电源故障',
+    wire_data_type: 'BIT',
+    data_type: 'INT',
+    unit: null,
+  }
+
+  assert.equal(model.suggestInlinePointProcessingDefaults([bit], 'PCS').mode, 'boolean_map')
+  for (const trueWhen of [0, 1]) {
+    const result = model.buildNodePointProcessingDraft([bit], {
+      mode: 'boolean_map',
+      definitionKey: 'pcs.power_fault',
+      displayName: '电源故障',
+      deviceCategory: 'PCS',
+      dataType: 'BOOL',
+      unit: null,
+      freshnessSeconds: 10,
+      trueWhen,
+    })
+    assert.equal(result.content.outputs[0].dataType, 'BOOL')
+    assert.equal(result.content.outputs[0].unit, null)
+    assert.deepEqual(result.content.outputs[0].transform, {
+      kind: 'boolean_map',
+      input: 'point_15v',
+      trueWhen,
+    })
+  }
+})
+
+test('0/1 boolean mapping rejects non BIT points and multiple selection', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const form = {
+    mode: 'boolean_map',
+    definitionKey: 'pcs.power_fault',
+    displayName: '电源故障',
+    deviceCategory: 'PCS',
+    dataType: 'BOOL',
+    unit: null,
+    freshnessSeconds: 10,
+    trueWhen: 1,
+  }
+  assert.throws(
+    () => model.buildNodePointProcessingDraft([POWER], form),
+    /BIT 协议的整数点位/,
+  )
+  assert.throws(
+    () => model.buildNodePointProcessingDraft([
+      { ...POWER, wire_data_type: 'BIT', data_type: 'INT', unit: null },
+      { ...CURRENT, wire_data_type: 'BIT', data_type: 'INT', unit: null },
+    ], form),
+    /一次只能选择一个/,
+  )
 })
 
 test('Chinese raw point names receive distinct valid entity identities', async () => {

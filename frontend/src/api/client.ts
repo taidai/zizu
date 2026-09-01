@@ -130,6 +130,7 @@ export interface Tag {
   node_name: string
   name: string
   display_name: string | null
+  wire_data_type: string | null
   data_type: string
   tag_type: string
   unit: string | null
@@ -547,7 +548,7 @@ export async function fetchHealth(): Promise<HealthStatus> {
 
 export interface HistoryPoint {
   ts: string
-  raw_value: number | null
+  raw_value: number | boolean | string | null
   eng_value: number | null
 }
 
@@ -1170,6 +1171,7 @@ export interface PointProcessingTrialOutput {
   quality: number
   reason: string | null
   observed_at: string
+  value_observed_at: string | null
   source_ids: string[]
 }
 

@@ -11,6 +11,7 @@ import {
   ENTITY_HISTORY_RANGES,
   entityFrameEvidence,
   processingKindLabel,
+  projectEntityValue,
   qualityLabel,
 } from './dataTrunkViewModel'
 
@@ -23,12 +24,6 @@ const QUALITY_STYLE: Record<number, string> = {
 
 function formatTime(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString('zh-CN') : '未收到'
-}
-
-function valueLabel(value: L2FrameItem['value']): string {
-  if (value === null) return '-'
-  if (Array.isArray(value)) return value.join('、')
-  return String(value)
 }
 
 export default function EntityObservationCard({
@@ -61,6 +56,11 @@ export default function EntityObservationCard({
     ? Math.max(0, Date.now() - new Date(observation.observed_at).getTime())
     : 0
   const reason = entityReasonLabel(observation?.reason ?? (observation ? null : 'STALE'), ageMs)
+  const projected = projectEntityValue({
+    value: observation?.value ?? null,
+    quality,
+    value_observed_at: observation?.value_observed_at,
+  })
   const numericHistory = history.some((item) => typeof item.value === 'number')
   const chartData = history.map((item) => [
     item.observed_at,
@@ -83,7 +83,7 @@ export default function EntityObservationCard({
           <span className="block truncate">{descriptor.display_name}</span>
         </span>
         <span className={`font-mono-value text-base font-semibold ${quality === 192 ? 'text-gray-900' : 'text-gray-500'}`}>
-          {valueLabel(observation?.value ?? null)}
+          {projected.currentValue}
         </span>
         <span className="text-gray-500">{observation?.unit || descriptor.unit || '-'}</span>
         <span className={`w-fit rounded border px-2 py-0.5 text-[10px] font-semibold ${QUALITY_STYLE[quality] || QUALITY_STYLE[0]}`}>
@@ -100,6 +100,12 @@ export default function EntityObservationCard({
               {reason}
             </div>
           )}
+
+          <div className="mb-3 grid gap-2 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] text-gray-600 sm:grid-cols-3">
+            <div><span className="text-gray-400">状态：</span>{projected.availabilityLabel}</div>
+            <div><span className="text-gray-400">上次正常值时间：</span>{formatTime(observation?.value_observed_at)}</div>
+            <div><span className="text-gray-400">当前状态时间：</span>{formatTime(observation?.observed_at)}</div>
+          </div>
 
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(14rem,0.8fr)]">
             <section aria-label="实体历史">
@@ -178,6 +184,7 @@ export default function EntityObservationCard({
                   <div><dt className="inline text-gray-400">observation_frame_sequence: </dt><dd className="inline">{frames.observationFrameSequence ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">projection_frame_sequence: </dt><dd className="inline">{frames.projectionFrameSequence ?? '未记录'}</dd></div>
                   <div><dt className="inline text-gray-400">received_at: </dt><dd className="inline">{formatTime(observation?.received_at)}</dd></div>
+                  <div><dt className="inline text-gray-400">value_observed_at: </dt><dd className="inline">{formatTime(observation?.value_observed_at)}</dd></div>
                   <div><dt className="inline text-gray-400">calculated_at: </dt><dd className="inline">{formatTime(observation?.calculated_at)}</dd></div>
                   <div><dt className="inline text-gray-400">reason: </dt><dd className="inline">{observation?.reason || '无'}</dd></div>
                 </dl>

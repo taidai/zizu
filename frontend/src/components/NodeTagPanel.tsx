@@ -532,6 +532,7 @@ export default function NodeTagPanel({
                         {tag.display_name || tag.name}
                         {!tag.enabled && <span className="ml-2 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-normal text-gray-600">已停用</span>}
                       </td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-gray-600">{tag.wire_data_type || tag.data_type}</td>
                       <td className="px-3 py-2 font-mono">{point.displayValue}</td>
                       <td className="px-3 py-2">{current?.unit || tag.unit || '-'}</td>
                       <td className={`px-3 py-2 ${qualityClass}`}>{point.qualityLabel}</td>
