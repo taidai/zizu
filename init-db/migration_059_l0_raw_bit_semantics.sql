@@ -157,6 +157,52 @@ BEGIN
 END
 $function$;
 
+-- L2 history still requires a typed STALE value unless a failed first frame
+-- has no baseline.  L2 latest is different: it intentionally stores only the
+-- last GOOD value, so the first STALE state legitimately has no retained value.
+CREATE OR REPLACE FUNCTION public.validate_empty_stale_evidence()
+RETURNS TRIGGER LANGUAGE plpgsql AS $function$
+DECLARE
+  sequence_value BIGINT;
+  value_count INTEGER;
+  failed_frame_count INTEGER;
+  earlier_baseline_count INTEGER;
+BEGIN
+  value_count := num_nonnulls(
+    NEW.value_float,NEW.value_int,NEW.value_numeric,
+    NEW.value_bool,NEW.value_text,NEW.value_codes
+  );
+  IF NEW.quality<>1 OR value_count<>0 THEN
+    RETURN NULL;
+  END IF;
+  IF TG_TABLE_NAME='t_l2_latest'
+     AND NULLIF(to_jsonb(NEW)->>'value_observed_at','') IS NULL THEN
+    RETURN NULL;
+  END IF;
+  sequence_value := COALESCE(
+    (to_jsonb(NEW)->>'commit_sequence')::bigint,
+    (to_jsonb(NEW)->>'frame_sequence')::bigint
+  );
+  SELECT count(*) INTO failed_frame_count
+  FROM public.t_data_frames
+  WHERE frame_sequence=sequence_value AND status='FAILED';
+  SELECT count(*) INTO earlier_baseline_count
+  FROM public.t_l2_observations
+  WHERE entity_instance_id=NEW.entity_instance_id
+    AND commit_sequence<sequence_value
+    AND quality IN (1,64,192)
+    AND num_nonnulls(
+      value_float,value_int,value_numeric,value_bool,value_text,value_codes
+    )=1;
+  IF NEW.reason<>'FRAME_PROCESSING_FAILED_NO_BASELINE'
+     OR failed_frame_count<>1 OR earlier_baseline_count<>0 THEN
+    RAISE EXCEPTION 'L2_EMPTY_STALE_EVIDENCE_INVALID: failed first frame required'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END
+$function$;
+
 CREATE INDEX IF NOT EXISTS ix_l2_observations_entity_good_commit
   ON public.t_l2_observations(entity_instance_id,commit_sequence DESC)
   WHERE quality=192;

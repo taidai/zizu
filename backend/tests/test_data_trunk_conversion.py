@@ -102,10 +102,10 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.GOOD, output.quality)
         self.assertIsNone(output.reason)
 
-    def test_passthrough_propagates_bad_and_stale_without_a_value(self) -> None:
+    def test_passthrough_keeps_diagnostic_value_for_stale_and_uncertain(self) -> None:
         for quality, source_reason, expected_reason in (
-            (TrunkQuality.BAD, "TYPE_MISMATCH", "TYPE_MISMATCH"),
             (TrunkQuality.STALE, None, "INPUT_STALE"),
+            (TrunkQuality.UNCERTAIN, None, "INPUT_UNCERTAIN"),
         ):
             with self.subTest(quality=quality):
                 fixture = self.fixture()
@@ -132,9 +132,36 @@ class PcsNumericConversionTest(unittest.TestCase):
 
                 output = evaluate_processing(**fixture)[0]
 
-                self.assertEqual(TypedValue.integer(None), output.value)
+                self.assertEqual(TypedValue.integer(1), output.value)
                 self.assertEqual(quality, output.quality)
                 self.assertEqual(expected_reason, output.reason)
+
+    def test_passthrough_rejects_bad_input_without_a_value(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        source = replace(
+            raw,
+            value=TypedValue.integer(1),
+            raw_unit=None,
+            quality=TrunkQuality.BAD,
+            quality_reason="TYPE_MISMATCH",
+        )
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.INT,
+                output_unit=None,
+                transform=PassthroughTransform(InputReference.l0(raw.tag_id)),
+            ),
+        )
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.integer(None), output.value)
+        self.assertEqual(TrunkQuality.BAD, output.quality)
+        self.assertEqual("TYPE_MISMATCH", output.reason)
 
     def test_boolean_map_covers_both_zero_one_polarities(self) -> None:
         for true_when, raw_value, expected in (
@@ -216,6 +243,42 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TypedValue.boolean(None), output.value)
         self.assertEqual(TrunkQuality.BAD, output.quality)
         self.assertEqual("BIT_VALUE_OUT_OF_RANGE", output.reason)
+
+    def test_boolean_map_keeps_mapped_value_when_source_is_stale(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        source = replace(
+            raw,
+            value=TypedValue.integer(1),
+            raw_unit=None,
+            quality=TrunkQuality.STALE,
+        )
+        compiled = compile_formula(
+            "input == 1",
+            sources=(FormulaSource("input", ValueKind.INT, None, "one", True, None),),
+            result_type=ValueKind.BOOL,
+            result_unit=None,
+        )
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.BOOL,
+                output_unit=None,
+                transform=BooleanMapTransform(
+                    InputReference.l0(raw.tag_id),
+                    1,
+                    compiled,
+                ),
+            ),
+        )
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.boolean(True), output.value)
+        self.assertEqual(TrunkQuality.STALE, output.quality)
+        self.assertEqual("INPUT_STALE", output.reason)
 
     def test_numeric_conversion_marks_wrong_runtime_unit_bad_without_value(self) -> None:
         fixture = self.fixture()
@@ -551,6 +614,25 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TypedValue.code_set(None), output.value)
         self.assertEqual(
             (TrunkQuality.BAD, "BIT_VALUE_OUT_OF_RANGE"),
+            (output.quality, output.reason),
+        )
+
+    def test_boolean_set_rejects_a_unit_bearing_integer(self) -> None:
+        fixture = self._boolean_set_fixture()
+        invalid_key = next(iter(fixture["current_inputs"]))
+        fixture["current_inputs"] = {
+            **fixture["current_inputs"],
+            invalid_key: replace(
+                fixture["current_inputs"][invalid_key],
+                raw_unit="V",
+            ),
+        }
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.code_set(None), output.value)
+        self.assertEqual(
+            (TrunkQuality.BAD, "UNIT_MISMATCH"),
             (output.quality, output.reason),
         )
 

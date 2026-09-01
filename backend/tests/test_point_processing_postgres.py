@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -189,6 +190,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
             TypedValue,
         )
         from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.data_trunk_conversion import evaluate_processing
         from app.services.point_processing import (
             ApplyPointProcessingPlan,
             PointProcessingService,
@@ -253,6 +255,48 @@ class PointProcessingPostgresTest(unittest.TestCase):
 
         self.assertEqual(1, len(snapshot.installed))
         self.assertIsInstance(snapshot.installed[0].transform, PassthroughTransform)
+
+        stale = replace(observation, quality=TrunkQuality.STALE)
+        output = evaluate_processing(
+            installed=snapshot.installed,
+            current_inputs={snapshot.installed[0].transform.input: stale},
+            configuration_revision=1,
+            calculated_at=observed_at,
+        )[0]
+        frame_id = uuid4()
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO t_data_frames
+                  (frame_id,candidate_digest,capture_beat,shot_at,
+                   configuration_revision,status,attempt_count)
+                VALUES(%s,%s,1,%s,1,'PENDING',0)
+                RETURNING frame_sequence
+                """,
+                (frame_id, hashlib.sha256(b"passthrough-stale").hexdigest(), observed_at),
+            )
+            frame_sequence = cursor.fetchone()[0]
+            stored = replace(
+                output,
+                frame_id=frame_id,
+                frame_sequence=frame_sequence,
+            )
+            PostgresFrameRepository._ensure_runtime(cursor)
+            PostgresFrameRepository._insert_frame_l2(cursor, (stored,))
+            PostgresFrameRepository._advance_frame_l2_latest(cursor, (stored,))
+            connection.commit()
+            cursor.execute(
+                "SELECT value_float,quality,reason FROM t_l2_observations "
+                "WHERE event_id=%s",
+                (stored.event_id,),
+            )
+            self.assertEqual((12.5, 1, "INPUT_STALE"), cursor.fetchone())
+            cursor.execute(
+                "SELECT value_float,value_observed_at,quality,reason "
+                "FROM t_l2_latest WHERE entity_instance_id=%s",
+                (stored.entity_instance_id,),
+            )
+            self.assertEqual((None, None, 1, "INPUT_STALE"), cursor.fetchone())
 
     def test_boolean_map_revision_persists_compiled_rule_and_reloads(self) -> None:
         from app.services.data_trunk_contracts import (
@@ -413,6 +457,8 @@ class PointProcessingPostgresTest(unittest.TestCase):
             )
         )
         entity_id = application.output_entity_instance_ids[0]
+        old_installed_id = application.installed_processing_id
+        old_application_id = application.id
 
         with get_connection() as connection:
             report = inspect_cutover(connection)
@@ -434,11 +480,44 @@ class PointProcessingPostgresTest(unittest.TestCase):
         )
         with get_connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT revision_id,configuration_revision FROM "
+                "SELECT id,revision_id,configuration_revision FROM "
                 "t_installed_point_processings WHERE current=TRUE AND node_id=%s",
                 (NODE_ID,),
             )
-            self.assertEqual((new_revisions[0], 2), cursor.fetchone())
+            new_installed_id, active_revision_id, configuration_revision = cursor.fetchone()
+            self.assertNotEqual(old_installed_id, new_installed_id)
+            self.assertEqual((new_revisions[0], 2), (active_revision_id, configuration_revision))
+            cursor.execute(
+                "SELECT revision_id,current FROM t_installed_point_processings WHERE id=%s",
+                (old_installed_id,),
+            )
+            self.assertEqual((registered.revision_id, False), cursor.fetchone())
+            cursor.execute(
+                "SELECT installed_processing_id,configuration_revision "
+                "FROM t_point_processing_applications WHERE id=%s",
+                (old_application_id,),
+            )
+            self.assertEqual((old_installed_id, 1), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_point_processing_applications "
+                "WHERE installed_processing_id=%s AND configuration_revision=2",
+                (new_installed_id,),
+            )
+            self.assertEqual((1,), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_point_processing_plans "
+                "WHERE id=(SELECT source_plan_id FROM t_installed_point_processings "
+                "WHERE id=%s) AND status='applied'",
+                (new_installed_id,),
+            )
+            self.assertEqual((1,), cursor.fetchone())
+            cursor.execute(
+                "SELECT count(*) FROM t_audit_events "
+                "WHERE details->>'kind'='l0_raw_bit_hard_cut' "
+                "AND details->>'old_installation_id'=%s",
+                (str(old_installed_id),),
+            )
+            self.assertEqual((1,), cursor.fetchone())
             cursor.execute(
                 """
                 SELECT count(*)
@@ -451,6 +530,17 @@ class PointProcessingPostgresTest(unittest.TestCase):
                   AND input.revision_id<>installed.revision_id
                 """,
                 (NODE_ID,),
+            )
+            self.assertEqual((0,), cursor.fetchone())
+            cursor.execute(
+                """
+                SELECT count(*)
+                FROM t_point_processing_input_bindings AS binding
+                JOIN t_point_processing_inputs AS input ON input.id=binding.input_id
+                WHERE binding.installed_processing_id=%s
+                  AND input.revision_id<>%s
+                """,
+                (old_installed_id, registered.revision_id),
             )
             self.assertEqual((0,), cursor.fetchone())
             cursor.execute(

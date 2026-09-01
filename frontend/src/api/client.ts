@@ -140,7 +140,7 @@ export interface Tag {
   read_write: string
   enabled: boolean
   description: string | null
-  raw_value: number | null
+  raw_value: number | boolean | string | null
   eng_value: number | null
   latest_ts: string | null
   quality: number | null
@@ -571,7 +571,7 @@ export interface TelemetryPoint {
   tag_id: string
   tag_name: string
   node_name: string
-  raw_value: number | null
+  raw_value: number | boolean | string | null
   eng_value: number | null
   quality: number | null
 }

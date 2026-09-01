@@ -435,7 +435,7 @@ export function projectEntityValue(observation: {
   availabilityLabel: string
   retained: boolean
 } {
-  const currentUsable = observation.quality === 192 || observation.quality === 64
+  const currentUsable = observation.quality === 192
   const value = observation.value
   const valueText = Array.isArray(value)
     ? value.join('、')

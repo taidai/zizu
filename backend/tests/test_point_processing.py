@@ -4,8 +4,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import unittest
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from app.services.data_trunk_contracts import (
+    BooleanMapTransform,
+    InputReference,
+    PassthroughTransform,
+    ValueKind,
+)
+from app.services.point_processing_formula import FormulaSource, compile_formula
+from app.services.point_processing_postgres import _transform_input_references
 from app.services.point_processing_templates import parse_point_processing_template
 
 
@@ -189,6 +197,25 @@ def _assets():
 
 
 class PointProcessingTest(unittest.TestCase):
+    def test_trial_reference_collection_includes_direct_and_boolean_map_inputs(self) -> None:
+        direct = InputReference.l0(uuid4())
+        mapped = InputReference.l0(uuid4())
+        compiled = compile_formula(
+            "input == 1",
+            sources=(FormulaSource("input", ValueKind.INT, None, "one", True, None),),
+            result_type=ValueKind.BOOL,
+            result_unit=None,
+        )
+
+        self.assertEqual(
+            {direct},
+            _transform_input_references(PassthroughTransform(direct)),
+        )
+        self.assertEqual(
+            {mapped},
+            _transform_input_references(BooleanMapTransform(mapped, 1, compiled)),
+        )
+
     def test_same_node_l0_formula_is_not_recorded_as_a_cross_entity_dag(self) -> None:
         from app.services.data_trunk_contracts import FormulaTransform, InputReference
         from app.services.point_processing import (

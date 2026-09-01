@@ -37,11 +37,11 @@ test('quality and invalid-current-value projection are explicit', async () => {
     retained: true,
   })
   assert.deepEqual(viewModel.projectEntityValue({ value: 18.4, quality: 64, value_observed_at: '2026-09-01T05:20:00Z' }), {
-    currentValue: '18.4',
+    currentValue: '上次值 18.4',
     qualityLabel: '存疑',
-    currentUsable: true,
-    availabilityLabel: '当前可用',
-    retained: false,
+    currentUsable: false,
+    availabilityLabel: '当前不可用',
+    retained: true,
   })
 })
 

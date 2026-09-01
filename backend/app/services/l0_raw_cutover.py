@@ -6,7 +6,9 @@ import hashlib
 import json
 import re
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+
+from psycopg2.extras import Json
 
 from app.services.configuration_revision import ConfigurationRevisionError
 from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
@@ -251,7 +253,7 @@ def apply_cutover(
     expected_digest: str,
     actor: str,
 ) -> tuple[UUID, ...]:
-    """Publish immutable boolean-map revisions and repoint current installations."""
+    """Publish immutable boolean-map revisions and replacement installations."""
     if not expected_digest or not actor.strip():
         raise CutoverError("CUTOVER_ARGUMENT_INVALID")
     try:
@@ -362,58 +364,226 @@ def apply_cutover(
 
             for installed_id, inputs in plan.inputs_by_installation.items():
                 old_revision = inputs[0].revision_id
-                new_revision, new_inputs, new_outputs = new_by_old_revision[old_revision]
+                new_revision, _new_inputs, _new_outputs = new_by_old_revision[old_revision]
+                migration_plan_id = uuid5(
+                    NAMESPACE_URL,
+                    "zizu/l0-raw-bit-cutover-plan/"
+                    f"{expected_digest}/{installed_id}/{new_revision}",
+                )
+                new_installed_id = uuid5(
+                    NAMESPACE_URL,
+                    f"zizu/installed-point-processing/{migration_plan_id}",
+                )
+                application_id = uuid5(
+                    NAMESPACE_URL,
+                    f"zizu/l0-raw-bit-cutover-application/{migration_plan_id}",
+                )
+                plan_items = [
+                    {
+                        "kind": "l0_raw_bit_hard_cut",
+                        "old_installation_id": str(installed_id),
+                        "old_revision_id": str(old_revision),
+                        "new_revision_id": str(new_revision),
+                    }
+                ]
+                plan_digest = hashlib.sha256(
+                    json.dumps(
+                        plan_items,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
                 cursor.execute(
                     """
-                    SELECT binding.input_id,input.input_key
+                    SELECT node_id
+                    FROM t_installed_point_processings
+                    WHERE id=%s AND current=TRUE AND revision_id=%s
+                    FOR UPDATE
+                    """,
+                    (installed_id, old_revision),
+                )
+                installed_row = cursor.fetchone()
+                if installed_row is None:
+                    raise CutoverError("CUTOVER_CONFIGURATION_REVISION_MISMATCH")
+                node_id = installed_row[0]
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_plans
+                      (id,node_id,template_revision_id,base_configuration_revision,
+                       source_catalog_digest,status,items,blockers,digest,planned_by)
+                    VALUES(%s,%s,%s,%s,%s,'applied',%s,%s,%s,%s)
+                    """,
+                    (
+                        migration_plan_id,
+                        node_id,
+                        new_revision,
+                        current_configuration,
+                        expected_digest,
+                        Json(plan_items),
+                        Json([]),
+                        plan_digest,
+                        actor.strip(),
+                    ),
+                )
+                cursor.execute(
+                    "UPDATE t_installed_point_processings SET current=FALSE "
+                    "WHERE id=%s AND current=TRUE",
+                    (installed_id,),
+                )
+                if cursor.rowcount != 1:
+                    raise CutoverError("CUTOVER_CONFIGURATION_REVISION_MISMATCH")
+                cursor.execute(
+                    """
+                    INSERT INTO t_installed_point_processings
+                      (id,node_id,revision_id,source_plan_id,
+                       configuration_revision,installed_by,current)
+                    VALUES(%s,%s,%s,%s,%s,%s,TRUE)
+                    """,
+                    (
+                        new_installed_id,
+                        node_id,
+                        new_revision,
+                        migration_plan_id,
+                        new_configuration,
+                        actor.strip(),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_input_bindings
+                      (installed_processing_id,input_id,source_kind,
+                       l0_tag_id,l2_entity_instance_id,confirmed_by,confirmed_at)
+                    SELECT %s,new_input.id,binding.source_kind,
+                           binding.l0_tag_id,binding.l2_entity_instance_id,
+                           %s,CURRENT_TIMESTAMP
                     FROM t_point_processing_input_bindings AS binding
-                    JOIN t_point_processing_inputs AS input ON input.id=binding.input_id
+                    JOIN t_point_processing_inputs AS old_input
+                      ON old_input.id=binding.input_id
+                    JOIN t_point_processing_inputs AS new_input
+                      ON new_input.revision_id=%s
+                     AND new_input.input_key=old_input.input_key
                     WHERE binding.installed_processing_id=%s
                     """,
-                    (installed_id,),
+                    (new_installed_id, actor.strip(), new_revision, installed_id),
                 )
-                for old_input_id, input_key in cursor.fetchall():
-                    cursor.execute(
-                        """
-                        UPDATE t_point_processing_input_bindings
-                        SET input_id=%s
-                        WHERE installed_processing_id=%s AND input_id=%s
-                        """,
-                        (new_inputs[input_key], installed_id, old_input_id),
-                    )
-                    cursor.execute(
-                        """
-                        UPDATE t_point_processing_selector_members
-                        SET input_id=%s
-                        WHERE installed_processing_id=%s AND input_id=%s
-                        """,
-                        (new_inputs[input_key], installed_id, old_input_id),
-                    )
                 cursor.execute(
                     """
-                    SELECT binding.output_id,output.output_key
+                    INSERT INTO t_point_processing_output_bindings
+                      (installed_processing_id,output_id,entity_instance_id)
+                    SELECT %s,new_output.id,binding.entity_instance_id
                     FROM t_point_processing_output_bindings AS binding
-                    JOIN t_point_processing_outputs AS output ON output.id=binding.output_id
+                    JOIN t_point_processing_outputs AS old_output
+                      ON old_output.id=binding.output_id
+                    JOIN t_point_processing_outputs AS new_output
+                      ON new_output.revision_id=%s
+                     AND new_output.output_key=old_output.output_key
                     WHERE binding.installed_processing_id=%s
                     """,
-                    (installed_id,),
+                    (new_installed_id, new_revision, installed_id),
                 )
-                for old_output_id, output_key in cursor.fetchall():
-                    cursor.execute(
-                        """
-                        UPDATE t_point_processing_output_bindings
-                        SET output_id=%s
-                        WHERE installed_processing_id=%s AND output_id=%s
-                        """,
-                        (new_outputs[output_key], installed_id, old_output_id),
-                    )
                 cursor.execute(
                     """
-                    UPDATE t_installed_point_processings
-                    SET revision_id=%s,configuration_revision=%s,installed_by=%s
-                    WHERE id=%s AND current=TRUE
+                    INSERT INTO t_point_processing_selector_members
+                      (installed_processing_id,input_id,ordinal,
+                       entity_instance_id,selector_digest)
+                    SELECT %s,new_input.id,member.ordinal,
+                           member.entity_instance_id,member.selector_digest
+                    FROM t_point_processing_selector_members AS member
+                    JOIN t_point_processing_inputs AS old_input
+                      ON old_input.id=member.input_id
+                    JOIN t_point_processing_inputs AS new_input
+                      ON new_input.revision_id=%s
+                     AND new_input.input_key=old_input.input_key
+                    WHERE member.installed_processing_id=%s
                     """,
-                    (new_revision, new_configuration, actor.strip(), installed_id),
+                    (new_installed_id, new_revision, installed_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_dependencies
+                      (installed_processing_id,input_id,output_id,
+                       source_entity_instance_id,target_entity_instance_id)
+                    SELECT %s,new_input.id,new_output.id,
+                           dependency.source_entity_instance_id,
+                           dependency.target_entity_instance_id
+                    FROM t_point_processing_dependencies AS dependency
+                    JOIN t_point_processing_inputs AS old_input
+                      ON old_input.id=dependency.input_id
+                    JOIN t_point_processing_outputs AS old_output
+                      ON old_output.id=dependency.output_id
+                    JOIN t_point_processing_inputs AS new_input
+                      ON new_input.revision_id=%s
+                     AND new_input.input_key=old_input.input_key
+                    JOIN t_point_processing_outputs AS new_output
+                      ON new_output.revision_id=%s
+                     AND new_output.output_key=old_output.output_key
+                    WHERE dependency.installed_processing_id=%s
+                    """,
+                    (
+                        new_installed_id,
+                        new_revision,
+                        new_revision,
+                        installed_id,
+                    ),
+                )
+                cursor.execute(
+                    "SELECT array_agg(entity_instance_id ORDER BY entity_instance_id) "
+                    "FROM t_point_processing_output_bindings "
+                    "WHERE installed_processing_id=%s",
+                    (new_installed_id,),
+                )
+                output_entity_ids = cursor.fetchone()[0] or []
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_applications
+                      (id,plan_id,installed_processing_id,
+                       configuration_revision,actor,output_entity_instance_ids)
+                    VALUES(%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        application_id,
+                        migration_plan_id,
+                        new_installed_id,
+                        new_configuration,
+                        actor.strip(),
+                        output_entity_ids,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_idempotency
+                      (actor,idempotency_key,request_digest,application_id)
+                    VALUES(%s,%s,%s,%s)
+                    """,
+                    (
+                        actor.strip(),
+                        f"l0-raw-bit-hard-cut/{migration_plan_id}",
+                        plan_digest,
+                        application_id,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_audit_events
+                      (id,event,outcome,reason,actor,target,details)
+                    VALUES(%s,'configuration.change','applied',
+                           'immutable L0 raw BIT hard cut',%s,%s,%s)
+                    """,
+                    (
+                        uuid4(),
+                        actor.strip(),
+                        "l0_raw_bit_hard_cut",
+                        Json(
+                            {
+                                "kind": "l0_raw_bit_hard_cut",
+                                "old_installation_id": str(installed_id),
+                                "new_installation_id": str(new_installed_id),
+                                "old_revision_id": str(old_revision),
+                                "new_revision_id": str(new_revision),
+                                "configuration_revision": new_configuration,
+                            }
+                        ),
+                    ),
                 )
 
             cursor.execute(
@@ -446,6 +616,12 @@ _RUNTIME_TABLES = (
     "t_alarm_transitions",
     "t_alarm_events",
     "t_jdm_executions",
+    "t_business_metric_acceptance_reports",
+    "t_business_metric_window_results",
+    "t_business_metric_projections",
+    "t_business_metric_recomputations",
+    "t_en9_acceptance_ws_receipts",
+    "t_point_processing_formula_runs",
     "t_committed_frame_consumers",
     "t_l2_observation_sources",
     "t_data_frame_outbox",

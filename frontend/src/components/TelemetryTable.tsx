@@ -6,6 +6,10 @@ import {
 
 const formatNum = (v: number | null, digits = 4) =>
   v !== null ? v.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: digits }) : '—'
+const formatRawScalar = (value: number | boolean | string | null) => {
+  if (value === null) return '—'
+  return typeof value === 'number' ? formatNum(value) : String(value)
+}
 
 export default function TelemetryTable() {
   const [nodes, setNodes] = useState<Node[]>([])
@@ -186,7 +190,7 @@ export default function TelemetryTable() {
                   <td className="px-3 py-2 text-gray-600">{p.node_name}</td>
                   <td className="px-3 py-2 text-gray-800 font-medium">{p.tag_name}</td>
                   <td className="px-3 py-2 text-right font-mono-value">
-                    {formatNum(p.raw_value)}
+                    {formatRawScalar(p.raw_value)}
                   </td>
                   <td className="px-3 py-2 text-right font-mono-value text-[#389e0d]">
                     {formatNum(p.eng_value)}

@@ -102,6 +102,14 @@ class RawObservationAdapterTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.GOOD, observation.quality)
         self.assertIsNone(observation.quality_reason)
 
+    def test_enum_wire_text_remains_a_good_raw_string(self) -> None:
+        observation = self._convert("RUNNING", "ENUM", "STRING")[0]
+
+        self.assertEqual(ValueKind.STRING, observation.value.kind)
+        self.assertEqual("RUNNING", observation.value.value)
+        self.assertEqual(TrunkQuality.GOOD, observation.quality)
+        self.assertIsNone(observation.quality_reason)
+
     def test_integer_zero_and_boolean_false_have_distinct_source_digests(self) -> None:
         integer = self._convert(0, "INT", "BIT")[0]
         boolean = self._convert(False, "INT", "BIT")[0]

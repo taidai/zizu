@@ -600,8 +600,8 @@ async def get_tag_history(
     查询点位历史趋势数据。
 
     - 1h: 原始数据 (约 1-2s/条)
-    - 24h: 5 分钟聚合
-    - 7d: 30 分钟聚合
+    - 24h: 每 5 分钟保留最后一条真实样本
+    - 7d: 每 30 分钟保留最后一条真实样本
     """
     from app.services.telemetry_store import get_connection
 
@@ -632,20 +632,20 @@ async def get_tag_history(
             tag_name, display_name = tag_row
 
             if bucket:
-                # 聚合查询
+                # 长周期只降采样真实原值；不得用平均值改写 INT/BOOL/TEXT 语义。
                 query = """
-                SELECT
-                    time_bucket(%s::interval, ts) AS bucket_ts,
-                    AVG(COALESCE(raw_value_float, raw_value_int::float)),
-                    NULL::bigint,
-                    NULL::boolean,
-                    NULL::text,
-                    MIN(quality),
-                    MAX(quality_reason)
-                FROM t_telemetry
-                WHERE tag_id = %s AND ts > NOW() - %s::interval
-                GROUP BY bucket_ts
-                ORDER BY bucket_ts ASC
+                WITH bucketed AS (
+                    SELECT time_bucket(%s::interval, ts) AS bucket_ts,
+                           ts,raw_value_float,raw_value_int,raw_value_bool,
+                           raw_value_text,quality,quality_reason
+                    FROM t_telemetry
+                    WHERE tag_id = %s AND ts > NOW() - %s::interval
+                )
+                SELECT DISTINCT ON (bucket_ts)
+                       ts,raw_value_float,raw_value_int,raw_value_bool,
+                       raw_value_text,quality,quality_reason
+                FROM bucketed
+                ORDER BY bucket_ts ASC,ts DESC
                 """
                 cur.execute(query, (bucket, tag_id, interval))
             else:

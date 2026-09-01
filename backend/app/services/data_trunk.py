@@ -222,6 +222,8 @@ def validate_raw_value(
         if value.value not in (0, 1):
             return TrunkQuality.BAD, "BIT_VALUE_OUT_OF_RANGE"
         return TrunkQuality.GOOD, None
+    if expected_data_type.upper() == "ENUM" and value.kind is ValueKind.STRING:
+        return TrunkQuality.GOOD, None
     if value.kind.value != expected_data_type.upper():
         return TrunkQuality.BAD, "TYPE_MISMATCH"
     return TrunkQuality.GOOD, None

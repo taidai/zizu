@@ -251,13 +251,20 @@ def _evaluate_passthrough_output(
         reason = "UNIT_MISMATCH"
         quality = TrunkQuality.BAD
         value = TypedValue(installed.output_kind, None)
-    elif source.quality is not TrunkQuality.GOOD:
+    elif source.quality is TrunkQuality.BAD:
         quality = source.quality
         if isinstance(source, RawObservation):
             reason = source.quality_reason or _input_quality_reason(quality)
         else:
             reason = source.reason or _input_quality_reason(quality)
         value = TypedValue(installed.output_kind, None)
+    elif source.quality is not TrunkQuality.GOOD:
+        quality = source.quality
+        if isinstance(source, RawObservation):
+            reason = source.quality_reason or _input_quality_reason(quality)
+        else:
+            reason = source.reason or _input_quality_reason(quality)
+        value = source.value
     else:
         quality = TrunkQuality.GOOD
         reason = None
@@ -336,7 +343,7 @@ def _evaluate_boolean_map_output(
             calculated_at,
             "BIT_VALUE_OUT_OF_RANGE",
         )
-    if source.quality is not TrunkQuality.GOOD:
+    if source.quality is TrunkQuality.BAD:
         return _observation(
             installed=installed,
             value=TypedValue.boolean(None),
@@ -367,8 +374,12 @@ def _evaluate_boolean_map_output(
     return _observation(
         installed=installed,
         value=TypedValue.boolean(mapped),
-        quality=TrunkQuality.GOOD,
-        reason=None,
+        quality=source.quality,
+        reason=(
+            None
+            if source.quality is TrunkQuality.GOOD
+            else source.quality_reason or _input_quality_reason(source.quality)
+        ),
         observed_at=source.source_timestamp,
         received_at=source.received_at,
         calculated_at=calculated_at,
@@ -593,6 +604,9 @@ def _evaluate_boolean_set_output(
                 "boolean-set processing requires L0 inputs",
             )
         sources.append(source)
+        if source.raw_unit is not None:
+            failure_reason = failure_reason or "UNIT_MISMATCH"
+            continue
         if source.value.kind is not ValueKind.INT or not isinstance(
             source.value.value, int
         ) or isinstance(source.value.value, bool):

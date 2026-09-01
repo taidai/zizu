@@ -8,6 +8,10 @@ import {
 type TimeRange = '1h' | '24h' | '7d' | 'all'
 
 const PAGE_SIZE = 20
+const formatRawScalar = (value: number | boolean | string | null) => {
+  if (value === null) return '—'
+  return typeof value === 'number' ? value.toFixed(2) : String(value)
+}
 
 export default function DataBrowser() {
   const [nodes, setNodes] = useState<Node[]>([])
@@ -165,7 +169,7 @@ export default function DataBrowser() {
                     <td className="px-2 py-1.5 text-gray-700">{p.node_name}</td>
                     <td className="px-2 py-1.5 text-gray-700">{p.tag_name}</td>
                     <td className="px-2 py-1.5 text-right text-gray-700 font-mono">
-                      {p.raw_value !== null ? p.raw_value.toFixed(2) : '—'}
+                      {formatRawScalar(p.raw_value)}
                     </td>
                     <td className="px-2 py-1.5 text-right text-[#389e0d] font-mono font-medium">
                       {p.eng_value !== null ? p.eng_value.toFixed(2) : '—'}

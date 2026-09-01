@@ -66,6 +66,40 @@ def _output_id(revision_id: UUID, output_key: str) -> UUID:
     )
 
 
+def _transform_input_references(transform: Any) -> set[Any]:
+    """Return every runtime source a transform needs during trial evaluation."""
+    from app.services.data_trunk_contracts import (
+        BooleanMapTransform,
+        BooleanSetTransform,
+        EnumTransform,
+        FaultCodeTransform,
+        FormulaTransform,
+        NumericTransform,
+        PassthroughTransform,
+    )
+
+    if isinstance(
+        transform,
+        (
+            PassthroughTransform,
+            BooleanMapTransform,
+            NumericTransform,
+            EnumTransform,
+            FaultCodeTransform,
+        ),
+    ):
+        return {transform.input}
+    if isinstance(transform, BooleanSetTransform):
+        return {entry.input for entry in transform.inputs}
+    if isinstance(transform, FormulaTransform):
+        return {
+            reference
+            for values in transform.sources.values()
+            for reference in values
+        }
+    return set()
+
+
 def _supports_processing_scope(cursor: Any) -> bool:
     """Keep the shared adapter usable during Schema 042 upgrade rehearsals."""
     cursor.execute(
@@ -2211,13 +2245,8 @@ class PostgresPointProcessingTrialEvaluator:
         catalog: PointProcessingCatalog,
     ) -> PointProcessingTrial:
         from app.services.data_trunk_contracts import (
-            BooleanSetTransform,
-            EnumTransform,
-            FaultCodeTransform,
-            FormulaTransform,
             InputReference,
             L2Observation,
-            NumericTransform,
             RawObservation,
             TrunkQuality,
             ValueKind,
@@ -2230,17 +2259,7 @@ class PostgresPointProcessingTrialEvaluator:
         installed = trial_installed_processings(plan, catalog)
         references: set[InputReference] = set()
         for item in installed:
-            transform = item.transform
-            if isinstance(transform, (NumericTransform, EnumTransform, FaultCodeTransform)):
-                references.add(transform.input)
-            elif isinstance(transform, BooleanSetTransform):
-                references.update(entry.input for entry in transform.inputs)
-            elif isinstance(transform, FormulaTransform):
-                references.update(
-                    reference
-                    for values in transform.sources.values()
-                    for reference in values
-                )
+            references.update(_transform_input_references(item.transform))
         l0_ids = sorted(
             (item.source_id for item in references if item.source_kind == "l0"),
             key=str,
