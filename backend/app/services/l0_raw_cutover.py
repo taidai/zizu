@@ -126,7 +126,7 @@ def _inspect_plan(connection: Any) -> _CutoverPlan:
                 """
                 SELECT revision_id,output_key,id
                 FROM t_point_processing_outputs
-                WHERE revision_id=ANY(%s)
+                WHERE revision_id=ANY(%s::uuid[])
                 ORDER BY revision_id,output_key
                 """,
                 (list(revision_ids),),

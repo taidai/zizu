@@ -460,6 +460,15 @@ class PointProcessingPostgresTest(unittest.TestCase):
         old_installed_id = application.installed_processing_id
         old_application_id = application.id
 
+        uuid_as_text = psycopg2.extensions.new_type(
+            (2950,), "UUID_AS_TEXT", lambda value, _cursor: value
+        )
+        with psycopg2.connect(**self.connection_kwargs) as string_uuid_connection:
+            psycopg2.extensions.register_type(uuid_as_text, string_uuid_connection)
+            string_uuid_report = inspect_cutover(string_uuid_connection)
+        self.assertFalse(string_uuid_report.blockers)
+        self.assertEqual(1, len(string_uuid_report.deterministic_output_ids))
+
         with get_connection() as connection:
             report = inspect_cutover(connection)
             self.assertFalse(report.blockers)
