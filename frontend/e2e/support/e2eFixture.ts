@@ -9,7 +9,8 @@ import {
 
 const execFileAsync = promisify(execFile)
 
-export type FixtureCommand = 'preflight' | 'setup' | 'publish' | 'ensure-rule' | 'cleanup'
+export type FixtureCommand = 'preflight' | 'setup' | 'ensure-rule' | 'cleanup'
+export type FixtureScalar = number | string | boolean
 
 export function fixtureNames(
   environment = buildAcceptanceEnvironment(process.env),
@@ -21,20 +22,25 @@ export function fixtureNames(
     neuronNode: `zizu_e2e_${neuronRunId}`,
     neuronGroup: 'e2e_data',
     neuronTag: 'e2e_active_power',
+    bitTag: 'e2e_fault_bit',
   }
 }
 
-export async function runFixture(
-  command: FixtureCommand,
-  value?: number,
+export function encodeFixtureScalar(value: FixtureScalar): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new Error('E2E fixture only accepts finite numeric values')
+  }
+  return JSON.stringify(value)
+}
+
+async function executeFixture(
+  command: FixtureCommand | 'publish',
+  extraArguments: string[],
   environment = buildAcceptanceEnvironment(process.env),
 ) {
   const repositoryRoot = path.resolve(process.cwd(), '..')
   const script = path.join(repositoryRoot, 'backend', 'scripts', 'node_management_e2e_fixture.py')
-  const commandArguments = [script, command]
-  if (value !== undefined) {
-    commandArguments.push('--value', String(value))
-  }
+  const commandArguments = [script, command, ...extraArguments]
   try {
     const { stdout } = await execFileAsync('python', commandArguments, {
       cwd: repositoryRoot,
@@ -58,4 +64,23 @@ export async function runFixture(
       .split(environment.password).join('[REDACTED]')
     throw new Error(`E2E fixture ${command} failed: ${safe}`)
   }
+}
+
+export async function runFixture(
+  command: FixtureCommand,
+  environment = buildAcceptanceEnvironment(process.env),
+) {
+  return executeFixture(command, [], environment)
+}
+
+export async function publishRawPoint(
+  pointKey: string,
+  value: FixtureScalar,
+  environment = buildAcceptanceEnvironment(process.env),
+) {
+  return executeFixture(
+    'publish',
+    ['--point-key', pointKey, '--value-json', encodeFixtureScalar(value)],
+    environment,
+  )
 }

@@ -27,6 +27,7 @@ class FixtureNames:
     neuron_node: str
     neuron_group: str
     neuron_tag: str = "e2e_active_power"
+    bit_tag: str = "e2e_fault_bit"
 
 
 def build_resource_names(root: str, run_id: str) -> FixtureNames:
@@ -47,14 +48,23 @@ def build_resource_names(root: str, run_id: str) -> FixtureNames:
 def build_telemetry_payload(
     names: FixtureNames,
     *,
-    value: float,
+    value: int | float | str | bool,
+    point_key: str | None = None,
     timestamp_ms: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if not names.neuron_node.startswith("zizu_e2e_"):
         raise ValueError("refusing to publish a non-E2E Neuron source")
     observed_at = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
-    tags = {names.neuron_tag: value}
+    selected = names.neuron_tag if point_key is None else point_key
+    allowed = {item["name"] for item in build_neuron_tags(names)}
+    if selected not in allowed:
+        raise ValueError("refusing to publish a non-E2E point")
+    tags: dict[str, int | float | str | bool] = {
+        names.neuron_tag: 0.0,
+        names.bit_tag: 0,
+    }
     tags.update({f"e2e_spare_{index:03d}": 0.0 for index in range(1, 51)})
+    tags[selected] = value
     return (
         f"/neuron/{names.neuron_node}/telemetry",
         {
@@ -73,12 +83,18 @@ def build_neuron_tags(names: FixtureNames) -> list[dict[str, Any]]:
             "address": "1!400001",
             "attribute": 1,
             "type": 9,
-        }
+        },
+        {
+            "name": names.bit_tag,
+            "address": "1!400002",
+            "attribute": 1,
+            "type": 11,
+        },
     ]
     tags.extend(
         {
             "name": f"e2e_spare_{index:03d}",
-            "address": f"1!{400001 + index}",
+            "address": f"1!{400002 + index}",
             "attribute": 1,
             "type": 9,
         }
@@ -217,9 +233,9 @@ def ensure_rule() -> dict[str, Any]:
     return {"status": "created", "rule_id": str(created["id"]), "rule_name": rule_name}
 
 
-def publish(value: float) -> dict[str, Any]:
+def publish(point_key: str, value: int | float | str | bool) -> dict[str, Any]:
     names = _environment_names()
-    topic, payload = build_telemetry_payload(names, value=value)
+    topic, payload = build_telemetry_payload(names, point_key=point_key, value=value)
     host = _mqtt_host()
     if not host:
         raise RuntimeError("ZIZU_E2E_MQTT_HOST is required")
@@ -249,6 +265,7 @@ def publish(value: float) -> dict[str, Any]:
     return {
         "status": "published",
         "topic": topic,
+        "point_key": point_key,
         "value": value,
         "transport": transport,
     }
@@ -457,19 +474,30 @@ def main() -> int:
         "command",
         choices=("preflight", "setup", "publish", "ensure-rule", "cleanup"),
     )
-    parser.add_argument("--value", type=float, default=12.5)
+    parser.add_argument("--point-key", default="e2e_active_power")
+    parser.add_argument("--value-json", default="12.5")
     arguments = parser.parse_args()
     if os.environ.get("ZIZU_E2E_ALLOW_LIVE_WRITES") != "1":
         raise RuntimeError("ZIZU_E2E_ALLOW_LIVE_WRITES must be 1")
     action = {
         "preflight": preflight,
         "setup": setup,
-        "publish": lambda: publish(arguments.value),
+        "publish": lambda: publish(arguments.point_key, _parse_scalar(arguments.value_json)),
         "ensure-rule": ensure_rule,
         "cleanup": cleanup,
     }[arguments.command]
     print(json.dumps(action(), ensure_ascii=False))
     return 0
+
+
+def _parse_scalar(raw: str) -> int | float | str | bool:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("--value-json must contain one JSON scalar") from error
+    if value is None or not isinstance(value, (int, float, str, bool)):
+        raise ValueError("--value-json must contain one JSON scalar")
+    return value
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { fixtureNames } from './e2eFixture.ts'
+import { encodeFixtureScalar, fixtureNames } from './e2eFixture.ts'
 
 
 test('fixture names use the one acceptance run id supplied by the suite', () => {
@@ -16,5 +16,13 @@ test('fixture names use the one acceptance run id supplied by the suite', () => 
     neuronNode: 'zizu_e2e_fixed_run_id',
     neuronGroup: 'e2e_data',
     neuronTag: 'e2e_active_power',
+    bitTag: 'e2e_fault_bit',
   })
+})
+
+test('fixture scalar encoding preserves numbers, booleans, and strings', () => {
+  assert.deepEqual(
+    [0, 1, 2, false, true, '0', '1'].map(encodeFixtureScalar),
+    ['0', '1', '2', 'false', 'true', '"0"', '"1"'],
+  )
 })

@@ -1,7 +1,7 @@
 import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 
 import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
-import { fixtureNames, runFixture } from './support/e2eFixture'
+import { fixtureNames, publishRawPoint, runFixture } from './support/e2eFixture'
 
 const CONFIGURATION_CHANGE_TIMEOUT_MS = 40_000
 const POINT_PROCESSING_DEVICE_CATEGORY = 'E2E_DEVICE'
@@ -9,12 +9,17 @@ const POINT_PROCESSING_DEVICE_CATEGORY = 'E2E_DEVICE'
 test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
   const names = fixtureNames(environment)
-  const fixture = (command: Parameters<typeof runFixture>[0], value?: number) => (
-    runFixture(command, value, environment)
+  const fixture = (command: Parameters<typeof runFixture>[0]) => (
+    runFixture(command, environment)
+  )
+  const publish = (pointKey: string, value: Parameters<typeof publishRawPoint>[1]) => (
+    publishRawPoint(pointKey, value, environment)
   )
   const editedPlatformNode = `${names.platformNode}-已编辑`
   const entityDisplayName = `E2E有功功率-${environment.runId}`
   const entityDefinitionKey = `e2e.active_power_${environment.runId.replaceAll('-', '_')}`
+  const bitEntityDisplayName = `E2E故障状态-${environment.runId}`
+  const bitEntityDefinitionKey = `e2e.fault_state_${environment.runId.replaceAll('-', '_')}`
   let context: BrowserContext
   let page: Page
 
@@ -127,11 +132,11 @@ test.describe.serial('节点管理主干', () => {
     })
     await modal.getByRole('button', { name: '确认导入' }).click()
     const dialog = await importDialog
-    expect(dialog.message()).toMatch(/导入完成：新增 51 个/)
+    expect(dialog.message()).toMatch(/导入完成：新增 52 个/)
     await dialog.accept()
     await expect(modal).toBeHidden()
 
-    await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible()
+    await expect(page.getByText('共 52 个点位', { exact: true })).toBeVisible()
     await expect(page.getByText('第 1 / 2 页', { exact: true })).toBeVisible()
     await expect(page.getByRole('region', { name: '数据链路' })).toBeVisible()
     await Promise.all([
@@ -149,7 +154,7 @@ test.describe.serial('节点管理主干', () => {
     const realtimeRow = page.getByRole('row').filter({ hasText: names.neuronTag })
     await expect(realtimeRow).toBeVisible()
 
-    await fixture('publish', 12.5)
+    await publish(names.neuronTag, 12.5)
     await expect(realtimeRow).toContainText('12.5', { timeout: 15_000 })
     await expect(realtimeRow).toContainText('正常')
     await expect(realtimeRow).toContainText(
@@ -209,10 +214,9 @@ test.describe.serial('节点管理主干', () => {
     const editor = page.getByLabel('加工为实体')
     await editor.getByLabel('实体名称').fill(entityDisplayName)
     await editor.getByLabel('加工方法').selectOption('passthrough')
-    await editor.getByLabel('单位').fill('kW')
     await editor.getByText('高级设置', { exact: true }).click()
     await editor.getByLabel('业务标识').fill(entityDefinitionKey)
-    await editor.getByLabel('结果类型').selectOption('FLOAT')
+    await expect(editor.getByLabel('结果类型')).toHaveValue('FLOAT')
     await editor.getByLabel('超时秒数').fill('30')
 
     await editor.getByRole('button', { name: '检查结果', exact: true }).click()
@@ -225,7 +229,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await fixture('publish', 13.5)
+    await publish(names.neuronTag, 13.5)
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
@@ -267,7 +271,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await fixture('publish', 14.5)
+    await publish(names.neuronTag, 14.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '14.5',
       { timeout: 15_000 },
@@ -283,7 +287,7 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
-    await fixture('publish', 15.5)
+    await publish(names.neuronTag, 15.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '15.5',
       { timeout: 15_000 },
@@ -297,7 +301,7 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await expect(page.getByText('当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。', { exact: true })).toBeVisible()
-    await fixture('publish', 16.5)
+    await publish(names.neuronTag, 16.5)
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
     await page.getByPlaceholder('搜索点位名称').fill(names.neuronTag)
     await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toContainText(
@@ -311,7 +315,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await fixture('publish', 17.5)
+    await publish(names.neuronTag, 17.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '17.5',
       { timeout: 15_000 },
@@ -340,6 +344,71 @@ test.describe.serial('节点管理主干', () => {
     })
   })
 
+  test('BIT 原值 0/1/2 沿 L0、点位加工、L2 到告警选择保持明确', async () => {
+    test.setTimeout(180_000)
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByRole('button', { name: '实时', exact: true }).click()
+    await page.getByLabel('数据类型').selectOption('INT')
+    await page.getByPlaceholder('搜索点位名称').fill(names.bitTag)
+    const rawRow = page.getByRole('row').filter({ hasText: names.bitTag })
+    await expect(rawRow).toBeVisible()
+
+    await publish(names.bitTag, 0)
+    await expect(rawRow).toContainText('0', { timeout: 15_000 })
+    await expect(rawRow).toContainText('BIT')
+    await expect(rawRow).toContainText('正常')
+
+    await page.getByRole('checkbox', { name: `选择 ${names.bitTag}` }).check()
+    await page.getByRole('button', { name: '加工为实体', exact: true }).click()
+    const editor = page.getByLabel('加工为实体')
+    await expect(editor.getByLabel('加工方法')).toHaveValue('boolean_map')
+    await expect(editor.getByLabel('结果类型')).toHaveValue('BOOL')
+    await expect(editor).toContainText('原值等于 1 → 实体值 false')
+    await editor.getByLabel('实体名称').fill(bitEntityDisplayName)
+    await editor.getByText('高级设置', { exact: true }).click()
+    await editor.getByLabel('业务标识').fill(bitEntityDefinitionKey)
+    await editor.getByRole('button', { name: '检查结果', exact: true }).click()
+    await expect(editor.getByText('检查通过，可以发布。', { exact: true })).toBeVisible()
+    await expect(editor.getByText('当前试算结果', { exact: true })).toBeVisible()
+    await expect(editor).toContainText('false')
+    await editor.getByRole('button', { name: '发布实体', exact: true }).click()
+    await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+
+    await publish(names.bitTag, 1)
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    const bitEntity = page.getByRole('button', { name: new RegExp(bitEntityDisplayName) })
+    await expect(bitEntity).toContainText('true', { timeout: 15_000 })
+    await expect(bitEntity).toContainText('正常')
+    await bitEntity.click()
+    await expect(page.getByRole('region', { name: '实体来源' })).toContainText(names.bitTag)
+
+    await publish(names.bitTag, 2)
+    await expect(bitEntity).toContainText('上次值 true', { timeout: 15_000 })
+    await expect(bitEntity).toContainText('无效')
+    await expect(page.getByText('当前不可用', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByLabel('数据类型').selectOption('INT')
+    await page.getByPlaceholder('搜索点位名称').fill(names.bitTag)
+    await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText('2', {
+      timeout: 15_000,
+    })
+    await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText('无效')
+    await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText(
+      '设备返回的 BIT 值不是 0 或 1',
+    )
+
+    await page.getByRole('button', { name: '告警中心' }).click()
+    await page.getByRole('button', { name: '状态', exact: true }).click()
+    await expect(page.locator('label').filter({ hasText: bitEntityDisplayName })).toBeVisible()
+
+    await page.getByRole('button', { name: '节点管理' }).click()
+    await page.getByPlaceholder('搜索节点...').fill(editedPlatformNode)
+    await nodeTree(page).getByTitle(editedPlatformNode).click()
+  })
+
   test('读取失败必须可见，临时节点最终退役', async () => {
     test.setTimeout(180_000)
     await page.route('**/api/v1/tags?**', async (route) => route.abort('failed'))
@@ -349,7 +418,7 @@ test.describe.serial('节点管理主干', () => {
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
-    await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible()
+    await expect(page.getByText('共 52 个点位', { exact: true })).toBeVisible()
 
     await page.getByPlaceholder('搜索点位名称').fill('e2e_spare_050')
     await page.getByRole('checkbox', { name: '选择 e2e_spare_050' }).check()
@@ -365,7 +434,7 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await page.getByPlaceholder('搜索点位名称').fill('')
-    await expect(page.getByText('共 50 个点位', { exact: true })).toBeVisible({
+    await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await expect(page.getByText('e2e_spare_050', { exact: true })).toHaveCount(0)

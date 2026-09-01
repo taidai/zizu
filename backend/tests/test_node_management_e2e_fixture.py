@@ -107,6 +107,7 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         self.assertEqual("zizu_e2e_20260830T120000Z", names.neuron_node)
         self.assertEqual("e2e_data", names.neuron_group)
         self.assertEqual("e2e_active_power", names.neuron_tag)
+        self.assertEqual("e2e_fault_bit", names.bit_tag)
 
     def test_resource_names_reject_non_e2e_root_and_unsafe_run_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "E2E验证"):
@@ -133,22 +134,39 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         self.assertEqual(names.neuron_node, payload["node_name"])
         self.assertEqual(names.neuron_group, payload["group"])
         self.assertEqual(1_777_777_777_000, payload["timestamp"])
-        self.assertEqual(51, len(payload["tags"]))
+        self.assertEqual(52, len(payload["tags"]))
         self.assertEqual(12.5, payload["tags"]["e2e_active_power"])
+        self.assertEqual(0, payload["tags"]["e2e_fault_bit"])
         self.assertEqual(0.0, payload["tags"]["e2e_spare_050"])
 
-    def test_neuron_catalog_has_two_pages_without_touching_real_points(self) -> None:
+    def test_neuron_catalog_has_float_and_raw_bit_points_without_touching_real_points(self) -> None:
         names = build_resource_names("E2E验证", "20260830T120000Z")
         tags = build_neuron_tags(names)
 
-        self.assertEqual(51, len(tags))
+        self.assertEqual(52, len(tags))
         self.assertEqual(
             {"name": names.neuron_tag, "address": "1!400001", "attribute": 1, "type": 9},
             tags[0],
         )
-        self.assertTrue(all(tag["type"] == 9 for tag in tags))
+        self.assertEqual(
+            {"name": names.bit_tag, "address": "1!400002", "attribute": 1, "type": 11},
+            tags[1],
+        )
         self.assertEqual("e2e_spare_050", tags[-1]["name"])
-        self.assertEqual(51, len({tag["address"] for tag in tags}))
+        self.assertEqual(52, len({tag["address"] for tag in tags}))
+
+    def test_telemetry_payload_preserves_the_selected_raw_scalar_type(self) -> None:
+        names = build_resource_names("E2E验证", "20260830T120000Z")
+
+        for value in (0, 1, 2, False, True, "0", "1"):
+            with self.subTest(value=value, scalar_type=type(value).__name__):
+                _topic, payload = build_telemetry_payload(
+                    names,
+                    point_key=names.bit_tag,
+                    value=value,
+                )
+                self.assertEqual(value, payload["tags"][names.bit_tag])
+                self.assertIs(type(value), type(payload["tags"][names.bit_tag]))
 
     @patch.dict(
         "os.environ",
@@ -193,7 +211,7 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
     ) -> None:
         mqtt_client.return_value.connect.side_effect = ConnectionRefusedError("private broker")
 
-        result = publish(15.25)
+        result = publish("e2e_active_power", 15.25)
 
         self.assertEqual("published", result["status"])
         self.assertEqual("ssh", result["transport"])
