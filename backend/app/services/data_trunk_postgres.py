@@ -1351,33 +1351,43 @@ class PostgresFrameRepository:
     ) -> None:
         if not observations:
             return
-        rows = [
-            (
-                str(observation.entity_instance_id),
-                str(observation.event_id),
-                observation.observed_at,
-                observation.received_at,
-                observation.calculated_at,
-                *_l2_columns(observation.value),
-                int(observation.quality),
-                observation.reason,
-                str(observation.processing_revision_id),
-                observation.configuration_revision,
-                observation.source_digest,
-                observation.source_order_key,
-                str(RUNTIME_INSTANCE_ID),
-                observation.event_time_basis,
-                observation.frame_sequence,
+        rows = []
+        for observation in observations:
+            typed_columns = _l2_columns(observation.value)
+            has_current_good_value = (
+                observation.quality is TrunkQuality.GOOD
+                and sum(value is not None for value in typed_columns) == 1
             )
-            for observation in observations
-        ]
+            retained_columns = (
+                typed_columns if has_current_good_value else (None,) * 6
+            )
+            rows.append(
+                (
+                    str(observation.entity_instance_id),
+                    str(observation.event_id),
+                    observation.observed_at,
+                    observation.received_at,
+                    observation.calculated_at,
+                    observation.observed_at if has_current_good_value else None,
+                    *retained_columns,
+                    int(observation.quality),
+                    observation.reason,
+                    str(observation.processing_revision_id),
+                    observation.configuration_revision,
+                    observation.source_digest,
+                    observation.source_order_key,
+                    str(RUNTIME_INSTANCE_ID),
+                    observation.event_time_basis,
+                    observation.frame_sequence,
+                )
+            )
         execute_values(
             cursor,
             """
             INSERT INTO t_l2_latest
               (entity_instance_id,event_id,observed_at,received_at,
-               calculated_at,value_float,value_int,value_numeric,value_bool,
-               value_text,value_codes,quality,reason,processing_revision_id,
+               calculated_at,value_observed_at,value_float,value_int,
+               value_numeric,value_bool,value_text,value_codes,quality,reason,processing_revision_id,
                configuration_revision,source_digest,source_order_key,
                producing_runtime_instance_id,event_time_basis,frame_sequence)
             VALUES %s
@@ -1385,10 +1395,21 @@ class PostgresFrameRepository:
               event_id=EXCLUDED.event_id,observed_at=EXCLUDED.observed_at,
               received_at=EXCLUDED.received_at,
               calculated_at=EXCLUDED.calculated_at,
-              value_float=EXCLUDED.value_float,value_int=EXCLUDED.value_int,
-              value_numeric=EXCLUDED.value_numeric,
-              value_bool=EXCLUDED.value_bool,value_text=EXCLUDED.value_text,
-              value_codes=EXCLUDED.value_codes,quality=EXCLUDED.quality,
+              value_observed_at=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_observed_at ELSE t_l2_latest.value_observed_at END,
+              value_float=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_float ELSE t_l2_latest.value_float END,
+              value_int=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_int ELSE t_l2_latest.value_int END,
+              value_numeric=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_numeric ELSE t_l2_latest.value_numeric END,
+              value_bool=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_bool ELSE t_l2_latest.value_bool END,
+              value_text=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_text ELSE t_l2_latest.value_text END,
+              value_codes=CASE WHEN EXCLUDED.quality=192 AND EXCLUDED.value_observed_at IS NOT NULL
+                THEN EXCLUDED.value_codes ELSE t_l2_latest.value_codes END,
+              quality=EXCLUDED.quality,
               reason=EXCLUDED.reason,
               processing_revision_id=EXCLUDED.processing_revision_id,
               configuration_revision=EXCLUDED.configuration_revision,
@@ -1402,7 +1423,7 @@ class PostgresFrameRepository:
             rows,
             template=(
                 "(%s::uuid,%s::uuid,%s::timestamptz,%s::timestamptz,"
-                "%s::timestamptz,%s::double precision,%s::bigint,%s::numeric,"
+                "%s::timestamptz,%s::timestamptz,%s::double precision,%s::bigint,%s::numeric,"
                 "%s::boolean,%s::text,%s::text[],%s::smallint,%s::text,"
                 "%s::uuid,%s::bigint,%s::char(64),%s::text,%s::uuid,"
                 "%s::text,%s::bigint)"

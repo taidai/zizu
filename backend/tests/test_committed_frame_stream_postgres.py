@@ -185,6 +185,7 @@ class _StaleSnapshotCursor:
                     "b" * 64,
                     1,
                     3.0,
+                    NOW,
                 )
             ]
         return []
@@ -312,6 +313,10 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
         self.assertEqual(int(TrunkQuality.STALE), snapshot.l2[0]["quality"])
         self.assertEqual("STALE", snapshot.l2[0]["reason"])
+        self.assertEqual(
+            NOW.isoformat().replace("+00:00", "Z"),
+            snapshot.l2[0]["value_observed_at"],
+        )
 
 
 class CommittedFrameLegacyProjectionTest(unittest.TestCase):

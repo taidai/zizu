@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import asyncio
 import os
 import unittest
 from uuid import UUID
@@ -17,10 +18,12 @@ from app.services.entity_instance_registry import (
     ResolvedEntitySource,
 )
 from app.services.entity_instance_runtime import (
+    EntityInstanceObservation,
     EntityInstanceRuntime,
     InMemoryObservationCatalog,
     SourceObservation,
 )
+from app.api.entity_instances import read_entity_instance_realtime
 
 
 ENTITY_ID = UUID("87000000-0000-0000-0000-000000000001")
@@ -142,7 +145,9 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
         self.assertEqual(latest.source_kind, "point_processing")
         self.assertEqual(latest.processing_revision_id, REVISION_ID)
         self.assertEqual(latest.event_id, second_event)
+        self.assertEqual(now, latest.value_observed_at)
         self.assertEqual(len(history), 2)
+        self.assertEqual(now - timedelta(seconds=2), history[0].value_observed_at)
 
     def test_missing_l2_does_not_fall_back_to_a_legacy_value(self) -> None:
         unrelated_legacy_tag = UUID("87000000-0000-0000-0000-000000000099")
@@ -157,6 +162,64 @@ class EntityInstanceL2RuntimeTest(unittest.TestCase):
         with self.assertRaises(EntityInstanceError) as raised:
             self.runtime.read(ENTITY_ID)
         self.assertEqual(raised.exception.code, "ENTITY_DATA_MISSING")
+
+    def test_bad_latest_keeps_last_good_value_time_but_remains_unusable(self) -> None:
+        value_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        bad_at = datetime.now(timezone.utc)
+        self.observations.publish(
+            SourceObservation(
+                ENTITY_ID,
+                bad_at,
+                12.345,
+                0,
+                reason="TYPE_MISMATCH",
+                value_observed_at=value_at,
+            )
+        )
+
+        status = self.runtime.read_for_alarm(ENTITY_ID)
+
+        self.assertEqual(12.345, status.value)
+        self.assertEqual(value_at, status.value_observed_at)
+        self.assertEqual(bad_at, status.observed_at)
+        self.assertFalse(status.quality_good)
+        with self.assertRaises(EntityInstanceError) as raised:
+            self.runtime.read(ENTITY_ID)
+        self.assertEqual("ENTITY_DATA_QUALITY_BAD", raised.exception.code)
+
+    def test_realtime_api_returns_bad_status_instead_of_hiding_it_as_conflict(self) -> None:
+        observed_at = datetime.now(timezone.utc)
+        value_observed_at = observed_at - timedelta(seconds=1)
+        status = EntityInstanceObservation(
+            entity_instance_id=ENTITY_ID,
+            definition_id="pcs.active_power",
+            node_id=NODE_ID,
+            node_key="PCS-01",
+            value=12.345,
+            data_type="FLOAT",
+            unit="kW",
+            observed_at=observed_at,
+            quality=0,
+            age_ms=0,
+            fresh=True,
+            quality_good=False,
+            value_observed_at=value_observed_at,
+        )
+
+        class _StatusRuntime:
+            def read(self, _entity_id):
+                raise AssertionError("presentation API must not hide BAD status")
+
+            def read_for_alarm(self, _entity_id):
+                return status
+
+        payload = asyncio.run(
+            read_entity_instance_realtime(ENTITY_ID, runtime=_StatusRuntime())
+        )
+
+        self.assertEqual(0, payload["quality"])
+        self.assertEqual(12.345, payload["value"])
+        self.assertEqual(value_observed_at.isoformat(), payload["value_observed_at"])
 
 if __name__ == "__main__":
     unittest.main()

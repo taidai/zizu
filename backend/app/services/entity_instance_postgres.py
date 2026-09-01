@@ -629,7 +629,8 @@ class PostgresObservationCatalog:
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
                                processing_revision_id,
-                               configuration_revision, source_digest
+                               configuration_revision, source_digest,
+                               value_observed_at
                         FROM t_l2_latest WHERE entity_instance_id = %s
                         """,
                         (source.source_id,),
@@ -640,7 +641,8 @@ class PostgresObservationCatalog:
                         SELECT tag_id, ts, value_float, value_int, value_bool,
                                value_str, NULL::text[], quality, NULL::uuid,
                                NULL::text, NULL::timestamptz, NULL::timestamptz,
-                               NULL::uuid, NULL::bigint, NULL::text
+                               NULL::uuid, NULL::bigint, NULL::text,
+                               ts
                         FROM t_telemetry_latest WHERE tag_id = %s
                         """,
                         (source.tag_id,),
@@ -652,6 +654,7 @@ class PostgresObservationCatalog:
         return SourceObservation(
             row[0], row[1], value, row[7], row[8], row[9], row[10], row[11],
             row[12], row[13], row[14].strip() if row[14] else None,
+            row[15],
         )
 
     def history(self, source, range_key: str) -> list[SourceObservation]:
@@ -668,7 +671,8 @@ class PostgresObservationCatalog:
                                value_codes, quality, event_id, reason,
                                received_at, calculated_at,
                                processing_revision_id,
-                               configuration_revision, source_digest
+                               configuration_revision, source_digest,
+                               CASE WHEN quality=192 THEN observed_at END
                         FROM t_l2_observations
                         WHERE entity_instance_id = %s
                           AND observed_at > NOW() - %s::interval
@@ -682,7 +686,8 @@ class PostgresObservationCatalog:
                         SELECT tag_id, ts, value_float, value_int, value_bool,
                                value_str, NULL::text[], quality, NULL::uuid,
                                NULL::text, NULL::timestamptz, NULL::timestamptz,
-                               NULL::uuid, NULL::bigint, NULL::text
+                               NULL::uuid, NULL::bigint, NULL::text,
+                               CASE WHEN quality=192 THEN ts END
                         FROM t_telemetry
                         WHERE tag_id = %s AND ts > NOW() - %s::interval
                         ORDER BY ts ASC LIMIT 2000
@@ -696,6 +701,7 @@ class PostgresObservationCatalog:
                 next((candidate for candidate in row[2:7] if candidate is not None), None),
                 row[7], row[8], row[9], row[10], row[11], row[12], row[13],
                 row[14].strip() if row[14] else None,
+                row[15],
             )
             for row in rows
         ]

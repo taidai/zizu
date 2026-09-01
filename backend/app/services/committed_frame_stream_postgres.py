@@ -398,7 +398,7 @@ class PostgresCommittedFrameStreamRepository:
                    latest.received_at,latest.calculated_at,
                    latest.processing_revision_id,latest.configuration_revision,
                    latest.source_digest,latest.frame_sequence,
-                   entity.freshness_seconds
+                   entity.freshness_seconds,latest.value_observed_at
             FROM t_entity_instances AS entity
             LEFT JOIN t_l2_latest AS latest
               ON latest.entity_instance_id=entity.id
@@ -450,6 +450,7 @@ class PostgresCommittedFrameStreamRepository:
                     ),
                     "reason": effective_reason,
                     "observed_at": _optional_iso(row[14]),
+                    "value_observed_at": _optional_iso(row[22]),
                     "received_at": _optional_iso(row[15]),
                     "calculated_at": _optional_iso(row[16]),
                     "processing_revision_id": (

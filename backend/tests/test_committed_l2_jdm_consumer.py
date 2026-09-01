@@ -203,6 +203,10 @@ class CommittedL2JdmConsumerTest(unittest.IsolatedAsyncioTestCase):
         cases = (
             ((), "JDM_INPUT_MISSING"),
             ((_change(quality=TrunkQuality.STALE),), "JDM_INPUT_QUALITY_NOT_GOOD"),
+            (
+                (_change(value=999.0, quality=TrunkQuality.BAD),),
+                "JDM_INPUT_QUALITY_NOT_GOOD",
+            ),
             ((_change(observed_at=None),), "JDM_INPUT_TIMESTAMP_MISSING"),
         )
         for changes, expected in cases:

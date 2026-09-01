@@ -49,6 +49,7 @@ class AlarmRuntimeTest(unittest.TestCase):
         value: object,
         after_seconds: int,
         max_observation_gap_seconds: float | None = None,
+        quality: int = 192,
     ):
         return self.runtime.submit(
             self.observation_type(
@@ -56,7 +57,7 @@ class AlarmRuntimeTest(unittest.TestCase):
                 entity_instance_id=ENTITY_INSTANCE_ID,
                 observed_at=self.started_at + timedelta(seconds=after_seconds),
                 value=value,
-                quality=192,
+                quality=quality,
                 source_kind="entity",
                 source_ref="PCS-01.activePower",
                 evidence={"sample": after_seconds},
@@ -90,6 +91,13 @@ class AlarmRuntimeTest(unittest.TestCase):
         self.assertFalse(repeated.notification_created)
         self.assertEqual(1, len(self.repository.active_events()))
         self.assertEqual(1, len(self.repository.notifications()))
+
+    def test_retained_fault_value_with_bad_quality_does_not_trigger_alarm(self) -> None:
+        bad = self.observe(value=101, after_seconds=0, quality=0)
+
+        self.assertEqual("normal", bad.state)
+        self.assertEqual("ALARM_NORMAL", bad.code)
+        self.assertEqual((), self.repository.active_events())
 
     def test_acknowledgement_keeps_event_active_until_recovery_is_stable(self) -> None:
         from app.services.alarm_runtime import AcknowledgeAlarm

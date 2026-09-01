@@ -36,6 +36,7 @@ class SourceObservation:
     processing_revision_id: UUID | None = None
     configuration_revision: int | None = None
     source_digest: str | None = None
+    value_observed_at: datetime | None = None
 
 
 class ObservationCatalog(Protocol):
@@ -146,6 +147,7 @@ class EntityInstanceObservation:
     processing_revision_id: UUID | None = None
     configuration_revision: int | None = None
     source_digest: str | None = None
+    value_observed_at: datetime | None = None
 
     def source_evidence(self) -> dict[str, Any]:
         """Return the one source identity every upper-layer consumer records."""
@@ -171,6 +173,11 @@ class EntityInstanceObservation:
             "data_type": self.data_type,
             "unit": self.unit,
             "observed_at": self.observed_at.isoformat(),
+            "value_observed_at": (
+                self.value_observed_at.isoformat()
+                if self.value_observed_at
+                else None
+            ),
             "quality": self.quality,
             "age_ms": self.age_ms,
             "fresh": self.fresh,
@@ -253,6 +260,14 @@ class EntityInstanceRuntime:
             processing_revision_id=observation.processing_revision_id,
             configuration_revision=observation.configuration_revision,
             source_digest=observation.source_digest,
+            value_observed_at=(
+                observation.value_observed_at
+                or (
+                    observed_at
+                    if observation.quality == 192 and observation.value is not None
+                    else None
+                )
+            ),
         )
 
     def history(self, entity_instance_id: UUID, range_key: str) -> list[EntityInstanceObservation]:
@@ -281,6 +296,14 @@ class EntityInstanceRuntime:
                 processing_revision_id=item.processing_revision_id,
                 configuration_revision=item.configuration_revision,
                 source_digest=item.source_digest,
+                value_observed_at=(
+                    item.value_observed_at
+                    or (
+                        item.observed_at
+                        if item.quality == 192 and item.value is not None
+                        else None
+                    )
+                ),
             )
             for item in self._observations.history(resolved, range_key)
         ]

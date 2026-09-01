@@ -18,6 +18,7 @@ from app.services.data_trunk_contracts import (
 )
 from app.services.data_trunk_outbox import (
     CommittedL0Change,
+    CommittedL2Change,
     CommittedFrameFanout,
     FrameOutboxDispatcher,
     FrameOutboxEvent,
@@ -92,6 +93,23 @@ class _FailingPublisher:
 
 
 class DataFrameOutboxTest(unittest.IsolatedAsyncioTestCase):
+    def test_l2_retained_value_time_survives_public_payload_round_trip(self) -> None:
+        change = CommittedL2Change(
+            entity_instance_id=uuid4(),
+            event_id=uuid4(),
+            value=TypedValue.boolean(False),
+            quality=TrunkQuality.BAD,
+            reason="TYPE_MISMATCH",
+            observed_at=NOW + timedelta(seconds=1),
+            value_observed_at=NOW,
+        )
+
+        restored = CommittedL2Change.from_public_dict(change.public_dict())
+
+        self.assertEqual(TypedValue.boolean(False), restored.value)
+        self.assertEqual(TrunkQuality.BAD, restored.quality)
+        self.assertEqual(NOW, restored.value_observed_at)
+
     def test_l0_quality_reason_survives_public_payload_round_trip(self) -> None:
         change = CommittedL0Change(
             tag_id=uuid4(),

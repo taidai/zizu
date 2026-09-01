@@ -83,6 +83,7 @@ class CommittedL2Change:
     node_id: UUID | None = None
     unit: str | None = None
     observed_at: datetime | None = None
+    value_observed_at: datetime | None = None
     received_at: datetime | None = None
     calculated_at: datetime | None = None
     processing_revision_id: UUID | None = None
@@ -99,6 +100,7 @@ class CommittedL2Change:
             "quality": int(self.quality),
             "reason": self.reason,
             "observed_at": _optional_utc_iso(self.observed_at),
+            "value_observed_at": _optional_utc_iso(self.value_observed_at),
             "received_at": _optional_utc_iso(self.received_at),
             "calculated_at": _optional_utc_iso(self.calculated_at),
             "processing_revision_id": (
@@ -120,6 +122,9 @@ class CommittedL2Change:
             node_id=_optional_uuid(payload.get("node_id")),
             unit=_optional_string(payload.get("unit")),
             observed_at=_optional_datetime(payload.get("observed_at")),
+            value_observed_at=_optional_datetime(
+                payload.get("value_observed_at")
+            ),
             received_at=_optional_datetime(payload.get("received_at")),
             calculated_at=_optional_datetime(payload.get("calculated_at")),
             processing_revision_id=_optional_uuid(
@@ -577,18 +582,35 @@ class PostgresFrameOutboxRepository:
         cursor.execute(
             """
             SELECT observation.entity_instance_id,observation.event_id,
-                   entity.data_type,observation.value_float,
-                   observation.value_int,observation.value_numeric,
-                   observation.value_bool,observation.value_text,
-                   observation.value_codes,observation.quality,
+                   entity.data_type,baseline.value_float,
+                   baseline.value_int,baseline.value_numeric,
+                   baseline.value_bool,baseline.value_text,
+                   baseline.value_codes,observation.quality,
                    observation.reason,entity.node_id,entity.unit,
                    observation.observed_at,observation.received_at,
                    observation.calculated_at,
                    observation.processing_revision_id,
-                   observation.source_digest
+                   observation.source_digest,baseline.observed_at
             FROM t_l2_observations AS observation
             JOIN t_entity_instances AS entity
               ON entity.id=observation.entity_instance_id
+            LEFT JOIN LATERAL (
+              SELECT candidate.value_float,candidate.value_int,
+                     candidate.value_numeric,candidate.value_bool,
+                     candidate.value_text,candidate.value_codes,
+                     candidate.observed_at
+              FROM t_l2_observations AS candidate
+              WHERE candidate.entity_instance_id=observation.entity_instance_id
+                AND candidate.commit_sequence <= observation.commit_sequence
+                AND candidate.quality=192
+                AND num_nonnulls(
+                  candidate.value_float,candidate.value_int,
+                  candidate.value_numeric,candidate.value_bool,
+                  candidate.value_text,candidate.value_codes
+                )=1
+              ORDER BY candidate.commit_sequence DESC,candidate.observed_at DESC
+              LIMIT 1
+            ) AS baseline ON TRUE
             WHERE observation.frame_id=%s
             ORDER BY observation.entity_instance_id
             """,
@@ -608,6 +630,7 @@ class PostgresFrameOutboxRepository:
                 calculated_at=row[15],
                 processing_revision_id=UUID(str(row[16])),
                 source_digest=str(row[17]).strip(),
+                value_observed_at=row[18],
             )
             for row in cursor.fetchall()
         )

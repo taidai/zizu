@@ -137,6 +137,8 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
             connection.autocommit = True
             with connection.cursor() as cursor:
                 self._reset_through_041(cursor)
+                self._apply_042(cursor)
+                self._apply_043(cursor)
                 self._apply_059(cursor)
                 cursor.execute(
                     "SELECT table_name,column_name FROM information_schema.columns "
@@ -167,6 +169,21 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
                     self.assertIn("raw_value_bool", normalized)
                     self.assertIn("= 1", normalized)
                     self.assertNotIn("t_tags", normalized)
+                cursor.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name='t_l2_latest' "
+                    "AND column_name='value_observed_at'"
+                )
+                self.assertEqual(("timestamp with time zone",), cursor.fetchone())
+                cursor.execute(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname='public' "
+                    "AND indexname='ix_l2_observations_entity_good_commit'"
+                )
+                index_definition = cursor.fetchone()
+                self.assertIsNotNone(index_definition)
+                self.assertIn("commit_sequence DESC", index_definition[0])
+                self.assertIn("quality = 192", index_definition[0])
 
     def test_schema_reset_retries_one_timescale_reporter_deadlock(self) -> None:
         class FakeConnection:

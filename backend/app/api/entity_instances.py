@@ -87,7 +87,7 @@ async def read_entity_instance_realtime(
     runtime: EntityInstanceRuntime = Depends(get_entity_instance_runtime),
 ) -> dict:
     try:
-        return runtime.read(entity_instance_id).public_dict()
+        return runtime.read_for_alarm(entity_instance_id).public_dict()
     except EntityInstanceError as exc:
         response_status = (
             status.HTTP_409_CONFLICT

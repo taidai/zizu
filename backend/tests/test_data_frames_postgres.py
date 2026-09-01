@@ -724,6 +724,184 @@ class DataFramesPostgresTest(unittest.TestCase):
             )
             self.assertEqual((str(source.observation_id),), cursor.fetchone())
 
+    def test_l2_latest_retains_last_good_value_while_current_quality_is_bad(self) -> None:
+        entity_id = uuid4()
+        template_id = uuid4()
+        processing_revision_id = uuid4()
+        good_at = self.now
+        bad_at = self.now + timedelta(seconds=1)
+        recovered_at = self.now + timedelta(seconds=2)
+
+        def observation(
+            *,
+            value: bool | None,
+            quality: TrunkQuality,
+            reason: str | None,
+            observed_at: datetime,
+            sequence: int,
+        ) -> L2Observation:
+            return L2Observation(
+                event_id=uuid4(),
+                entity_instance_id=entity_id,
+                definition_id="test.boolean_status",
+                value=TypedValue.boolean(value),
+                unit=None,
+                quality=quality,
+                reason=reason,
+                observed_at=observed_at,
+                received_at=observed_at,
+                calculated_at=observed_at,
+                processing_revision_id=processing_revision_id,
+                configuration_revision=0,
+                source_observation_ids=(),
+                source_digest=hashlib.sha256(
+                    f"l2-{sequence}".encode()
+                ).hexdigest(),
+                source_order_key=f"l2-{sequence}",
+                event_time_basis="received_at",
+                frame_id=uuid4(),
+                frame_sequence=sequence,
+            )
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_point_processing_templates"
+                "(id,asset_id,device_category,brand,model,display_name,status) "
+                "VALUES(%s,%s,'DEVICE','test','last-good','Last good test','active')",
+                (str(template_id), f"test.last-good.{template_id}"),
+            )
+            cursor.execute(
+                "INSERT INTO t_point_processing_revisions"
+                "(id,template_id,revision,content_digest,published_at) "
+                "VALUES(%s,%s,1,%s,%s)",
+                (
+                    str(processing_revision_id),
+                    str(template_id),
+                    hashlib.sha256(str(processing_revision_id).encode()).hexdigest(),
+                    self.now,
+                ),
+            )
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_entity_instances"
+                "(id,node_id,definition_id,display_name,data_type,direction,"
+                " freshness_seconds,active,source_kind) "
+                "VALUES(%s,%s,'test.boolean_status','Boolean status','BOOL','R',"
+                " 30,TRUE,'point_processing')",
+                (str(entity_id), str(self.node_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            self.repository._ensure_runtime(cursor)
+            self.repository._advance_frame_l2_latest(
+                cursor,
+                (observation(
+                    value=False,
+                    quality=TrunkQuality.GOOD,
+                    reason=None,
+                    observed_at=good_at,
+                    sequence=1,
+                ),),
+            )
+            self.repository._advance_frame_l2_latest(
+                cursor,
+                (observation(
+                    value=None,
+                    quality=TrunkQuality.BAD,
+                    reason="TYPE_MISMATCH",
+                    observed_at=bad_at,
+                    sequence=2,
+                ),),
+            )
+            cursor.execute(
+                "SELECT value_bool,value_observed_at,quality,observed_at,reason "
+                "FROM t_l2_latest WHERE entity_instance_id=%s",
+                (str(entity_id),),
+            )
+            self.assertEqual(
+                (False, good_at, 0, bad_at, "TYPE_MISMATCH"),
+                cursor.fetchone(),
+            )
+            self.repository._advance_frame_l2_latest(
+                cursor,
+                (observation(
+                    value=True,
+                    quality=TrunkQuality.GOOD,
+                    reason=None,
+                    observed_at=recovered_at,
+                    sequence=3,
+                ),),
+            )
+            cursor.execute(
+                "SELECT value_bool,value_observed_at,quality,observed_at,reason "
+                "FROM t_l2_latest WHERE entity_instance_id=%s",
+                (str(entity_id),),
+            )
+            self.assertEqual(
+                (True, recovered_at, 192, recovered_at, None),
+                cursor.fetchone(),
+            )
+
+    def test_first_bad_l2_latest_does_not_invent_a_retained_value(self) -> None:
+        entity_id = uuid4()
+        template_id = uuid4()
+        processing_revision_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_point_processing_templates"
+                "(id,asset_id,device_category,brand,model,display_name,status) "
+                "VALUES(%s,%s,'DEVICE','test','first-bad','First bad test','active')",
+                (str(template_id), f"test.first-bad.{template_id}"),
+            )
+            cursor.execute(
+                "INSERT INTO t_point_processing_revisions"
+                "(id,template_id,revision,content_digest,published_at) "
+                "VALUES(%s,%s,1,%s,%s)",
+                (
+                    str(processing_revision_id),
+                    str(template_id),
+                    hashlib.sha256(str(processing_revision_id).encode()).hexdigest(),
+                    self.now,
+                ),
+            )
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_entity_instances"
+                "(id,node_id,definition_id,display_name,data_type,direction,"
+                " freshness_seconds,active,source_kind) "
+                "VALUES(%s,%s,'test.first_bad','First bad','BOOL','R',"
+                " 30,TRUE,'point_processing')",
+                (str(entity_id), str(self.node_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            self.repository._ensure_runtime(cursor)
+            bad = L2Observation(
+                event_id=uuid4(),
+                entity_instance_id=entity_id,
+                definition_id="test.first_bad",
+                value=TypedValue.boolean(None),
+                unit=None,
+                quality=TrunkQuality.BAD,
+                reason="TYPE_MISMATCH",
+                observed_at=self.now,
+                received_at=self.now,
+                calculated_at=self.now,
+                processing_revision_id=processing_revision_id,
+                configuration_revision=0,
+                source_observation_ids=(),
+                source_digest=hashlib.sha256(b"first-bad-l2").hexdigest(),
+                source_order_key="first-bad-l2",
+                event_time_basis="received_at",
+                frame_id=uuid4(),
+                frame_sequence=1,
+            )
+            self.repository._advance_frame_l2_latest(cursor, (bad,))
+            cursor.execute(
+                "SELECT value_bool,value_observed_at,quality "
+                "FROM t_l2_latest WHERE entity_instance_id=%s",
+                (str(entity_id),),
+            )
+            self.assertEqual((None, None, 0), cursor.fetchone())
+
     def test_terminal_frame_outbox_rebuilds_atomic_event_and_acks_token(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=108))
         terminal = FrameProcessor(

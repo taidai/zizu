@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import unittest
 from uuid import UUID
@@ -215,6 +215,23 @@ class ControlCommandRuntimeTest(unittest.TestCase):
 
         self.assertEqual(("rejected", "CONTROL_INTERLOCK_UNSATISFIED"), (interlocked.status, interlocked.code))
         self.assertEqual(("rejected", "CONTROL_VALUE_OUT_OF_RANGE"), (out_of_range.status, out_of_range.code))
+        self.assertEqual([], self.dispatcher.requests)
+
+    def test_retained_true_interlock_with_bad_quality_never_dispatches(self) -> None:
+        self._observe(INTERLOCK_ID, True)
+        current = self.readback.observations[INTERLOCK_ID]
+        self.readback.observations[INTERLOCK_ID] = replace(
+            current,
+            quality=0,
+            quality_good=False,
+        )
+
+        rejected = self.runtime.submit(self._request(key="bad-retained-interlock"))
+
+        self.assertEqual(
+            ("rejected", "CONTROL_INTERLOCK_UNAVAILABLE"),
+            (rejected.status, rejected.code),
+        )
         self.assertEqual([], self.dispatcher.requests)
 
     def test_fresh_readback_mismatch_is_terminal(self) -> None:
