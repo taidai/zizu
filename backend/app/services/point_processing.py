@@ -22,6 +22,7 @@ from app.services.data_trunk_contracts import (
     InputReference,
     InstalledPointProcessing,
     NumericTransform,
+    PassthroughTransform,
     ValueKind,
 )
 from app.services.point_processing_templates import (
@@ -1077,7 +1078,9 @@ def _installed_processings_for_context(
                 input_contract.source_kind,
                 current.input_source_ids[input_id],
             )
-        if kind == "numeric":
+        if kind == "passthrough":
+            transform = PassthroughTransform(input=input_reference)
+        elif kind == "numeric":
             transform = NumericTransform(
                 input=input_reference,
                 scale=float(output.transform["scale"]),

@@ -243,6 +243,37 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
             exported.headers["etag"],
         )
 
+    async def test_passthrough_template_validates_and_round_trips_without_formula(self) -> None:
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        raw = PointProcessingTemplateTest.passthrough_template("INT", None)
+        app, _, _ = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            admin_headers = await self.login(client, "admin")
+            validated = await client.post(
+                "/api/v1/point-processing-templates/validate",
+                headers=admin_headers,
+                json=raw,
+            )
+            created = await client.post(
+                "/api/v1/point-processing-templates/import",
+                headers=admin_headers,
+                json=raw,
+            )
+            exported = await client.get(
+                f"/api/v1/point-processing-templates/{created.json()['revision_id']}/export",
+                headers=admin_headers,
+            )
+
+        self.assertEqual(200, validated.status_code, validated.text)
+        self.assertEqual("passthrough", validated.json()["content"]["outputs"][0]["transform"]["kind"])
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual(raw, exported.json())
+
     async def test_engineer_can_plan_a_node_draft_without_a_shared_template(self) -> None:
         from copy import deepcopy
 

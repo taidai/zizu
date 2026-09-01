@@ -16,6 +16,7 @@ from app.services.data_trunk_contracts import (
     InputReference,
     InstalledPointProcessing,
     L2Observation,
+    PassthroughTransform,
     RawObservation,
     TrunkQuality,
     TypedValue,
@@ -77,6 +78,62 @@ class PcsNumericConversionTest(unittest.TestCase):
             result[0].source_order_key,
             f"S:00000000000000000001:{'a' * 64}",
         )
+
+    def test_passthrough_returns_the_same_good_typed_value(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        source = replace(raw, value=TypedValue.integer(0), raw_unit=None)
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.INT,
+                output_unit=None,
+                transform=PassthroughTransform(InputReference.l0(raw.tag_id)),
+            ),
+        )
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(source.value, output.value)
+        self.assertIs(source.value, output.value)
+        self.assertEqual(TrunkQuality.GOOD, output.quality)
+        self.assertIsNone(output.reason)
+
+    def test_passthrough_propagates_bad_and_stale_without_a_value(self) -> None:
+        for quality, source_reason, expected_reason in (
+            (TrunkQuality.BAD, "TYPE_MISMATCH", "TYPE_MISMATCH"),
+            (TrunkQuality.STALE, None, "INPUT_STALE"),
+        ):
+            with self.subTest(quality=quality):
+                fixture = self.fixture()
+                raw = next(iter(fixture["current_inputs"].values()))
+                source = replace(
+                    raw,
+                    value=TypedValue.integer(1),
+                    raw_unit=None,
+                    quality=quality,
+                    quality_reason=source_reason,
+                )
+                base = fixture["installed"][0]
+                fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+                fixture["installed"] = (
+                    replace(
+                        base,
+                        output_kind=ValueKind.INT,
+                        output_unit=None,
+                        transform=PassthroughTransform(
+                            InputReference.l0(raw.tag_id)
+                        ),
+                    ),
+                )
+
+                output = evaluate_processing(**fixture)[0]
+
+                self.assertEqual(TypedValue.integer(None), output.value)
+                self.assertEqual(quality, output.quality)
+                self.assertEqual(expected_reason, output.reason)
 
     def test_numeric_conversion_marks_wrong_runtime_unit_bad_without_value(self) -> None:
         fixture = self.fixture()

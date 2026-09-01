@@ -33,6 +33,7 @@ from app.services.data_trunk_contracts import (
     InputReference,
     InstalledPointProcessing,
     L2Observation,
+    PassthroughTransform,
     PendingFrame,
     ProcessingSnapshot,
     RawObservation,
@@ -922,6 +923,14 @@ class PostgresFrameRepository:
                         )
                     }
                 )
+                installed.update(
+                    {
+                        item.entity_instance_id: item
+                        for item in self._load_frame_l2_passthrough_processings(
+                            cursor, claimed.configuration_revision
+                        )
+                    }
+                )
                 cursor.execute(
                     """
                     SELECT source_entity_instance_id,target_entity_instance_id
@@ -1119,6 +1128,50 @@ class PostgresFrameRepository:
                 )
             )
         return tuple(items)
+
+    @staticmethod
+    def _load_frame_l2_passthrough_processings(
+        cursor,
+        configuration_revision: int,
+    ) -> tuple[InstalledPointProcessing, ...]:
+        cursor.execute(
+            """
+            SELECT installed.id,installed.revision_id,
+                   output_binding.entity_instance_id,
+                   output.entity_definition_id,output.data_type,output.unit,
+                   output.freshness_seconds,binding.l2_entity_instance_id
+            FROM t_installed_point_processings AS installed
+            JOIN t_point_processing_outputs AS output
+              ON output.revision_id=installed.revision_id
+            JOIN t_point_processing_output_bindings AS output_binding
+              ON output_binding.installed_processing_id=installed.id
+             AND output_binding.output_id=output.id
+            JOIN t_point_processing_passthrough_rules AS rule
+              ON rule.output_id=output.id
+            JOIN t_point_processing_input_bindings AS binding
+              ON binding.installed_processing_id=installed.id
+             AND binding.input_id=rule.input_id
+             AND binding.source_kind='l2'
+            WHERE installed.current=TRUE
+              AND installed.configuration_revision <= %s
+              AND binding.l2_entity_instance_id IS NOT NULL
+            ORDER BY output_binding.entity_instance_id
+            """,
+            (configuration_revision,),
+        )
+        return tuple(
+            InstalledPointProcessing(
+                installation_id=UUID(str(row[0])),
+                revision_id=UUID(str(row[1])),
+                entity_instance_id=UUID(str(row[2])),
+                entity_definition_id=row[3],
+                output_kind=ValueKind(row[4]),
+                output_unit=row[5],
+                freshness_seconds=float(row[6]),
+                transform=PassthroughTransform(InputReference.l2(UUID(str(row[7])))),
+            )
+            for row in cursor.fetchall()
+        )
 
     def complete(
         self,
@@ -1945,6 +1998,7 @@ class PostgresFrameRepository:
               numeric.minimum,
               numeric.maximum,
               enum_rule.output_id IS NOT NULL,
+              passthrough_rule.output_id IS NOT NULL,
               fault_rule.delimiter
             FROM t_installed_point_processings AS installed
             JOIN t_point_processing_outputs AS output
@@ -1954,12 +2008,15 @@ class PostgresFrameRepository:
              AND output_binding.output_id = output.id
             LEFT JOIN t_numeric_transform_rules AS numeric
               ON numeric.output_id = output.id
+            LEFT JOIN t_point_processing_passthrough_rules AS passthrough_rule
+              ON passthrough_rule.output_id = output.id
             LEFT JOIN t_enum_transform_rules AS enum_rule
               ON enum_rule.output_id = output.id
             LEFT JOIN t_fault_code_transform_rules AS fault_rule
               ON fault_rule.output_id = output.id
             JOIN t_point_processing_inputs AS input
               ON input.id = COALESCE(
+                passthrough_rule.input_id,
                 numeric.input_id,
                 enum_rule.input_id,
                 fault_rule.input_id
@@ -1971,6 +2028,7 @@ class PostgresFrameRepository:
             WHERE installed.current = TRUE
               AND input_binding.l0_tag_id = ANY(%s::uuid[])
               AND num_nonnulls(
+                passthrough_rule.output_id,
                 numeric.output_id,
                 enum_rule.output_id,
                 fault_rule.output_id
@@ -1998,10 +2056,22 @@ class PostgresFrameRepository:
                 minimum,
                 maximum,
                 has_enum_rule,
+                has_passthrough_rule,
                 fault_delimiter,
             ) = row
             input_reference = InputReference.l0(UUID(str(input_tag_id)))
-            if scale is not None:
+            if has_passthrough_rule:
+                item = InstalledPointProcessing(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(entity_instance_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind(output_type),
+                    output_unit=output_unit,
+                    freshness_seconds=freshness_seconds,
+                    transform=PassthroughTransform(input_reference),
+                )
+            elif scale is not None:
                 if output_type != ValueKind.FLOAT.value:
                     raise DataTrunkError(
                         "POINT_PROCESSING_CONFIGURATION_INVALID",

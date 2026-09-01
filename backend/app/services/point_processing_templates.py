@@ -16,6 +16,7 @@ from app.services.point_processing_formula import FormulaCompileError, compile_f
 _SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
 _OUTPUT_TYPES = {
+    "passthrough": None,
     "numeric": "FLOAT",
     "enum": "ENUM",
     "fault_codes": "CODE_SET",
@@ -507,6 +508,27 @@ def _parse_transform(
             "Point processing transform kind is invalid",
         )
     kind = raw["kind"]
+    if kind == "passthrough":
+        if set(raw) != {"kind", "input"}:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Passthrough transform fields are invalid",
+            )
+        input_id = raw.get("input")
+        source = inputs.get(input_id) if isinstance(input_id, str) else None
+        if (
+            source is None
+            or not source.required
+            or source.cardinality != "one"
+            or source.default_value is not None
+            or source.data_type != output_data_type
+            or source.unit != output_unit
+        ):
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Passthrough input and output contracts must match",
+            )
+        return {"kind": "passthrough", "input": input_id}
     if kind == "formula":
         if set(raw) != {
             "kind", "expression", "scheduleSeconds", "controlEligible"

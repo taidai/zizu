@@ -274,6 +274,11 @@ class InputReference:
 
 
 @dataclass(frozen=True)
+class PassthroughTransform:
+    input: InputReference
+
+
+@dataclass(frozen=True)
 class NumericTransform:
     input: InputReference
     scale: float
@@ -439,7 +444,8 @@ class FormulaTransform:
 
 
 Transform = (
-    NumericTransform
+    PassthroughTransform
+    | NumericTransform
     | EnumTransform
     | FaultCodeTransform
     | BooleanSetTransform

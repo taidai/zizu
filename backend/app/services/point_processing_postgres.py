@@ -332,7 +332,17 @@ def persist_point_processing_template(
                 ),
             )
             transform = output.transform
-            if transform["kind"] == "numeric":
+            if transform["kind"] == "passthrough":
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_passthrough_rules
+                      (output_id, input_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (output_id, input_ids[str(transform["input"])]),
+                )
+            elif transform["kind"] == "numeric":
                 transform_input_id = input_ids[str(transform["input"])]
                 cursor.execute(
                     """
@@ -893,6 +903,18 @@ class PostgresPointProcessingCatalog:
                 "scheduleSeconds": expression[3],
                 "controlEligible": expression[4],
             }
+        cursor.execute(
+            """
+            SELECT input.input_key
+            FROM t_point_processing_passthrough_rules AS rule
+            JOIN t_point_processing_inputs AS input ON input.id = rule.input_id
+            WHERE rule.output_id = %s
+            """,
+            (output_id,),
+        )
+        passthrough = cursor.fetchone()
+        if passthrough is not None:
+            return {"kind": "passthrough", "input": passthrough[0]}
         cursor.execute(
             """
             SELECT input.input_key, rule.scale, rule."offset",

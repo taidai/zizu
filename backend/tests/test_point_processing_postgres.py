@@ -148,6 +148,112 @@ class PointProcessingPostgresTest(unittest.TestCase):
             )
         )
 
+    def test_passthrough_revision_persists_and_reloads_canonical_json(self) -> None:
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+
+        raw = self._raw("pcs-brand-a")
+        raw["id"] = "pcs-passthrough"
+        raw["revision"] = 1
+        raw["inputs"] = [raw["inputs"][0]]
+        raw["outputs"] = [raw["outputs"][0]]
+        raw["outputs"][0]["dataType"] = raw["inputs"][0]["dataType"]
+        raw["outputs"][0]["unit"] = raw["inputs"][0].get("unit")
+        raw["outputs"][0]["transform"] = {
+            "kind": "passthrough",
+            "input": raw["inputs"][0]["id"],
+        }
+        templates = PostgresPointProcessingTemplates()
+
+        registered = templates.import_template(raw, actor="test:engineer")
+
+        self.assertEqual(raw, templates.export_template(registered.revision_id))
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT input.input_key FROM t_point_processing_passthrough_rules rule "
+                "JOIN t_point_processing_inputs input ON input.id=rule.input_id "
+                "JOIN t_point_processing_outputs output ON output.id=rule.output_id "
+                "WHERE output.revision_id=%s",
+                (registered.revision_id,),
+            )
+            self.assertEqual((raw["inputs"][0]["id"],), cursor.fetchone())
+
+    def test_passthrough_applies_and_reloads_as_a_runtime_transform(self) -> None:
+        from app.services.data_trunk_contracts import (
+            PassthroughTransform,
+            RawObservation,
+            SourceOrder,
+            TrunkQuality,
+            TypedValue,
+        )
+        from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingService,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+
+        raw = self._raw("pcs-brand-b")
+        raw["id"] = "pcs-passthrough-runtime"
+        raw["inputs"] = [raw["inputs"][0]]
+        raw["outputs"] = [raw["outputs"][0]]
+        raw["outputs"][0]["transform"] = {
+            "kind": "passthrough",
+            "input": raw["inputs"][0]["id"],
+        }
+        revision = PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor="test:engineer",
+        ).revision_id
+        service = PointProcessingService(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+        )
+        plan = self._plan(service, revision)
+        service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "passthrough-runtime",
+                "test:engineer",
+            )
+        )
+        observed_at = datetime.now(UTC)
+        tag_id = uuid5(NAMESPACE_URL, f"test/tag/{NODE_ID}/PActKw")
+        observation = RawObservation(
+            observation_id=uuid4(),
+            node_id=NODE_ID,
+            tag_id=tag_id,
+            source_key="PActKw",
+            value=TypedValue.float(12.5),
+            raw_unit="kW",
+            quality=TrunkQuality.GOOD,
+            source_timestamp=observed_at,
+            received_at=observed_at,
+            source_message_id="passthrough-runtime",
+            source_sequence=1,
+            source_digest=hashlib.sha256(b"passthrough-runtime").hexdigest(),
+            event_time_basis="received_at",
+            source_order=SourceOrder.received_at(observed_at, 1),
+        )
+
+        with get_connection() as connection, connection.cursor() as cursor:
+            snapshot = PostgresFrameRepository._load_conversion_snapshot(
+                cursor,
+                (observation,),
+                calculated_at=observed_at,
+            )
+
+        self.assertEqual(1, len(snapshot.installed))
+        self.assertIsInstance(snapshot.installed[0].transform, PassthroughTransform)
+
     def test_apply_publishes_one_revision_and_attaches_l2_directly_to_node(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection

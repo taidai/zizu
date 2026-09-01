@@ -19,6 +19,7 @@ from app.services.data_trunk_contracts import (
     InstalledPointProcessing,
     L2Observation,
     NumericTransform,
+    PassthroughTransform,
     RawObservation,
     TrunkQuality,
     TypedValue,
@@ -71,6 +72,13 @@ def _evaluate_output(
     configuration_revision: int,
     calculated_at: datetime,
 ) -> L2Observation:
+    if isinstance(installed.transform, PassthroughTransform):
+        return _evaluate_passthrough_output(
+            installed,
+            current_inputs,
+            configuration_revision,
+            calculated_at,
+        )
     if isinstance(installed.transform, FormulaTransform):
         return _evaluate_formula_output(
             installed,
@@ -190,6 +198,83 @@ def _evaluate_output(
         source_observation_ids=(source.observation_id,),
         source_digest=source.source_digest,
         source_order_key=_raw_order_key(source),
+        event_time_basis=source.event_time_basis,
+    )
+
+
+def _evaluate_passthrough_output(
+    installed: InstalledPointProcessing,
+    current_inputs: Mapping[InputReference, RawObservation | L2Observation],
+    configuration_revision: int,
+    calculated_at: datetime,
+) -> L2Observation:
+    transform = installed.transform
+    if not isinstance(transform, PassthroughTransform):
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "passthrough processing requires a passthrough transform",
+        )
+    source = current_inputs.get(transform.input)
+    if source is None:
+        return _runtime_failure(
+            installed,
+            configuration_revision,
+            calculated_at,
+            "REQUIRED_INPUT_MISSING",
+        )
+    if (
+        transform.input.source_kind == "l0"
+        and not isinstance(source, RawObservation)
+    ) or (
+        transform.input.source_kind == "l2"
+        and not isinstance(source, L2Observation)
+    ):
+        raise DataTrunkError(
+            "POINT_PROCESSING_CONFIGURATION_INVALID",
+            "passthrough source kind does not match its input",
+        )
+
+    source_unit = source.raw_unit if isinstance(source, RawObservation) else source.unit
+    if source.value.kind is not installed.output_kind:
+        reason = "TYPE_MISMATCH"
+        quality = TrunkQuality.BAD
+        value = TypedValue(installed.output_kind, None)
+    elif source_unit != installed.output_unit:
+        reason = "UNIT_MISMATCH"
+        quality = TrunkQuality.BAD
+        value = TypedValue(installed.output_kind, None)
+    elif source.quality is not TrunkQuality.GOOD:
+        quality = source.quality
+        if isinstance(source, RawObservation):
+            reason = source.quality_reason or _input_quality_reason(quality)
+        else:
+            reason = source.reason or _input_quality_reason(quality)
+        value = TypedValue(installed.output_kind, None)
+    else:
+        quality = TrunkQuality.GOOD
+        reason = None
+        value = source.value
+
+    if isinstance(source, RawObservation):
+        observed_at = source.source_timestamp
+        source_ids = (source.observation_id,)
+        source_order_key = _raw_order_key(source)
+    else:
+        observed_at = source.observed_at
+        source_ids = (source.event_id,)
+        source_order_key = source.source_order_key
+    return _observation(
+        installed=installed,
+        value=value,
+        quality=quality,
+        reason=reason,
+        observed_at=observed_at,
+        received_at=source.received_at,
+        calculated_at=calculated_at,
+        configuration_revision=configuration_revision,
+        source_observation_ids=source_ids,
+        source_digest=source.source_digest,
+        source_order_key=source_order_key,
         event_time_basis=source.event_time_basis,
     )
 

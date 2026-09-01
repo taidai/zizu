@@ -5,6 +5,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from app.services.point_processing_templates import (
     InMemoryPointProcessingTemplates,
@@ -57,6 +58,67 @@ def template_json() -> dict:
 
 
 class PointProcessingTemplateTest(unittest.TestCase):
+    @staticmethod
+    def passthrough_template(data_type: str, unit: str | None) -> dict:
+        raw = template_json()
+        raw["inputs"][0]["dataType"] = data_type
+        raw["inputs"][0]["unit"] = unit
+        raw["outputs"][0]["dataType"] = data_type
+        raw["outputs"][0]["unit"] = unit
+        raw["outputs"][0]["transform"] = {
+            "kind": "passthrough",
+            "input": "active_power_raw",
+        }
+        return raw
+
+    def test_passthrough_accepts_same_typed_int_bool_and_string_without_formula(self) -> None:
+        with patch(
+            "app.services.point_processing_templates.compile_formula"
+        ) as compile_formula:
+            for data_type, unit in (("INT", None), ("BOOL", None), ("STRING", "code")):
+                with self.subTest(data_type=data_type):
+                    parsed = parse_point_processing_template(
+                        self.passthrough_template(data_type, unit)
+                    )
+                    self.assertEqual("passthrough", parsed.outputs[0].transform["kind"])
+        compile_formula.assert_not_called()
+
+    def test_passthrough_rejects_type_unit_and_input_contract_mismatches(self) -> None:
+        cases = []
+        wrong_type = self.passthrough_template("INT", None)
+        wrong_type["outputs"][0]["dataType"] = "BOOL"
+        cases.append(wrong_type)
+        wrong_unit = self.passthrough_template("INT", "raw")
+        wrong_unit["outputs"][0]["unit"] = "normalized"
+        cases.append(wrong_unit)
+        optional = self.passthrough_template("INT", None)
+        optional["inputs"][0]["required"] = False
+        cases.append(optional)
+        many = self.passthrough_template("INT", None)
+        many["inputs"][0]["cardinality"] = "many"
+        many["inputs"][0]["selector"] = {
+            "scope": "descendants",
+            "nodeType": "PCS",
+            "entityDefinition": "ActivePowerRaw",
+        }
+        many["inputs"][0]["sourceKind"] = "l2"
+        cases.append(many)
+        missing = self.passthrough_template("INT", None)
+        missing["outputs"][0]["transform"].pop("input")
+        cases.append(missing)
+        multiple = self.passthrough_template("INT", None)
+        multiple["outputs"][0]["transform"]["input"] = [
+            "active_power_raw",
+            "active_power_raw",
+        ]
+        cases.append(multiple)
+
+        for raw in cases:
+            with self.subTest(raw=raw["outputs"][0]["transform"]):
+                with self.assertRaises(PointProcessingTemplateError) as caught:
+                    parse_point_processing_template(raw)
+                self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
+
     def test_meter_template_is_a_supported_device_category(self) -> None:
         raw = template_json()
         raw["deviceCategory"] = "METER"

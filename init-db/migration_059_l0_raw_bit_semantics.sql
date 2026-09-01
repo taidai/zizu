@@ -50,4 +50,11 @@ ALTER TABLE public.t_telemetry_latest
     )
   );
 
+CREATE TABLE IF NOT EXISTS public.t_point_processing_passthrough_rules (
+  output_id UUID PRIMARY KEY
+    REFERENCES public.t_point_processing_outputs(id) ON DELETE CASCADE,
+  input_id UUID NOT NULL
+    REFERENCES public.t_point_processing_inputs(id)
+);
+
 COMMIT;
