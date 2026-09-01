@@ -152,6 +152,7 @@ class RawObservation:
     source_digest: str
     event_time_basis: str
     source_order: SourceOrder | None = None
+    quality_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.event_time_basis not in {"unknown", "observed_at", "received_at"}:

@@ -57,6 +57,23 @@ class NeuronPointProcessingCatalogTest(unittest.TestCase):
 
         self.assertEqual("INT", scan.points[0].value_data_type)
 
+    def test_bit_keeps_protocol_type_and_uses_integer_l0_value(self) -> None:
+        from app.services.neuron_point_processing_catalog import NeuronPointCatalog
+
+        neuron = FakeNeuron()
+        neuron.tags = [{
+            "name": "15V电源故障",
+            "address": "1!000001",
+            "attribute": 1,
+            "type": 11,
+            "decimal": 0.0,
+        }]
+
+        point = NeuronPointCatalog(neuron).scan("EN9-PCS").points[0]
+
+        self.assertEqual("BIT", point.wire_data_type)
+        self.assertEqual("INT", point.value_data_type)
+
     def test_scan_normalizes_exact_en9_read_only_catalog_without_mutation(self) -> None:
         from app.services.neuron_point_processing_catalog import NeuronPointCatalog
 

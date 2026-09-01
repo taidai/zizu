@@ -12,7 +12,7 @@ os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
 os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
 os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-at-least-32-chars")
 
-from app.services.data_trunk_contracts import AcceptReceipt, TypedValue
+from app.services.data_trunk_contracts import AcceptReceipt, TrunkQuality, TypedValue
 from app.services.normalizer import TagNormalizationRule
 from app.services.pipeline import DataPipeline
 
@@ -38,7 +38,7 @@ class _RecordingFrameTrunk:
 
 
 class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
-    async def test_pipeline_only_accepts_canonical_l0_into_blackboard(self) -> None:
+    async def test_pipeline_accepts_raw_l0_without_applying_engineering_conversion(self) -> None:
         trunk = _RecordingFrameTrunk()
         pipeline = DataPipeline(data_trunk=trunk)
         rule = TagNormalizationRule(
@@ -70,7 +70,9 @@ class PipelineDataTrunkTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual((9,), tuple(item.source_sequence for item in trunk.accepted))
-        self.assertEqual(TypedValue.float(12345.0), trunk.accepted[0].value)
+        self.assertEqual(TypedValue.integer(12345), trunk.accepted[0].value)
+        self.assertEqual(TrunkQuality.BAD, trunk.accepted[0].quality)
+        self.assertEqual("TYPE_MISMATCH", trunk.accepted[0].quality_reason)
         self.assertEqual(0, trunk.capture_calls)
 
     def test_pipeline_has_no_database_or_legacy_alarm_write_path(self) -> None:

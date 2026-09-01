@@ -18,7 +18,7 @@ _TYPE_BY_CODE = {
     8: ("UINT64", "INT"),
     9: ("FLOAT", "FLOAT"),
     10: ("DOUBLE", "FLOAT"),
-    11: ("BIT", "BOOL"),
+    11: ("BIT", "INT"),
     13: ("STRING", "STRING"),
 }
 

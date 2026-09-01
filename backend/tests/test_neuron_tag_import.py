@@ -34,6 +34,28 @@ def point(
 
 
 class NeuronTagImportPlanTest(unittest.TestCase):
+    def test_bit_import_keeps_protocol_type_and_integer_value_contract(self) -> None:
+        from app.services.neuron_tag_import import plan_neuron_tag_import
+
+        preview = plan_neuron_tag_import(
+            node_id=NODE_ID,
+            neuron_node="EN9-PCS",
+            selected_groups=("error1",),
+            points=(
+                point(
+                    "15V电源故障",
+                    group="error1",
+                    wire_data_type="BIT",
+                    value_data_type="INT",
+                ),
+            ),
+            existing=(),
+            base_configuration_revision=7,
+        )
+
+        self.assertEqual("BIT", preview.items[0].wire_data_type)
+        self.assertEqual("INT", preview.items[0].value_data_type)
+
     def test_multi_group_preview_classifies_source_owned_changes(self) -> None:
         from app.services.neuron_tag_import import ExistingNeuronTag, plan_neuron_tag_import
 

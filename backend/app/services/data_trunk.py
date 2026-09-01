@@ -110,6 +110,7 @@ class TagMetadata:
     data_type: str
     unit: str | None
     timestamp_trusted: bool
+    wire_data_type: str | None = None
     source_sequence_trusted: bool = False
 
 
@@ -134,9 +135,14 @@ class RawObservationAdapter:
             metadata = tag_catalog.get(source_key)
             if metadata is None:
                 continue
-            value = _raw_typed_value(raw_value, metadata.data_type)
+            value = decode_raw_scalar(raw_value)
             if value is None:
                 continue
+            quality, quality_reason = validate_raw_value(
+                value,
+                wire_data_type=metadata.wire_data_type,
+                expected_data_type=metadata.data_type,
+            )
             digest = _raw_source_digest(
                 metadata,
                 parsed.timestamp,
@@ -170,7 +176,7 @@ class RawObservationAdapter:
                     source_key=metadata.stable_source_key,
                     value=value,
                     raw_unit=metadata.unit,
-                    quality=TrunkQuality.GOOD,
+                    quality=quality,
                     source_timestamp=parsed.timestamp,
                     received_at=received_at,
                     source_message_id=source_message_id,
@@ -183,56 +189,42 @@ class RawObservationAdapter:
                         else "observed_at"
                     ),
                     source_order=source_order,
+                    quality_reason=quality_reason,
                 )
             )
         return tuple(observations)
 
 
-def _raw_typed_value(raw_value, data_type: str) -> TypedValue | None:
-    kind = data_type.upper()
-    if kind == "BOOL":
-        if isinstance(raw_value, bool):
-            return TypedValue(ValueKind.BOOL, raw_value)
-        if isinstance(raw_value, int) and raw_value in (0, 1):
-            return TypedValue(ValueKind.BOOL, bool(raw_value))
-        if (
-            isinstance(raw_value, float)
-            and math.isfinite(raw_value)
-            and raw_value in (0.0, 1.0)
-        ):
-            return TypedValue(ValueKind.BOOL, bool(raw_value))
-        return None
-    if kind == "INT":
-        if isinstance(raw_value, bool):
-            return None
-        if isinstance(raw_value, int):
-            integer = raw_value
-        elif (
-            isinstance(raw_value, float)
-            and math.isfinite(raw_value)
-            and raw_value.is_integer()
-        ):
-            integer = int(raw_value)
-        else:
-            return None
-        if not -(1 << 63) <= integer <= (1 << 63) - 1:
-            return None
-        return TypedValue(ValueKind.INT, integer)
+def decode_raw_scalar(raw_value: object) -> TypedValue | None:
     if isinstance(raw_value, bool):
         return TypedValue(ValueKind.BOOL, raw_value)
     if isinstance(raw_value, int):
-        if kind == "FLOAT":
-            return TypedValue(ValueKind.FLOAT, float(raw_value))
-        if kind == "ENUM":
-            return TypedValue(ValueKind.ENUM, str(raw_value))
+        if not -(1 << 63) <= raw_value <= (1 << 63) - 1:
+            return None
         return TypedValue(ValueKind.INT, raw_value)
     if isinstance(raw_value, float):
         number = float(raw_value)
         return TypedValue(ValueKind.FLOAT, number) if math.isfinite(number) else None
     if isinstance(raw_value, str):
-        value_kind = ValueKind.ENUM if kind == "ENUM" else ValueKind.STRING
-        return TypedValue(value_kind, raw_value)
+        return TypedValue(ValueKind.STRING, raw_value)
     return None
+
+
+def validate_raw_value(
+    value: TypedValue,
+    *,
+    wire_data_type: str | None,
+    expected_data_type: str,
+) -> tuple[TrunkQuality, str | None]:
+    if (wire_data_type or "").upper() == "BIT":
+        if value.kind is not ValueKind.INT:
+            return TrunkQuality.BAD, "TYPE_MISMATCH"
+        if value.value not in (0, 1):
+            return TrunkQuality.BAD, "BIT_VALUE_OUT_OF_RANGE"
+        return TrunkQuality.GOOD, None
+    if value.kind.value != expected_data_type.upper():
+        return TrunkQuality.BAD, "TYPE_MISMATCH"
+    return TrunkQuality.GOOD, None
 
 
 def _raw_source_digest(

@@ -283,6 +283,7 @@ class DataPipeline:
                                    t.range_max,
                                    t.source_type,
                                    t.source_path,
+                                   t.wire_data_type,
                                    n.source_catalog_key,
                                    t.timestamp_trusted,
                                    t.source_sequence_trusted
@@ -304,7 +305,7 @@ class DataPipeline:
             for row in rows:
                 (tag_name, node_name, tag_id, node_id, data_type,
                  scale_factor, offset, unit_from, unit_to, range_min, range_max,
-                 source_type, source_path, node_source_catalog_key,
+                 source_type, source_path, wire_data_type, node_source_catalog_key,
                  timestamp_trusted, source_sequence_trusted) = row
 
                 rule = TagNormalizationRule(
@@ -330,6 +331,7 @@ class DataPipeline:
                     data_type=str(getattr(data_type, "value", data_type)),
                     unit=unit_from or unit_to,
                     timestamp_trusted=bool(timestamp_trusted),
+                    wire_data_type=wire_data_type,
                     source_sequence_trusted=bool(source_sequence_trusted),
                 )
                 new_raw_node_tag_map[(node_name, tag_name)] = raw_metadata
