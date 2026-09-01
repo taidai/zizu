@@ -53,6 +53,7 @@ test('raw point selection exposes only maintenance actions that can change state
       canEditDisplayName: false,
       canEnable: true,
       canDisable: true,
+      canDelete: true,
     },
   )
   assert.deepEqual(
@@ -62,6 +63,17 @@ test('raw point selection exposes only maintenance actions that can change state
       canEditDisplayName: true,
       canEnable: false,
       canDisable: true,
+      canDelete: true,
+    },
+  )
+  assert.deepEqual(
+    model.rawPointSelectionSummary([]),
+    {
+      count: 0,
+      canEditDisplayName: false,
+      canEnable: false,
+      canDisable: false,
+      canDelete: false,
     },
   )
 })

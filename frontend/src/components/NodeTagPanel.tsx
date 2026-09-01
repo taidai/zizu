@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { fetchTags, maintainRawPoints, type Node, type Tag } from '../api/client'
+import { deleteRawPoints, fetchTags, maintainRawPoints, type Node, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
   fetchCommittedFrameSnapshot,
@@ -22,6 +22,7 @@ const RawPointHistoryPanel = lazy(() => import('./RawPointHistoryPanel'))
 interface NodeTagPanelProps {
   node: Node
   readOnly: boolean
+  onPointCountChanged?: () => void
 }
 
 type RawPointView = 'realtime' | 'history'
@@ -32,7 +33,7 @@ function formatTime(timestamp: string | null | undefined): string {
   return timestamp ? new Date(timestamp).toLocaleString('zh-CN') : '未收到'
 }
 
-export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
+export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: NodeTagPanelProps) {
   const nodeId = node.id
   const [view, setView] = useState<RawPointView>('realtime')
   const [tags, setTags] = useState<Tag[]>([])
@@ -106,7 +107,7 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
 
   useEffect(() => {
     void loadTags()
-  }, [loadTags])
+  }, [loadTags, node.tag_count])
 
   useEffect(() => {
     let active = true
@@ -237,6 +238,27 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
     )
   }
 
+  const deleteSelected = async () => {
+    if (!selectionSummary.canDelete) return
+    if (!window.confirm(
+      `确认永久删除选中的 ${selectedRows.length} 个原始点位？\n点位及全部实时、历史数据将被清除，无法恢复。`,
+    )) return
+    setMaintenanceBusy(true)
+    setMaintenanceMessage('')
+    try {
+      const result = await deleteRawPoints(selectedRows.map((tag) => tag.id))
+      setSelected(new Map())
+      setEditingPoint(null)
+      setMaintenanceMessage(`已永久删除 ${result.deleted} 个原始点位及其历史数据`)
+      await loadTags()
+      onPointCountChanged?.()
+    } catch (reason) {
+      setMaintenanceMessage(reason instanceof Error ? reason.message : '原始点位删除失败')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
   return (
     <section className="neu-card min-h-full p-4" aria-label="原始数据">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -334,7 +356,15 @@ export default function NodeTagPanel({ node, readOnly }: NodeTagPanelProps) {
                 >
                   停用
                 </button>
-                <span className="text-[11px] text-gray-500">停用不会删除点位或历史数据</span>
+                <button
+                  type="button"
+                  disabled={!selectionSummary.canDelete || maintenanceBusy}
+                  onClick={() => { void deleteSelected() }}
+                  className="neu-btn px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-40"
+                >
+                  删除
+                </button>
+                <span className="text-[11px] text-gray-500">停用保留数据；删除将永久清除</span>
               </div>
 
               {editingPoint && (

@@ -1383,6 +1383,30 @@ export async function maintainRawPoints(
   return res.json()
 }
 
+export interface RawPointDeleteResult {
+  deleted: number
+  configuration_revision: number
+  deleted_ids: string[]
+}
+
+export async function deleteRawPoints(tagIds: string[]): Promise<RawPointDeleteResult> {
+  const res = await apiFetch(`${API_BASE}/tags/maintenance`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag_ids: tagIds }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    const detail = error.detail
+    throw new Error(
+      typeof detail === 'string'
+        ? detail
+        : detail?.message || `原始点位删除失败：${res.status}`,
+    )
+  }
+  return res.json()
+}
+
 export async function createPointProcessingDeactivationPlan(
   nodeId: string,
 ): Promise<PointProcessingPlan> {

@@ -617,6 +617,10 @@ class RawPointMaintenanceRequest(BaseModel):
     enabled: bool | None = Field(None, description="批量启用或停用")
 
 
+class RawPointDeleteRequest(BaseModel):
+    tag_ids: list[UUID] = Field(..., min_length=1, description="永久删除的原始点位 ID")
+
+
 def get_raw_point_maintenance():
     from app.services.raw_point_maintenance import PostgresRawPointMaintenance
 
@@ -647,6 +651,7 @@ def _raise_raw_point_maintenance_http(error: Exception) -> None:
     status_by_code = {
         "RAW_POINT_NOT_FOUND": status.HTTP_404_NOT_FOUND,
         "RAW_POINT_IN_USE": status.HTTP_409_CONFLICT,
+        "ALARM_CONFIGURATION_MIGRATION_REQUIRED": status.HTTP_409_CONFLICT,
         "CONFIGURATION_REVISION_STALE": status.HTTP_409_CONFLICT,
         "DATA_FRAME_CONFIGURATION_STALE": status.HTTP_409_CONFLICT,
         "CONFIGURATION_RUNTIME_BUSY": status.HTTP_409_CONFLICT,
@@ -686,6 +691,46 @@ async def maintain_raw_points(
     await runtime.reload_rules_now()
     await asyncio.to_thread(gate.reconcile_configuration_runtime)
     return result
+
+
+async def _delete_raw_points(
+    *,
+    tag_ids: tuple[UUID, ...],
+    principal: Principal,
+    repository,
+    runtime,
+) -> dict:
+    base_revision = await asyncio.to_thread(repository.current_revision)
+    gate = runtime.data_trunk.configuration_gate
+    try:
+        await asyncio.to_thread(gate.begin_configuration_publish, base_revision)
+        result = await asyncio.to_thread(
+            repository.delete,
+            tag_ids=tag_ids,
+            actor=principal.actor,
+            base_revision=base_revision,
+        )
+    except Exception as error:
+        gate.cancel_configuration_publish()
+        _raise_raw_point_maintenance_http(error)
+    await runtime.reload_rules_now()
+    await asyncio.to_thread(gate.reconcile_configuration_runtime)
+    return result
+
+
+@router.delete("/tags/maintenance", **protected(CONFIGURATION_WRITE))
+async def delete_raw_points(
+    request: RawPointDeleteRequest,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    repository=Depends(get_raw_point_maintenance),
+    runtime=Depends(get_raw_point_maintenance_runtime),
+) -> dict:
+    return await _delete_raw_points(
+        tag_ids=tuple(request.tag_ids),
+        principal=principal,
+        repository=repository,
+        runtime=runtime,
+    )
 
 
 
@@ -810,38 +855,24 @@ async def batch_update_tags(req: BatchUpdateRequest) -> dict:
 
 
 @router.delete("/tags/{tag_id}", **protected(CONFIGURATION_WRITE))
-async def delete_tag(tag_id: UUID) -> dict:
-    """删除单个点位及其历史遥测、最新值缓存。"""
-    from app.services.telemetry_store import get_connection
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT alarm_level, alarm_type, alarm_threshold, fault_map_id
-                FROM t_tags WHERE id = %s
-                """,
-                (tag_id,),
-            )
-            legacy_alarm_values = cur.fetchone()
-            if legacy_alarm_values is None:
-                raise HTTPException(status_code=404, detail="Tag not found")
-            if any(value is not None for value in legacy_alarm_values):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
-                        "message": "Legacy alarm tag must be migrated before deletion",
-                    },
-                )
-
-            # t_telemetry / t_telemetry_latest 外键级联删除；migration_030
-            # 已移除只读 t_alarms 的外键，以保留不可变告警历史。
-            cur.execute("DELETE FROM t_tags WHERE id = %s", (tag_id,))
-            conn.commit()
-
-    logger.info("[API/tags] deleted tag {}", tag_id)
-    return {"status": "ok", "deleted": str(tag_id)}
+async def delete_tag(
+    tag_id: UUID,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    repository=Depends(get_raw_point_maintenance),
+    runtime=Depends(get_raw_point_maintenance_runtime),
+) -> dict:
+    """兼容单点调用，但复用同一个受栅栏保护的永久删除语义。"""
+    result = await _delete_raw_points(
+        tag_ids=(tag_id,),
+        principal=principal,
+        repository=repository,
+        runtime=runtime,
+    )
+    return {
+        "status": "ok",
+        "deleted": result["deleted_ids"][0],
+        "configuration_revision": result["configuration_revision"],
+    }
 
 
 @router.put("/tags/{tag_id}", **protected(CONFIGURATION_WRITE))

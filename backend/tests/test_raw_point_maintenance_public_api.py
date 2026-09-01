@@ -33,6 +33,14 @@ class _Repository:
             "items": [{"id": str(TAG_ID), "display_name": "PCS 有功功率", "enabled": False}],
         }
 
+    def delete(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "deleted": 1,
+            "configuration_revision": 8,
+            "deleted_ids": [str(TAG_ID)],
+        }
+
 
 class _Gate:
     def begin_configuration_publish(self, revision: int) -> None:
@@ -83,6 +91,22 @@ class RawPointMaintenancePublicApiTest(unittest.IsolatedAsyncioTestCase):
             {"display_name": "PCS 有功功率", "enabled": False},
             self.repository.calls[0]["changes"],
         )
+        self.assertEqual(7, self.runtime.data_trunk.configuration_gate.revision)
+        self.assertTrue(self.runtime.data_trunk.configuration_gate.reconciled)
+        self.assertTrue(self.runtime.reloaded)
+
+    async def test_delete_uses_the_configuration_gate_and_returns_deleted_ids(self) -> None:
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client._request(
+                "DELETE",
+                "/api/v1/tags/maintenance",
+                json={"tag_ids": [str(TAG_ID)]},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual([str(TAG_ID)], response.json()["deleted_ids"])
+        self.assertEqual((TAG_ID,), self.repository.calls[0]["tag_ids"])
+        self.assertEqual(7, self.repository.calls[0]["base_revision"])
         self.assertEqual(7, self.runtime.data_trunk.configuration_gate.revision)
         self.assertTrue(self.runtime.data_trunk.configuration_gate.reconciled)
         self.assertTrue(self.runtime.reloaded)

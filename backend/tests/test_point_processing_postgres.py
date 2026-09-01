@@ -264,6 +264,115 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     cursor.fetchone(),
                 )
 
+    def test_raw_point_maintenance_deletes_unused_point_and_measurements(self) -> None:
+        from app.services.raw_point_maintenance import PostgresRawPointMaintenance
+        from app.services.telemetry_store import get_connection
+
+        tag_id = uuid4()
+        observation_id = uuid4()
+        observed_at = datetime.now(UTC)
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO t_tags
+                      (id,node_id,name,display_name,data_type,source_type,
+                       source_path,enabled)
+                    VALUES(%s,%s,'DeleteMe','待删除点','FLOAT','neuron',
+                           'PCS/data/DeleteMe',TRUE)
+                    """,
+                    (tag_id, NODE_ID),
+                )
+                cursor.execute(
+                    "INSERT INTO t_telemetry(ts,node_id,tag_id,value_float) "
+                    "VALUES(%s,%s,%s,12.5)",
+                    (observed_at, NODE_ID, tag_id),
+                )
+                cursor.execute(
+                    "INSERT INTO t_telemetry_latest"
+                    "(node_id,tag_id,ts,value_float,frame_sequence,accepted_beat) "
+                    "VALUES(%s,%s,%s,12.5,0,0)",
+                    (NODE_ID, tag_id, observed_at),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_l0_observation_dedup
+                      (observation_id,tag_id,observed_at,source_digest)
+                    VALUES(%s,%s,%s,%s)
+                    """,
+                    (observation_id, tag_id, observed_at, "d" * 64),
+                )
+            connection.commit()
+
+        deleted = PostgresRawPointMaintenance().delete(
+            tag_ids=(tag_id,),
+            actor="test:engineer",
+            base_revision=0,
+        )
+
+        self.assertEqual(1, deleted["deleted"])
+        self.assertEqual([str(tag_id)], deleted["deleted_ids"])
+        self.assertEqual(1, deleted["configuration_revision"])
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                for table in (
+                    "t_tags",
+                    "t_telemetry",
+                    "t_telemetry_latest",
+                    "t_l0_observation_dedup",
+                ):
+                    key = "id" if table == "t_tags" else "tag_id"
+                    cursor.execute(
+                        f"SELECT count(*) FROM {table} WHERE {key}=%s",
+                        (tag_id,),
+                    )
+                    self.assertEqual(0, cursor.fetchone()[0])
+                cursor.execute(
+                    "SELECT action FROM t_configuration_revisions WHERE revision=1"
+                )
+                self.assertEqual(("raw_point.delete",), cursor.fetchone())
+
+    def test_raw_point_maintenance_blocks_deleting_an_l1_input(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.raw_point_maintenance import (
+            PostgresRawPointMaintenance,
+            RawPointMaintenanceError,
+        )
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, revision_id = self._service_and_revision("pcs-brand-a")
+        plan = self._plan(service, revision_id)
+        installed = service.apply(ApplyPointProcessingPlan(
+            plan.id,
+            plan.digest,
+            "install-before-l0-delete",
+            "test:engineer",
+        ))
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT l0_tag_id
+                    FROM t_point_processing_input_bindings
+                    WHERE source_kind='l0'
+                    ORDER BY l0_tag_id
+                    LIMIT 1
+                    """
+                )
+                tag_id = cursor.fetchone()[0]
+
+        with self.assertRaisesRegex(RawPointMaintenanceError, "RAW_POINT_IN_USE"):
+            PostgresRawPointMaintenance().delete(
+                tag_ids=(tag_id,),
+                actor="test:engineer",
+                base_revision=installed.configuration_revision,
+            )
+
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM t_tags WHERE id=%s", (tag_id,))
+                self.assertEqual(1, cursor.fetchone()[0])
+
     def test_deactivation_preserves_evidence_and_reactivation_reuses_entity_ids(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection

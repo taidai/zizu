@@ -49,6 +49,7 @@ export function rawPointSelectionSummary(points: { id: string; enabled: boolean 
     canEditDisplayName: points.length === 1,
     canEnable: points.some((point) => !point.enabled),
     canDisable: points.some((point) => point.enabled),
+    canDelete: points.length > 0,
   }
 }
 

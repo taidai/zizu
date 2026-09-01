@@ -343,6 +343,25 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
     await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible()
 
+    await page.getByPlaceholder('搜索点位名称').fill('e2e_spare_050')
+    await page.getByRole('checkbox', { name: '选择 e2e_spare_050' }).check()
+    const deleteDialog = page.waitForEvent('dialog')
+    await Promise.all([
+      deleteDialog.then(async (dialog) => {
+        expect(dialog.message()).toContain('全部实时、历史数据将被清除，无法恢复')
+        await dialog.accept()
+      }),
+      page.getByLabel('原始点位维护').getByRole('button', { name: '删除', exact: true }).click(),
+    ])
+    await expect(page.getByText('已永久删除 1 个原始点位及其历史数据', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+    await page.getByPlaceholder('搜索点位名称').fill('')
+    await expect(page.getByText('共 50 个点位', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+    await expect(page.getByText('e2e_spare_050', { exact: true })).toHaveCount(0)
+
     await page.getByRole('button', { name: '退役', exact: true }).click()
     const modal = nodeModal(page, '确认退役节点？')
     await expect(modal).toContainText(editedPlatformNode)

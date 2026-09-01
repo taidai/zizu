@@ -156,5 +156,137 @@ class PostgresRawPointMaintenance:
             "items": after,
         }
 
+    def delete(
+        self,
+        *,
+        tag_ids: tuple[str | UUID, ...],
+        actor: str,
+        base_revision: int,
+    ) -> dict[str, Any]:
+        normalized_ids = tuple(dict.fromkeys(str(tag_id) for tag_id in tag_ids))
+        if not normalized_ids:
+            raise RawPointMaintenanceError("RAW_POINT_SELECTION_REQUIRED")
+
+        with self._connection_factory() as connection:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT {','.join(RAW_POINT_COLUMNS)}
+                        FROM t_tags
+                        WHERE id=ANY(%s::uuid[])
+                        ORDER BY id
+                        FOR UPDATE
+                        """,
+                        (list(normalized_ids),),
+                    )
+                    before = [_point(row) for row in cursor.fetchall()]
+                    if len(before) != len(normalized_ids):
+                        raise RawPointMaintenanceError("RAW_POINT_NOT_FOUND")
+
+                    cursor.execute(
+                        """
+                        SELECT id
+                        FROM t_tags
+                        WHERE id=ANY(%s::uuid[])
+                          AND num_nonnulls(
+                            alarm_level, alarm_type, alarm_threshold, fault_map_id
+                          ) > 0
+                        LIMIT 1
+                        """,
+                        (list(normalized_ids),),
+                    )
+                    if cursor.fetchone() is not None:
+                        raise RawPointMaintenanceError(
+                            "ALARM_CONFIGURATION_MIGRATION_REQUIRED",
+                            "点位仍带有旧告警配置，请先完成告警迁移",
+                        )
+
+                    cursor.execute(
+                        """
+                        SELECT l0_tag_id
+                        FROM t_point_processing_input_bindings
+                        WHERE source_kind='l0'
+                          AND l0_tag_id=ANY(%s::uuid[])
+                        UNION
+                        SELECT l0_tag_id
+                        FROM t_l2_control_bindings
+                        WHERE l0_tag_id=ANY(%s::uuid[])
+                        UNION
+                        SELECT selected_tag_id
+                        FROM t_point_processing_plan_items
+                        WHERE selected_tag_id=ANY(%s::uuid[])
+                        UNION
+                        SELECT tag_id
+                        FROM t_entity_bindings
+                        WHERE tag_id=ANY(%s::uuid[])
+                        UNION
+                        SELECT tag_id
+                        FROM t_entity_source_reservations
+                        WHERE tag_id=ANY(%s::uuid[])
+                        LIMIT 1
+                        """,
+                        (
+                            list(normalized_ids),
+                            list(normalized_ids),
+                            list(normalized_ids),
+                            list(normalized_ids),
+                            list(normalized_ids),
+                        ),
+                    )
+                    if cursor.fetchone() is not None:
+                        raise RawPointMaintenanceError(
+                            "RAW_POINT_IN_USE",
+                            "点位已被加工或控制配置引用，不能永久删除；请使用停用",
+                        )
+
+                    # 存储保留策略把遥测外键改为非级联；必须在同一事务显式清除。
+                    cursor.execute(
+                        "DELETE FROM t_telemetry_latest "
+                        "WHERE tag_id=ANY(%s::uuid[])",
+                        (list(normalized_ids),),
+                    )
+                    cursor.execute(
+                        "DELETE FROM t_telemetry "
+                        "WHERE tag_id=ANY(%s::uuid[])",
+                        (list(normalized_ids),),
+                    )
+                    cursor.execute(
+                        "DELETE FROM t_l0_observation_dedup "
+                        "WHERE tag_id=ANY(%s::uuid[])",
+                        (list(normalized_ids),),
+                    )
+                    cursor.execute(
+                        "DELETE FROM t_tags WHERE id=ANY(%s::uuid[])",
+                        (list(normalized_ids),),
+                    )
+                    if cursor.rowcount != len(normalized_ids):
+                        raise RawPointMaintenanceError("RAW_POINT_NOT_FOUND")
+
+                deleted_ids = [item["id"] for item in before]
+                revision = self._revisions.publish(
+                    transaction=connection,
+                    base_revision=base_revision,
+                    actor=actor,
+                    action="raw_point.delete",
+                    resource_kind="raw_point_batch",
+                    resource_id=canonical_digest(normalized_ids),
+                    before_digest=canonical_digest(before),
+                    after_digest=canonical_digest([]),
+                    details={
+                        "tag_ids": deleted_ids,
+                        "deleted_measurements": True,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "deleted": len(deleted_ids),
+            "configuration_revision": revision,
+            "deleted_ids": deleted_ids,
+        }
+
 
 __all__ = ["PostgresRawPointMaintenance", "RawPointMaintenanceError"]

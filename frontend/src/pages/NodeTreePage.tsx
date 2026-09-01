@@ -777,7 +777,14 @@ export default function NodeTreePage({
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === 'raw-points' && <NodeTagPanel key={`${selectedNode.id}:raw:${selectedNode.tag_count}`} node={selectedNode} readOnly={readOnly} />}
+              {activeTab === 'raw-points' && (
+                <NodeTagPanel
+                  key={`${selectedNode.id}:raw`}
+                  node={selectedNode}
+                  readOnly={readOnly}
+                  onPointCountChanged={() => { void loadNodes() }}
+                />
+              )}
               {activeTab === 'entities' && (
                 <Suspense fallback={<div className="neu-card p-8 text-center text-xs text-gray-400">实体数据加载中...</div>}>
                   <DataTrunkWorkspace
