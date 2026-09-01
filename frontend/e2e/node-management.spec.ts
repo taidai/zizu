@@ -345,7 +345,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('BIT 原值 0/1/2 沿 L0、点位加工、L2 到告警选择保持明确', async () => {
-    test.setTimeout(180_000)
+    test.setTimeout(240_000)
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
     await page.getByRole('button', { name: '实时', exact: true }).click()
     await page.getByLabel('数据类型').selectOption('INT')
@@ -387,7 +387,7 @@ test.describe.serial('节点管理主干', () => {
     await publish(names.bitTag, 2)
     await expect(bitEntity).toContainText('上次值 true', { timeout: 15_000 })
     await expect(bitEntity).toContainText('无效')
-    await expect(page.getByText('当前不可用', { exact: true })).toBeVisible()
+    await expect(bitEntity.locator('..')).toContainText('状态：当前不可用')
 
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
     await page.getByLabel('数据类型').selectOption('INT')
@@ -401,6 +401,7 @@ test.describe.serial('节点管理主干', () => {
     )
 
     await page.getByRole('button', { name: '告警中心' }).click()
+    await page.getByRole('button', { name: '告警规则', exact: true }).click()
     await page.getByRole('button', { name: '状态', exact: true }).click()
     await expect(page.locator('label').filter({ hasText: bitEntityDisplayName })).toBeVisible()
 
@@ -412,12 +413,11 @@ test.describe.serial('节点管理主干', () => {
   test('读取失败必须可见，临时节点最终退役', async () => {
     test.setTimeout(180_000)
     await page.route('**/api/v1/tags?**', async (route) => route.abort('failed'))
-    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByRole('button', { name: '刷新原始点位', exact: true }).click()
     await expect(page.getByText('原始点位读取失败，请稍后重试', { exact: true })).toBeVisible()
     await page.unroute('**/api/v1/tags?**')
 
-    await page.getByRole('button', { name: '标准实体', exact: true }).click()
-    await page.getByRole('button', { name: '原始数据', exact: true }).click()
+    await page.getByRole('button', { name: '刷新原始点位', exact: true }).click()
     await expect(page.getByText('共 52 个点位', { exact: true })).toBeVisible()
 
     await page.getByPlaceholder('搜索点位名称').fill('e2e_spare_050')

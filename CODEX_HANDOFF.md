@@ -5281,3 +5281,13 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 维护者已确认 `docs/superpowers/specs/2026-09-01-l0-raw-value-and-explicit-bit-processing-design.md`，规格状态保持 Accepted。
 - 已形成逐任务 TDD 实施计划：`docs/superpowers/plans/2026-09-01-l0-raw-value-and-explicit-bit-processing.md`。计划共 9 批，依次覆盖 L0 原值解码、Schema059 持久化、真正 passthrough、显式 boolean_map、L2 last-good/current-bad、硬切工具、前端闭环、E2E 主干和 v0.6.8 固定摘要部署。
 - 本轮只编写计划和 handoff，未修改产品代码、数据库、版本或 1 号机。执行时应使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐任务先 RED 后 GREEN；不得跳过硬切 blocker、完整门禁或 Browser 主干验收。
+
+## Session 2026-09-02 — v0.6.8 已部署，无头主干验收 7/7
+
+- 产品提交与标签 `4dacdf4d8c8df325a9ad9729fc225f3829a9fc43`，Actions `33543992024` 成功；1 号机运行 ARM64 固定摘要 `sha256:6bebbaabb06531d5338c6b3fb080b0fb0b1c721f82575c03f9bdcb2a6863b0b5`。
+- Schema 059、backend healthy、restart 0；保持 host 网络和 `/dev/mqueue`，未重启 TimescaleDB/NanoMQ/Neuron，未启用 TLS/Caddy。
+- 切换前备份 `/opt/zizu-release-test-0.5.0/backups/v0.6.8-pre/omnithings-20260901T181502Z.dump`，254,563,658 bytes，SHA-256 `b7edc72f0f0f85faa84f8e5906d8c07930818656c985768212be5c4b0226ec57`，`pg_restore --list` 通过。
+- 清除 17 张运行表 3,232,454 条旧运行数据；59 节点、1,684 点位、87 加工修订、25 实体完整保留。1 个旧 BIT 恒等加工完成不可变硬切，0 blocker。
+- 真实 TimescaleDB 点位加工回归 20/20；公网无头主干最终 7/7、0 失败、0 跳过。BIT 0/1/2、L0 原值、L1 显式布尔映射、L2 last-good/current-bad、告警实体选择、读取失败、点位删除和节点退役均通过；活动 E2E 平台/Neuron 临时节点最终为 0。
+- E2E 脚本同步修正三处过时断言：实体当前不可用改按实体详情语义断言；告警路径补“告警规则”一级；读取失败改由“刷新原始点位”强制发起请求。产品没有因这三处脚本问题重新构建。
+- 可见 Browser 已打开 1 号机登录页。因浏览器提交凭据需要动作前确认，尚未在可见 Browser 中完成只读点击主干；无头浏览器业务闭环已完成。完整记录见 `docs/deploy-1号机-v0.6.8-http.md`。
