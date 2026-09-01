@@ -5276,3 +5276,8 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 无头主干验收脚本已补 L0 名称修改→停用→恢复→名称还原的完整生命周期，验收清单同步增加安全维护与依赖保护项。
 - 验证：相关真实 PostgreSQL/API 测试 5/5，通过；前端单元测试 55/55，通过；TypeScript/Vite production build 成功；Playwright 主干清单可加载 6 项。尚未对 1 号机执行写入式无头验收或部署。
 - Browser 打开 `http://e606.hlszh.com:9000/` 后停在登录页；当前线上仍应按已记录的 v0.5.7 看待，不能把本地 L0 维护入口宣称为已上线。下一步如用户明确要求发布，再走版本、备份、固定摘要部署及无头主干验收。
+## Session 2026-09-01 — L0 原值保真与 BIT 显式加工规格确认并形成实施计划
+
+- 维护者已确认 `docs/superpowers/specs/2026-09-01-l0-raw-value-and-explicit-bit-processing-design.md`，规格状态保持 Accepted。
+- 已形成逐任务 TDD 实施计划：`docs/superpowers/plans/2026-09-01-l0-raw-value-and-explicit-bit-processing.md`。计划共 9 批，依次覆盖 L0 原值解码、Schema059 持久化、真正 passthrough、显式 boolean_map、L2 last-good/current-bad、硬切工具、前端闭环、E2E 主干和 v0.6.8 固定摘要部署。
+- 本轮只编写计划和 handoff，未修改产品代码、数据库、版本或 1 号机。执行时应使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐任务先 RED 后 GREEN；不得跳过硬切 blocker、完整门禁或 Browser 主干验收。
