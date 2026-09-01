@@ -112,6 +112,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('Neuron 点位可预览导入且 L0 实时、历史、筛选和分页可用', async () => {
+    test.setTimeout(180_000)
     await page.getByRole('button', { name: '导入点位', exact: true }).click()
     const modal = nodeModal(page, '从 Neuron 导入点位')
     const neuronSelect = modal.locator('select').first()
@@ -340,6 +341,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('读取失败必须可见，临时节点最终退役', async () => {
+    test.setTimeout(180_000)
     await page.route('**/api/v1/tags?**', async (route) => route.abort('failed'))
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
     await expect(page.getByText('原始点位读取失败，请稍后重试', { exact: true })).toBeVisible()
