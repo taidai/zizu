@@ -126,10 +126,20 @@ function stableKey(value: string, fallback: string): string {
   return normalized || fallback
 }
 
+const FORMULA_RESERVED_IDENTIFIERS = new Set([
+  'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
+  'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global',
+  'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass',
+  'raise', 'return', 'try', 'while', 'with', 'yield',
+])
+
 function pointInputIds(points: readonly InlineRawPoint[]): string[] {
   const used = new Set<string>()
   return points.map((point, index) => {
-    const base = stableKey(point.name, `point_${index + 1}`)
+    const normalized = stableKey(point.name, `point_${index + 1}`)
+    const base = /^[a-z]/.test(normalized) && !FORMULA_RESERVED_IDENTIFIERS.has(normalized)
+      ? normalized
+      : `point_${normalized}`
     let inputId = base
     let suffix = 2
     while (used.has(inputId)) inputId = `${base}_${suffix++}`

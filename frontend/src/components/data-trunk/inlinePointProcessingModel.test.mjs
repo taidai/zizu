@@ -115,6 +115,56 @@ test('direct mapping may declare a unit when the raw point has none', async () =
   assert.equal(result.content.outputs[0].transform.kind, 'numeric')
 })
 
+test('direct BOOL mapping makes digit-leading raw names safe for formulas', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const result = model.buildNodePointProcessingDraft([{
+    id: 'tag-15v-fault',
+    name: '15V电源故障',
+    display_name: '15V电源故障',
+    data_type: 'BOOL',
+    unit: null,
+  }], {
+    mode: 'passthrough',
+    definitionKey: 'e2e_root.15v',
+    displayName: '15V电源故障',
+    deviceCategory: 'E2E_ROOT',
+    dataType: 'BOOL',
+    unit: null,
+    freshnessSeconds: 10,
+  })
+
+  assert.equal(result.content.inputs[0].id, 'point_15v')
+  assert.deepEqual(result.inputSelections, { point_15v: 'tag-15v-fault' })
+  assert.deepEqual(result.content.outputs[0].transform, {
+    kind: 'formula',
+    expression: 'point_15v',
+    scheduleSeconds: 1,
+    controlEligible: false,
+  })
+})
+
+test('direct mapping makes formula keywords safe as input identities', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const result = model.buildNodePointProcessingDraft([{
+    id: 'tag-and',
+    name: 'and',
+    display_name: 'AND 状态',
+    data_type: 'BOOL',
+    unit: null,
+  }], {
+    mode: 'passthrough',
+    definitionKey: 'device.and_state',
+    displayName: 'AND 状态',
+    deviceCategory: 'DEVICE',
+    dataType: 'BOOL',
+    unit: null,
+    freshnessSeconds: 10,
+  })
+
+  assert.equal(result.content.inputs[0].id, 'point_and')
+  assert.equal(result.content.outputs[0].transform.expression, 'point_and')
+})
+
 test('Chinese raw point names receive distinct valid entity identities', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
   const first = model.suggestInlinePointProcessingDefaults([{
