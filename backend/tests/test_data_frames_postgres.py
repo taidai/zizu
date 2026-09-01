@@ -13,6 +13,12 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg2
 
+os.environ.setdefault("DB_PASSWORD", "test-postgres-secret")
+os.environ.setdefault("NEURON_PASSWORD", "test-neuron-secret")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "test-nanomq-secret")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-value-that-is-long-enough")
+
+from app.api.tags import _coerce_latest_value
 from app.services.data_trunk_contracts import (
     DataTrunkError,
     FrameFailure,
@@ -26,6 +32,7 @@ from app.services.data_trunk_contracts import (
     TrunkQuality,
     TypedValue,
     ValueKind,
+    typed_raw_value_from_columns,
 )
 from app.services.data_trunk_postgres import PostgresFrameRepository
 from app.services.data_trunk_outbox import PostgresFrameOutboxRepository
@@ -39,6 +46,65 @@ from tests import test_committed_frame_consumers_migration_postgres as consumer_
 
 MIGRATION_050 = Path(__file__).resolve().parents[2] / "init-db" / "migration_050_node_l0_usability.sql"
 MIGRATION_051 = Path(__file__).resolve().parents[2] / "init-db" / "migration_051_node_private_point_processing.sql"
+MIGRATION_059 = Path(__file__).resolve().parents[2] / "init-db" / "migration_059_l0_raw_bit_semantics.sql"
+
+
+class RawTypedUnionContractTest(unittest.TestCase):
+    def test_actual_nonempty_column_defines_the_raw_value_type(self) -> None:
+        integer = typed_raw_value_from_columns(
+            raw_float=None,
+            raw_int=0,
+            raw_bool=None,
+            raw_text=None,
+        )
+        boolean = typed_raw_value_from_columns(
+            raw_float=None,
+            raw_int=None,
+            raw_bool=False,
+            raw_text=None,
+        )
+
+        self.assertEqual(TypedValue.integer(0), integer)
+        self.assertEqual(TypedValue.boolean(False), boolean)
+
+    def test_zero_or_multiple_raw_columns_are_invalid_evidence(self) -> None:
+        with self.assertRaisesRegex(DataTrunkError, "RECOVERY_EVIDENCE_INVALID"):
+            typed_raw_value_from_columns(
+                raw_float=None,
+                raw_int=None,
+                raw_bool=None,
+                raw_text=None,
+            )
+        with self.assertRaisesRegex(DataTrunkError, "RECOVERY_EVIDENCE_INVALID"):
+            typed_raw_value_from_columns(
+                raw_float=0.0,
+                raw_int=0,
+                raw_bool=None,
+                raw_text=None,
+            )
+
+    def test_tags_api_prefers_the_actual_framed_raw_scalar_and_reason(self) -> None:
+        tag = {
+            "data_type": "BOOL",
+            "frame_sequence": 9,
+            "raw_value_float": None,
+            "raw_value_int": 0,
+            "raw_value_bool": None,
+            "raw_value_text": None,
+            "value_float": None,
+            "value_int": 0,
+            "value_bool": None,
+            "value_str": None,
+            "quality": 0,
+            "quality_reason": "TYPE_MISMATCH",
+        }
+
+        _coerce_latest_value(tag)
+
+        self.assertEqual(0, tag["raw_value"])
+        self.assertIs(type(tag["raw_value"]), int)
+        self.assertIsNone(tag["eng_value"])
+        self.assertEqual("TYPE_MISMATCH", tag["quality_reason"])
 
 
 @unittest.skipUnless(
@@ -80,6 +146,7 @@ class DataFramesPostgresTest(unittest.TestCase):
                 cursor.execute(
                     frame_migration.MIGRATION_054.read_text(encoding="utf-8")
                 )
+                cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
             connection.commit()
 
     def setUp(self) -> None:
@@ -251,11 +318,59 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (str(pending.frame_id),),
             )
             self.assertEqual((0,), cursor.fetchone())
+
+    def test_bad_raw_integer_round_trips_through_history_latest_and_outbox(self) -> None:
+        candidate = self._candidate(capture_beat=102)
+        original = candidate.changed_l0[0]
+        bad_observation = replace(
+            original.observation,
+            value=TypedValue.integer(2),
+            quality=TrunkQuality.BAD,
+            quality_reason="BIT_VALUE_OUT_OF_RANGE",
+        )
+        bad = replace(
+            original,
+            observation=bad_observation,
+            effective_quality=TrunkQuality.BAD,
+        )
+        candidate = replace(
+            candidate,
+            cells=MappingProxyType({self.tag_id: bad}),
+            changed_l0=(bad,),
+        )
+
+        pending = self.repository.commit_pending(candidate)
+        claimed = self.repository.claim_next(datetime.now(UTC))
+        snapshot = self.repository.load_processing_snapshot(claimed)
+        restored = snapshot.l0_by_tag[self.tag_id].observation
+        self.assertEqual(TypedValue.integer(2), restored.value)
+        self.assertEqual(
+            "BIT_VALUE_OUT_OF_RANGE",
+            restored.quality_reason,
+        )
+        self.repository.complete(claimed, snapshot, ())
+
+        with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT count(*) FROM t_data_frame_outbox WHERE frame_id=%s",
+                "SELECT raw_value_int,raw_value_bool,quality,quality_reason "
+                "FROM t_telemetry WHERE frame_id=%s",
                 (str(pending.frame_id),),
             )
-            self.assertEqual((0,), cursor.fetchone())
+            self.assertEqual((2, None, 0, "BIT_VALUE_OUT_OF_RANGE"), cursor.fetchone())
+            cursor.execute(
+                "SELECT raw_value_int,raw_value_bool,quality,quality_reason "
+                "FROM t_telemetry_latest WHERE tag_id=%s",
+                (str(self.tag_id),),
+            )
+            self.assertEqual((2, None, 0, "BIT_VALUE_OUT_OF_RANGE"), cursor.fetchone())
+            cursor.execute(
+                "SELECT payload->'l0_changes' FROM t_data_frame_outbox WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            change = cursor.fetchone()[0][0]
+            self.assertEqual("INT", change["data_type"])
+            self.assertEqual(2, change["value"])
+            self.assertEqual("BIT_VALUE_OUT_OF_RANGE", change["quality_reason"])
 
     def test_stale_l0_remains_stale_after_latest_advances_without_new_sample(self) -> None:
         installation_id = uuid4()
@@ -483,7 +598,7 @@ class DataFramesPostgresTest(unittest.TestCase):
             recovered.observations[0].observation.tag_id,
         )
 
-    def test_restore_blackboard_ignores_legacy_value_with_wrong_declared_type(self) -> None:
+    def test_restore_blackboard_preserves_actual_raw_type_after_tag_metadata_changes(self) -> None:
         self.repository.commit_pending(self._candidate(capture_beat=105))
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -495,7 +610,10 @@ class DataFramesPostgresTest(unittest.TestCase):
         recovered = self.repository.restore_blackboard()
 
         self.assertIn(self.tag_id, recovered.active_input_contracts)
-        self.assertEqual((), recovered.observations)
+        self.assertEqual(1, len(recovered.observations))
+        observation = recovered.observations[0].observation
+        self.assertEqual(TypedValue.float(105.0), observation.value)
+        self.assertEqual(TrunkQuality.GOOD, observation.quality)
 
     def test_transaction_b_atomically_advances_l0_and_completes_frame(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=106))

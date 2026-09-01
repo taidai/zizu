@@ -26,6 +26,10 @@ from app.api.business_security import (
     protected,
 )
 from app.services.identity import Principal
+from app.services.data_trunk_contracts import (
+    DataTrunkError,
+    typed_raw_value_from_columns,
+)
 
 router = APIRouter()
 _LEGACY_ALARM_FIELDS = frozenset(
@@ -128,12 +132,16 @@ class TagResponse(BaseModel):
     eng_value: float | None = None
     latest_ts: str | None = None
     quality: int | None = None
+    quality_reason: str | None = None
+    wire_data_type: str | None = None
 
 
 class HistoryPoint(BaseModel):
     ts: str
-    raw_value: float | None
+    raw_value: float | int | bool | str | None
     eng_value: float | None
+    quality: int | None = None
+    quality_reason: str | None = None
 
 
 class HistoryResponse(BaseModel):
@@ -148,19 +156,46 @@ class HistoryResponse(BaseModel):
 
 def _coerce_latest_value(tag: dict) -> None:
     """
-    将 t_telemetry_latest 的 value_* 列转换为 API 层的 raw_value / eng_value。
+    将最新值 typed-union 转换为 API 层的 raw_value / eng_value。
 
-    数据库层存储的是工程值（归一化后）。原始值通过 scale/offset 反向推导：
-      工程值 = 原始值 × scale + offset
-      原始值 = (工程值 - offset) / scale
-    由于 Neuron 上报值可能为浮点但 t_tags 配置为 INT，这里做跨列回退。
-    BOOL/STRING 类型只返回 raw_value，eng_value 为 None。
+    数据帧记录按实际非空 raw_value_* 列恢复协议原值，声明类型不能改写它；
+    工程换算只属于 L1。无数据帧的旧记录保留原有 value_* 兼容读法。
     """
     data_type = tag.get("data_type")
+    raw_value_float = tag.pop("raw_value_float", None)
+    raw_value_int = tag.pop("raw_value_int", None)
+    raw_value_bool = tag.pop("raw_value_bool", None)
+    raw_value_text = tag.pop("raw_value_text", None)
     value_float = tag.pop("value_float", None)
     value_int = tag.pop("value_int", None)
     value_bool = tag.pop("value_bool", None)
     value_str = tag.pop("value_str", None)
+
+    has_framed_raw_evidence = bool(tag.get("frame_sequence")) or any(
+        value is not None
+        for value in (
+            raw_value_float,
+            raw_value_int,
+            raw_value_bool,
+            raw_value_text,
+        )
+    )
+    if has_framed_raw_evidence:
+        try:
+            raw_value = typed_raw_value_from_columns(
+                raw_float=raw_value_float,
+                raw_int=raw_value_int,
+                raw_bool=raw_value_bool,
+                raw_text=raw_value_text,
+            ).value
+        except DataTrunkError:
+            raw_value = None
+            tag["quality"] = 0
+            tag["quality_reason"] = "RECOVERY_EVIDENCE_INVALID"
+        tag["raw_value"] = raw_value
+        # L0 is protocol evidence. Engineering conversion belongs to L1.
+        tag["eng_value"] = None
+        return
 
     if data_type == "BOOL":
         eng = value_bool
@@ -281,7 +316,14 @@ async def list_tags(
         latest.value_int,
         latest.value_bool,
         latest.value_str,
-        latest.quality
+        latest.quality,
+        latest.raw_value_float,
+        latest.raw_value_int,
+        latest.raw_value_bool,
+        latest.raw_value_text,
+        latest.quality_reason,
+        latest.frame_sequence,
+        t.wire_data_type
     FROM t_tags t
     JOIN t_nodes n ON n.id = t.node_id
     LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
@@ -370,7 +412,13 @@ async def export_tags_csv(
         latest.value_int,
         latest.value_bool,
         latest.value_str,
-        latest.ts AS latest_ts
+        latest.ts AS latest_ts,
+        latest.raw_value_float,
+        latest.raw_value_int,
+        latest.raw_value_bool,
+        latest.raw_value_text,
+        latest.quality_reason,
+        latest.frame_sequence
     FROM t_tags t
     JOIN t_nodes n ON n.id = t.node_id
     LEFT JOIN t_telemetry_latest latest ON latest.tag_id = t.id
@@ -392,13 +440,38 @@ async def export_tags_csv(
         "原始值", "工程值", "Scale", "Offset", "最新时间"
     ])
     for row in rows:
-        node_name, name, display_name, data_type, unit, scale, offset, value_float, value_int, value_bool, value_str, ts = row
+        (
+            node_name,
+            name,
+            display_name,
+            data_type,
+            unit,
+            scale,
+            offset,
+            value_float,
+            value_int,
+            value_bool,
+            value_str,
+            ts,
+            raw_value_float,
+            raw_value_int,
+            raw_value_bool,
+            raw_value_text,
+            quality_reason,
+            frame_sequence,
+        ) = row
         tag = {
             "data_type": data_type,
             "value_float": value_float,
             "value_int": value_int,
             "value_bool": value_bool,
             "value_str": value_str,
+            "raw_value_float": raw_value_float,
+            "raw_value_int": raw_value_int,
+            "raw_value_bool": raw_value_bool,
+            "raw_value_text": raw_value_text,
+            "quality_reason": quality_reason,
+            "frame_sequence": frame_sequence,
         }
         _coerce_latest_value(tag)
         raw = tag["raw_value"]
@@ -409,7 +482,9 @@ async def export_tags_csv(
             display_name or "",
             data_type,
             unit or "",
-            f"{raw:.4f}" if raw is not None else "",
+            f"{raw:.4f}"
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool)
+            else (str(raw) if raw is not None else ""),
             f"{eng:.4f}" if eng is not None else "",
             f"{scale:.6f}",
             f"{offset:.6f}",
@@ -487,7 +562,11 @@ async def get_tag(
                        fm.name AS fault_map_name,
                        n.name AS node_name,
                        latest.ts, latest.value_float, latest.value_int,
-                       latest.value_bool, latest.value_str, latest.quality
+                       latest.value_bool, latest.value_str, latest.quality,
+                       latest.raw_value_float, latest.raw_value_int,
+                       latest.raw_value_bool, latest.raw_value_text,
+                       latest.quality_reason, latest.frame_sequence,
+                       t.wire_data_type
                 FROM t_tags t
                 JOIN t_nodes n ON n.id = t.node_id
                 LEFT JOIN t_fault_maps fm ON fm.id = t.fault_map_id
@@ -544,20 +623,25 @@ async def get_tag_history(
         with conn.cursor() as cur:
             # 获取 tag 信息
             cur.execute(
-                "SELECT name, display_name, scale_factor, value_offset FROM t_tags WHERE id = %s",
+                "SELECT name,display_name FROM t_tags WHERE id = %s",
                 (tag_id,),
             )
             tag_row = cur.fetchone()
             if not tag_row:
                 raise HTTPException(status_code=404, detail="Tag not found")
-            tag_name, display_name, scale_factor, value_offset = tag_row
+            tag_name, display_name = tag_row
 
             if bucket:
                 # 聚合查询
                 query = """
                 SELECT
                     time_bucket(%s::interval, ts) AS bucket_ts,
-                    AVG(COALESCE(value_float, value_int::float)) AS raw_value
+                    AVG(COALESCE(raw_value_float, raw_value_int::float)),
+                    NULL::bigint,
+                    NULL::boolean,
+                    NULL::text,
+                    MIN(quality),
+                    MAX(quality_reason)
                 FROM t_telemetry
                 WHERE tag_id = %s AND ts > NOW() - %s::interval
                 GROUP BY bucket_ts
@@ -567,7 +651,8 @@ async def get_tag_history(
             else:
                 # 原始数据，但限制最多 2000 条防止爆内存
                 query = """
-                SELECT ts AS bucket_ts, COALESCE(value_float, value_int::float) AS raw_value
+                SELECT ts,raw_value_float,raw_value_int,raw_value_bool,
+                       raw_value_text,quality,quality_reason
                 FROM t_telemetry
                 WHERE tag_id = %s AND ts > NOW() - %s::interval
                 ORDER BY ts ASC
@@ -577,14 +662,32 @@ async def get_tag_history(
 
             points = []
             for row in cur.fetchall():
-                ts, raw = row
-                eng = None
-                if raw is not None:
-                    eng = round(float(raw), 4)
+                (
+                    ts,
+                    raw_value_float,
+                    raw_value_int,
+                    raw_value_bool,
+                    raw_value_text,
+                    quality,
+                    quality_reason,
+                ) = row
+                try:
+                    raw = typed_raw_value_from_columns(
+                        raw_float=raw_value_float,
+                        raw_int=raw_value_int,
+                        raw_bool=raw_value_bool,
+                        raw_text=raw_value_text,
+                    ).value
+                except DataTrunkError:
+                    raw = None
+                    quality = 0
+                    quality_reason = "RECOVERY_EVIDENCE_INVALID"
                 points.append({
                     "ts": ts.isoformat(),
-                    "raw_value": round(float(raw), 4) if raw is not None else None,
-                    "eng_value": eng,
+                    "raw_value": raw,
+                    "eng_value": None,
+                    "quality": quality,
+                    "quality_reason": quality_reason,
                 })
 
     return {

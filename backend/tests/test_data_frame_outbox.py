@@ -92,6 +92,24 @@ class _FailingPublisher:
 
 
 class DataFrameOutboxTest(unittest.IsolatedAsyncioTestCase):
+    def test_l0_quality_reason_survives_public_payload_round_trip(self) -> None:
+        change = CommittedL0Change(
+            tag_id=uuid4(),
+            observation_id=uuid4(),
+            value=TypedValue.integer(2),
+            source_quality=TrunkQuality.BAD,
+            effective_quality=TrunkQuality.BAD,
+            source_timestamp=NOW,
+            received_at=NOW,
+            accepted_beat=10,
+            quality_reason="BIT_VALUE_OUT_OF_RANGE",
+        )
+
+        restored = CommittedL0Change.from_public_dict(change.public_dict())
+
+        self.assertEqual("BIT_VALUE_OUT_OF_RANGE", restored.quality_reason)
+        self.assertEqual(TypedValue.integer(2), restored.value)
+
     async def test_production_fanout_delivers_alarm_jdm_then_stream(self) -> None:
         from app.main import build_committed_frame_fanout
 

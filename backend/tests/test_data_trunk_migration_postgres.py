@@ -46,6 +46,7 @@ MIGRATION_043 = MIGRATIONS_ROOT / "migration_043_business_metrics.sql"
 MIGRATION_044 = MIGRATIONS_ROOT / "migration_044_node_data_trunk_hard_cut.sql"
 MIGRATION_045 = MIGRATIONS_ROOT / "migration_045_edge_storage_retention.sql"
 MIGRATION_046 = MIGRATIONS_ROOT / "migration_046_data_frames.sql"
+MIGRATION_059 = MIGRATIONS_ROOT / "migration_059_l0_raw_bit_semantics.sql"
 
 
 @unittest.skipUnless(
@@ -119,6 +120,10 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
     def _apply_046(cursor) -> None:
         cursor.execute(MIGRATION_046.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _apply_059(cursor) -> None:
+        cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
+
     @classmethod
     def _reset_through_041(cls, cursor) -> None:
         cls._reset_through_037(cursor)
@@ -126,6 +131,42 @@ class DataTrunkMigrationPostgresTest(unittest.TestCase):
         cls._apply_039(cursor)
         cls._apply_040(cursor)
         cls._apply_041(cursor)
+
+    def test_059_adds_l0_quality_reason_without_coupling_raw_type_to_tag(self) -> None:
+        with psycopg2.connect(**self.connection_kwargs) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                self._reset_through_041(cursor)
+                self._apply_059(cursor)
+                cursor.execute(
+                    "SELECT table_name,column_name FROM information_schema.columns "
+                    "WHERE table_schema='public' AND column_name='quality_reason' "
+                    "AND table_name IN ('t_telemetry','t_telemetry_latest') "
+                    "ORDER BY table_name"
+                )
+                self.assertEqual(
+                    [
+                        ("t_telemetry", "quality_reason"),
+                        ("t_telemetry_latest", "quality_reason"),
+                    ],
+                    cursor.fetchall(),
+                )
+                cursor.execute(
+                    "SELECT conname,pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname IN "
+                    "('chk_telemetry_raw_typed_value',"
+                    " 'chk_telemetry_latest_raw_typed_value') "
+                    "ORDER BY conname"
+                )
+                constraints = cursor.fetchall()
+                self.assertEqual(2, len(constraints))
+                for _name, definition in constraints:
+                    normalized = " ".join(definition.lower().split())
+                    self.assertIn("num_nonnulls", normalized)
+                    self.assertIn("raw_value_int", normalized)
+                    self.assertIn("raw_value_bool", normalized)
+                    self.assertIn("= 1", normalized)
+                    self.assertNotIn("t_tags", normalized)
 
     def test_schema_reset_retries_one_timescale_reporter_deadlock(self) -> None:
         class FakeConnection:

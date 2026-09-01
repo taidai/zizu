@@ -15,7 +15,11 @@ from app.services.committed_frame_stream import (
     FrameStreamError,
     ReplayWindow,
 )
-from app.services.data_trunk_contracts import TrunkQuality, ValueKind
+from app.services.data_trunk_contracts import (
+    TrunkQuality,
+    ValueKind,
+    typed_raw_value_from_columns,
+)
 from app.services.data_trunk_freshness import effective_l0_quality
 from app.services.data_trunk_outbox import FrameOutboxEvent
 
@@ -286,7 +290,8 @@ class PostgresCommittedFrameStreamRepository:
                    latest.event_received_at,latest.source_digest,
                    latest.frame_sequence,history.quality,history.accepted_beat,
                    latest.value_float,latest.value_int,
-                   latest.value_bool,latest.value_str
+                   latest.value_bool,latest.value_str,
+                   latest.quality_reason,tag.wire_data_type
             FROM t_tags AS tag
             LEFT JOIN t_telemetry_latest AS latest
               ON latest.tag_id=tag.id AND latest.node_id=tag.node_id
@@ -347,7 +352,7 @@ class PostgresCommittedFrameStreamRepository:
                 int(TrunkQuality.GOOD),
                 int(TrunkQuality.UNCERTAIN),
             }:
-                reason = "SOURCE_QUALITY_BAD"
+                reason = row[23] or "SOURCE_QUALITY_BAD"
             else:
                 reason = None
             items.append(
@@ -371,6 +376,7 @@ class PostgresCommittedFrameStreamRepository:
                         None if row[15] is None else str(row[15]).strip()
                     ),
                     "frame_sequence": frame_sequence_value,
+                    "wire_data_type": row[24],
                 }
             )
         return tuple(items)
@@ -515,15 +521,13 @@ def _l0_snapshot_value(
     legacy_text: Any,
 ) -> Any:
     if frame_sequence > 0:
-        return _typed_value(
-            data_type,
-            raw_float,
-            raw_int,
-            None,
-            raw_bool,
-            raw_text,
-            None,
-        )
+        value = typed_raw_value_from_columns(
+            raw_float=raw_float,
+            raw_int=raw_int,
+            raw_bool=raw_bool,
+            raw_text=raw_text,
+        ).value
+        return float(value) if isinstance(value, Decimal) else value
     # Before committed frames, imported Neuron register types and engineering
     # values were occasionally stored in different legacy columns. Preserve
     # the last observable value for diagnostics without relaxing new frames.

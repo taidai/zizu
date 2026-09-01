@@ -42,6 +42,7 @@ from app.services.data_trunk_contracts import (
     TypedValue,
     TerminalFrame,
     ValueKind,
+    typed_raw_value_from_columns,
 )
 from app.services.point_processing_dag import validate_processing_dag
 from app.services.point_processing import _formula_input_names
@@ -448,23 +449,19 @@ class PostgresFrameRepository:
                           telemetry.event_received_at,
                           telemetry.accepted_beat,
                           telemetry.source_order_mode,
-                          telemetry.source_receive_ordinal
+                          telemetry.source_receive_ordinal,
+                          telemetry.quality_reason
                         FROM t_telemetry AS telemetry
                         JOIN t_tags AS recovered_tag
                           ON recovered_tag.id=telemetry.tag_id
                         WHERE telemetry.tag_id = ANY(%s::uuid[])
                           AND telemetry.frame_sequence IS NOT NULL
-                          AND CASE upper(COALESCE(
-                                recovered_tag.value_data_type,
-                                recovered_tag.data_type
-                              ))
-                                WHEN 'FLOAT' THEN telemetry.raw_value_float IS NOT NULL
-                                WHEN 'INT' THEN telemetry.raw_value_int IS NOT NULL
-                                WHEN 'BOOL' THEN telemetry.raw_value_bool IS NOT NULL
-                                WHEN 'STRING' THEN telemetry.raw_value_text IS NOT NULL
-                                WHEN 'ENUM' THEN telemetry.raw_value_text IS NOT NULL
-                                ELSE FALSE
-                              END
+                          AND num_nonnulls(
+                                telemetry.raw_value_float,
+                                telemetry.raw_value_int,
+                                telemetry.raw_value_bool,
+                                telemetry.raw_value_text
+                              ) = 1
                         ORDER BY telemetry.tag_id,
                                  telemetry.frame_sequence DESC, telemetry.ts DESC
                         """,
@@ -490,8 +487,11 @@ class PostgresFrameRepository:
                             order = SourceOrder.received_at(
                                 row[14], ordinal, str(row[4]).strip()
                             )
-                        value = _raw_value_from_columns(
-                            str(contract[3]), row[8], row[9], row[10], row[11]
+                        value = typed_raw_value_from_columns(
+                            raw_float=row[8],
+                            raw_int=row[9],
+                            raw_bool=row[10],
+                            raw_text=row[11],
                         )
                         raw = RawObservation(
                             observation_id=UUID(str(row[0])),
@@ -508,6 +508,7 @@ class PostgresFrameRepository:
                             source_digest=str(row[4]).strip(),
                             event_time_basis=str(row[13]),
                             source_order=order,
+                            quality_reason=row[18],
                         )
                         observations.append(
                             FramedRawObservation(
@@ -776,7 +777,8 @@ class PostgresFrameRepository:
                              telemetry.event_time_basis,
                              telemetry.accepted_beat,
                              telemetry.source_order_mode,
-                             telemetry.source_receive_ordinal
+                             telemetry.source_receive_ordinal,
+                             telemetry.quality_reason
                       FROM t_l0_observation_dedup AS dedup
                       JOIN LATERAL (
                         SELECT item.observation_id,item.node_id,item.tag_id,
@@ -787,7 +789,7 @@ class PostgresFrameRepository:
                                item.source_sequence,item.source_digest,
                                item.event_time_basis,item.accepted_beat,
                                item.source_order_mode,
-                               item.source_receive_ordinal
+                               item.source_receive_ordinal,item.quality_reason
                         FROM t_telemetry AS item
                         WHERE item.observation_id=dedup.observation_id
                           AND item.ts=dedup.observed_at
@@ -818,7 +820,7 @@ class PostgresFrameRepository:
                              latest.source_sequence,latest.source_digest,
                              latest.event_time_basis,latest.accepted_beat,
                              latest.source_order_mode,
-                             latest.source_receive_ordinal
+                             latest.source_receive_ordinal,latest.quality_reason
                       FROM t_telemetry_latest AS latest
                       JOIN relevant_tags USING(tag_id)
                       WHERE NOT EXISTS (
@@ -837,7 +839,8 @@ class PostgresFrameRepository:
                       telemetry.source_sequence,telemetry.source_digest,
                       telemetry.event_time_basis,telemetry.accepted_beat,
                       telemetry.source_order_mode,
-                      telemetry.source_receive_ordinal
+                      telemetry.source_receive_ordinal,
+                      telemetry.quality_reason
                     FROM frame_state AS telemetry
                     JOIN t_tags AS tag ON tag.id=telemetry.tag_id
                     ORDER BY telemetry.tag_id
@@ -870,8 +873,11 @@ class PostgresFrameRepository:
                         node_id=UUID(str(row[1])),
                         tag_id=tag_id,
                         source_key=str(row[3]),
-                        value=_raw_value_from_columns(
-                            str(row[4]), row[6], row[7], row[8], row[9]
+                        value=typed_raw_value_from_columns(
+                            raw_float=row[6],
+                            raw_int=row[7],
+                            raw_bool=row[8],
+                            raw_text=row[9],
                         ),
                         raw_unit=row[5],
                         quality=TrunkQuality(int(row[10])),
@@ -882,6 +888,7 @@ class PostgresFrameRepository:
                         source_digest=str(row[15]).strip(),
                         event_time_basis=str(row[16]),
                         source_order=order,
+                        quality_reason=row[20],
                     )
                     accepted_beat = int(row[17])
                     effective_quality = TrunkQuality(int(row[10]))
@@ -1765,6 +1772,7 @@ class PostgresFrameRepository:
                     observation.source_sequence,
                     *compatibility,
                     int(framed.effective_quality),
+                    observation.quality_reason,
                     observation.raw_unit,
                     *raw,
                     observation.event_time_basis,
@@ -1782,7 +1790,7 @@ class PostgresFrameRepository:
             WITH input (
               observation_id,node_id,tag_id,observed_at,source_digest,
               source_message_id,source_sequence,value_float,value_int,
-              value_bool,value_str,quality,raw_unit,raw_value_float,
+              value_bool,value_str,quality,quality_reason,raw_unit,raw_value_float,
               raw_value_int,raw_value_bool,raw_value_text,event_time_basis,
               event_received_at,frame_id,frame_sequence,accepted_beat,
               source_order_mode,source_receive_ordinal
@@ -1797,13 +1805,13 @@ class PostgresFrameRepository:
             )
             INSERT INTO t_telemetry
               (ts,node_id,tag_id,value_float,value_int,value_bool,value_str,
-               is_virtual,quality,observation_id,source_message_id,
+               is_virtual,quality,quality_reason,observation_id,source_message_id,
                source_sequence,source_digest,raw_unit,raw_value_float,
                raw_value_int,raw_value_bool,raw_value_text,event_time_basis,
                event_received_at,frame_id,frame_sequence,accepted_beat,
                source_order_mode,source_receive_ordinal)
             SELECT observed_at,node_id,tag_id,value_float,value_int,value_bool,
-                   value_str,FALSE,quality,input.observation_id,
+                   value_str,FALSE,quality,quality_reason,input.observation_id,
                    source_message_id,source_sequence,source_digest,raw_unit,
                    raw_value_float,raw_value_int,raw_value_bool,raw_value_text,
                    event_time_basis,event_received_at,frame_id,frame_sequence,
@@ -1814,7 +1822,7 @@ class PostgresFrameRepository:
             template=(
                 "(%s::uuid,%s::uuid,%s::uuid,%s::timestamptz,%s::char(64),"
                 "%s::text,%s::bigint,%s::double precision,%s::bigint,"
-                "%s::boolean,%s::text,%s::smallint,%s::text,"
+                "%s::boolean,%s::text,%s::smallint,%s::text,%s::text,"
                 "%s::double precision,%s::bigint,%s::boolean,%s::text,"
                 "%s::text,%s::timestamptz,%s::uuid,%s::bigint,%s::bigint,"
                 "%s::text,%s::bigint)"
@@ -1847,6 +1855,7 @@ class PostgresFrameRepository:
                     observation.source_timestamp,
                     *compatibility,
                     int(framed.effective_quality),
+                    observation.quality_reason,
                     str(observation.observation_id),
                     observation.source_message_id,
                     observation.source_sequence,
@@ -1869,7 +1878,7 @@ class PostgresFrameRepository:
             """
             INSERT INTO t_telemetry_latest
               (node_id,tag_id,ts,value_float,value_int,value_bool,value_str,
-               quality,observation_id,source_message_id,source_sequence,
+               quality,quality_reason,observation_id,source_message_id,source_sequence,
                source_digest,raw_unit,raw_value_float,raw_value_int,
                raw_value_bool,raw_value_text,event_time_basis,
                event_received_at,source_order_key,frame_sequence,
@@ -1879,6 +1888,7 @@ class PostgresFrameRepository:
               ts=EXCLUDED.ts,value_float=EXCLUDED.value_float,
               value_int=EXCLUDED.value_int,value_bool=EXCLUDED.value_bool,
               value_str=EXCLUDED.value_str,quality=EXCLUDED.quality,
+              quality_reason=EXCLUDED.quality_reason,
               observation_id=EXCLUDED.observation_id,
               source_message_id=EXCLUDED.source_message_id,
               source_sequence=EXCLUDED.source_sequence,
@@ -1899,7 +1909,7 @@ class PostgresFrameRepository:
             rows,
             template=(
                 "(%s::uuid,%s::uuid,%s::timestamptz,%s::double precision,"
-                "%s::bigint,%s::boolean,%s::text,%s::smallint,%s::uuid,"
+                "%s::bigint,%s::boolean,%s::text,%s::smallint,%s::text,%s::uuid,"
                 "%s::text,%s::bigint,%s::char(64),%s::text,"
                 "%s::double precision,%s::bigint,%s::boolean,%s::text,"
                 "%s::text,%s::timestamptz,%s::text,%s::bigint,%s::bigint,"
@@ -2375,35 +2385,6 @@ def _raw_order_key(observation: RawObservation) -> str:
         f"S:{observation.source_sequence:020d}:"
         f"{observation.source_digest}"
     )
-
-
-def _raw_value_from_columns(
-    data_type: str,
-    raw_float: float | None,
-    raw_int: int | None,
-    raw_bool: bool | None,
-    raw_text: str | None,
-) -> TypedValue:
-    kind = ValueKind(data_type.upper())
-    if kind is ValueKind.FLOAT:
-        value = raw_float
-    elif kind is ValueKind.INT:
-        value = raw_int
-    elif kind is ValueKind.BOOL:
-        value = raw_bool
-    elif kind in {ValueKind.STRING, ValueKind.ENUM}:
-        value = raw_text
-    else:
-        raise DataTrunkError(
-            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
-            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
-        )
-    if value is None:
-        raise DataTrunkError(
-            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
-            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
-        )
-    return TypedValue(kind, value)
 
 
 def _l2_columns(

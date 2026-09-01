@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import hashlib
 import os
+from pathlib import Path
 from types import MappingProxyType
 import unittest
 from uuid import UUID, uuid4
@@ -30,6 +31,11 @@ from tests import test_committed_frame_payload_migration_postgres as payload_mig
 
 
 NOW = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
+MIGRATION_059 = (
+    Path(__file__).resolve().parents[2]
+    / "init-db"
+    / "migration_059_l0_raw_bit_semantics.sql"
+)
 
 
 class _SnapshotCursor:
@@ -77,10 +83,19 @@ class _ReusableConnection:
 
 
 class _StaleSnapshotCursor:
-    def __init__(self, *, head_beat: int = 10, accepted_beat: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        head_beat: int = 10,
+        accepted_beat: int = 1,
+        source_quality: int = 192,
+        quality_reason: str | None = None,
+    ) -> None:
         self.sql = ""
         self.head_beat = head_beat
         self.accepted_beat = accepted_beat
+        self.source_quality = source_quality
+        self.quality_reason = quality_reason
         self.tag_id = uuid4()
         self.node_id = uuid4()
         self.entity_id = uuid4()
@@ -130,17 +145,19 @@ class _StaleSnapshotCursor:
                     None,
                     None,
                     None,
-                    192,
+                    self.source_quality,
                     NOW + timedelta(seconds=1),
                     NOW + timedelta(seconds=1),
                     "a" * 64,
                     1,
-                    192,
+                    self.source_quality,
                     self.accepted_beat,
                     None,
                     None,
                     None,
                     None,
+                    self.quality_reason,
+                    "FLOAT",
                 )
             ]
         if "FROM t_entity_instances AS entity" in self.sql:
@@ -174,11 +191,20 @@ class _StaleSnapshotCursor:
 
 
 class _StaleSnapshotConnection(_ReusableConnection):
-    def __init__(self, *, head_beat: int = 10, accepted_beat: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        head_beat: int = 10,
+        accepted_beat: int = 1,
+        source_quality: int = 192,
+        quality_reason: str | None = None,
+    ) -> None:
         super().__init__()
         self.snapshot_cursor = _StaleSnapshotCursor(
             head_beat=head_beat,
             accepted_beat=accepted_beat,
+            source_quality=source_quality,
+            quality_reason=quality_reason,
         )
 
     def cursor(self):
@@ -253,6 +279,26 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
             snapshot.l0[0]["effective_quality"],
         )
 
+    def test_resnapshot_exposes_the_stored_bad_raw_value_reason(self) -> None:
+        connection = _StaleSnapshotConnection(
+            head_beat=1,
+            accepted_beat=1,
+            source_quality=int(TrunkQuality.BAD),
+            quality_reason="BIT_VALUE_OUT_OF_RANGE",
+        )
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        ).read_snapshot(FrameScope.for_node(connection.snapshot_cursor.node_id))
+
+        self.assertEqual(5.0, snapshot.l0[0]["value"])
+        self.assertEqual(int(TrunkQuality.BAD), snapshot.l0[0]["effective_quality"])
+        self.assertEqual("BIT_VALUE_OUT_OF_RANGE", snapshot.l0[0]["reason"])
+
     def test_resnapshot_marks_expired_l2_stale_using_entity_freshness(self) -> None:
         connection = _StaleSnapshotConnection()
 
@@ -304,8 +350,9 @@ class CommittedFrameLegacyProjectionTest(unittest.TestCase):
             effective_l0_quality(0, has_value=True, stored_quality=192),
         )
 
-    def test_committed_frame_keeps_strict_declared_type(self) -> None:
-        self.assertIsNone(
+    def test_committed_frame_projects_the_actual_raw_typed_column(self) -> None:
+        self.assertEqual(
+            34.1,
             _l0_snapshot_value(
                 "INT",
                 1,
@@ -317,7 +364,7 @@ class CommittedFrameLegacyProjectionTest(unittest.TestCase):
                 legacy_int=None,
                 legacy_bool=None,
                 legacy_text=None,
-            )
+            ),
         )
 
     def test_ambiguous_legacy_value_columns_fail_closed(self) -> None:
@@ -366,6 +413,7 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
                 cursor.execute(
                     frame_migration.MIGRATION_054.read_text(encoding="utf-8")
                 )
+                cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
             connection.commit()
 
     def setUp(self) -> None:

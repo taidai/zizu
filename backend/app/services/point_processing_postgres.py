@@ -2164,13 +2164,11 @@ class PostgresPointProcessingTrialEvaluator:
             RawObservation,
             TrunkQuality,
             ValueKind,
+            typed_raw_value_from_columns,
         )
         from app.services.data_trunk_conversion import evaluate_processing
         from app.services.data_trunk_freshness import effective_l0_quality
-        from app.services.data_trunk_postgres import (
-            _l2_value_from_columns,
-            _raw_value_from_columns,
-        )
+        from app.services.data_trunk_postgres import _l2_value_from_columns
 
         installed = trial_installed_processings(plan, catalog)
         references: set[InputReference] = set()
@@ -2237,7 +2235,8 @@ class PostgresPointProcessingTrialEvaluator:
                                    latest.raw_value_text,latest.quality,latest.ts,
                                    latest.event_received_at,latest.source_message_id,
                                    latest.source_sequence,latest.source_digest,
-                                   latest.event_time_basis,history.accepted_beat
+                                   latest.event_time_basis,history.accepted_beat,
+                                   latest.quality_reason
                             FROM t_telemetry_latest AS latest
                             JOIN t_tags AS tag ON tag.id=latest.tag_id
                             LEFT JOIN LATERAL (
@@ -2258,8 +2257,11 @@ class PostgresPointProcessingTrialEvaluator:
                                 node_id=UUID(str(row[1])),
                                 tag_id=UUID(str(row[2])),
                                 source_key=str(row[3]),
-                                value=_raw_value_from_columns(
-                                    str(row[4]), row[6], row[7], row[8], row[9]
+                                value=typed_raw_value_from_columns(
+                                    raw_float=row[6],
+                                    raw_int=row[7],
+                                    raw_bool=row[8],
+                                    raw_text=row[9],
                                 ),
                                 raw_unit=row[5],
                                 quality=effective_l0_quality(
@@ -2277,6 +2279,7 @@ class PostgresPointProcessingTrialEvaluator:
                                 source_sequence=row[14],
                                 source_digest=str(row[15]).strip(),
                                 event_time_basis=str(row[16]),
+                                quality_reason=row[18],
                             )
                             current_inputs[InputReference.l0(raw.tag_id)] = raw
                     if l2_ids:

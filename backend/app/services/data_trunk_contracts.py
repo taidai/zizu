@@ -558,3 +558,29 @@ class DataTrunkError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def typed_raw_value_from_columns(
+    *,
+    raw_float: float | None,
+    raw_int: int | None,
+    raw_bool: bool | None,
+    raw_text: str | None,
+) -> TypedValue:
+    populated = tuple(
+        (kind, value)
+        for kind, value in (
+            (ValueKind.FLOAT, raw_float),
+            (ValueKind.INT, raw_int),
+            (ValueKind.BOOL, raw_bool),
+            (ValueKind.STRING, raw_text),
+        )
+        if value is not None
+    )
+    if len(populated) != 1:
+        raise DataTrunkError(
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+            "DATA_FRAME_RECOVERY_EVIDENCE_INVALID",
+        )
+    kind, value = populated[0]
+    return TypedValue(kind, value)

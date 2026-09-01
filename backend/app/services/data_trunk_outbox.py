@@ -16,6 +16,7 @@ from app.services.data_trunk_contracts import (
     TrunkQuality,
     TypedValue,
     ValueKind,
+    typed_raw_value_from_columns,
 )
 
 
@@ -33,6 +34,7 @@ class CommittedL0Change:
     unit: str | None = None
     source_path: str | None = None
     source_type: str | None = None
+    quality_reason: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +51,7 @@ class CommittedL0Change:
             "accepted_beat": self.accepted_beat,
             "source_path": self.source_path,
             "source_type": self.source_type,
+            "quality_reason": self.quality_reason,
         }
 
     @classmethod
@@ -66,6 +69,7 @@ class CommittedL0Change:
             unit=_optional_string(payload.get("unit")),
             source_path=_optional_string(payload.get("source_path")),
             source_type=_optional_string(payload.get("source_type")),
+            quality_reason=_optional_string(payload.get("quality_reason")),
         )
 
 
@@ -628,7 +632,7 @@ class PostgresFrameOutboxRepository:
                    latest.raw_value_bool,latest.raw_value_text,
                    latest.quality,latest.ts,latest.event_received_at,
                    latest.accepted_beat,tag.node_id,tag.unit,
-                   tag.source_path,tag.source_type
+                   tag.source_path,tag.source_type,latest.quality_reason
             FROM t_telemetry_latest AS latest
             JOIN t_tags AS tag ON tag.id=latest.tag_id
             WHERE latest.frame_sequence > 0
@@ -649,7 +653,8 @@ class PostgresFrameOutboxRepository:
                    telemetry.raw_value_bool,telemetry.raw_value_text,
                    telemetry.quality,telemetry.ts,
                    telemetry.event_received_at,telemetry.accepted_beat,
-                   tag.node_id,tag.unit,tag.source_path,tag.source_type
+                   tag.node_id,tag.unit,tag.source_path,tag.source_type,
+                   telemetry.quality_reason
             FROM t_telemetry AS telemetry
             JOIN t_tags AS tag ON tag.id=telemetry.tag_id
             WHERE telemetry.frame_sequence IS NOT NULL
@@ -677,8 +682,11 @@ class PostgresFrameOutboxRepository:
             change = CommittedL0Change(
                 tag_id=UUID(str(row[0])),
                 observation_id=UUID(str(row[1])),
-                value=_typed_value_from_columns(
-                    str(row[2]), row[3], row[4], None, row[5], row[6], None
+                value=typed_raw_value_from_columns(
+                    raw_float=row[3],
+                    raw_int=row[4],
+                    raw_bool=row[5],
+                    raw_text=row[6],
                 ),
                 source_quality=source_quality,
                 effective_quality=effective_quality,
@@ -689,6 +697,7 @@ class PostgresFrameOutboxRepository:
                 unit=row[12],
                 source_path=row[13],
                 source_type=row[14],
+                quality_reason=row[15],
             )
             state[change.tag_id] = change
         return state
