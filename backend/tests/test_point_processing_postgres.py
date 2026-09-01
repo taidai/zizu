@@ -254,6 +254,101 @@ class PointProcessingPostgresTest(unittest.TestCase):
         self.assertEqual(1, len(snapshot.installed))
         self.assertIsInstance(snapshot.installed[0].transform, PassthroughTransform)
 
+    def test_boolean_map_revision_persists_compiled_rule_and_reloads(self) -> None:
+        from app.services.data_trunk_contracts import (
+            BooleanMapTransform,
+            RawObservation,
+            SourceOrder,
+            TrunkQuality,
+            TypedValue,
+        )
+        from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingService,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        raw = PointProcessingTemplateTest.passthrough_template("INT", None)
+        raw["id"] = "pcs-boolean-map-postgres"
+        raw["outputs"][0]["dataType"] = "BOOL"
+        raw["outputs"][0]["transform"] = {
+            "kind": "boolean_map",
+            "input": "active_power_raw",
+            "trueWhen": 1,
+        }
+        templates = PostgresPointProcessingTemplates()
+
+        registered = templates.import_template(raw, actor="test:engineer")
+
+        self.assertEqual(raw, templates.export_template(registered.revision_id))
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT rule.true_when,length(rule.ast_digest),rule.compiled_ast "
+                "FROM t_point_processing_boolean_map_rules rule "
+                "JOIN t_point_processing_outputs output ON output.id=rule.output_id "
+                "WHERE output.revision_id=%s",
+                (registered.revision_id,),
+            )
+            true_when, digest_length, compiled_ast = cursor.fetchone()
+            self.assertEqual(1, true_when)
+            self.assertEqual(64, digest_length)
+            self.assertEqual("==", compiled_ast["compare"])
+            cursor.execute(
+                "UPDATE t_tags SET data_type='INT',value_data_type='INT',unit=NULL "
+                "WHERE node_id=%s AND name='ActivePowerRaw'",
+                (NODE_ID,),
+            )
+            connection.commit()
+
+        service = PointProcessingService(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+        )
+        plan = self._plan(service, registered.revision_id)
+        self.assertEqual("ready", plan.status)
+        service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "boolean-map-runtime",
+                "test:engineer",
+            )
+        )
+        observed_at = datetime.now(UTC)
+        tag_id = uuid5(NAMESPACE_URL, f"test/tag/{NODE_ID}/ActivePowerRaw")
+        observation = RawObservation(
+            observation_id=uuid4(),
+            node_id=NODE_ID,
+            tag_id=tag_id,
+            source_key="ActivePowerRaw",
+            value=TypedValue.integer(1),
+            raw_unit=None,
+            quality=TrunkQuality.GOOD,
+            source_timestamp=observed_at,
+            received_at=observed_at,
+            source_message_id="boolean-map-runtime",
+            source_sequence=1,
+            source_digest=hashlib.sha256(b"boolean-map-runtime").hexdigest(),
+            event_time_basis="received_at",
+            source_order=SourceOrder.received_at(observed_at, 1),
+        )
+        with get_connection() as connection, connection.cursor() as cursor:
+            snapshot = PostgresFrameRepository._load_conversion_snapshot(
+                cursor,
+                (observation,),
+                calculated_at=observed_at,
+            )
+
+        self.assertEqual(1, len(snapshot.installed))
+        self.assertIsInstance(snapshot.installed[0].transform, BooleanMapTransform)
+
     def test_apply_publishes_one_revision_and_attaches_l2_directly_to_node(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection

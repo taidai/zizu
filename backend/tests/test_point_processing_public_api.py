@@ -274,6 +274,37 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(201, created.status_code, created.text)
         self.assertEqual(raw, exported.json())
 
+    async def test_boolean_map_template_round_trips_both_polarities(self) -> None:
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        app, _, _ = self.build_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://testserver",
+        ) as client:
+            admin_headers = await self.login(client, "admin")
+            for true_when in (0, 1):
+                raw = PointProcessingTemplateTest.passthrough_template("INT", None)
+                raw["id"] = f"pcs-boolean-map-{true_when}"
+                raw["outputs"][0]["dataType"] = "BOOL"
+                raw["outputs"][0]["transform"] = {
+                    "kind": "boolean_map",
+                    "input": "active_power_raw",
+                    "trueWhen": true_when,
+                }
+                created = await client.post(
+                    "/api/v1/point-processing-templates/import",
+                    headers=admin_headers,
+                    json=raw,
+                )
+                self.assertEqual(201, created.status_code, created.text)
+                exported = await client.get(
+                    f"/api/v1/point-processing-templates/{created.json()['revision_id']}/export",
+                    headers=admin_headers,
+                )
+                self.assertEqual(raw, exported.json())
+
     async def test_engineer_can_plan_a_node_draft_without_a_shared_template(self) -> None:
         from copy import deepcopy
 

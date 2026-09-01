@@ -119,6 +119,63 @@ class PointProcessingTemplateTest(unittest.TestCase):
                     parse_point_processing_template(raw)
                 self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
 
+    def test_boolean_map_accepts_zero_and_one_and_keeps_canonical_shape(self) -> None:
+        for true_when in (0, 1):
+            with self.subTest(true_when=true_when):
+                raw = self.passthrough_template("INT", None)
+                raw["outputs"][0]["dataType"] = "BOOL"
+                raw["outputs"][0]["transform"] = {
+                    "kind": "boolean_map",
+                    "input": "active_power_raw",
+                    "trueWhen": true_when,
+                }
+
+                parsed = parse_point_processing_template(raw)
+
+                self.assertEqual(
+                    raw,
+                    canonical_point_processing_content(parsed),
+                )
+                self.assertEqual(
+                    64,
+                    len(parsed.outputs[0].transform["astDigest"]),
+                )
+
+    def test_boolean_map_rejects_ambiguous_or_incompatible_contracts(self) -> None:
+        valid = self.passthrough_template("INT", None)
+        valid["outputs"][0]["dataType"] = "BOOL"
+        valid["outputs"][0]["transform"] = {
+            "kind": "boolean_map",
+            "input": "active_power_raw",
+            "trueWhen": 1,
+        }
+        cases = []
+        for invalid in (True, False, -1, 2, "1"):
+            raw = copy.deepcopy(valid)
+            raw["outputs"][0]["transform"]["trueWhen"] = invalid
+            cases.append(raw)
+        wrong_input = copy.deepcopy(valid)
+        wrong_input["inputs"][0]["dataType"] = "BOOL"
+        cases.append(wrong_input)
+        wrong_output = copy.deepcopy(valid)
+        wrong_output["outputs"][0]["dataType"] = "INT"
+        cases.append(wrong_output)
+        input_unit = copy.deepcopy(valid)
+        input_unit["inputs"][0]["unit"] = "flag"
+        cases.append(input_unit)
+        output_unit = copy.deepcopy(valid)
+        output_unit["outputs"][0]["unit"] = "flag"
+        cases.append(output_unit)
+        optional = copy.deepcopy(valid)
+        optional["inputs"][0]["required"] = False
+        cases.append(optional)
+
+        for raw in cases:
+            with self.subTest(transform=raw["outputs"][0]["transform"]):
+                with self.assertRaises(PointProcessingTemplateError) as caught:
+                    parse_point_processing_template(raw)
+                self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
+
     def test_meter_template_is_a_supported_device_category(self) -> None:
         raw = template_json()
         raw["deviceCategory"] = "METER"

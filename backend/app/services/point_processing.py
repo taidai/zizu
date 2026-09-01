@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.services.data_trunk_contracts import (
+    BooleanMapTransform,
     BooleanCodeInput,
     BooleanSetTransform,
     CompiledFormula,
@@ -1078,7 +1079,19 @@ def _installed_processings_for_context(
                 input_contract.source_kind,
                 current.input_source_ids[input_id],
             )
-        if kind == "passthrough":
+        if kind == "boolean_map":
+            transform = BooleanMapTransform(
+                input=input_reference,
+                true_when=int(output.transform["trueWhen"]),
+                compiled=CompiledFormula(
+                    text=f"input == {output.transform['trueWhen']}",
+                    ast=output.transform["canonicalAst"],
+                    digest=str(output.transform["astDigest"]),
+                    result_kind=ValueKind.BOOL,
+                    result_unit=None,
+                ),
+            )
+        elif kind == "passthrough":
             transform = PassthroughTransform(input=input_reference)
         elif kind == "numeric":
             transform = NumericTransform(

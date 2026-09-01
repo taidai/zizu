@@ -57,4 +57,14 @@ CREATE TABLE IF NOT EXISTS public.t_point_processing_passthrough_rules (
     REFERENCES public.t_point_processing_inputs(id)
 );
 
+CREATE TABLE IF NOT EXISTS public.t_point_processing_boolean_map_rules (
+  output_id UUID PRIMARY KEY
+    REFERENCES public.t_point_processing_outputs(id) ON DELETE CASCADE,
+  input_id UUID NOT NULL
+    REFERENCES public.t_point_processing_inputs(id),
+  true_when SMALLINT NOT NULL CHECK (true_when IN (0, 1)),
+  compiled_ast JSONB NOT NULL,
+  ast_digest CHAR(64) NOT NULL
+);
+
 COMMIT;

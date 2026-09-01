@@ -332,7 +332,23 @@ def persist_point_processing_template(
                 ),
             )
             transform = output.transform
-            if transform["kind"] == "passthrough":
+            if transform["kind"] == "boolean_map":
+                cursor.execute(
+                    """
+                    INSERT INTO t_point_processing_boolean_map_rules
+                      (output_id,input_id,true_when,compiled_ast,ast_digest)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (output_id) DO NOTHING
+                    """,
+                    (
+                        output_id,
+                        input_ids[str(transform["input"])],
+                        transform["trueWhen"],
+                        Json(_plain(transform["canonicalAst"])),
+                        transform["astDigest"],
+                    ),
+                )
+            elif transform["kind"] == "passthrough":
                 cursor.execute(
                     """
                     INSERT INTO t_point_processing_passthrough_rules
@@ -902,6 +918,25 @@ class PostgresPointProcessingCatalog:
                 "astDigest": expression[2].strip(),
                 "scheduleSeconds": expression[3],
                 "controlEligible": expression[4],
+            }
+        cursor.execute(
+            """
+            SELECT input.input_key,rule.true_when,
+                   rule.compiled_ast,rule.ast_digest
+            FROM t_point_processing_boolean_map_rules AS rule
+            JOIN t_point_processing_inputs AS input ON input.id=rule.input_id
+            WHERE rule.output_id=%s
+            """,
+            (output_id,),
+        )
+        boolean_map = cursor.fetchone()
+        if boolean_map is not None:
+            return {
+                "kind": "boolean_map",
+                "input": boolean_map[0],
+                "trueWhen": boolean_map[1],
+                "canonicalAst": MappingProxyType(boolean_map[2]),
+                "astDigest": str(boolean_map[3]).strip(),
             }
         cursor.execute(
             """

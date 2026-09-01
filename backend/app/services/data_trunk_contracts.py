@@ -279,6 +279,23 @@ class PassthroughTransform:
 
 
 @dataclass(frozen=True)
+class BooleanMapTransform:
+    input: InputReference
+    true_when: int
+    compiled: "CompiledFormula"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.true_when, int)
+            or isinstance(self.true_when, bool)
+            or self.true_when not in {0, 1}
+            or self.compiled.result_kind is not ValueKind.BOOL
+            or self.compiled.result_unit is not None
+        ):
+            raise ValueError("boolean-map transform contract is invalid")
+
+
+@dataclass(frozen=True)
 class NumericTransform:
     input: InputReference
     scale: float
@@ -445,6 +462,7 @@ class FormulaTransform:
 
 Transform = (
     PassthroughTransform
+    | BooleanMapTransform
     | NumericTransform
     | EnumTransform
     | FaultCodeTransform

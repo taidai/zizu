@@ -17,6 +17,7 @@ _SCHEMA_VERSION = "zizu.point-processing/v1alpha1"
 _DATA_TYPES = {"FLOAT", "INT", "BOOL", "STRING", "ENUM", "CODE_SET"}
 _OUTPUT_TYPES = {
     "passthrough": None,
+    "boolean_map": "BOOL",
     "numeric": "FLOAT",
     "enum": "ENUM",
     "fault_codes": "CODE_SET",
@@ -172,7 +173,7 @@ def canonical_point_processing_content(
     outputs: list[dict[str, Any]] = []
     for item in template.outputs:
         transform = _plain(item.transform)
-        if transform.get("kind") == "formula":
+        if transform.get("kind") in {"formula", "boolean_map"}:
             transform.pop("canonicalAst", None)
             transform.pop("astDigest", None)
         outputs.append(
@@ -508,6 +509,61 @@ def _parse_transform(
             "Point processing transform kind is invalid",
         )
     kind = raw["kind"]
+    if kind == "boolean_map":
+        if set(raw) != {"kind", "input", "trueWhen"}:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Boolean-map transform fields are invalid",
+            )
+        input_id = raw.get("input")
+        true_when = raw.get("trueWhen")
+        source = inputs.get(input_id) if isinstance(input_id, str) else None
+        if (
+            source is None
+            or source.source_kind != "l0"
+            or not source.required
+            or source.cardinality != "one"
+            or source.default_value is not None
+            or source.data_type != "INT"
+            or source.unit is not None
+            or output_data_type != "BOOL"
+            or output_unit is not None
+            or not isinstance(true_when, int)
+            or isinstance(true_when, bool)
+            or true_when not in {0, 1}
+        ):
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Boolean-map requires one unitless INT input and BOOL output",
+            )
+        try:
+            compiled = compile_formula(
+                f"input == {true_when}",
+                sources=(
+                    FormulaSource(
+                        "input",
+                        ValueKind.INT,
+                        None,
+                        "one",
+                        True,
+                        None,
+                    ),
+                ),
+                result_type=ValueKind.BOOL,
+                result_unit=None,
+            )
+        except (FormulaCompileError, ValueError) as exc:
+            raise PointProcessingTemplateError(
+                "POINT_PROCESSING_RULE_INVALID",
+                "Boolean-map rule could not be compiled",
+            ) from exc
+        return {
+            "kind": "boolean_map",
+            "input": input_id,
+            "trueWhen": true_when,
+            "canonicalAst": _plain(compiled.ast),
+            "astDigest": compiled.digest,
+        }
     if kind == "passthrough":
         if set(raw) != {"kind", "input"}:
             raise PointProcessingTemplateError(

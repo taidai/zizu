@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from app.services.data_trunk_contracts import (
+    BooleanMapTransform,
     BooleanCodeInput,
     BooleanSetTransform,
     EnumTransform,
@@ -134,6 +135,87 @@ class PcsNumericConversionTest(unittest.TestCase):
                 self.assertEqual(TypedValue.integer(None), output.value)
                 self.assertEqual(quality, output.quality)
                 self.assertEqual(expected_reason, output.reason)
+
+    def test_boolean_map_covers_both_zero_one_polarities(self) -> None:
+        for true_when, raw_value, expected in (
+            (1, 0, False),
+            (1, 1, True),
+            (0, 0, True),
+            (0, 1, False),
+        ):
+            with self.subTest(true_when=true_when, raw_value=raw_value):
+                fixture = self.fixture()
+                raw = next(iter(fixture["current_inputs"].values()))
+                source = replace(
+                    raw,
+                    value=TypedValue.integer(raw_value),
+                    raw_unit=None,
+                )
+                compiled = compile_formula(
+                    f"input == {true_when}",
+                    sources=(
+                        FormulaSource(
+                            "input",
+                            ValueKind.INT,
+                            None,
+                            "one",
+                            True,
+                            None,
+                        ),
+                    ),
+                    result_type=ValueKind.BOOL,
+                    result_unit=None,
+                )
+                base = fixture["installed"][0]
+                fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+                fixture["installed"] = (
+                    replace(
+                        base,
+                        output_kind=ValueKind.BOOL,
+                        output_unit=None,
+                        transform=BooleanMapTransform(
+                            InputReference.l0(raw.tag_id),
+                            true_when,
+                            compiled,
+                        ),
+                    ),
+                )
+
+                output = evaluate_processing(**fixture)[0]
+
+                self.assertEqual(TypedValue.boolean(expected), output.value)
+                self.assertEqual(TrunkQuality.GOOD, output.quality)
+
+    def test_boolean_map_rejects_out_of_range_good_integer_at_runtime(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        source = replace(raw, value=TypedValue.integer(2), raw_unit=None)
+        compiled = compile_formula(
+            "input == 1",
+            sources=(FormulaSource("input", ValueKind.INT, None, "one", True, None),),
+            result_type=ValueKind.BOOL,
+            result_unit=None,
+        )
+        base = fixture["installed"][0]
+        fixture["current_inputs"] = {InputReference.l0(raw.tag_id): source}
+        fixture["installed"] = (
+            replace(
+                base,
+                output_kind=ValueKind.BOOL,
+                output_unit=None,
+                transform=BooleanMapTransform(
+                    InputReference.l0(raw.tag_id),
+                    1,
+                    compiled,
+                ),
+            ),
+        )
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.boolean(None), output.value)
+        self.assertEqual(TrunkQuality.BAD, output.quality)
+        self.assertEqual("BIT_VALUE_OUT_OF_RANGE", output.reason)
 
     def test_numeric_conversion_marks_wrong_runtime_unit_bad_without_value(self) -> None:
         fixture = self.fixture()

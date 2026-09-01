@@ -16,6 +16,7 @@ from psycopg2.extras import Json, execute_values
 from app.services.data_trunk import DataTrunk
 from app.services.data_trunk_contracts import (
     BlackboardRecovery,
+    BooleanMapTransform,
     BudgetTerminalizationClaim,
     BooleanCodeInput,
     BooleanSetTransform,
@@ -1999,6 +2000,10 @@ class PostgresFrameRepository:
               numeric.maximum,
               enum_rule.output_id IS NOT NULL,
               passthrough_rule.output_id IS NOT NULL,
+              boolean_map_rule.output_id IS NOT NULL,
+              boolean_map_rule.true_when,
+              boolean_map_rule.compiled_ast,
+              boolean_map_rule.ast_digest,
               fault_rule.delimiter
             FROM t_installed_point_processings AS installed
             JOIN t_point_processing_outputs AS output
@@ -2010,12 +2015,15 @@ class PostgresFrameRepository:
               ON numeric.output_id = output.id
             LEFT JOIN t_point_processing_passthrough_rules AS passthrough_rule
               ON passthrough_rule.output_id = output.id
+            LEFT JOIN t_point_processing_boolean_map_rules AS boolean_map_rule
+              ON boolean_map_rule.output_id = output.id
             LEFT JOIN t_enum_transform_rules AS enum_rule
               ON enum_rule.output_id = output.id
             LEFT JOIN t_fault_code_transform_rules AS fault_rule
               ON fault_rule.output_id = output.id
             JOIN t_point_processing_inputs AS input
               ON input.id = COALESCE(
+                boolean_map_rule.input_id,
                 passthrough_rule.input_id,
                 numeric.input_id,
                 enum_rule.input_id,
@@ -2028,6 +2036,7 @@ class PostgresFrameRepository:
             WHERE installed.current = TRUE
               AND input_binding.l0_tag_id = ANY(%s::uuid[])
               AND num_nonnulls(
+                boolean_map_rule.output_id,
                 passthrough_rule.output_id,
                 numeric.output_id,
                 enum_rule.output_id,
@@ -2057,10 +2066,44 @@ class PostgresFrameRepository:
                 maximum,
                 has_enum_rule,
                 has_passthrough_rule,
+                has_boolean_map_rule,
+                boolean_map_true_when,
+                boolean_map_ast,
+                boolean_map_digest,
                 fault_delimiter,
             ) = row
             input_reference = InputReference.l0(UUID(str(input_tag_id)))
-            if has_passthrough_rule:
+            if has_boolean_map_rule:
+                if (
+                    output_type != ValueKind.BOOL.value
+                    or output_unit is not None
+                    or input_unit is not None
+                ):
+                    raise DataTrunkError(
+                        "POINT_PROCESSING_CONFIGURATION_INVALID",
+                        "boolean-map runtime contract is invalid",
+                    )
+                item = InstalledPointProcessing(
+                    installation_id=UUID(str(installation_id)),
+                    revision_id=UUID(str(revision_id)),
+                    entity_instance_id=UUID(str(entity_instance_id)),
+                    entity_definition_id=definition_id,
+                    output_kind=ValueKind.BOOL,
+                    output_unit=None,
+                    freshness_seconds=freshness_seconds,
+                    transform=BooleanMapTransform(
+                        input=input_reference,
+                        true_when=int(boolean_map_true_when),
+                        compiled=CompiledFormula(
+                            text=f"input == {boolean_map_true_when}",
+                            ast=boolean_map_ast,
+                            digest=str(boolean_map_digest).strip(),
+                            result_kind=ValueKind.BOOL,
+                            result_unit=None,
+                        ),
+                    ),
+                )
+            elif has_passthrough_rule:
                 item = InstalledPointProcessing(
                     installation_id=UUID(str(installation_id)),
                     revision_id=UUID(str(revision_id)),
