@@ -593,13 +593,15 @@ def _evaluate_boolean_set_output(
                 "boolean-set processing requires L0 inputs",
             )
         sources.append(source)
-        if source.value.kind is not ValueKind.BOOL or not isinstance(
-            source.value.value,
-            bool,
-        ):
+        if source.value.kind is not ValueKind.INT or not isinstance(
+            source.value.value, int
+        ) or isinstance(source.value.value, bool):
             failure_reason = failure_reason or "TYPE_MISMATCH"
             continue
-        if source.value.value:
+        if source.value.value not in {0, 1}:
+            failure_reason = failure_reason or "BIT_VALUE_OUT_OF_RANGE"
+            continue
+        if source.value.value == 1:
             active_codes.append(item.code)
 
     if failure_reason is not None:

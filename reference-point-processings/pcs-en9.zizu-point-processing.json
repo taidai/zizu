@@ -6,7 +6,7 @@
   "deviceCategory": "PCS",
   "brand": "EN9",
   "model": "EN9-PCS",
-  "revision": 1,
+  "revision": 2,
   "status": "active",
   "inputs": [
     {
@@ -52,7 +52,7 @@
       "aliases": [
         "1!405889.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -69,7 +69,7 @@
       "aliases": [
         "1!405889.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -86,7 +86,7 @@
       "aliases": [
         "1!405889.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -103,7 +103,7 @@
       "aliases": [
         "1!405889.4"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -120,7 +120,7 @@
       "aliases": [
         "1!405889.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -137,7 +137,7 @@
       "aliases": [
         "1!405890.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -154,7 +154,7 @@
       "aliases": [
         "1!405890.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -171,7 +171,7 @@
       "aliases": [
         "1!405890.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -188,7 +188,7 @@
       "aliases": [
         "1!405890.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -205,7 +205,7 @@
       "aliases": [
         "1!405890.7"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -222,7 +222,7 @@
       "aliases": [
         "1!405890.8"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -239,7 +239,7 @@
       "aliases": [
         "1!405890.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -256,7 +256,7 @@
       "aliases": [
         "1!405890.10"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -273,7 +273,7 @@
       "aliases": [
         "1!405890.11"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -290,7 +290,7 @@
       "aliases": [
         "1!405890.12"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -307,7 +307,7 @@
       "aliases": [
         "1!405890.13"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -324,7 +324,7 @@
       "aliases": [
         "1!405890.14"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -341,7 +341,7 @@
       "aliases": [
         "1!405890.15"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -358,7 +358,7 @@
       "aliases": [
         "1!405891.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -375,7 +375,7 @@
       "aliases": [
         "1!405891.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -392,7 +392,7 @@
       "aliases": [
         "1!405891.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -409,7 +409,7 @@
       "aliases": [
         "1!405891.3"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -426,7 +426,7 @@
       "aliases": [
         "1!405891.4"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -443,7 +443,7 @@
       "aliases": [
         "1!405891.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -460,7 +460,7 @@
       "aliases": [
         "1!405891.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -477,7 +477,7 @@
       "aliases": [
         "1!405891.7"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -494,7 +494,7 @@
       "aliases": [
         "1!405891.8"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -511,7 +511,7 @@
       "aliases": [
         "1!405891.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -528,7 +528,7 @@
       "aliases": [
         "1!405891.10"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -545,7 +545,7 @@
       "aliases": [
         "1!405891.11"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -562,7 +562,7 @@
       "aliases": [
         "1!405891.12"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -579,7 +579,7 @@
       "aliases": [
         "1!405891.13"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -596,7 +596,7 @@
       "aliases": [
         "1!405891.14"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -613,7 +613,7 @@
       "aliases": [
         "1!405891.15"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -630,7 +630,7 @@
       "aliases": [
         "1!405892.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -647,7 +647,7 @@
       "aliases": [
         "1!405892.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -664,7 +664,7 @@
       "aliases": [
         "1!405892.4"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -681,7 +681,7 @@
       "aliases": [
         "1!405892.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -698,7 +698,7 @@
       "aliases": [
         "1!405892.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -715,7 +715,7 @@
       "aliases": [
         "1!405892.7"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -732,7 +732,7 @@
       "aliases": [
         "1!405892.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -749,7 +749,7 @@
       "aliases": [
         "1!405892.10"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -766,7 +766,7 @@
       "aliases": [
         "1!405892.11"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -783,7 +783,7 @@
       "aliases": [
         "1!405892.12"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -800,7 +800,7 @@
       "aliases": [
         "1!405892.15"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -817,7 +817,7 @@
       "aliases": [
         "1!405893.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -834,7 +834,7 @@
       "aliases": [
         "1!405893.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -851,7 +851,7 @@
       "aliases": [
         "1!405893.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -868,7 +868,7 @@
       "aliases": [
         "1!405893.3"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -885,7 +885,7 @@
       "aliases": [
         "1!405893.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -902,7 +902,7 @@
       "aliases": [
         "1!405894.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -919,7 +919,7 @@
       "aliases": [
         "1!405894.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -936,7 +936,7 @@
       "aliases": [
         "1!405894.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -953,7 +953,7 @@
       "aliases": [
         "1!405894.3"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -970,7 +970,7 @@
       "aliases": [
         "1!405894.4"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -987,7 +987,7 @@
       "aliases": [
         "1!405894.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1004,7 +1004,7 @@
       "aliases": [
         "1!405894.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1021,7 +1021,7 @@
       "aliases": [
         "1!405894.8"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1038,7 +1038,7 @@
       "aliases": [
         "1!405894.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1055,7 +1055,7 @@
       "aliases": [
         "1!405894.11"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1072,7 +1072,7 @@
       "aliases": [
         "1!405894.12"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1089,7 +1089,7 @@
       "aliases": [
         "1!405894.13"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1106,7 +1106,7 @@
       "aliases": [
         "1!405894.14"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1123,7 +1123,7 @@
       "aliases": [
         "1!405894.15"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1140,7 +1140,7 @@
       "aliases": [
         "1!405895.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1157,7 +1157,7 @@
       "aliases": [
         "1!405895.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1174,7 +1174,7 @@
       "aliases": [
         "1!405895.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1191,7 +1191,7 @@
       "aliases": [
         "1!405895.3"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1208,7 +1208,7 @@
       "aliases": [
         "1!405895.4"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1225,7 +1225,7 @@
       "aliases": [
         "1!405895.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1242,7 +1242,7 @@
       "aliases": [
         "1!405895.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1259,7 +1259,7 @@
       "aliases": [
         "1!405895.7"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1276,7 +1276,7 @@
       "aliases": [
         "1!405895.8"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1293,7 +1293,7 @@
       "aliases": [
         "1!405895.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1310,7 +1310,7 @@
       "aliases": [
         "1!405895.10"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1327,7 +1327,7 @@
       "aliases": [
         "1!405896.0"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1344,7 +1344,7 @@
       "aliases": [
         "1!405896.1"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1361,7 +1361,7 @@
       "aliases": [
         "1!405896.2"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1378,7 +1378,7 @@
       "aliases": [
         "1!405896.3"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1395,7 +1395,7 @@
       "aliases": [
         "1!405896.5"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1412,7 +1412,7 @@
       "aliases": [
         "1!405896.6"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1429,7 +1429,7 @@
       "aliases": [
         "1!405896.8"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1446,7 +1446,7 @@
       "aliases": [
         "1!405896.9"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1463,7 +1463,7 @@
       "aliases": [
         "1!405896.10"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1480,7 +1480,7 @@
       "aliases": [
         "1!405896.11"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1497,7 +1497,7 @@
       "aliases": [
         "1!405896.12"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1514,7 +1514,7 @@
       "aliases": [
         "1!405896.14"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",
@@ -1531,7 +1531,7 @@
       "aliases": [
         "1!405896.15"
       ],
-      "dataType": "BOOL",
+      "dataType": "INT",
       "required": true,
       "sourceContract": {
         "group": "data",

@@ -176,6 +176,29 @@ class PointProcessingTemplateTest(unittest.TestCase):
                     parse_point_processing_template(raw)
                 self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
 
+    def test_boolean_set_accepts_only_unitless_integer_fault_bits(self) -> None:
+        valid = self.passthrough_template("INT", None)
+        valid["outputs"][0]["dataType"] = "CODE_SET"
+        valid["outputs"][0]["transform"] = {
+            "kind": "boolean_set",
+            "entries": [{
+                "input": "active_power_raw",
+                "code": "pcs.hardware.epo",
+                "name": "EPO 故障",
+                "category": "HARDWARE",
+            }],
+        }
+
+        parsed = parse_point_processing_template(valid)
+
+        self.assertEqual("INT", parsed.inputs[0].data_type)
+        self.assertEqual("boolean_set", parsed.outputs[0].transform["kind"])
+        bool_input = copy.deepcopy(valid)
+        bool_input["inputs"][0]["dataType"] = "BOOL"
+        with self.assertRaises(PointProcessingTemplateError) as caught:
+            parse_point_processing_template(bool_input)
+        self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
+
     def test_meter_template_is_a_supported_device_category(self) -> None:
         raw = template_json()
         raw["deviceCategory"] = "METER"

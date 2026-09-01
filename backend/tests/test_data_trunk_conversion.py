@@ -535,6 +535,25 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.GOOD, output.quality)
         self.assertEqual(88, len(output.source_observation_ids))
 
+    def test_boolean_set_rejects_an_integer_other_than_zero_or_one(self) -> None:
+        fixture = self._boolean_set_fixture()
+        invalid_key = next(iter(fixture["current_inputs"]))
+        fixture["current_inputs"] = {
+            **fixture["current_inputs"],
+            invalid_key: replace(
+                fixture["current_inputs"][invalid_key],
+                value=TypedValue.integer(2),
+            ),
+        }
+
+        output = evaluate_processing(**fixture)[0]
+
+        self.assertEqual(TypedValue.code_set(None), output.value)
+        self.assertEqual(
+            (TrunkQuality.BAD, "BIT_VALUE_OUT_OF_RANGE"),
+            (output.quality, output.reason),
+        )
+
     def test_boolean_set_keeps_value_when_one_required_input_is_stale(self) -> None:
         fixture = self._boolean_set_fixture()
         expected_value = evaluate_processing(**fixture)[0].value
@@ -727,8 +746,8 @@ class PcsNumericConversionTest(unittest.TestCase):
                 tag_id=reference.source_id,
                 source_key=f"Fault{index:02d}",
                 value=TypedValue(
-                    ValueKind.BOOL,
-                    index in {0, 87},
+                    ValueKind.INT,
+                    1 if index in {0, 87} else 0,
                 ),
                 raw_unit=None,
                 quality=TrunkQuality.GOOD,

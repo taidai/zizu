@@ -821,15 +821,16 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     """
                     INSERT INTO t_l2_latest
                       (entity_instance_id,event_id,observed_at,received_at,
-                       calculated_at,value_float,quality,processing_revision_id,
+                       calculated_at,value_observed_at,value_float,quality,processing_revision_id,
                        configuration_revision,source_digest,source_order_key,
                        event_time_basis,frame_sequence)
-                    VALUES(%s,%s,%s,%s,%s,12.5,192,%s,%s,%s,'deactivation-evidence',
+                    VALUES(%s,%s,%s,%s,%s,%s,12.5,192,%s,%s,%s,'deactivation-evidence',
                            'received_at',0)
                     """,
                     (
                         observed_entity_id,
                         uuid4(),
+                        observed_at,
                         observed_at,
                         observed_at,
                         observed_at,
@@ -1408,15 +1409,16 @@ class PointProcessingPostgresTest(unittest.TestCase):
                     """
                     INSERT INTO t_l2_latest
                       (entity_instance_id,event_id,observed_at,received_at,
-                       calculated_at,value_float,quality,processing_revision_id,
+                       calculated_at,value_observed_at,value_float,quality,processing_revision_id,
                        configuration_revision,source_digest,source_order_key,
                        producing_runtime_instance_id,event_time_basis,frame_sequence)
-                    VALUES(%s,%s,%s,%s,%s,12.5,192,%s,0,%s,'trial-l2',%s,
+                    VALUES(%s,%s,%s,%s,%s,%s,12.5,192,%s,0,%s,'trial-l2',%s,
                            'received_at',%s)
                     """,
                     (
                         source_entity_id,
                         event_id,
+                        observed_at,
                         observed_at,
                         observed_at,
                         observed_at,

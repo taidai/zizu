@@ -659,8 +659,12 @@ def _parse_transform(
             if (
                 not isinstance(entry_input, str)
                 or entry_input not in inputs
-                or inputs[entry_input].data_type != "BOOL"
+                or inputs[entry_input].source_kind != "l0"
+                or inputs[entry_input].data_type != "INT"
+                or inputs[entry_input].unit is not None
                 or not inputs[entry_input].required
+                or inputs[entry_input].cardinality != "one"
+                or inputs[entry_input].default_value is not None
                 or entry_input in seen_inputs
                 or not isinstance(code, str)
                 or not code.strip()
@@ -672,7 +676,7 @@ def _parse_transform(
             ):
                 raise PointProcessingTemplateError(
                     "POINT_PROCESSING_RULE_INVALID",
-                    "Boolean-set transform entry is invalid",
+                    "Boolean-set requires one unitless INT 0/1 input per fault code",
                 )
             seen_inputs.add(entry_input)
             seen_codes.add(code)
