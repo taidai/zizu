@@ -349,6 +349,227 @@ class PointProcessingPostgresTest(unittest.TestCase):
         self.assertEqual(1, len(snapshot.installed))
         self.assertIsInstance(snapshot.installed[0].transform, BooleanMapTransform)
 
+    def test_hard_cut_replaces_legacy_bit_identity_with_immutable_boolean_map(self) -> None:
+        from app.services.l0_raw_cutover import (
+            apply_cutover,
+            clear_runtime_test_data,
+            inspect_cutover,
+        )
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingService,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        raw = PointProcessingTemplateTest.passthrough_template("BOOL", None)
+        raw["id"] = "pcs-legacy-bit-identity"
+        raw["inputs"].append(
+            {
+                "id": "unrelated_power",
+                "sourceKind": "l0",
+                "sourceKey": "PActKw",
+                "aliases": [],
+                "dataType": "FLOAT",
+                "unit": "kW",
+                "required": True,
+            }
+        )
+        raw["outputs"][0]["transform"] = {
+            "kind": "formula",
+            "expression": "active_power_raw",
+            "scheduleSeconds": 1,
+            "controlEligible": False,
+        }
+        registered = PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor="test:engineer",
+        )
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_tags SET data_type='BOOL',value_data_type='BOOL',"
+                "wire_data_type='BIT',unit=NULL WHERE node_id=%s AND name='ActivePowerRaw'",
+                (NODE_ID,),
+            )
+            connection.commit()
+
+        repository = PostgresPointProcessingRepository()
+        service = PointProcessingService(
+            repository,
+            PostgresPointProcessingCatalog(),
+        )
+        plan = self._plan(service, registered.revision_id)
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "legacy-bit-install",
+                "test:engineer",
+            )
+        )
+        entity_id = application.output_entity_instance_ids[0]
+
+        with get_connection() as connection:
+            report = inspect_cutover(connection)
+            self.assertFalse(report.blockers)
+            self.assertEqual(1, len(report.deterministic_output_ids))
+            new_revisions = apply_cutover(
+                connection,
+                expected_digest=report.digest,
+                actor="release-v0.6.8",
+            )
+
+        self.assertEqual(1, len(new_revisions))
+        self.assertNotEqual(registered.revision_id, new_revisions[0])
+        exported = PostgresPointProcessingTemplates().export_template(new_revisions[0])
+        self.assertEqual("INT", exported["inputs"][0]["dataType"])
+        self.assertEqual(
+            {"kind": "boolean_map", "input": "active_power_raw", "trueWhen": 1},
+            exported["outputs"][0]["transform"],
+        )
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT revision_id,configuration_revision FROM "
+                "t_installed_point_processings WHERE current=TRUE AND node_id=%s",
+                (NODE_ID,),
+            )
+            self.assertEqual((new_revisions[0], 2), cursor.fetchone())
+            cursor.execute(
+                """
+                SELECT count(*)
+                FROM t_point_processing_input_bindings AS binding
+                JOIN t_point_processing_inputs AS input ON input.id=binding.input_id
+                JOIN t_installed_point_processings AS installed
+                  ON installed.id=binding.installed_processing_id
+                WHERE installed.current=TRUE
+                  AND installed.node_id=%s
+                  AND input.revision_id<>installed.revision_id
+                """,
+                (NODE_ID,),
+            )
+            self.assertEqual((0,), cursor.fetchone())
+            cursor.execute(
+                "SELECT entity_instance_id FROM t_point_processing_output_bindings "
+                "WHERE installed_processing_id=(SELECT id FROM "
+                "t_installed_point_processings WHERE current=TRUE AND node_id=%s)",
+                (NODE_ID,),
+            )
+            self.assertEqual((entity_id,), cursor.fetchone())
+            cursor.execute(
+                "SELECT data_type,value_data_type FROM t_tags "
+                "WHERE node_id=%s AND name='ActivePowerRaw'",
+                (NODE_ID,),
+            )
+            self.assertEqual(("INT", "INT"), cursor.fetchone())
+
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_nodes UNION ALL SELECT count(*) FROM t_tags "
+                "UNION ALL SELECT count(*) FROM t_point_processing_revisions "
+                "UNION ALL SELECT count(*) FROM t_entity_instances"
+            )
+            configuration_counts = tuple(row[0] for row in cursor.fetchall())
+            tag_id = uuid5(NAMESPACE_URL, f"test/tag/{NODE_ID}/ActivePowerRaw")
+            observed_at = datetime.now(UTC)
+            cursor.execute(
+                "INSERT INTO t_telemetry(ts,node_id,tag_id,value_int,quality) "
+                "VALUES(%s,%s,%s,1,192)",
+                (observed_at, NODE_ID, tag_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_data_frames
+                  (frame_id,candidate_digest,capture_beat,shot_at,
+                   configuration_revision,status,attempt_count)
+                VALUES(%s,%s,1,%s,2,'PENDING',0)
+                """,
+                (uuid4(), "c" * 64, observed_at),
+            )
+            connection.commit()
+
+        with get_connection() as connection:
+            deleted = clear_runtime_test_data(
+                connection,
+                expected_configuration_revision=2,
+            )
+        self.assertEqual(1, deleted["t_telemetry"])
+        self.assertEqual(1, deleted["t_data_frames"])
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_nodes UNION ALL SELECT count(*) FROM t_tags "
+                "UNION ALL SELECT count(*) FROM t_point_processing_revisions "
+                "UNION ALL SELECT count(*) FROM t_entity_instances"
+            )
+            self.assertEqual(
+                configuration_counts,
+                tuple(row[0] for row in cursor.fetchall()),
+            )
+            cursor.execute(
+                "SELECT (SELECT count(*) FROM t_telemetry),"
+                "(SELECT count(*) FROM t_data_frames),"
+                "(SELECT count(*) FROM t_l2_observations)"
+            )
+            self.assertEqual((0, 0, 0), cursor.fetchone())
+
+    def test_hard_cut_blocks_complex_legacy_bit_formula(self) -> None:
+        from app.services.l0_raw_cutover import inspect_cutover
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingService,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        raw = PointProcessingTemplateTest.passthrough_template("BOOL", None)
+        raw["id"] = "pcs-legacy-bit-complex"
+        raw["outputs"][0]["transform"] = {
+            "kind": "formula",
+            "expression": "not active_power_raw",
+            "scheduleSeconds": 1,
+            "controlEligible": False,
+        }
+        registered = PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor="test:engineer",
+        )
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_tags SET data_type='BOOL',value_data_type='BOOL',"
+                "wire_data_type='BIT',unit=NULL WHERE node_id=%s AND name='ActivePowerRaw'",
+                (NODE_ID,),
+            )
+            connection.commit()
+        service = PointProcessingService(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+        )
+        plan = self._plan(service, registered.revision_id)
+        service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "legacy-bit-complex",
+                "test:engineer",
+            )
+        )
+
+        with get_connection() as connection:
+            report = inspect_cutover(connection)
+
+        self.assertFalse(report.deterministic_output_ids)
+        self.assertEqual(1, len(report.blockers))
+        self.assertEqual("BIT_FORMULA_REQUIRES_REVIEW", report.blockers[0].code)
+
     def test_apply_publishes_one_revision_and_attaches_l2_directly_to_node(self) -> None:
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection
