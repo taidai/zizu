@@ -1,5 +1,20 @@
 ---
 
+## Session 2026-09-01 — v0.6.7 修复数字开头点位加工并部署短验收
+
+- 根因：`15V电源故障` 的内部输入名被生成为非法公式变量 `15v`，使 BOOL“直接使用”报
+  `Formula syntax is invalid`。提交 `2c3c0de` 对非字母开头和公式关键字统一增加 `point_` 前缀，
+  重名仍稳定消歧；版本已标记 `v0.6.7` 并推送 `main`。
+- TDD 专项 12/12、前端全量 61/61、发布/版本 15/15、生产构建和 Actions `33491291281` 均通过；
+  独立复审最终 Critical 0、Important 0。
+- 1 号机运行 ARM64 固定摘要 `sha256:f5159d3802a310d6234e0b5192f84df21a821829896baa92712e50e33d681a35`、
+  Schema058、healthy、restart 0、host 网络和 `/dev/mqueue`。近 60 秒 25 COMPLETE，outbox 0，
+  未完成帧 0，错误日志 0。
+- 应用内 Browser 无法附着后，使用现有 Chromium 做 22 秒公网无头短验收：真实
+  `E2E验证 / 15V电源故障 / 直接使用 / 检查结果` 通过，未发布实体或改变运行配置。完整证据见
+  `docs/deploy-1号机-v0.6.7-http.md`；配置备份为
+  `/opt/zizu-release-test-0.5.0/release.env.pre-v0.6.7-2c3c0de-20260901T0919Z`。
+
 ## Session 2026-09-01 — v0.6.6 L0 刷新诊断与数据帧背压已部署验收
 
 - `7c291457` 已推送 `main` 并标记 `v0.6.6`；Actions `33481502086` 成功。1 号机运行 ARM64 固定
