@@ -15,7 +15,7 @@ NOW = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
 
 
 class RawObservationAdapterTest(unittest.TestCase):
-    def _convert(self, raw_value: object):
+    def _convert(self, raw_value: object, data_type: str = "INT"):
         parsed = ParsedMessage(
             node_name="pcs",
             timestamp_ms=int(NOW.timestamp() * 1000),
@@ -29,7 +29,7 @@ class RawObservationAdapterTest(unittest.TestCase):
                     node_id=NODE_ID,
                     tag_id=TAG_ID,
                     stable_source_key="pcs/ActivePower",
-                    data_type="INT",
+                    data_type=data_type,
                     unit="kW",
                     timestamp_trusted=False,
                 )
@@ -48,6 +48,18 @@ class RawObservationAdapterTest(unittest.TestCase):
 
     def test_fractional_json_float_is_rejected_for_int_contract(self) -> None:
         self.assertEqual((), self._convert(0.5))
+
+    def test_numeric_bit_obeys_configured_bool_contract(self) -> None:
+        disabled = self._convert(0, "BOOL")
+        enabled = self._convert(1, "BOOL")
+
+        self.assertEqual(ValueKind.BOOL, disabled[0].value.kind)
+        self.assertIs(False, disabled[0].value.value)
+        self.assertEqual(ValueKind.BOOL, enabled[0].value.kind)
+        self.assertIs(True, enabled[0].value.value)
+
+    def test_non_bit_number_is_rejected_for_bool_contract(self) -> None:
+        self.assertEqual((), self._convert(2, "BOOL"))
 
 
 if __name__ == "__main__":

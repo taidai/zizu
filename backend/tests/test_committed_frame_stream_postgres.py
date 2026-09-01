@@ -107,7 +107,11 @@ class _StaleSnapshotCursor:
                 7,
                 self.head_beat,
                 NOW + timedelta(seconds=10),
+                "FAILED",
+                "FRAME_PROCESSING_FAILED",
             )
+        if self.sql.startswith("SELECT count(*) FROM t_data_frames"):
+            return (3,)
         return None
 
     def fetchall(self):
@@ -213,6 +217,25 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
             int(TrunkQuality.STALE),
             snapshot.l0[0]["effective_quality"],
         )
+
+    def test_snapshot_exposes_frame_failure_and_backlog_for_link_diagnosis(self) -> None:
+        connection = _StaleSnapshotConnection()
+
+        @contextmanager
+        def reusable_connection():
+            yield connection
+
+        snapshot = PostgresCommittedFrameStreamRepository(
+            connection_factory=reusable_connection
+        ).read_snapshot(FrameScope.for_node(connection.snapshot_cursor.node_id))
+
+        self.assertEqual("FAILED", snapshot.frame_status)
+        self.assertEqual(
+            {"code": "FRAME_PROCESSING_FAILED"},
+            snapshot.failure,
+        )
+        self.assertEqual(3, snapshot.backlog_frames)
+        self.assertEqual("STALE", snapshot.l0[0]["reason"])
 
     def test_resnapshot_fails_closed_while_runtime_is_warming(self) -> None:
         connection = _StaleSnapshotConnection(head_beat=1, accepted_beat=1)

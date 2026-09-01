@@ -61,7 +61,8 @@ class PostgresCommittedFrameStreamRepository:
                 cursor.execute(
                     """
                     SELECT frame_sequence,COALESCE(finished_at,shot_at),
-                           configuration_revision,capture_beat,CURRENT_TIMESTAMP
+                           configuration_revision,capture_beat,CURRENT_TIMESTAMP,
+                           status,failure_code
                     FROM t_data_frames
                     WHERE status IN ('COMPLETE','FAILED')
                     ORDER BY frame_sequence DESC
@@ -79,6 +80,8 @@ class PostgresCommittedFrameStreamRepository:
                     frame_time = None
                     capture_beat = 0
                     snapshot_at = datetime.now(UTC)
+                    frame_status = None
+                    failure = None
                     configuration_revision = (
                         0 if revision_row is None else int(revision_row[0])
                     )
@@ -88,6 +91,16 @@ class PostgresCommittedFrameStreamRepository:
                     configuration_revision = int(head[2])
                     capture_beat = int(head[3])
                     snapshot_at = head[4]
+                    frame_status = str(head[5])
+                    failure = (
+                        None if head[6] is None else {"code": str(head[6])}
+                    )
+                cursor.execute(
+                    "SELECT count(*) FROM t_data_frames "
+                    "WHERE status IN ('PENDING','PROCESSING')"
+                )
+                backlog_row = cursor.fetchone()
+                backlog_frames = 0 if backlog_row is None else int(backlog_row[0])
                 if self._on_snapshot_head_read is not None:
                     self._on_snapshot_head_read()
                 l0 = self._read_l0(
@@ -115,6 +128,9 @@ class PostgresCommittedFrameStreamRepository:
             configuration_revision=configuration_revision,
             l0=l0,
             l2=l2,
+            frame_status=frame_status,
+            failure=failure,
+            backlog_frames=backlog_frames,
         )
 
     def replay_window(self) -> ReplayWindow:
@@ -323,6 +339,17 @@ class PostgresCommittedFrameStreamRepository:
                     legacy_text=row[22],
                 )
             )
+            if not has_value:
+                reason = "WAITING_DATA"
+            elif effective_quality == int(TrunkQuality.STALE):
+                reason = "STALE"
+            elif effective_quality not in {
+                int(TrunkQuality.GOOD),
+                int(TrunkQuality.UNCERTAIN),
+            }:
+                reason = "SOURCE_QUALITY_BAD"
+            else:
+                reason = None
             items.append(
                 {
                     "tag_id": str(row[0]),
@@ -334,6 +361,7 @@ class PostgresCommittedFrameStreamRepository:
                     "unit": row[4],
                     "source_quality": source_quality,
                     "effective_quality": effective_quality,
+                    "reason": reason,
                     "source_timestamp": _optional_iso(row[13]),
                     "received_at": _optional_iso(row[14]),
                     "accepted_beat": row[18],

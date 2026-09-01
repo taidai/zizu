@@ -71,6 +71,9 @@ class FrameSnapshot:
     configuration_revision: int
     l0: tuple[Mapping[str, Any], ...]
     l2: tuple[Mapping[str, Any], ...]
+    frame_status: str | None = None
+    failure: Mapping[str, Any] | None = None
+    backlog_frames: int = 0
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +83,9 @@ class FrameSnapshot:
             "frame_sequence": self.frame_sequence,
             "frame_time": self.frame_time,
             "configuration_revision": self.configuration_revision,
+            "frame_status": self.frame_status,
+            "failure": None if self.failure is None else dict(self.failure),
+            "backlog_frames": self.backlog_frames,
             "l0": [dict(item) for item in self.l0],
             "l2": [dict(item) for item in self.l2],
         }

@@ -14,6 +14,7 @@ export interface CommittedFrameProjection {
   configurationRevision: number
   status: 'COMPLETE' | 'FAILED' | null
   failure: FrameFailure | null
+  backlogFrames: number
   l0: Map<string, L0FrameItem>
   l2: Map<string, L2FrameItem>
 }
@@ -28,8 +29,9 @@ export function replaceSnapshot(
     frameSequence: snapshot.frame_sequence,
     frameTime: snapshot.frame_time,
     configurationRevision: snapshot.configuration_revision,
-    status: null,
-    failure: null,
+    status: snapshot.frame_status,
+    failure: snapshot.failure,
+    backlogFrames: snapshot.backlog_frames,
     l0: new Map(snapshot.l0.map((item) => [item.tag_id, { ...item }])),
     l2: new Map(
       snapshot.l2.map((item) => [item.entity_instance_id, { ...item }]),

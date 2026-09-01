@@ -189,6 +189,18 @@ class RawObservationAdapter:
 
 def _raw_typed_value(raw_value, data_type: str) -> TypedValue | None:
     kind = data_type.upper()
+    if kind == "BOOL":
+        if isinstance(raw_value, bool):
+            return TypedValue(ValueKind.BOOL, raw_value)
+        if isinstance(raw_value, int) and raw_value in (0, 1):
+            return TypedValue(ValueKind.BOOL, bool(raw_value))
+        if (
+            isinstance(raw_value, float)
+            and math.isfinite(raw_value)
+            and raw_value in (0.0, 1.0)
+        ):
+            return TypedValue(ValueKind.BOOL, bool(raw_value))
+        return None
     if kind == "INT":
         if isinstance(raw_value, bool):
             return None

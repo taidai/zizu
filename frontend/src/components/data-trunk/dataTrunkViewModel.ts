@@ -21,6 +21,7 @@ export const RAW_POINT_COLUMNS = [
   '当前值',
   '单位',
   '质量',
+  '原因',
   '数据时间',
   '来源',
 ] as const
@@ -263,6 +264,132 @@ export function qualityLabel(quality: number): string {
   if (quality === 64) return '存疑'
   if (quality === 1) return '超时'
   return '无效'
+}
+
+interface RawPointReasonInput {
+  reason: string | null | undefined
+  receivedAt: string | null | undefined
+  frameStatus: 'COMPLETE' | 'FAILED' | null | undefined
+  frameFailureCode: string | null | undefined
+  nowMs?: number
+}
+
+function elapsedLabel(timestamp: string | null | undefined, nowMs: number): string | null {
+  if (!timestamp) return null
+  const elapsedMs = Math.max(0, nowMs - Date.parse(timestamp))
+  if (!Number.isFinite(elapsedMs)) return null
+  const seconds = Math.floor(elapsedMs / 1000)
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  return `${Math.floor(minutes / 60)} 小时`
+}
+
+export function rawPointReasonLabel({
+  reason,
+  receivedAt,
+  frameStatus,
+  frameFailureCode,
+  nowMs = Date.now(),
+}: RawPointReasonInput): string {
+  if (frameStatus === 'FAILED' && (reason === 'WAITING_DATA' || reason === 'STALE')) {
+    return frameFailureCode === 'FRAME_PROCESSING_FAILED'
+      ? '数据已到达平台，但数据帧处理失败'
+      : '数据帧处理失败'
+  }
+  if (reason === 'WAITING_DATA') return '等待首个已提交数据'
+  if (reason === 'STALE') {
+    const elapsed = elapsedLabel(receivedAt, nowMs)
+    return elapsed ? `${elapsed}未收到新数据` : '未收到新数据'
+  }
+  if (reason === 'SOURCE_QUALITY_BAD') return '设备上报质量异常'
+  return reason ? '当前数据不可用' : '—'
+}
+
+export type RawPointLinkState = 'ok' | 'warning' | 'error' | 'unknown'
+
+export interface RawPointLinkStage {
+  label: string
+  state: RawPointLinkState
+  detail: string
+}
+
+interface RawPointDataLinkInput {
+  neuronStatus: string | null | undefined
+  mqttStatus: string | null | undefined
+  pipelineStatus: string | null | undefined
+  lastMessageAt: string | null | undefined
+  frameStatus: 'COMPLETE' | 'FAILED' | null | undefined
+  frameFailureCode: string | null | undefined
+  backlogFrames: number
+  projectionAvailable: boolean
+  goodPoints: number
+  totalPoints: number
+  nowMs?: number
+}
+
+function connectionStage(label: string, status: string | null | undefined): RawPointLinkStage {
+  if (!status) return { label, state: 'unknown', detail: '状态未知' }
+  const normalized = status.toLowerCase()
+  if (normalized === 'connected' || normalized === 'running' || normalized === 'healthy') {
+    return { label, state: 'ok', detail: '已连接' }
+  }
+  return { label, state: 'error', detail: '未连接' }
+}
+
+export function buildRawPointDataLink({
+  neuronStatus,
+  mqttStatus,
+  pipelineStatus,
+  lastMessageAt,
+  frameStatus,
+  frameFailureCode,
+  backlogFrames,
+  projectionAvailable,
+  goodPoints,
+  totalPoints,
+  nowMs = Date.now(),
+}: RawPointDataLinkInput): RawPointLinkStage[] {
+  const receivedAge = elapsedLabel(lastMessageAt, nowMs)
+  const receivedSeconds = lastMessageAt
+    ? Math.max(0, Math.floor((nowMs - Date.parse(lastMessageAt)) / 1000))
+    : Number.NaN
+  const reception: RawPointLinkStage = !pipelineStatus || !lastMessageAt || !Number.isFinite(receivedSeconds)
+    ? { label: '数据接收', state: 'unknown', detail: '尚无消息' }
+    : pipelineStatus.toLowerCase() !== 'running'
+      ? { label: '数据接收', state: 'error', detail: '接收程序未运行' }
+      : receivedSeconds <= 10
+        ? { label: '数据接收', state: 'ok', detail: `${receivedAge}前收到消息` }
+        : { label: '数据接收', state: 'warning', detail: `${receivedAge}未收到消息` }
+  const frame: RawPointLinkStage = !projectionAvailable
+    ? { label: '数据帧', state: 'unknown', detail: '暂不可用' }
+    : frameStatus === 'FAILED'
+      ? {
+          label: '数据帧',
+          state: 'error',
+          detail: `${frameFailureCode === 'FRAME_PROCESSING_FAILED' ? '处理失败' : '失败'} · 刷新时积压 ${backlogFrames} 帧`,
+        }
+      : frameStatus === 'COMPLETE'
+        ? {
+            label: '数据帧',
+            state: backlogFrames > 0 ? 'warning' : 'ok',
+            detail: backlogFrames > 0 ? `正常 · 刷新时积压 ${backlogFrames} 帧` : '正常',
+          }
+        : { label: '数据帧', state: 'unknown', detail: '等待首帧' }
+  const l0: RawPointLinkStage = totalPoints <= 0
+    ? { label: 'L0', state: 'unknown', detail: '没有点位' }
+    : {
+        label: 'L0',
+        state: goodPoints === totalPoints ? 'ok' : 'warning',
+        detail: `${goodPoints} / ${totalPoints} 个点位正常`,
+      }
+  return [
+    connectionStage('Neuron 接口', neuronStatus),
+    connectionStage('MQTT 总线', mqttStatus),
+    reception,
+    frame,
+    l0,
+  ]
 }
 
 export function projectRawPointValue(

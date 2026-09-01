@@ -10,6 +10,9 @@ const snapshot = (sequence = 10) => ({
   frame_sequence: sequence,
   frame_time: '2026-08-27T10:00:00Z',
   configuration_revision: 46,
+  frame_status: 'FAILED',
+  failure: { code: 'FRAME_PROCESSING_FAILED' },
+  backlog_frames: 3,
   l0: [{ tag_id: 'tag-a', value: 1, frame_sequence: sequence }],
   l2: [{ entity_instance_id: 'entity-a', value: 2, frame_sequence: sequence }],
 })
@@ -52,6 +55,14 @@ test('snapshot replacement cannot retain values from the previous node', () => {
   assert.equal(replacement.l0.has('tag-a'), false)
   assert.equal(replacement.l0.get('tag-b').value, 8)
   assert.equal(replacement.l2.size, 0)
+})
+
+test('snapshot replacement keeps data-frame diagnostics for the selected node', () => {
+  const current = projection.replaceSnapshot(null, snapshot(10))
+
+  assert.equal(current.status, 'FAILED')
+  assert.deepEqual(current.failure, { code: 'FRAME_PROCESSING_FAILED' })
+  assert.equal(current.backlogFrames, 3)
 })
 
 test('a missing global checkpoint fails closed', () => {

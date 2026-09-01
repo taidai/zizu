@@ -18,6 +18,7 @@ export interface L0FrameItem {
   source_path: string | null
   source_type: string | null
   source_digest?: string | null
+  reason?: string | null
   frame_sequence: number
 }
 
@@ -41,7 +42,7 @@ export interface L2FrameItem {
 }
 
 export interface FrameFailure {
-  failure_id: string | null
+  failure_id?: string | null
   code: string | null
 }
 
@@ -52,6 +53,9 @@ export interface CommittedFrameSnapshot {
   frame_sequence: number
   frame_time: string | null
   configuration_revision: number
+  frame_status: 'COMPLETE' | 'FAILED' | null
+  failure: FrameFailure | null
+  backlog_frames: number
   l0: L0FrameItem[]
   l2: L2FrameItem[]
 }

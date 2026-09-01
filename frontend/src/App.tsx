@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { fetchCurrentUser, fetchHealth, login, logout, type HealthStatus } from './api/client'
 import {
   clearAuthSession,
@@ -152,6 +152,7 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession
 function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLoggedOut: () => void }) {
   const [activePage, setActivePage] = useState<PageKey>('workbench')
   const [health, setHealth] = useState<HealthStatus | null>(null)
+  const healthRequestGenerationRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
   const navigation = useMemo(
@@ -165,12 +166,21 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
     }
   }, [activePage, navigation])
 
-  useEffect(() => {
-    const poll = () => fetchHealth().then(setHealth).catch(() => {})
-    poll()
-    const id = setInterval(poll, 5000)
-    return () => clearInterval(id)
+  const loadHealth = useCallback(async () => {
+    const generation = ++healthRequestGenerationRef.current
+    try {
+      const nextHealth = await fetchHealth()
+      if (generation === healthRequestGenerationRef.current) setHealth(nextHealth)
+    } catch {
+      // Keep the last known state; the next poll or manual refresh retries.
+    }
   }, [])
+
+  useEffect(() => {
+    void loadHealth()
+    const id = setInterval(() => { void loadHealth() }, 5000)
+    return () => clearInterval(id)
+  }, [loadHealth])
 
   const handleLogout = async () => {
     setLoggingOut(true)
@@ -268,7 +278,15 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <div className="mt-4">
           <Suspense fallback={<PageLoader />}>
             {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
-            {activePage === 'tree' && <NodeTreePage actorId={session.user.id} readOnly={session.user.role === 'operator'} canManageTemplates={session.user.role === 'admin'} />}
+            {activePage === 'tree' && (
+              <NodeTreePage
+                actorId={session.user.id}
+                readOnly={session.user.role === 'operator'}
+                canManageTemplates={session.user.role === 'admin'}
+                health={health}
+                onRefreshHealth={loadHealth}
+              />
+            )}
             {activePage === 'rules' && <RuleEnginePage />}
             {activePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={CONFIG_ROLES.includes(session.user.role)} />}
           </Suspense>

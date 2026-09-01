@@ -483,6 +483,20 @@ class DataFramesPostgresTest(unittest.TestCase):
             recovered.observations[0].observation.tag_id,
         )
 
+    def test_restore_blackboard_ignores_legacy_value_with_wrong_declared_type(self) -> None:
+        self.repository.commit_pending(self._candidate(capture_beat=105))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_tags SET data_type='BOOL',value_data_type='BOOL' "
+                "WHERE id=%s",
+                (str(self.tag_id),),
+            )
+
+        recovered = self.repository.restore_blackboard()
+
+        self.assertIn(self.tag_id, recovered.active_input_contracts)
+        self.assertEqual((), recovered.observations)
+
     def test_transaction_b_atomically_advances_l0_and_completes_frame(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=106))
         terminal = FrameProcessor(

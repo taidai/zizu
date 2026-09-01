@@ -3,7 +3,7 @@ import {
   fetchNodes, fetchRules, updateNode, createNode, deleteNode, fetchAlarmCounts,
   fetchCategories, fetchNeuronNodes, fetchNeuronGroups, previewNeuronTags, importNeuronTags,
   type Node, type Rule, type Category, type NeuronNode, type NeuronGroup,
-  type NeuronImportPreview,
+  type HealthStatus, type NeuronImportPreview,
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
 import { nodeDataTabs, type NodeDataTabKey } from '../components/data-trunk/dataTrunkViewModel'
@@ -512,10 +512,14 @@ export default function NodeTreePage({
   readOnly = false,
   actorId,
   canManageTemplates = false,
+  health,
+  onRefreshHealth,
 }: {
   readOnly?: boolean
   actorId: string
   canManageTemplates?: boolean
+  health: HealthStatus | null
+  onRefreshHealth?: () => Promise<void> | void
 }) {
   const [nodes, setNodes] = useState<Node[]>([])
   const [rules, setRules] = useState<Rule[]>([])
@@ -782,6 +786,8 @@ export default function NodeTreePage({
                   key={`${selectedNode.id}:raw`}
                   node={selectedNode}
                   readOnly={readOnly}
+                  health={health}
+                  onRefreshHealth={onRefreshHealth}
                   onPointCountChanged={() => { void loadNodes() }}
                 />
               )}

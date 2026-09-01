@@ -132,6 +132,12 @@ test.describe.serial('节点管理主干', () => {
 
     await expect(page.getByText('共 51 个点位', { exact: true })).toBeVisible()
     await expect(page.getByText('第 1 / 2 页', { exact: true })).toBeVisible()
+    await expect(page.getByRole('region', { name: '数据链路' })).toBeVisible()
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes('/api/v1/tags?') && response.ok()),
+      page.waitForResponse((response) => response.url().includes('/api/v1/runtime/frame-snapshot') && response.ok()),
+      page.getByRole('button', { name: '刷新原始点位' }).click(),
+    ])
     await page.getByRole('button', { name: '下一页' }).click()
     await expect(page.getByText('e2e_spare_050', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '上一页' }).click()

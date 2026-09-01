@@ -59,6 +59,64 @@ test('raw point keeps the last diagnostic value while stale', async () => {
   })
 })
 
+test('raw point timeout explains the failing link instead of blaming the device', async () => {
+  const viewModel = await import('./dataTrunkViewModel.ts')
+
+  assert.equal(viewModel.rawPointReasonLabel({
+    reason: 'WAITING_DATA',
+    receivedAt: null,
+    frameStatus: 'FAILED',
+    frameFailureCode: 'FRAME_PROCESSING_FAILED',
+    nowMs: Date.parse('2026-09-01T05:30:00Z'),
+  }), '数据已到达平台，但数据帧处理失败')
+  assert.equal(viewModel.rawPointReasonLabel({
+    reason: 'WAITING_DATA',
+    receivedAt: null,
+    frameStatus: 'COMPLETE',
+    frameFailureCode: null,
+    nowMs: Date.parse('2026-09-01T05:30:00Z'),
+  }), '等待首个已提交数据')
+  assert.equal(viewModel.rawPointReasonLabel({
+    reason: 'STALE',
+    receivedAt: '2026-09-01T05:29:43Z',
+    frameStatus: 'COMPLETE',
+    frameFailureCode: null,
+    nowMs: Date.parse('2026-09-01T05:30:00Z'),
+  }), '17 秒未收到新数据')
+  assert.equal(viewModel.rawPointReasonLabel({
+    reason: null,
+    receivedAt: '2026-09-01T05:29:59Z',
+    frameStatus: 'FAILED',
+    frameFailureCode: 'FRAME_PROCESSING_FAILED',
+    nowMs: Date.parse('2026-09-01T05:30:00Z'),
+  }), '—')
+})
+
+test('raw point link status identifies the broken data-frame stage', async () => {
+  const viewModel = await import('./dataTrunkViewModel.ts')
+  const stages = viewModel.buildRawPointDataLink({
+    neuronStatus: 'connected',
+    mqttStatus: 'connected',
+    pipelineStatus: 'RUNNING',
+    lastMessageAt: '2026-09-01T05:29:59Z',
+    frameStatus: 'FAILED',
+    frameFailureCode: 'FRAME_PROCESSING_FAILED',
+    backlogFrames: 77,
+    projectionAvailable: true,
+    goodPoints: 0,
+    totalPoints: 91,
+    nowMs: Date.parse('2026-09-01T05:30:00Z'),
+  })
+
+  assert.deepEqual(stages.map((stage) => [stage.label, stage.state, stage.detail]), [
+    ['Neuron 接口', 'ok', '已连接'],
+    ['MQTT 总线', 'ok', '已连接'],
+    ['数据接收', 'ok', '1 秒前收到消息'],
+    ['数据帧', 'error', '处理失败 · 刷新时积压 77 帧'],
+    ['L0', 'warning', '0 / 91 个点位正常'],
+  ])
+})
+
 test('delete candidate explains runtime stop without erasing history', async () => {
   const viewModel = await import('./dataTrunkViewModel.ts')
   assert.equal(
@@ -145,7 +203,7 @@ test('node data tabs expose only raw points and entities', async () => {
     ['raw-points', 'entities'],
   )
   assert.deepEqual(model.RAW_POINT_COLUMNS, [
-    '点位名称', '当前值', '单位', '质量', '数据时间', '来源',
+    '点位名称', '当前值', '单位', '质量', '原因', '数据时间', '来源',
   ])
 })
 

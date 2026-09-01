@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { deleteRawPoints, fetchTags, maintainRawPoints, type Node, type Tag } from '../api/client'
+import { deleteRawPoints, fetchTags, maintainRawPoints, type HealthStatus, type Node, type Tag } from '../api/client'
 import {
   connectCommittedFrameStream,
   fetchCommittedFrameSnapshot,
@@ -10,7 +10,13 @@ import {
   replaceSnapshot,
   type CommittedFrameProjection,
 } from './data-trunk/committedFrameProjection'
-import { projectRawPointValue, RAW_POINT_COLUMNS } from './data-trunk/dataTrunkViewModel'
+import {
+  buildRawPointDataLink,
+  projectRawPointValue,
+  rawPointReasonLabel,
+  RAW_POINT_COLUMNS,
+  type RawPointLinkState,
+} from './data-trunk/dataTrunkViewModel'
 import InlinePointProcessingPanel from './data-trunk/InlinePointProcessingPanel'
 import {
   rawPointDisplayNameChange,
@@ -23,6 +29,8 @@ interface NodeTagPanelProps {
   node: Node
   readOnly: boolean
   onPointCountChanged?: () => void
+  health: HealthStatus | null
+  onRefreshHealth?: () => Promise<void> | void
 }
 
 type RawPointView = 'realtime' | 'history'
@@ -33,7 +41,27 @@ function formatTime(timestamp: string | null | undefined): string {
   return timestamp ? new Date(timestamp).toLocaleString('zh-CN') : '未收到'
 }
 
-export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: NodeTagPanelProps) {
+const LINK_TONES: Record<RawPointLinkState, string> = {
+  ok: 'border-green-200 bg-green-50 text-green-800',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800',
+  error: 'border-red-200 bg-red-50 text-red-800',
+  unknown: 'border-gray-200 bg-gray-50 text-gray-500',
+}
+
+const LINK_DOTS: Record<RawPointLinkState, string> = {
+  ok: 'bg-green-500',
+  warning: 'bg-amber-500',
+  error: 'bg-red-500',
+  unknown: 'bg-gray-400',
+}
+
+export default function NodeTagPanel({
+  node,
+  readOnly,
+  onPointCountChanged,
+  health,
+  onRefreshHealth,
+}: NodeTagPanelProps) {
   const nodeId = node.id
   const [view, setView] = useState<RawPointView>('realtime')
   const [tags, setTags] = useState<Tag[]>([])
@@ -50,6 +78,8 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
   const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [maintenanceBusy, setMaintenanceBusy] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState('')
+  const [realtimeRefresh, setRealtimeRefresh] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
   const activeNodeIdRef = useRef(nodeId)
   const tagRequestGenerationRef = useRef(0)
   activeNodeIdRef.current = nodeId
@@ -105,6 +135,16 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
     setSelected(new Map())
   }, [nodeId])
 
+  const refreshRawPoints = async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    await Promise.all([
+      loadTags(),
+      Promise.resolve(onRefreshHealth?.()),
+    ])
+    setRealtimeRefresh((value) => value + 1)
+  }
+
   useEffect(() => {
     void loadTags()
   }, [loadTags, node.tag_count])
@@ -152,6 +192,8 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
           && !(reason instanceof DOMException && reason.name === 'AbortError')) {
           setProjection(null)
         }
+      } finally {
+        if (active && currentGeneration === generation) setRefreshing(false)
       }
     }
 
@@ -162,7 +204,7 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
       controller?.abort()
       stopStream()
     }
-  }, [nodeId])
+  }, [nodeId, realtimeRefresh])
 
   const selectedRows = [...selected.values()]
   const selectionSummary = rawPointSelectionSummary(selectedRows)
@@ -170,6 +212,22 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
   const selectableTags = tags
   const allVisibleSelected = selectableTags.length > 0
     && selectableTags.every((tag) => selected.has(tag.id))
+  const linkTotal = projection?.l0.size || total
+  const linkGood = projection
+    ? [...projection.l0.values()].filter((item) => item.effective_quality === 192).length
+    : 0
+  const linkStages = buildRawPointDataLink({
+    neuronStatus: health?.components.neuron.status,
+    mqttStatus: health?.components.mqtt.status,
+    pipelineStatus: health?.pipeline.status,
+    lastMessageAt: health?.pipeline.last_message_at,
+    frameStatus: projection?.status,
+    frameFailureCode: projection?.failure?.code,
+    backlogFrames: projection?.backlogFrames || 0,
+    projectionAvailable: projection !== null,
+    goodPoints: linkGood,
+    totalPoints: linkTotal,
+  })
 
   const togglePoint = (tag: Tag) => {
     setSelected((current) => {
@@ -267,6 +325,15 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
           <p className="mt-1 text-xs text-gray-500">查看设备实际上传的值。点位配置请使用节点上方的“导入点位”。</p>
         </div>
         <div className="flex gap-2" aria-label="原始点位数据视图">
+          <button
+            type="button"
+            aria-label="刷新原始点位"
+            disabled={refreshing}
+            onClick={() => { void refreshRawPoints() }}
+            className="neu-btn rounded px-3 py-1.5 text-xs font-medium text-gray-700 disabled:opacity-40"
+          >
+            {refreshing ? '刷新中...' : '刷新'}
+          </button>
           {([
             ['realtime', '实时'],
             ['history', '历史'],
@@ -293,6 +360,26 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
         </Suspense>
       ) : (
         <>
+          <section className="mb-3" aria-label="数据链路">
+            <p className="mb-1.5 text-[10px] text-gray-500">
+              前三段是平台公共链路；当前设备是否有数据，以最后的 L0 状态为准。
+            </p>
+            <div className="flex flex-wrap items-stretch gap-1.5">
+              {linkStages.map((stage, index) => (
+                <div key={stage.label} className="flex items-center gap-1.5">
+                  {index > 0 && <span aria-hidden="true" className="text-gray-300">→</span>}
+                  <div className={`min-w-28 rounded border px-2.5 py-2 ${LINK_TONES[stage.state]}`}>
+                    <div className="flex items-center gap-1.5 text-[11px] font-semibold">
+                      <span className={`h-2 w-2 rounded-full ${LINK_DOTS[stage.state]}`} />
+                      {stage.label}
+                    </div>
+                    <div className="mt-0.5 whitespace-nowrap text-[10px]">{stage.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <label className="text-xs text-gray-600">
               <span className="sr-only">搜索点位</span>
@@ -448,6 +535,14 @@ export default function NodeTagPanel({ node, readOnly, onPointCountChanged }: No
                       <td className="px-3 py-2 font-mono">{point.displayValue}</td>
                       <td className="px-3 py-2">{current?.unit || tag.unit || '-'}</td>
                       <td className={`px-3 py-2 ${qualityClass}`}>{point.qualityLabel}</td>
+                      <td className="max-w-64 px-3 py-2 text-gray-600">
+                        {rawPointReasonLabel({
+                          reason: current?.reason ?? (current ? null : 'WAITING_DATA'),
+                          receivedAt: current?.received_at,
+                          frameStatus: projection?.status,
+                          frameFailureCode: projection?.failure?.code,
+                        })}
+                      </td>
                       <td className="whitespace-nowrap px-3 py-2">{formatTime(current?.source_timestamp)}</td>
                       <td className="max-w-80 truncate px-3 py-2 font-mono text-[11px] text-gray-500" title={current?.source_path || tag.source_path || ''}>
                         {current?.source_path || tag.source_path || '未记录'}

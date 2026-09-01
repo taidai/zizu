@@ -450,8 +450,21 @@ class PostgresFrameRepository:
                           telemetry.source_order_mode,
                           telemetry.source_receive_ordinal
                         FROM t_telemetry AS telemetry
+                        JOIN t_tags AS recovered_tag
+                          ON recovered_tag.id=telemetry.tag_id
                         WHERE telemetry.tag_id = ANY(%s::uuid[])
                           AND telemetry.frame_sequence IS NOT NULL
+                          AND CASE upper(COALESCE(
+                                recovered_tag.value_data_type,
+                                recovered_tag.data_type
+                              ))
+                                WHEN 'FLOAT' THEN telemetry.raw_value_float IS NOT NULL
+                                WHEN 'INT' THEN telemetry.raw_value_int IS NOT NULL
+                                WHEN 'BOOL' THEN telemetry.raw_value_bool IS NOT NULL
+                                WHEN 'STRING' THEN telemetry.raw_value_text IS NOT NULL
+                                WHEN 'ENUM' THEN telemetry.raw_value_text IS NOT NULL
+                                ELSE FALSE
+                              END
                         ORDER BY telemetry.tag_id,
                                  telemetry.frame_sequence DESC, telemetry.ts DESC
                         """,

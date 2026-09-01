@@ -118,6 +118,9 @@ class CommittedFramePublicApiTest(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("frame_snapshot", response.json()["type"])
         self.assertEqual("cursor-10", response.json()["cursor"])
+        self.assertIsNone(response.json()["frame_status"])
+        self.assertIsNone(response.json()["failure"])
+        self.assertEqual(0, response.json()["backlog_frames"])
         self.assertEqual(NODE_ID, self.stream.last_scope.node_id)
 
     def test_websocket_replays_after_authenticated_cursor(self) -> None:
