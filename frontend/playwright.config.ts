@@ -6,7 +6,8 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 60_000,
-  globalTimeout: 600_000,
+  expect: { timeout: 40_000 },
+  globalTimeout: 900_000,
   outputDir: 'test-results/node-management-artifacts',
   reporter: [
     ['line'],

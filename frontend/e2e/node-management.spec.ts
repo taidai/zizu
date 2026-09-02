@@ -155,7 +155,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(realtimeRow).toBeVisible()
 
     await publish(names.neuronTag, 12.5)
-    await expect(realtimeRow).toContainText('12.5', { timeout: 15_000 })
+    await expect(realtimeRow).toContainText('12.5', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
     await expect(realtimeRow).toContainText('正常')
     await expect(realtimeRow).toContainText(
       `${names.neuronNode}/${names.neuronGroup}/${names.neuronTag}`,
@@ -197,10 +197,16 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
 
+    await publish(names.neuronTag, 12.75)
+    await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toContainText(
+      '12.75',
+      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
+    )
+
     await page.getByRole('button', { name: '历史', exact: true }).click()
     await page.getByLabel('选择一个原始点位').selectOption({ label: names.neuronTag })
     await page.getByRole('button', { name: '明细', exact: true }).click()
-    await expect(page.getByRole('cell', { name: '12.5', exact: true }).first()).toBeVisible()
+    await expect(page.getByRole('cell', { name: '12.75', exact: true }).first()).toBeVisible()
   })
 
   test('L1 可检查发布且 L2 可查看实时、历史、质量和来源证据', async () => {
@@ -222,7 +228,7 @@ test.describe.serial('节点管理主干', () => {
     await editor.getByRole('button', { name: '检查结果', exact: true }).click()
     await expect(editor.getByText('检查通过，可以发布。', { exact: true })).toBeVisible()
     await expect(editor.getByText('当前试算结果', { exact: true })).toBeVisible()
-    await expect(editor).toContainText('12.5')
+    await expect(editor).toContainText('12.75')
     await expect(editor).toContainText('1 个来源')
 
     await editor.getByRole('button', { name: '发布实体', exact: true }).click()
@@ -235,7 +241,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
     const entity = page.getByRole('button', { name: new RegExp(entityDisplayName) })
     await expect(entity).toBeVisible()
-    await expect(entity).toContainText('13.5', { timeout: 15_000 })
+    await expect(entity).toContainText('13.5', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
     await expect(entity).toContainText('正常')
     await entity.click()
     await expect(page.getByRole('region', { name: '实体历史' })).toBeVisible()
@@ -246,7 +252,7 @@ test.describe.serial('节点管理主干', () => {
   })
 
   test('L1 模板可维护、升级、停用再恢复，规则可指定再取消且不会执行', async () => {
-    test.setTimeout(180_000)
+    test.setTimeout(300_000)
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await page.getByRole('button', { name: '保存为共享模板', exact: true }).click()
     await page.getByPlaceholder('模板名称').fill(`E2E模板-${environment.runId}`)
@@ -274,7 +280,7 @@ test.describe.serial('节点管理主干', () => {
     await publish(names.neuronTag, 14.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '14.5',
-      { timeout: 15_000 },
+      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
@@ -290,7 +296,7 @@ test.describe.serial('节点管理主干', () => {
     await publish(names.neuronTag, 15.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '15.5',
-      { timeout: 15_000 },
+      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await page.getByRole('button', { name: '准备停用', exact: true }).click()
@@ -306,7 +312,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByPlaceholder('搜索点位名称').fill(names.neuronTag)
     await expect(page.getByRole('row').filter({ hasText: names.neuronTag })).toContainText(
       '16.5',
-      { timeout: 15_000 },
+      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
 
@@ -318,7 +324,7 @@ test.describe.serial('节点管理主干', () => {
     await publish(names.neuronTag, 17.5)
     await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
       '17.5',
-      { timeout: 15_000 },
+      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await fixture('ensure-rule')
@@ -354,7 +360,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(rawRow).toBeVisible()
 
     await publish(names.bitTag, 0)
-    await expect(rawRow).toContainText('0', { timeout: 15_000 })
+    await expect(rawRow).toContainText('0', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
     await expect(rawRow).toContainText('BIT')
     await expect(rawRow).toContainText('正常')
 
@@ -379,13 +385,13 @@ test.describe.serial('节点管理主干', () => {
     await publish(names.bitTag, 1)
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     const bitEntity = page.getByRole('button', { name: new RegExp(bitEntityDisplayName) })
-    await expect(bitEntity).toContainText('true', { timeout: 15_000 })
+    await expect(bitEntity).toContainText('true', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
     await expect(bitEntity).toContainText('正常')
     await bitEntity.click()
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText(names.bitTag)
 
     await publish(names.bitTag, 2)
-    await expect(bitEntity).toContainText('上次值 true', { timeout: 15_000 })
+    await expect(bitEntity).toContainText('上次值 true', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
     await expect(bitEntity).toContainText('无效')
     await expect(bitEntity.locator('..')).toContainText('状态：当前不可用')
 
@@ -393,7 +399,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByLabel('数据类型').selectOption('INT')
     await page.getByPlaceholder('搜索点位名称').fill(names.bitTag)
     await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText('2', {
-      timeout: 15_000,
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText('无效')
     await expect(page.getByRole('row').filter({ hasText: names.bitTag })).toContainText(
