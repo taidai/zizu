@@ -20,6 +20,7 @@ import {
   describeAlarmDraft,
   describeAlarmTrialResult,
   parseFaultCodePaste,
+  prepareAlarmRuleEdit,
   prepareAlarmTrialInput,
   type AlarmDraftDataType,
 } from '../components/alarm-center/alarmCenterModel'
@@ -86,8 +87,15 @@ export default function MinimalAlarmRulesPage() {
     const revision = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_non_empty_revision)
     if (!revision) return
     const operator = revision.rules[0]?.trigger.operator
+    const entityDataTypes = group.entity_instance_ids.map((id) => entities.find((item) => item.id === id)?.data_type)
+    if (entityDataTypes.some((item) => !item)) { setError('找不到规则组绑定实体的类型信息，请刷新后重试。'); return }
+    const prepared = prepareAlarmRuleEdit(revision.rules, entityDataTypes as string[])
+    if (!prepared.ready) { setError(prepared.message); return }
+    setError('')
     setDataType(operator === 'contains' ? 'CODE_SET' : ['gt', 'gte', 'lt', 'lte'].includes(operator || '') ? 'NUMBER' : 'STATE')
-    setRules(revision.rules); setSelectedEntities(group.entity_instance_ids); setName(copy ? `${group.name} 副本` : group.name)
+    setRules(prepared.rules)
+    if (prepared.booleanEntity) setTrialValue('false')
+    setSelectedEntities(group.entity_instance_ids); setName(copy ? `${group.name} 副本` : group.name)
     setSelectedRevision(copy ? null : revision); setFaultPaste(''); resetResult()
   }
 
@@ -162,6 +170,11 @@ export default function MinimalAlarmRulesPage() {
       <div className="flex gap-2">{(['NUMBER', 'STATE', 'CODE_SET'] as AlarmDraftDataType[]).map((type) => <button key={type} onClick={() => changeType(type)} className={`rounded px-3 py-1.5 text-xs ${dataType === type ? 'bg-[#52c41a] text-white' : 'bg-white/50 text-gray-600'}`}>{type === 'NUMBER' ? '数值' : type === 'STATE' ? '状态' : '多故障码'}</button>)}</div>
       <div className="grid gap-2 md:grid-cols-2">{selectableEntities.map((entity) => <label key={entity.id} className="flex items-center gap-2 rounded border border-white/70 p-2 text-xs"><input type="checkbox" checked={selectedEntities.includes(entity.id)} onChange={(event) => {
         const selectingFirst = event.target.checked && selectedEntities.length === 0
+        if (event.target.checked && !selectingFirst) {
+          const selectedTypes = selectedEntities.map((id) => entities.find((item) => item.id === id)?.data_type).filter((item): item is string => !!item)
+          const prepared = prepareAlarmRuleEdit([], [...selectedTypes, entity.data_type])
+          if (!prepared.ready) { setError(prepared.message); return }
+        }
         setSelectedEntities((items) => event.target.checked ? [...items, entity.id] : items.filter((id) => id !== entity.id))
         if (selectingFirst && dataType === 'STATE' && ['BOOL', 'BOOLEAN'].includes(entity.data_type.toUpperCase())) {
           setRules([defaultAlarmDraft('STATE', entity.data_type)])

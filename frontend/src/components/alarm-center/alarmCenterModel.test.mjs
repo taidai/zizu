@@ -80,6 +80,72 @@ test('boolean alarm trials use real booleans instead of free-text state values',
   })
 })
 
+test('editing a legacy text-state rule for a boolean entity restores typed conditions', async () => {
+  const { defaultAlarmDraft, normalizeAlarmRuleForEntity } = await import('./alarmCenterModel.ts')
+  const legacyRule = {
+    ...defaultAlarmDraft('STATE'),
+    name: '15V 电源故障',
+    severity: 'MAJOR',
+  }
+
+  const normalized = normalizeAlarmRuleForEntity(legacyRule, 'BOOL')
+
+  assert.equal(normalized.name, '15V 电源故障')
+  assert.equal(normalized.severity, 'MAJOR')
+  assert.deepEqual(normalized.trigger, { operator: 'eq', value: true })
+  assert.deepEqual(normalized.recovery, { operator: 'eq', value: false })
+})
+
+test('boolean rule normalization preserves each condition that is already typed', async () => {
+  const { defaultAlarmDraft, normalizeAlarmRuleForEntity } = await import('./alarmCenterModel.ts')
+  const halfMigrated = {
+    ...defaultAlarmDraft('STATE'),
+    trigger: { operator: 'eq', value: false },
+  }
+
+  const normalized = normalizeAlarmRuleForEntity(halfMigrated, 'BOOLEAN')
+
+  assert.deepEqual(normalized.trigger, { operator: 'eq', value: false })
+  assert.deepEqual(normalized.recovery, { operator: 'eq', value: false })
+})
+
+test('boolean rule normalization preserves numeric legacy conditions', async () => {
+  const { defaultAlarmDraft, normalizeAlarmRuleForEntity } = await import('./alarmCenterModel.ts')
+  const numericLegacyRule = {
+    ...defaultAlarmDraft('STATE'),
+    trigger: { operator: 'eq', value: 0 },
+    recovery: { operator: 'eq', value: 1 },
+  }
+
+  const normalized = normalizeAlarmRuleForEntity(numericLegacyRule, 'BOOL')
+
+  assert.deepEqual(normalized.trigger, { operator: 'eq', value: 0 })
+  assert.deepEqual(normalized.recovery, { operator: 'eq', value: 1 })
+})
+
+test('rule editing accepts one compatible type family and rejects mixed bindings', async () => {
+  const { defaultAlarmDraft, prepareAlarmRuleEdit } = await import('./alarmCenterModel.ts')
+  const legacyRule = defaultAlarmDraft('STATE')
+
+  assert.deepEqual(prepareAlarmRuleEdit([legacyRule], ['BOOL', 'BOOLEAN']), {
+    ready: true,
+    booleanEntity: true,
+    rules: [{
+      ...legacyRule,
+      trigger: { operator: 'eq', value: true },
+      recovery: { operator: 'eq', value: false },
+    }],
+  })
+  assert.deepEqual(prepareAlarmRuleEdit([legacyRule], ['BOOL', 'STRING']), {
+    ready: false,
+    message: '该规则组混合绑定了不同类型的实体，请拆分规则组后再编辑。',
+  })
+  assert.deepEqual(prepareAlarmRuleEdit([legacyRule], []), {
+    ready: false,
+    message: '找不到规则组绑定实体的类型信息，请刷新后重试。',
+  })
+})
+
 test('alarm trial summary shows the tested entity, value, conditions, and outcome', async () => {
   const { defaultAlarmDraft, describeAlarmTrialResult } = await import('./alarmCenterModel.ts')
   const rule = defaultAlarmDraft('STATE', 'BOOL')

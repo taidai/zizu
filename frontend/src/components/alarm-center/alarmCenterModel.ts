@@ -13,6 +13,12 @@ export interface AlarmPreviewEntity {
 
 export type AlarmDraftDataType = 'NUMBER' | 'STATE' | 'CODE_SET'
 
+type AlarmEntityTypeFamily = 'BOOLEAN' | 'NUMBER' | 'STATE' | 'CODE_SET'
+
+export type AlarmRuleEditPreparation =
+  | { ready: false; message: string }
+  | { ready: true; booleanEntity: boolean; rules: AlarmRule[] }
+
 export type AlarmTrialInput =
   | { ready: false; message: string }
   | { ready: true; value: number | boolean | string | string[]; message: string }
@@ -114,6 +120,42 @@ export function defaultAlarmDraft(dataType: AlarmDraftDataType, entityDataType?:
     trigger: { operator: 'gte', value: 0 }, trigger_duration_seconds: 3,
     recovery: { operator: 'lte', value: 0 }, recovery_duration_seconds: 3,
     notification_throttle_seconds: 300, unit: null, fault_map_id: null,
+  }
+}
+
+export function normalizeAlarmRuleForEntity(rule: AlarmRule, entityDataType?: string | null): AlarmRule {
+  const booleanEntity = ['BOOL', 'BOOLEAN'].includes((entityDataType || '').toUpperCase())
+  if (!booleanEntity) return rule
+  return {
+    ...rule,
+    trigger: typeof rule.trigger.value === 'string' ? { operator: 'eq', value: true } : rule.trigger,
+    recovery: typeof rule.recovery.value === 'string' ? { operator: 'eq', value: false } : rule.recovery,
+  }
+}
+
+function alarmEntityTypeFamily(entityDataType: string): AlarmEntityTypeFamily | null {
+  const normalized = entityDataType.toUpperCase()
+  if (['BOOL', 'BOOLEAN'].includes(normalized)) return 'BOOLEAN'
+  if (['FLOAT', 'INT', 'NUMBER', 'NUMERIC', 'DOUBLE', 'DECIMAL'].includes(normalized)) return 'NUMBER'
+  if (['STRING', 'STATE', 'ENUM'].includes(normalized)) return 'STATE'
+  if (normalized === 'CODE_SET') return 'CODE_SET'
+  return null
+}
+
+export function prepareAlarmRuleEdit(rules: AlarmRule[], entityDataTypes: string[]): AlarmRuleEditPreparation {
+  const families = entityDataTypes.map(alarmEntityTypeFamily)
+  if (!families.length || families.some((family) => family === null)) {
+    return { ready: false, message: '找不到规则组绑定实体的类型信息，请刷新后重试。' }
+  }
+  const uniqueFamilies = new Set(families)
+  if (uniqueFamilies.size !== 1) {
+    return { ready: false, message: '该规则组混合绑定了不同类型的实体，请拆分规则组后再编辑。' }
+  }
+  const booleanEntity = families[0] === 'BOOLEAN'
+  return {
+    ready: true,
+    booleanEntity,
+    rules: booleanEntity ? rules.map((rule) => normalizeAlarmRuleForEntity(rule, 'BOOL')) : rules,
   }
 }
 
