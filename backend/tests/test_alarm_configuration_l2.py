@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 import os
+from threading import Event
 import unittest
 from uuid import uuid4
 
@@ -18,12 +21,14 @@ from app.services.alarm_configuration import (
     AlarmConfigurationError,
     AlarmRule,
     AlarmRuleSetRevision,
+    AppliedAlarmConfiguration,
     EntitySelection,
     ApplyAlarmConfigurationPlan,
     PlanAlarmConfiguration,
     ResolvedAlarmEntity,
     canonical_digest,
 )
+from app.services.data_trunk_contracts import DataTrunkError
 
 
 class _Repository:
@@ -83,6 +88,22 @@ class _RuntimeGate:
 
     def reconcile_configuration_runtime(self):
         self.calls.append(("reconcile",))
+
+
+class _AwaitingRuntimeGate(_RuntimeGate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = Event()
+        self.release = Event()
+
+    def begin_configuration_publish(self, revision):
+        super().begin_configuration_publish(revision)
+        self.entered.set()
+        if not self.release.wait(timeout=0.2):
+            raise DataTrunkError(
+                "CONFIGURATION_RUNTIME_DRAIN_TIMEOUT",
+                "CONFIGURATION_RUNTIME_DRAIN_TIMEOUT",
+            )
 
 
 class AlarmConfigurationL2Test(unittest.TestCase):
@@ -290,6 +311,53 @@ class AlarmConfigurationL2Test(unittest.TestCase):
 
 
 class AlarmConfigurationPublicApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_apply_endpoint_keeps_event_loop_running_while_runtime_drains(self) -> None:
+        from app.api.alarm_configurations import get_alarm_configuration, router
+
+        repository = _Repository()
+        gate = _AwaitingRuntimeGate()
+        configuration = AlarmConfiguration(repository, runtime_gate=gate)
+        plan = configuration.plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(repository.entity.id,)),
+                repository.rule_set.rule_set_id,
+                1,
+                "operator:test",
+            )
+        )
+        repository.applied = AppliedAlarmConfiguration(
+            uuid4(),
+            plan.id,
+            8,
+            (uuid4(),),
+            uuid4(),
+            datetime.now(UTC),
+            plan.items,
+        )
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1")
+        app.dependency_overrides[get_alarm_configuration] = lambda: configuration
+
+        async def finish_runtime_drain() -> None:
+            await asyncio.to_thread(gate.entered.wait)
+            gate.release.set()
+
+        async with AuthenticatedApiClient(app) as client:
+            bearer = await client._bearer("engineer")
+            release_task = asyncio.create_task(finish_runtime_drain())
+            response = await client._client.post(
+                f"/api/v1/alarm-configuration-plans/{plan.id}/apply",
+                json={"plan_digest": plan.digest},
+                headers={
+                    "Authorization": bearer,
+                    "Idempotency-Key": "alarm-apply-event-loop-test",
+                },
+            )
+        await release_task
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(8, response.json()["configuration_revision"])
+
     async def test_trial_endpoint_returns_a_result_without_creating_a_plan(self) -> None:
         from app.api.alarm_configurations import get_alarm_configuration, router
 

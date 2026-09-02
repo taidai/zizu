@@ -1,6 +1,7 @@
 """L2-only alarm configuration HTTP API."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 from uuid import UUID
 
@@ -230,7 +231,15 @@ async def get_alarm_configuration_plan(plan_id: UUID, configuration: AlarmConfig
 @router.post("/alarm-configuration-plans/{plan_id}/apply", openapi_extra=capability_metadata(CONFIGURATION_WRITE))
 async def apply_alarm_configuration_plan(plan_id: UUID, body: ApplyPlanRequest, idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200), principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)), configuration: AlarmConfiguration = Depends(get_alarm_configuration)) -> dict[str, Any]:
     try:
-        result = configuration.apply(ApplyAlarmConfigurationPlan(plan_id, body.plan_digest, idempotency_key, principal.actor))
+        result = await asyncio.to_thread(
+            configuration.apply,
+            ApplyAlarmConfigurationPlan(
+                plan_id,
+                body.plan_digest,
+                idempotency_key,
+                principal.actor,
+            ),
+        )
         return {"id": str(result.id), "plan_id": str(result.plan_id), "configuration_revision": result.configuration_revision, "definition_ids": [str(value) for value in result.definition_ids], "audit_event_id": str(result.audit_event_id), "applied_at": result.applied_at.isoformat()}
     except AlarmConfigurationError as error:
         raise _error(error) from error
