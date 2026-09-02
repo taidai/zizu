@@ -4,7 +4,7 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 1 号机当前运行版本：**v0.4.87**。普通用户界面已收口为“原始数据”和“标准实体”两个视图；原来的 L1 点位加工被内嵌为标准实体的“数据来源与计算”，支持一个或多个同节点原始点位、同一生产引擎试算和来源证据展示。PCS 的 L0 实时数据、L2 实体、来源证据及 committed L2 告警消费已完成现场数据链验收；有效账号登录后的页面点击复验仍待完成。
+> 1 号机当前运行版本：**v0.7.3**；下一个发布候选为 **v0.7.4**。产品主线已经收口为节点、L0 原始数据、L1 数据来源与计算、L2 标准实体和只消费 L2 的告警/JDM/控制/EMS 工作台。发布状态与现场证据以最新 `docs/deploy-1号机-*.md` 为准。
 >
 > 唯一现行架构入口：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。README 后部仍含历史接口说明时，以总纲、最新 accepted ADR 与当前源码为准。
 
@@ -534,6 +534,9 @@ zizu/
 | GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
 | GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
 | POST | `/api/v1/alarm-events/{id}/acknowledgements` | 确认活动未确认事件；不提供人工恢复命令 |
+| GET/POST/PUT/DELETE | `/api/v1/admin/alarm-http-notifications` | admin 维护、测试和启停告警 HTTP 请求配置；URL 与敏感字段只加密保存并脱敏返回 |
+| GET | `/api/v1/alarms/notification-deliveries` | operator 及以上查看发生/恢复通知的脱敏发送记录与逐次尝试 |
+| POST | `/api/v1/alarms/notification-deliveries/{id}/retry` | engineer/admin 携带 `Idempotency-Key` 手工重发终态失败通知 |
 | GET | `/api/v1/alarm-configuration-applications/latest/acceptance-progress` | 只读观察最新已应用告警配置的逐定义验收进度，不生成报告 |
 | POST | `/api/v1/alarm-configuration-applications/{id}/acceptance` | 以 `Idempotency-Key` 为已完整证据生成不可变告警配置验收报告 |
 | GET | `/api/v1/alarm-configuration-reports/{id}` | 读取包含事件、转换时间线、确认审计、站点版本与摘要的不可变报告 |
@@ -573,6 +576,18 @@ POST 与配置应用共用站点状态事务锁，若目标已不是最新应用
 版本和内容摘要，写入后禁止更新、删除或清空；
 隔离 PostgreSQL 双连接并发、事务回滚、进程重启重放和公开 Neuron 协议生命周期主缝均已覆盖，
 这些机器证据不等同于现场部署或独立交付试验。
+
+### 告警 HTTP 通知
+
+admin 在“系统工具 → HTTP 通知”维护请求，先发送测试，成功后才能启用；告警规则只能选择一个已测试且
+已启用的配置。告警发生和现场恢复在数据库提交后异步发送，人工确认不发送。只有 HTTP 2xx 算送达；
+失败固定在 5 秒、30 秒和 5 分钟后重试，第四次失败进入可手工重发状态。投递采用至少一次语义，每个通知
+都携带稳定 `Idempotency-Key`，接收方应据此去重。修改配置会自动停用并使旧测试失效，未完成任务下次
+尝试使用新配置；删除配置会解除规则绑定并取消未完成任务。通知失败永不反向改变告警状态。
+
+完整 URL、敏感查询参数和敏感请求头使用独立 `HTTP_NOTIFICATION_ENCRYPTION_KEY` 加密。
+该密钥必须和数据库备份放进同一恢复清单并一同恢复；丢失后系统不会降级为明文，管理员必须重新录入
+请求地址与敏感字段、重新测试并启用。
 
 控制与管理能力矩阵：`system.manage` 仅 admin（系统、SQL、NanoMQ）；
 `gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色。
