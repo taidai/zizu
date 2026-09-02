@@ -1476,6 +1476,7 @@ export interface AlarmRule {
   notification_throttle_seconds: number
   unit: string | null
   fault_map_id: string | null
+  http_notification_config_id: string | null
 }
 
 export interface AlarmRuleSetRevision {
@@ -1663,6 +1664,9 @@ const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_ACCEPTANCE_REPORT_NOT_FOUND: '未找到该验收报告。',
   ALARM_ACCEPTANCE_APPLIED_ITEMS_INVALID: '已应用配置的验收范围不完整。',
   ALARM_ACCEPTANCE_PERSISTENCE_UNAVAILABLE: '验收证据暂时不可用，请稍后重试。',
+  HTTP_NOTIFICATION_NOT_FOUND: '所选 HTTP 通知不存在，请重新选择。',
+  HTTP_NOTIFICATION_DISABLED: '所选 HTTP 通知尚未启用，请先在系统工具中启用。',
+  HTTP_NOTIFICATION_TEST_STALE: '所选 HTTP 通知内容已变化，请先重新测试并启用。',
 }
 
 async function alarmConfigurationError(response: Response, fallback: string): Promise<AlarmConfigurationApiError> {

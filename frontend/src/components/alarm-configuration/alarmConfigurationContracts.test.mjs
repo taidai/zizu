@@ -34,3 +34,22 @@ test('alarm condition values render booleans in Chinese and preserve negative nu
   assert.equal(contracts.formatAlarmConditionValue(-12.5), '-12.5')
   assert.equal(contracts.formatAlarmConditionValue('运行'), '运行')
 })
+
+test('new alarm rules default to no HTTP notification', async () => {
+  const { defaultAlarmDraft } = await import('../alarm-center/alarmCenterModel.ts')
+
+  assert.equal(defaultAlarmDraft('NUMBER').http_notification_config_id, null)
+})
+
+test('editing an alarm rule preserves its HTTP notification binding', async () => {
+  const { defaultAlarmDraft, prepareAlarmRuleEdit } = await import('../alarm-center/alarmCenterModel.ts')
+  const saved = {
+    ...defaultAlarmDraft('NUMBER'),
+    http_notification_config_id: '00000000-0000-0000-0000-000000000201',
+  }
+
+  const prepared = prepareAlarmRuleEdit([saved], ['FLOAT'])
+
+  assert.equal(prepared.ready, true)
+  assert.equal(prepared.rules[0].http_notification_config_id, saved.http_notification_config_id)
+})

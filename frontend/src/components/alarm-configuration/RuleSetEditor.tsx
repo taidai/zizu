@@ -34,6 +34,7 @@ function freshRule(index: number): AlarmRule {
     trigger: { operator: 'gte', value: 0 }, trigger_duration_seconds: 0,
     recovery: { operator: 'lt', value: 0 }, recovery_duration_seconds: 0,
     notification_throttle_seconds: 300, unit: null, fault_map_id: null,
+    http_notification_config_id: null,
   }
 }
 

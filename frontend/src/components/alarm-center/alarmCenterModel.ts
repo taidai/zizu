@@ -65,6 +65,7 @@ export function compileFaultCodeRules(rows: FaultCodeRow[]): AlarmRule[] {
     notification_throttle_seconds: 300,
     unit: null,
     fault_map_id: null,
+    http_notification_config_id: null,
   }))
 }
 
@@ -105,6 +106,7 @@ export function defaultAlarmDraft(dataType: AlarmDraftDataType, entityDataType?:
       trigger: { operator: 'eq', value: booleanEntity ? true : '故障' }, trigger_duration_seconds: 0,
       recovery: { operator: booleanEntity ? 'eq' : 'ne', value: booleanEntity ? false : '故障' }, recovery_duration_seconds: 3,
       notification_throttle_seconds: 300, unit: null, fault_map_id: null,
+      http_notification_config_id: null,
     }
   }
   if (dataType === 'CODE_SET') {
@@ -113,6 +115,7 @@ export function defaultAlarmDraft(dataType: AlarmDraftDataType, entityDataType?:
       trigger: { operator: 'contains', value: 'E01' }, trigger_duration_seconds: 0,
       recovery: { operator: 'not_contains', value: 'E01' }, recovery_duration_seconds: 3,
       notification_throttle_seconds: 300, unit: null, fault_map_id: null,
+      http_notification_config_id: null,
     }
   }
   return {
@@ -120,6 +123,7 @@ export function defaultAlarmDraft(dataType: AlarmDraftDataType, entityDataType?:
     trigger: { operator: 'gte', value: 0 }, trigger_duration_seconds: 3,
     recovery: { operator: 'lte', value: 0 }, recovery_duration_seconds: 3,
     notification_throttle_seconds: 300, unit: null, fault_map_id: null,
+    http_notification_config_id: null,
   }
 }
 
