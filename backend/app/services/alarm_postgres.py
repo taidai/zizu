@@ -319,6 +319,17 @@ class PostgresAlarmRepository:
         with self.transaction() as transaction:
             transaction.enqueue_notification(notification)
 
+    def notification_configuration(
+        self,
+        definition_id: UUID,
+    ) -> tuple[UUID, str] | None:
+        with self.transaction() as transaction:
+            return transaction.notification_configuration(definition_id)
+
+    def has_activation_notification(self, event_id: UUID) -> bool:
+        with self.transaction() as transaction:
+            return transaction.has_activation_notification(event_id)
+
 
 class _PostgresAlarmTransaction:
     def __init__(self, connection: Any) -> None:
@@ -425,7 +436,7 @@ class _PostgresAlarmTransaction:
             cur.execute(
                 """
                 SELECT event_id, from_state, to_state, occurred_at, code,
-                       evidence, actor, note, audit_event_id
+                       evidence, actor, note, audit_event_id, id
                 FROM t_alarm_transitions WHERE event_id = %s
                 ORDER BY occurred_at, id
                 """,
@@ -519,11 +530,12 @@ class _PostgresAlarmTransaction:
             cur.execute(
                 """
                 INSERT INTO t_alarm_transitions
-                  (event_id, audit_event_id, from_state, to_state, occurred_at,
+                  (id,event_id, audit_event_id, from_state, to_state, occurred_at,
                    code, evidence, actor, note)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
+                    transition.id,
                     transition.event_id,
                     audit_event_id,
                     transition.from_state,
@@ -543,6 +555,7 @@ class _PostgresAlarmTransaction:
                 """
                 SELECT max(created_at) FROM t_alarm_notification_outbox
                 WHERE definition_id = %s AND entity_instance_id = %s
+                  AND transition_code = 'ALARM_ACTIVATED'
                 """,
                 (definition_id, entity_instance_id),
             )
@@ -554,17 +567,60 @@ class _PostgresAlarmTransaction:
             cur.execute(
                 """
                 INSERT INTO t_alarm_notification_outbox
-                  (id, event_id, definition_id, entity_instance_id, created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                  (id,transition_id,transition_code,event_id,definition_id,
+                   entity_instance_id,configuration_id,
+                   configuration_name_snapshot,context_snapshot,status,
+                   next_attempt_at,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s)
+                ON CONFLICT(transition_id) WHERE transition_id IS NOT NULL
+                DO NOTHING
                 """,
                 (
                     notification.id,
+                    notification.transition_id,
+                    notification.transition_code,
                     notification.event_id,
                     notification.definition_id,
                     notification.entity_instance_id,
+                    notification.configuration_id,
+                    notification.configuration_name,
+                    Json(notification.context_snapshot),
+                    notification.created_at,
+                    notification.created_at,
                     notification.created_at,
                 ),
             )
+
+    def notification_configuration(
+        self,
+        definition_id: UUID,
+    ) -> tuple[UUID, str] | None:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT binding.configuration_id,config.name
+                FROM t_alarm_http_notification_bindings binding
+                JOIN t_alarm_http_notification_configs config
+                  ON config.id=binding.configuration_id
+                WHERE binding.definition_id=%s
+                """,
+                (definition_id,),
+            )
+            row = cur.fetchone()
+        return None if row is None else (row[0], row[1])
+
+    def has_activation_notification(self, event_id: UUID) -> bool:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS(
+                  SELECT 1 FROM t_alarm_notification_outbox
+                  WHERE event_id=%s AND transition_code='ALARM_ACTIVATED'
+                )
+                """,
+                (event_id,),
+            )
+            return bool(cur.fetchone()[0])
 
 
 def _event(row: tuple[Any, ...]) -> AlarmEvent:

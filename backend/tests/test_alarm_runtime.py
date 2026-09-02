@@ -7,6 +7,7 @@ from uuid import UUID
 
 DEFINITION_ID = UUID("70000000-0000-0000-0000-000000000001")
 ENTITY_INSTANCE_ID = UUID("70000000-0000-0000-0000-000000000002")
+NOTIFICATION_CONFIG_ID = UUID("70000000-0000-0000-0000-000000000003")
 
 
 class AlarmRuntimeTest(unittest.TestCase):
@@ -22,6 +23,11 @@ class AlarmRuntimeTest(unittest.TestCase):
         self.observation_type = AlarmObservation
         self.started_at = datetime(2026, 8, 14, 9, tzinfo=timezone.utc)
         self.repository = InMemoryAlarmRepository()
+        self.repository.bind_http_notification(
+            DEFINITION_ID,
+            NOTIFICATION_CONFIG_ID,
+            "值班群",
+        )
         self.runtime = AlarmRuntime(
             definitions=InMemoryAlarmDefinitionCatalog(
                 (
@@ -128,6 +134,64 @@ class AlarmRuntimeTest(unittest.TestCase):
         self.assertEqual("recovered", recovered.state)
         self.assertEqual("ALARM_RECOVERED", recovered.code)
         self.assertEqual(active.event_id, recovered.event_id)
+        self.assertTrue(recovered.notification_created)
+        self.assertEqual(
+            ["ALARM_ACTIVATED", "ALARM_RECOVERED"],
+            [item.transition_code for item in self.repository.notifications()],
+        )
+
+    def test_recovery_without_activation_notification_does_not_create_orphan(self) -> None:
+        self.repository.unbind_http_notification(DEFINITION_ID)
+        self.observe(value=101, after_seconds=0)
+        activated = self.observe(value=101, after_seconds=10)
+        self.observe(value=90, after_seconds=11)
+        recovered = self.observe(value=90, after_seconds=16)
+
+        self.assertFalse(activated.notification_created)
+        self.assertFalse(recovered.notification_created)
+        self.assertEqual((), self.repository.notifications())
+
+    def test_unbound_recovery_does_not_send_after_a_bound_activation(self) -> None:
+        self.observe(value=101, after_seconds=0)
+        activated = self.observe(value=101, after_seconds=10)
+        self.repository.unbind_http_notification(DEFINITION_ID)
+        self.observe(value=90, after_seconds=11)
+        recovered = self.observe(value=90, after_seconds=16)
+
+        self.assertTrue(activated.notification_created)
+        self.assertFalse(recovered.notification_created)
+        self.assertEqual(
+            ["ALARM_ACTIVATED"],
+            [item.transition_code for item in self.repository.notifications()],
+        )
+
+    def test_duplicate_transition_id_does_not_duplicate_outbox(self) -> None:
+        from app.services.alarm_runtime import AlarmNotification, AlarmTransition
+
+        transition = AlarmTransition(
+            event_id=UUID("70000000-0000-0000-0000-000000000004"),
+            from_state="pending",
+            to_state="active_unacknowledged",
+            occurred_at=self.started_at,
+            code="ALARM_ACTIVATED",
+        )
+        notification = AlarmNotification(
+            id=UUID("70000000-0000-0000-0000-000000000005"),
+            transition_id=transition.id,
+            transition_code=transition.code,
+            event_id=transition.event_id,
+            definition_id=DEFINITION_ID,
+            entity_instance_id=ENTITY_INSTANCE_ID,
+            configuration_id=NOTIFICATION_CONFIG_ID,
+            configuration_name="值班群",
+            context_snapshot={"event.type": transition.code},
+            created_at=self.started_at,
+        )
+
+        self.repository.enqueue_notification(notification)
+        self.repository.enqueue_notification(notification)
+
+        self.assertEqual(1, len(self.repository.notifications()))
 
     def test_recovery_cannot_span_a_stale_observation_gap(self) -> None:
         self.observe(value=101, after_seconds=0, max_observation_gap_seconds=30)

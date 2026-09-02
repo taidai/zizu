@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -98,14 +98,20 @@ class AlarmTransition:
     actor: str | None = None
     note: str | None = None
     audit_event_id: UUID | None = None
+    id: UUID = field(default_factory=uuid4)
 
 
 @dataclass(frozen=True)
 class AlarmNotification:
     id: UUID
+    transition_id: UUID
+    transition_code: str
     event_id: UUID
     definition_id: UUID
     entity_instance_id: UUID
+    configuration_id: UUID
+    configuration_name: str
+    context_snapshot: dict[str, object]
     created_at: datetime
 
 
@@ -172,6 +178,13 @@ class AlarmRepository(Protocol):
 
     def enqueue_notification(self, notification: AlarmNotification) -> None: ...
 
+    def notification_configuration(
+        self,
+        definition_id: UUID,
+    ) -> tuple[UUID, str] | None: ...
+
+    def has_activation_notification(self, event_id: UUID) -> bool: ...
+
 
 class InMemoryAlarmDefinitionCatalog:
     """Fixed definition adapter for lifecycle and public API tests."""
@@ -234,6 +247,7 @@ class InMemoryAlarmRepository:
         self._transitions: list[AlarmTransition] = []
         self._notifications: list[AlarmNotification] = []
         self._consumed_frames: dict[tuple[str, UUID], tuple[int, int]] = {}
+        self._notification_bindings: dict[UUID, tuple[UUID, str]] = {}
 
     @contextmanager
     def transaction(self):
@@ -342,11 +356,44 @@ class InMemoryAlarmRepository:
             for item in self._notifications
             if item.definition_id == definition_id
             and item.entity_instance_id == entity_instance_id
+            and item.transition_code == "ALARM_ACTIVATED"
         ]
         return max(values) if values else None
 
     def enqueue_notification(self, notification: AlarmNotification) -> None:
+        if any(
+            item.transition_id == notification.transition_id
+            for item in self._notifications
+        ):
+            return
         self._notifications.append(notification)
+
+    def bind_http_notification(
+        self,
+        definition_id: UUID,
+        configuration_id: UUID,
+        configuration_name: str,
+    ) -> None:
+        self._notification_bindings[definition_id] = (
+            configuration_id,
+            configuration_name,
+        )
+
+    def unbind_http_notification(self, definition_id: UUID) -> None:
+        self._notification_bindings.pop(definition_id, None)
+
+    def notification_configuration(
+        self,
+        definition_id: UUID,
+    ) -> tuple[UUID, str] | None:
+        return self._notification_bindings.get(definition_id)
+
+    def has_activation_notification(self, event_id: UUID) -> bool:
+        return any(
+            item.event_id == event_id
+            and item.transition_code == "ALARM_ACTIVATED"
+            for item in self._notifications
+        )
 
     def active_events(self) -> tuple[AlarmEvent, ...]:
         return tuple(item for item in self._events.values() if item.state in OPEN_STATES)
@@ -449,21 +496,20 @@ class AlarmRuntime:
                     active_at=observed_at,
                 )
                 repository.save_event(active)
-                repository.append_transition(
-                    AlarmTransition(
-                        active.id,
-                        "pending",
-                        active.state,
-                        observed_at,
-                        "ALARM_ACTIVATED",
-                        _evidence(observation),
-                    )
+                transition = AlarmTransition(
+                    active.id,
+                    "pending",
+                    active.state,
+                    observed_at,
+                    "ALARM_ACTIVATED",
+                    _evidence(observation),
                 )
-                notified = self._notify_if_allowed(
+                repository.append_transition(transition)
+                notified = self._notify_activation_if_allowed(
                     repository,
                     active,
                     definition,
-                    observed_at,
+                    transition,
                 )
                 return AlarmOutcome(
                     active.id,
@@ -618,17 +664,21 @@ class AlarmRuntime:
             return AlarmOutcome(event.id, "pending", None, "ALARM_TRIGGER_PENDING", False)
         active = replace(updated, state="active_unacknowledged", active_at=observed_at)
         repository.save_event(active)
-        repository.append_transition(
-            AlarmTransition(
-                event.id,
-                event.state,
-                active.state,
-                observed_at,
-                "ALARM_ACTIVATED",
-                evidence,
-            )
+        transition = AlarmTransition(
+            event.id,
+            event.state,
+            active.state,
+            observed_at,
+            "ALARM_ACTIVATED",
+            evidence,
         )
-        notified = self._notify_if_allowed(repository, active, definition, observed_at)
+        repository.append_transition(transition)
+        notified = self._notify_activation_if_allowed(
+            repository,
+            active,
+            definition,
+            transition,
+        )
         return AlarmOutcome(
             active.id,
             active.state,
@@ -675,31 +725,40 @@ class AlarmRuntime:
             recovery_observation=evidence,
         )
         repository.save_event(recovered)
-        repository.append_transition(
-            AlarmTransition(
-                event.id,
-                event.state,
-                recovered.state,
-                observed_at,
-                "ALARM_RECOVERED",
-                evidence,
-            )
+        transition = AlarmTransition(
+            event.id,
+            event.state,
+            recovered.state,
+            observed_at,
+            "ALARM_RECOVERED",
+            evidence,
+        )
+        repository.append_transition(transition)
+        notified = self._notify_recovery_if_paired(
+            repository,
+            recovered,
+            definition,
+            transition,
         )
         return AlarmOutcome(
             event.id,
             recovered.state,
             {"from": event.state, "to": recovered.state},
             "ALARM_RECOVERED",
-            False,
+            notified,
         )
 
-    def _notify_if_allowed(
+    def _notify_activation_if_allowed(
         self,
         repository: AlarmRepository,
         event: AlarmEvent,
         definition: AlarmDefinition,
-        occurred_at: datetime,
+        transition: AlarmTransition,
     ) -> bool:
+        configuration = repository.notification_configuration(definition.id)
+        if configuration is None:
+            return False
+        occurred_at = transition.occurred_at
         last = repository.last_notification_at(
             definition.id,
             definition.entity_instance_id,
@@ -708,13 +767,61 @@ class AlarmRuntime:
             seconds=definition.notification_throttle_seconds
         ):
             return False
+        return self._enqueue_notification(
+            repository,
+            event,
+            definition,
+            transition,
+            configuration,
+        )
+
+    def _notify_recovery_if_paired(
+        self,
+        repository: AlarmRepository,
+        event: AlarmEvent,
+        definition: AlarmDefinition,
+        transition: AlarmTransition,
+    ) -> bool:
+        if not repository.has_activation_notification(event.id):
+            return False
+        configuration = repository.notification_configuration(definition.id)
+        if configuration is None:
+            return False
+        return self._enqueue_notification(
+            repository,
+            event,
+            definition,
+            transition,
+            configuration,
+        )
+
+    @staticmethod
+    def _enqueue_notification(
+        repository: AlarmRepository,
+        event: AlarmEvent,
+        definition: AlarmDefinition,
+        transition: AlarmTransition,
+        configuration: tuple[UUID, str],
+    ) -> bool:
+        notification_id = uuid4()
+        configuration_id, configuration_name = configuration
         repository.enqueue_notification(
             AlarmNotification(
-                uuid4(),
-                event.id,
-                definition.id,
-                definition.entity_instance_id,
-                occurred_at,
+                id=notification_id,
+                transition_id=transition.id,
+                transition_code=transition.code,
+                event_id=event.id,
+                definition_id=definition.id,
+                entity_instance_id=definition.entity_instance_id,
+                configuration_id=configuration_id,
+                configuration_name=configuration_name,
+                context_snapshot=_notification_context(
+                    notification_id,
+                    event,
+                    definition,
+                    transition,
+                ),
+                created_at=transition.occurred_at,
             )
         )
         return True
@@ -777,6 +884,42 @@ def _evidence(observation: AlarmObservation) -> dict[str, Any]:
         "source_ref": observation.source_ref,
         "evidence": dict(observation.evidence),
         "max_observation_gap_seconds": observation.max_observation_gap_seconds,
+    }
+
+
+def _notification_context(
+    notification_id: UUID,
+    event: AlarmEvent,
+    definition: AlarmDefinition,
+    transition: AlarmTransition,
+) -> dict[str, object]:
+    observation = transition.evidence or event.last_observation or {}
+    details = observation.get("evidence")
+    if not isinstance(details, dict):
+        details = {}
+    node_id = details.get("node_id", "")
+    return {
+        "notification.id": str(notification_id),
+        "event.id": str(event.id),
+        "event.type": transition.code,
+        "event.time": transition.occurred_at.isoformat(),
+        "alarm.name": str(details.get("alarm_name") or definition.asset_id),
+        "alarm.severity": definition.severity,
+        "alarm.state": transition.to_state,
+        "alarm.definition_id": str(definition.id),
+        "alarm.rule_key": definition.asset_id,
+        "node.id": str(node_id),
+        "node.name": str(details.get("node_name") or node_id),
+        "node.path": str(details.get("node_path") or details.get("node_name") or node_id),
+        "entity.id": str(definition.entity_instance_id),
+        "entity.key": definition.entity_definition_id,
+        "entity.name": str(
+            details.get("entity_name") or definition.entity_definition_id
+        ),
+        "entity.value": observation.get("value"),
+        "entity.unit": details.get("entity_unit"),
+        "entity.quality": observation.get("quality"),
+        "entity.observed_at": observation.get("observed_at"),
     }
 
 
