@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext, type Page } from '@playwright/test'
+import { expect, test, type BrowserContext, type Locator, type Page } from '@playwright/test'
 
 import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
 import { fixtureNames, publishRawPoint, runFixture } from './support/e2eFixture'
@@ -15,6 +15,23 @@ test.describe.serial('节点管理主干', () => {
   const publish = (pointKey: string, value: Parameters<typeof publishRawPoint>[1]) => (
     publishRawPoint(pointKey, value, environment)
   )
+  const publishUntilShows = async (
+    pointKey: string,
+    value: Parameters<typeof publishRawPoint>[1],
+    entity: Locator,
+    expected: string,
+  ) => {
+    // Neuron devices publish continuously. Keep the E2E source alive at the
+    // configured cadence so an intentionally stale one-shot sample cannot be
+    // mistaken for a broken L0 -> L1 -> L2 path while a prior frame drains.
+    await expect.poll(async () => {
+      await publish(pointKey, value)
+      return await entity.textContent() ?? ''
+    }, {
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+      intervals: [1_000],
+    }).toContain(expected)
+  }
   const editedPlatformNode = `${names.platformNode}-已编辑`
   const entityDisplayName = `E2E有功功率-${environment.runId}`
   const entityDefinitionKey = `e2e.active_power_${environment.runId.replaceAll('-', '_')}`
@@ -154,9 +171,8 @@ test.describe.serial('节点管理主干', () => {
     const realtimeRow = page.getByRole('row').filter({ hasText: names.neuronTag })
     await expect(realtimeRow).toBeVisible()
 
-    await publish(names.neuronTag, 12.5)
-    await expect(realtimeRow).toContainText('12.5', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
-    await expect(realtimeRow).toContainText('正常')
+    await publishUntilShows(names.neuronTag, 12.5, realtimeRow, '正常')
+    await expect(realtimeRow).toContainText('12.5')
     await expect(realtimeRow).toContainText(
       `${names.neuronNode}/${names.neuronGroup}/${names.neuronTag}`,
     )
@@ -235,13 +251,11 @@ test.describe.serial('节点管理主干', () => {
     await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await publish(names.neuronTag, 13.5)
-
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
     const entity = page.getByRole('button', { name: new RegExp(entityDisplayName) })
     await expect(entity).toBeVisible()
-    await expect(entity).toContainText('13.5', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
+    await publishUntilShows(names.neuronTag, 13.5, entity, '13.5')
     await expect(entity).toContainText('正常')
     await entity.click()
     await expect(page.getByRole('region', { name: '实体历史' })).toBeVisible()
@@ -277,10 +291,11 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await publish(names.neuronTag, 14.5)
-    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+    await publishUntilShows(
+      names.neuronTag,
+      14.5,
+      page.getByRole('button', { name: new RegExp(entityDisplayName) }),
       '14.5',
-      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
@@ -293,10 +308,11 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
-    await publish(names.neuronTag, 15.5)
-    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+    await publishUntilShows(
+      names.neuronTag,
+      15.5,
+      page.getByRole('button', { name: new RegExp(entityDisplayName) }),
       '15.5',
-      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await page.getByRole('button', { name: '准备停用', exact: true }).click()
@@ -321,10 +337,11 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
-    await publish(names.neuronTag, 17.5)
-    await expect(page.getByRole('button', { name: new RegExp(entityDisplayName) })).toContainText(
+    await publishUntilShows(
+      names.neuronTag,
+      17.5,
+      page.getByRole('button', { name: new RegExp(entityDisplayName) }),
       '17.5',
-      { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
 
     await fixture('ensure-rule')
@@ -382,10 +399,9 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
 
-    await publish(names.bitTag, 1)
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     const bitEntity = page.getByRole('button', { name: new RegExp(bitEntityDisplayName) })
-    await expect(bitEntity).toContainText('true', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
+    await publishUntilShows(names.bitTag, 1, bitEntity, 'true')
     await expect(bitEntity).toContainText('正常')
     await bitEntity.click()
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText(names.bitTag)
@@ -420,17 +436,19 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByLabel('恢复值')).toHaveValue('false')
     await expect(page.getByLabel('试算值')).toHaveValue('false')
     await trialButton.click()
-    await expect(page.getByText(
-      `${editedPlatformNode} / ${bitEntityDisplayName}：试算值 false；结果：会恢复。触发条件 = true（未命中），恢复条件 = false（命中）。`,
-      { exact: true },
-    )).toBeVisible()
+    const recoveryTrial = page.locator('p').filter({ hasText: '试算值 false；结果：会恢复。' })
+    await expect(recoveryTrial).toContainText(`${editedPlatformNode} / ${bitEntityDisplayName}`)
+    await expect(recoveryTrial).toContainText(
+      '触发条件 = true（未命中），恢复条件 = false（命中）。',
+    )
 
     await page.getByLabel('试算值').selectOption('true')
     await trialButton.click()
-    await expect(page.getByText(
-      `${editedPlatformNode} / ${bitEntityDisplayName}：试算值 true；结果：会触发警告告警。触发条件 = true（命中），恢复条件 = false（未命中）。`,
-      { exact: true },
-    )).toBeVisible()
+    const triggerTrial = page.locator('p').filter({ hasText: '试算值 true；结果：会触发警告告警。' })
+    await expect(triggerTrial).toContainText(`${editedPlatformNode} / ${bitEntityDisplayName}`)
+    await expect(triggerTrial).toContainText(
+      '触发条件 = true（命中），恢复条件 = false（未命中）。',
+    )
     await expect(page.getByRole('button', { name: '生成发布预览', exact: true })).toBeEnabled()
 
     await page.getByRole('button', { name: '节点管理' }).click()

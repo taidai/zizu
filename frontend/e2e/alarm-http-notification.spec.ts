@@ -100,8 +100,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
       .getByText(fixture.alarm_name, { exact: true })
     await expect(configuredGroup).toBeVisible()
 
-    await publishRawPoint(fixture.tag_key, 1, environment)
-    await expect.poll(async () => deliveryTypes()).toContain('ALARM_ACTIVATED')
+    await publishUntilDelivered(1, 'ALARM_ACTIVATED')
     await expect.poll(async () => receiverTypes()).toContain('ALARM_ACTIVATED')
 
     const activeEvents = await api<{ items: Array<{ id: string; alarm_name: string }> }>(
@@ -123,8 +122,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     await page.waitForTimeout(1_200)
     expect((await alarmHttpReceiverStatus(environment)).records).toHaveLength(beforeAck)
 
-    await publishRawPoint(fixture.tag_key, 0, environment)
-    await expect.poll(async () => deliveryTypes()).toContain('ALARM_RECOVERED')
+    await publishUntilDelivered(0, 'ALARM_RECOVERED')
     await expect.poll(async () => receiverTypes()).toContain('ALARM_RECOVERED')
 
     const records = (await alarmHttpReceiverStatus(environment)).records
@@ -235,6 +233,16 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     return (await deliveries())
       .filter((item) => item.status === 'delivered')
       .map((item) => item.event_type || '')
+  }
+
+  async function publishUntilDelivered(value: number, eventType: string) {
+    await expect.poll(async () => {
+      await publishRawPoint(fixture.tag_key, value, environment)
+      return deliveryTypes()
+    }, {
+      timeout: 60_000,
+      intervals: [1_000],
+    }).toContain(eventType)
   }
 
   async function receiverTypes(): Promise<string[]> {

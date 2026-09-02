@@ -217,6 +217,32 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         self.assertEqual("ssh", result["transport"])
         publish_via_ssh.assert_called_once()
 
+    @patch.dict(
+        "os.environ",
+        {
+            "ZIZU_E2E_BASE_URL": "http://e606.hlszh.com:9000",
+            "ZIZU_E2E_WRITE_ROOT": "E2E验证",
+            "ZIZU_E2E_RUN_ID": "20260830T120000Z",
+            "ZIZU_E2E_SSH_HOST": "e606.hlszh.com",
+            "ZIZU_E2E_SSH_USER": "fixture-user",
+            "ZIZU_E2E_SSH_PASSWORD": "fixture-password",
+        },
+        clear=True,
+    )
+    @patch("scripts.node_management_e2e_fixture._publish_via_ssh")
+    @patch("scripts.node_management_e2e_fixture.mqtt.Client")
+    def test_publish_uses_configured_ssh_without_probing_the_private_broker(
+        self,
+        mqtt_client: MagicMock,
+        publish_via_ssh: MagicMock,
+    ) -> None:
+        result = publish("e2e_active_power", 15.25)
+
+        self.assertEqual("published", result["status"])
+        self.assertEqual("ssh", result["transport"])
+        mqtt_client.assert_not_called()
+        publish_via_ssh.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

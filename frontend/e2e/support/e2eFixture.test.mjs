@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { encodeFixtureScalar, fixtureNames } from './e2eFixture.ts'
+import { encodeFixtureScalar, fixtureNames, fixtureTimeoutMs } from './e2eFixture.ts'
 
 
 test('fixture names use the one acceptance run id supplied by the suite', () => {
@@ -25,4 +25,9 @@ test('fixture scalar encoding preserves numbers, booleans, and strings', () => {
     [0, 1, 2, false, true, '0', '1'].map(encodeFixtureScalar),
     ['0', '1', '2', 'false', 'true', '"0"', '"1"'],
   )
+})
+
+test('cleanup gets enough time for API retirement and private Neuron cleanup', () => {
+  assert.equal(fixtureTimeoutMs('cleanup'), 90_000)
+  assert.equal(fixtureTimeoutMs('publish'), 30_000)
 })

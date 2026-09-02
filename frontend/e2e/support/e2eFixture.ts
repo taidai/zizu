@@ -12,6 +12,10 @@ const execFileAsync = promisify(execFile)
 export type FixtureCommand = 'preflight' | 'setup' | 'ensure-rule' | 'cleanup'
 export type FixtureScalar = number | string | boolean
 
+export function fixtureTimeoutMs(command: FixtureCommand | 'publish'): number {
+  return command === 'cleanup' ? 90_000 : 30_000
+}
+
 export function fixtureNames(
   environment = buildAcceptanceEnvironment(process.env),
 ) {
@@ -48,7 +52,7 @@ async function executeFixture(
         ...process.env,
         ZIZU_E2E_RUN_ID: environment.runId,
       },
-      timeout: 30_000,
+      timeout: fixtureTimeoutMs(command),
       maxBuffer: 1024 * 1024,
       windowsHide: true,
     })

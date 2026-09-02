@@ -18,9 +18,9 @@ import urllib.request
 from typing import Any
 from uuid import UUID
 
-try:
-    from scripts import node_management_e2e_fixture as node_fixture
-except ModuleNotFoundError:  # Direct execution adds backend/scripts to sys.path.
+if __package__:
+    from . import node_management_e2e_fixture as node_fixture
+else:  # Direct execution adds backend/scripts to sys.path.
     import node_management_e2e_fixture as node_fixture
 
 
@@ -341,20 +341,31 @@ def start_receiver(
 import base64, socket, subprocess, sys, time
 path = '/tmp/zizu_alarm_http_test_receiver.py'
 open(path, 'wb').write(base64.b64decode({encoded!r}))
-probe = socket.socket()
-probe.settimeout(0.25)
-try:
-    listening = probe.connect_ex(({RECEIVER_HOST!r}, {RECEIVER_PORT})) == 0
-finally:
-    probe.close()
+def is_listening():
+    probe = socket.socket()
+    probe.settimeout(0.25)
+    try:
+        return probe.connect_ex(({RECEIVER_HOST!r}, {RECEIVER_PORT})) == 0
+    finally:
+        probe.close()
+listening = is_listening()
 if not listening:
-    subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, path, '--host', {RECEIVER_HOST!r}, '--port', {str(RECEIVER_PORT)!r},
          '--response-status', {str(response_status)!r}, '--delay-seconds', {str(delay_seconds)!r}],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    time.sleep(0.5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if is_listening():
+            listening = True
+            break
+        if process.poll() is not None:
+            raise RuntimeError(f'receiver exited before listening: {{process.returncode}}')
+        time.sleep(0.1)
+if not listening:
+    raise RuntimeError('receiver did not listen within 5 seconds')
 print('ready')
 """.lstrip()
     _remote_backend_python(launcher)

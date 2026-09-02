@@ -236,6 +236,22 @@ def ensure_rule() -> dict[str, Any]:
 def publish(point_key: str, value: int | float | str | bool) -> dict[str, Any]:
     names = _environment_names()
     topic, payload = build_telemetry_payload(names, point_key=point_key, value=value)
+    if all(
+        os.environ.get(key, "").strip()
+        for key in (
+            "ZIZU_E2E_SSH_HOST",
+            "ZIZU_E2E_SSH_USER",
+            "ZIZU_E2E_SSH_PASSWORD",
+        )
+    ):
+        _publish_via_ssh(topic, payload)
+        return {
+            "status": "published",
+            "topic": topic,
+            "point_key": point_key,
+            "value": value,
+            "transport": "ssh",
+        }
     host = _mqtt_host()
     if not host:
         raise RuntimeError("ZIZU_E2E_MQTT_HOST is required")
