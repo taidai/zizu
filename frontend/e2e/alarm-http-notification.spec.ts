@@ -141,7 +141,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     const matching = page.locator('article').filter({ hasText: fixture.alarm_name })
     await expect(matching).toHaveCount(2)
     await expect(matching.filter({ hasText: '告警发生' })).toContainText('已送达')
-    await expect(matching.filter({ hasText: '现场恢复' })).toContainText('已送达')
+    await expect(matching.filter({ hasText: '告警恢复' })).toContainText('已送达')
   })
 
   async function loginApi(request: APIRequestContext): Promise<ApiSession> {
