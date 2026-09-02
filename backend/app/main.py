@@ -37,6 +37,26 @@ _data_trunk_tasks = []
 _data_trunk_stop = None
 
 
+async def run_alarm_http_notification_loop(dispatcher, stop_event) -> None:
+    """Deliver committed alarm intents without exposing request secrets in logs."""
+    import asyncio
+
+    while not stop_event.is_set():
+        try:
+            processed = await dispatcher.run_once()
+        except Exception as error:
+            logger.warning(
+                "[AlarmHTTP] delivery tick failed: {}",
+                type(error).__name__,
+            )
+            processed = 0
+        if processed == 0 and not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+
+
 def build_committed_frame_fanout(alarm_consumer, jdm_consumer, stream):
     """Keep the production committed-frame consumer order explicit."""
     from app.services.data_trunk_outbox import CommittedFrameFanout
@@ -182,6 +202,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.services.committed_l2_jdm_consumer import (
         build_postgres_committed_l2_jdm_consumer,
     )
+    from app.services.alarm_http_notification_postgres import (
+        build_postgres_alarm_http_notification_dispatcher,
+    )
 
     committed_frame_stream = get_committed_frame_stream()
     committed_frame_fanout = build_committed_frame_fanout(
@@ -194,6 +217,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         committed_frame_fanout,
     )
     runtime.configuration_gate.register_committed_frame_consumer()
+    alarm_http_dispatcher = build_postgres_alarm_http_notification_dispatcher()
 
     async def _wait_or_stop(seconds: float) -> None:
         try:
@@ -248,8 +272,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(
             _data_frame_outbox_loop(), name="data_frame_outbox"
         ),
+        asyncio.create_task(
+            run_alarm_http_notification_loop(
+                alarm_http_dispatcher,
+                _data_trunk_stop,
+            ),
+            name="alarm_http_notification",
+        ),
     ]
-    logger.success("[Main] data-frame capture, processor and outbox started ✅")
+    logger.success(
+        "[Main] data-frame capture, processor, outbox and alarm HTTP delivery started ✅"
+    )
 
     yield
 

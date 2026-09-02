@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 import json
 from typing import Any, Callable, Iterator, Sequence
 from uuid import UUID, uuid4
@@ -10,10 +11,13 @@ import psycopg2
 from psycopg2.extras import Json, register_uuid
 
 from app.services.alarm_http_notifications import (
+    AlarmHttpNotificationDispatcher,
     AlarmHttpNotifications,
+    DeliveryClaim,
     HttpNotificationDraft,
     HttpNotificationError,
     HttpSendResult,
+    NotificationContext,
     RequestField,
     ResolvedHttpNotificationConfig,
     SecretCodec,
@@ -346,6 +350,196 @@ class PostgresAlarmHttpNotificationRepository:
                 (config_id,),
             )
 
+    def claim_due(
+        self,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int = 30,
+    ) -> DeliveryClaim | None:
+        lease_until = now + timedelta(seconds=lease_seconds)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH candidate AS (
+                  SELECT delivery.id
+                  FROM t_alarm_notification_outbox delivery
+                  JOIN t_alarm_http_notification_configs config
+                    ON config.id=delivery.configuration_id
+                  WHERE delivery.status IN ('pending','retry_wait')
+                    AND delivery.next_attempt_at <= %s
+                    AND (
+                      delivery.lease_expires_at IS NULL
+                      OR delivery.lease_expires_at <= %s
+                    )
+                    AND config.enabled=TRUE
+                    AND config.tested_digest=config.current_digest
+                  ORDER BY delivery.next_attempt_at,delivery.created_at,delivery.id
+                  FOR UPDATE OF delivery SKIP LOCKED
+                  LIMIT 1
+                )
+                UPDATE t_alarm_notification_outbox delivery
+                SET lease_owner=%s,lease_expires_at=%s,updated_at=%s
+                FROM candidate
+                WHERE delivery.id=candidate.id
+                RETURNING delivery.id,delivery.transition_id,
+                          delivery.transition_code,delivery.event_id,
+                          delivery.configuration_id,delivery.context_snapshot,
+                          delivery.attempt_count,delivery.cycle_attempt_count,
+                          delivery.lease_owner
+                """,
+                (now, now, worker_id, lease_until, now),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return DeliveryClaim(
+            id=row[0],
+            transition_id=row[1],
+            transition_code=row[2],
+            event_id=row[3],
+            configuration_id=row[4],
+            context=NotificationContext(dict(row[5])),
+            attempt_count=int(row[6]),
+            cycle_attempt_count=int(row[7]),
+            lease_owner=row[8],
+        )
+
+    def current_config(
+        self,
+        config_id: UUID,
+    ) -> ResolvedHttpNotificationConfig | None:
+        return self.resolve_config(config_id)
+
+    def complete_attempt(
+        self,
+        claim: DeliveryClaim,
+        result: HttpSendResult,
+        now: datetime,
+    ) -> None:
+        method = result.method or "POST"
+        target_display = result.target_display or "unavailable"
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt_count,cycle_attempt_count
+                FROM t_alarm_notification_outbox
+                WHERE id=%s AND lease_owner=%s
+                  AND status IN ('pending','retry_wait')
+                FOR UPDATE
+                """,
+                (claim.id, claim.lease_owner),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_DELIVERY_CLAIM_LOST",
+                    "HTTP notification delivery lease is no longer owned",
+                )
+            attempt_count = int(row[0]) + 1
+            cycle_attempt_count = int(row[1]) + 1
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_attempts
+                  (id,notification_id,attempt_no,attempted_at,method,
+                   target_display,duration_ms,outcome,http_status,error_code,
+                   error_detail,response_excerpt)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    uuid4(),
+                    claim.id,
+                    attempt_count,
+                    now,
+                    method,
+                    target_display,
+                    result.duration_ms,
+                    result.outcome,
+                    result.http_status,
+                    result.error_code,
+                    result.error_detail,
+                    result.response_excerpt,
+                ),
+            )
+            if result.delivered:
+                status = "delivered"
+                next_attempt_at = now
+                delivered_at = now
+            elif cycle_attempt_count <= 3:
+                status = "retry_wait"
+                delays = (5, 30, 300)
+                next_attempt_at = now + timedelta(
+                    seconds=delays[cycle_attempt_count - 1]
+                )
+                delivered_at = None
+            else:
+                status = "failed"
+                next_attempt_at = now
+                delivered_at = None
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET status=%s,attempt_count=%s,cycle_attempt_count=%s,
+                    next_attempt_at=%s,lease_owner=NULL,lease_expires_at=NULL,
+                    last_target_display=%s,last_http_status=%s,
+                    last_error_code=%s,last_error_detail=%s,
+                    last_response_excerpt=%s,delivered_at=%s,updated_at=%s
+                WHERE id=%s AND lease_owner=%s
+                """,
+                (
+                    status,
+                    attempt_count,
+                    cycle_attempt_count,
+                    next_attempt_at,
+                    target_display,
+                    result.http_status,
+                    result.error_code,
+                    result.error_detail,
+                    result.response_excerpt,
+                    delivered_at,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_DELIVERY_CLAIM_LOST",
+                    "HTTP notification delivery lease is no longer owned",
+                )
+
+    def release_lease(self, notification_id: UUID, worker_id: str) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET lease_owner=NULL,lease_expires_at=NULL,
+                    updated_at=clock_timestamp()
+                WHERE id=%s AND lease_owner=%s
+                """,
+                (notification_id, worker_id),
+            )
+
+    def cancel_missing_config(
+        self,
+        claim: DeliveryClaim,
+        now: datetime,
+    ) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET status='cancelled',configuration_id=NULL,
+                    last_error_code='HTTP_NOTIFICATION_DELIVERY_CANCELLED',
+                    last_error_detail='Notification configuration is missing',
+                    lease_owner=NULL,lease_expires_at=NULL,cancelled_at=%s,
+                    updated_at=%s
+                WHERE id=%s AND lease_owner=%s
+                  AND status IN ('pending','retry_wait')
+                """,
+                (now, now, claim.id, claim.lease_owner),
+            )
+
     @staticmethod
     def _fetch_public(cursor: Any, config_id: UUID) -> tuple[Any, ...] | None:
         cursor.execute(
@@ -534,7 +728,15 @@ def build_postgres_alarm_http_notifications() -> AlarmHttpNotifications:
     return AlarmHttpNotifications(PostgresAlarmHttpNotificationRepository())
 
 
+def build_postgres_alarm_http_notification_dispatcher(
+) -> AlarmHttpNotificationDispatcher:
+    return AlarmHttpNotificationDispatcher(
+        PostgresAlarmHttpNotificationRepository()
+    )
+
+
 __all__ = [
     "PostgresAlarmHttpNotificationRepository",
+    "build_postgres_alarm_http_notification_dispatcher",
     "build_postgres_alarm_http_notifications",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
 from uuid import uuid4
@@ -105,6 +106,122 @@ class AlarmHttpNotificationPostgresTest(unittest.TestCase):
 
     def _create(self):
         return self.repository.create_config(self._draft(), "admin:test")
+
+    def _seed_delivery(self):
+        config = self._create()
+        self.repository.record_test(
+            config.id,
+            config.current_digest,
+            HttpSendResult(True, "delivered", 204, 1, None, None, None),
+            "admin:test",
+        )
+        self.repository.set_enabled(config.id, True, "admin:test")
+        definition_id = uuid4()
+        transition_id = uuid4()
+        notification_id = uuid4()
+        now = datetime(2026, 9, 2, 10, tzinfo=timezone.utc)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_alarm_definitions(id) VALUES (%s)",
+                (definition_id,),
+            )
+            cursor.execute(
+                "INSERT INTO t_alarm_transitions(id) VALUES (%s)",
+                (transition_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_outbox
+                  (id,event_id,definition_id,entity_instance_id,created_at,
+                   transition_id,transition_code,configuration_id,
+                   configuration_name_snapshot,context_snapshot,status,
+                   next_attempt_at)
+                VALUES (%s,%s,%s,%s,%s,%s,'ALARM_ACTIVATED',%s,%s,%s,
+                        'pending',%s)
+                """,
+                (
+                    notification_id,
+                    uuid4(),
+                    definition_id,
+                    uuid4(),
+                    now,
+                    transition_id,
+                    config.id,
+                    config.name,
+                    '{"notification.id":"%s","event.type":"ALARM_ACTIVATED"}'
+                    % notification_id,
+                    now,
+                ),
+            )
+        return notification_id, config.id, now
+
+    def test_claim_is_exclusive_and_expired_lease_is_recovered(self) -> None:
+        notification_id, _config_id, now = self._seed_delivery()
+
+        first = self.repository.claim_due(worker_id="worker-1", now=now)
+        blocked = self.repository.claim_due(worker_id="worker-2", now=now)
+        recovered = self.repository.claim_due(
+            worker_id="worker-2",
+            now=now + timedelta(seconds=31),
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(blocked)
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(notification_id, recovered.id)
+        self.assertEqual("worker-2", recovered.lease_owner)
+
+    def test_complete_attempt_persists_retry_schedule_and_redacted_evidence(self) -> None:
+        notification_id, _config_id, now = self._seed_delivery()
+        claim = self.repository.claim_due(worker_id="worker-1", now=now)
+        assert claim is not None
+
+        self.repository.complete_attempt(
+            claim,
+            HttpSendResult(
+                False,
+                "rejected",
+                500,
+                12,
+                "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                "Remote endpoint rejected the request",
+                "failure",
+                "POST",
+                "https://receiver.invalid/***",
+            ),
+            now,
+        )
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT status,attempt_count,cycle_attempt_count,next_attempt_at,
+                       lease_owner,last_target_display,last_http_status
+                FROM t_alarm_notification_outbox WHERE id=%s
+                """,
+                (notification_id,),
+            )
+            delivery = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT attempt_no,method,target_display,outcome,http_status
+                FROM t_alarm_notification_attempts
+                WHERE notification_id=%s
+                """,
+                (notification_id,),
+            )
+            attempt = cursor.fetchone()
+        self.assertEqual("retry_wait", delivery[0])
+        self.assertEqual((1, 1), delivery[1:3])
+        self.assertEqual(now + timedelta(seconds=5), delivery[3])
+        self.assertIsNone(delivery[4])
+        self.assertEqual("https://receiver.invalid/***", delivery[5])
+        self.assertEqual(500, delivery[6])
+        self.assertEqual(
+            (1, "POST", "https://receiver.invalid/***", "rejected", 500),
+            attempt,
+        )
 
     def test_database_and_public_model_never_contain_plaintext_secrets(self) -> None:
         created = self._create()

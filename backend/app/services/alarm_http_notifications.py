@@ -16,7 +16,7 @@ import time
 from collections.abc import Sequence
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
 import httpx
@@ -120,6 +120,8 @@ class HttpSendResult:
     error_code: str | None
     error_detail: str | None
     response_excerpt: str | None
+    method: str | None = None
+    target_display: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +248,36 @@ class AlarmHttpNotificationRepository(Protocol):
     def delete_config(self, config_id: UUID, actor: str) -> None: ...
 
 
+class AlarmDeliveryRepository(Protocol):
+    def claim_due(
+        self,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int = 30,
+    ) -> DeliveryClaim | None: ...
+
+    def current_config(
+        self,
+        config_id: UUID,
+    ) -> ResolvedHttpNotificationConfig | None: ...
+
+    def complete_attempt(
+        self,
+        claim: DeliveryClaim,
+        result: HttpSendResult,
+        now: datetime,
+    ) -> None: ...
+
+    def release_lease(self, notification_id: UUID, worker_id: str) -> None: ...
+
+    def cancel_missing_config(
+        self,
+        claim: DeliveryClaim,
+        now: datetime,
+    ) -> None: ...
+
+
 Sender = Callable[[RenderedHttpRequest], Awaitable[HttpSendResult]]
 
 
@@ -340,6 +372,67 @@ class AlarmHttpNotifications:
 
     def delete(self, config_id: UUID, actor: str) -> None:
         self._repository.delete_config(config_id, actor)
+
+
+class AlarmHttpNotificationDispatcher:
+    """Claims committed intents and sends one bounded HTTP attempt per tick."""
+
+    def __init__(
+        self,
+        repository: AlarmDeliveryRepository,
+        *,
+        sender: Sender | None = None,
+        worker_id: str | None = None,
+    ) -> None:
+        self._repository = repository
+        self._sender = sender or send_http_request
+        self._worker_id = worker_id or f"alarm-http-{uuid4()}"
+
+    async def run_once(self, now: datetime | None = None) -> int:
+        current = now or datetime.now(timezone.utc)
+        claim = self._repository.claim_due(
+            worker_id=self._worker_id,
+            now=current,
+        )
+        if claim is None:
+            return 0
+        try:
+            config = self._repository.current_config(claim.configuration_id)
+            if config is None:
+                self._repository.cancel_missing_config(claim, current)
+                return 1
+            if (
+                not config.enabled
+                or config.tested_digest != config.current_digest
+            ):
+                self._repository.release_lease(claim.id, self._worker_id)
+                return 0
+            try:
+                request = render_request(config.draft, claim.context)
+            except HttpNotificationError as error:
+                result = HttpSendResult(
+                    False,
+                    "render_error",
+                    None,
+                    0,
+                    error.code,
+                    str(error),
+                    None,
+                    config.draft.method,
+                    mask_url(config.draft.url),
+                )
+            else:
+                sent = await self._sender(request)
+                result = replace(
+                    sent,
+                    method=request.method,
+                    target_display=request.target_display,
+                )
+            self._repository.complete_attempt(claim, result, current)
+            return 1
+        except Exception:
+            self._repository.release_lease(claim.id, self._worker_id)
+            raise
 
 
 def normalize_draft(draft: HttpNotificationDraft) -> HttpNotificationDraft:
@@ -699,7 +792,9 @@ def _response_excerpt(value: str) -> str:
 
 __all__ = [
     "ALLOWED_VARIABLES",
+    "AlarmDeliveryRepository",
     "AlarmHttpNotificationRepository",
+    "AlarmHttpNotificationDispatcher",
     "AlarmHttpNotifications",
     "DeliveryClaim",
     "HttpNotificationDraft",

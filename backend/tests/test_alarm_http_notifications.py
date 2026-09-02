@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import unittest
 from uuid import UUID
 
@@ -172,6 +174,163 @@ class AlarmHttpNotificationSendTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.delivered)
         self.assertNotIn("\x00", result.response_excerpt or "")
         self.assertLessEqual(len((result.response_excerpt or "").encode("utf-8")), 4096)
+
+
+class _DeliveryRepository:
+    def __init__(self, results) -> None:
+        module = _module()
+        self.now = datetime(2026, 9, 2, 10, tzinfo=timezone.utc)
+        self.config = module.ResolvedHttpNotificationConfig(
+            TEST_NOTIFICATION_ID,
+            _draft(url="https://old.invalid/hook"),
+            "a" * 64,
+            "a" * 64,
+            True,
+        )
+        self.claim = module.DeliveryClaim(
+            id=TEST_NOTIFICATION_ID,
+            transition_id=UUID("00000000-0000-0000-0000-000000000103"),
+            transition_code="ALARM_ACTIVATED",
+            event_id=TEST_EVENT_ID,
+            configuration_id=TEST_NOTIFICATION_ID,
+            context=_context(),
+            attempt_count=0,
+            cycle_attempt_count=0,
+            lease_owner="",
+        )
+        self.status = "pending"
+        self.next_at = self.now
+        self.results = list(results)
+        self.attempts = []
+
+    def claim_due(self, *, worker_id, now, lease_seconds=30):
+        if (
+            self.status not in {"pending", "retry_wait"}
+            or now < self.next_at
+            or not self.config.enabled
+            or self.config.tested_digest != self.config.current_digest
+        ):
+            return None
+        self.claim = replace(self.claim, lease_owner=worker_id)
+        return self.claim
+
+    def current_config(self, config_id):
+        return self.config if config_id == self.config.id else None
+
+    def complete_attempt(self, claim, result, now):
+        self.attempts.append(result)
+        cycle = claim.cycle_attempt_count + 1
+        total = claim.attempt_count + 1
+        self.claim = replace(
+            claim,
+            attempt_count=total,
+            cycle_attempt_count=cycle,
+            lease_owner="",
+        )
+        if result.delivered:
+            self.status = "delivered"
+            return
+        delays = (5, 30, 300)
+        if cycle <= len(delays):
+            self.status = "retry_wait"
+            self.next_at = now + timedelta(seconds=delays[cycle - 1])
+        else:
+            self.status = "failed"
+
+    def release_lease(self, notification_id, worker_id):
+        self.claim = replace(self.claim, lease_owner="")
+
+    def cancel_missing_config(self, claim, now):
+        self.status = "cancelled"
+
+    def update_target(self, url):
+        self.config = replace(
+            self.config,
+            draft=replace(self.config.draft, url=url),
+        )
+
+
+class AlarmHttpNotificationDispatcherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_schedule_and_fourth_failure_is_terminal(self) -> None:
+        module = _module()
+        repository = _DeliveryRepository([500, 500, 500, 500])
+
+        async def sender(request):
+            status = repository.results.pop(0)
+            return module.HttpSendResult(
+                False,
+                "rejected",
+                status,
+                1,
+                "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                "Remote endpoint rejected the request",
+                None,
+            )
+
+        dispatcher = module.AlarmHttpNotificationDispatcher(
+            repository,
+            sender=sender,
+            worker_id="worker-1",
+        )
+        expected = (
+            (repository.now, "retry_wait", 1, repository.now + timedelta(seconds=5)),
+            (repository.now + timedelta(seconds=5), "retry_wait", 2, repository.now + timedelta(seconds=35)),
+            (repository.now + timedelta(seconds=35), "retry_wait", 3, repository.now + timedelta(seconds=335)),
+            (repository.now + timedelta(seconds=335), "failed", 4, repository.now + timedelta(seconds=335)),
+        )
+        for moment, status, cycle, next_at in expected:
+            self.assertEqual(1, await dispatcher.run_once(moment))
+            self.assertEqual(status, repository.status)
+            self.assertEqual(cycle, repository.claim.cycle_attempt_count)
+            if status != "failed":
+                self.assertEqual(next_at, repository.next_at)
+        self.assertEqual(4, len(repository.attempts))
+
+    async def test_retry_reads_the_current_request_configuration(self) -> None:
+        module = _module()
+        repository = _DeliveryRepository([500, 204])
+        targets = []
+
+        async def sender(request):
+            targets.append(request.url)
+            status = repository.results.pop(0)
+            return module.HttpSendResult(
+                status == 204,
+                "delivered" if status == 204 else "rejected",
+                status,
+                1,
+                None if status == 204 else "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                None,
+                None,
+            )
+
+        dispatcher = module.AlarmHttpNotificationDispatcher(
+            repository,
+            sender=sender,
+            worker_id="worker-1",
+        )
+        await dispatcher.run_once(repository.now)
+        repository.update_target("https://new.invalid/hook")
+        await dispatcher.run_once(repository.now + timedelta(seconds=5))
+
+        self.assertEqual(
+            ["https://old.invalid/hook", "https://new.invalid/hook"],
+            targets,
+        )
+        self.assertEqual("delivered", repository.status)
+
+    async def test_disabled_configuration_waits_without_an_attempt(self) -> None:
+        module = _module()
+        repository = _DeliveryRepository([])
+        repository.config = replace(repository.config, enabled=False)
+        dispatcher = module.AlarmHttpNotificationDispatcher(
+            repository,
+            worker_id="worker-1",
+        )
+
+        self.assertEqual(0, await dispatcher.run_once(repository.now))
+        self.assertEqual(0, repository.claim.attempt_count)
+        self.assertEqual([], repository.attempts)
 
 
 if __name__ == "__main__":
