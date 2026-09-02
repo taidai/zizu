@@ -420,11 +420,17 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByLabel('恢复值')).toHaveValue('false')
     await expect(page.getByLabel('试算值')).toHaveValue('false')
     await trialButton.click()
-    await expect(page.getByText('状态告警：当前值未命中触发条件，命中恢复条件。', { exact: true })).toBeVisible()
+    await expect(page.getByText(
+      `${editedPlatformNode} / ${bitEntityDisplayName}：试算值 false；结果：会恢复。触发条件 = true（未命中），恢复条件 = false（命中）。`,
+      { exact: true },
+    )).toBeVisible()
 
     await page.getByLabel('试算值').selectOption('true')
     await trialButton.click()
-    await expect(page.getByText('状态告警：当前值命中触发条件，未命中恢复条件。', { exact: true })).toBeVisible()
+    await expect(page.getByText(
+      `${editedPlatformNode} / ${bitEntityDisplayName}：试算值 true；结果：会触发警告告警。触发条件 = true（命中），恢复条件 = false（未命中）。`,
+      { exact: true },
+    )).toBeVisible()
     await expect(page.getByRole('button', { name: '生成发布预览', exact: true })).toBeEnabled()
 
     await page.getByRole('button', { name: '节点管理' }).click()

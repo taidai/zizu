@@ -79,3 +79,23 @@ test('boolean alarm trials use real booleans instead of free-text state values',
     message: '可以试算。',
   })
 })
+
+test('alarm trial summary shows the tested entity, value, conditions, and outcome', async () => {
+  const { defaultAlarmDraft, describeAlarmTrialResult } = await import('./alarmCenterModel.ts')
+  const rule = defaultAlarmDraft('STATE', 'BOOL')
+
+  assert.equal(
+    describeAlarmTrialResult(
+      {
+        entity_instance_id: 'entity-1',
+        trigger_matches: false,
+        recovery_matches: true,
+        description: '状态告警：当前值未命中触发条件，命中恢复条件。',
+      },
+      rule,
+      false,
+      { displayName: 'E2E验证 / 15V电源故障', unit: null },
+    ),
+    'E2E验证 / 15V电源故障：试算值 false；结果：会恢复。触发条件 = true（未命中），恢复条件 = false（命中）。',
+  )
+})

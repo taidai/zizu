@@ -1,4 +1,4 @@
-import type { AlarmRule, AlarmSeverity } from '../../api/client'
+import type { AlarmRule, AlarmRuleTrial, AlarmSeverity } from '../../api/client'
 
 export interface FaultCodeRow {
   code: string
@@ -122,4 +122,23 @@ export function describeAlarmDraft(draft: AlarmRule, entity: AlarmPreviewEntity)
   const triggerDuration = draft.trigger_duration_seconds > 0 ? ` 持续 ${draft.trigger_duration_seconds} 秒` : ''
   const recoveryDuration = draft.recovery_duration_seconds > 0 ? ` 持续 ${draft.recovery_duration_seconds} 秒` : ''
   return `${entity.displayName} ${OPERATOR_LABEL[draft.trigger.operator]} ${String(draft.trigger.value)}${unit}${triggerDuration}，产生${SEVERITY_LABEL[draft.severity]}告警；${OPERATOR_LABEL[draft.recovery.operator]} ${String(draft.recovery.value)}${unit}${recoveryDuration}后恢复。`
+}
+
+export function describeAlarmTrialResult(
+  trial: AlarmRuleTrial,
+  rule: AlarmRule,
+  value: number | boolean | string | string[],
+  entity: AlarmPreviewEntity,
+): string {
+  const outcome = trial.trigger_matches && trial.recovery_matches
+    ? '同时满足触发和恢复，请调整规则'
+    : trial.trigger_matches
+      ? `会触发${SEVERITY_LABEL[rule.severity]}告警`
+      : trial.recovery_matches
+        ? '会恢复'
+        : '无变化'
+  const renderedValue = Array.isArray(value) ? value.join(', ') : String(value)
+  const triggerState = trial.trigger_matches ? '命中' : '未命中'
+  const recoveryState = trial.recovery_matches ? '命中' : '未命中'
+  return `${entity.displayName}：试算值 ${renderedValue}；结果：${outcome}。触发条件 ${OPERATOR_LABEL[rule.trigger.operator]} ${String(rule.trigger.value)}（${triggerState}），恢复条件 ${OPERATOR_LABEL[rule.recovery.operator]} ${String(rule.recovery.value)}（${recoveryState}）。`
 }
