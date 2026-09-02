@@ -13,6 +13,10 @@ export interface AlarmPreviewEntity {
 
 export type AlarmDraftDataType = 'NUMBER' | 'STATE' | 'CODE_SET'
 
+export type AlarmTrialInput =
+  | { ready: false; message: string }
+  | { ready: true; value: number | boolean | string | string[]; message: string }
+
 const SEVERITIES = new Set<AlarmSeverity>(['CRITICAL', 'MAJOR', 'WARNING', 'INFO'])
 const OPERATOR_LABEL = {
   eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤',
@@ -58,12 +62,42 @@ export function compileFaultCodeRules(rows: FaultCodeRow[]): AlarmRule[] {
   }))
 }
 
-export function defaultAlarmDraft(dataType: AlarmDraftDataType): AlarmRule {
+export function prepareAlarmTrialInput(
+  dataType: AlarmDraftDataType,
+  entityDataType: string | null | undefined,
+  rawValue: string,
+): AlarmTrialInput {
+  if (!entityDataType) return { ready: false, message: '请先在第 1 步勾选一个实体。' }
+  const value = rawValue.trim()
+  if (dataType === 'NUMBER') {
+    const parsed = Number(value)
+    return value && Number.isFinite(parsed)
+      ? { ready: true, value: parsed, message: '可以试算。' }
+      : { ready: false, message: '请输入有效的数值再试算。' }
+  }
+  if (dataType === 'CODE_SET') {
+    const codes = value.split(/[,，\s]+/).filter(Boolean)
+    return codes.length
+      ? { ready: true, value: codes, message: '可以试算。' }
+      : { ready: false, message: '请至少输入一个故障码再试算。' }
+  }
+  if (['BOOL', 'BOOLEAN'].includes(entityDataType.toUpperCase())) {
+    if (['true', '1'].includes(value.toLowerCase())) return { ready: true, value: true, message: '可以试算。' }
+    if (['false', '0'].includes(value.toLowerCase())) return { ready: true, value: false, message: '可以试算。' }
+    return { ready: false, message: '布尔实体的试算值只能选择 true 或 false。' }
+  }
+  return value
+    ? { ready: true, value, message: '可以试算。' }
+    : { ready: false, message: '请输入状态值再试算。' }
+}
+
+export function defaultAlarmDraft(dataType: AlarmDraftDataType, entityDataType?: string | null): AlarmRule {
   if (dataType === 'STATE') {
+    const booleanEntity = ['BOOL', 'BOOLEAN'].includes((entityDataType || '').toUpperCase())
     return {
       id: 'state-alarm', name: '状态告警', severity: 'WARNING',
-      trigger: { operator: 'eq', value: '故障' }, trigger_duration_seconds: 0,
-      recovery: { operator: 'ne', value: '故障' }, recovery_duration_seconds: 3,
+      trigger: { operator: 'eq', value: booleanEntity ? true : '故障' }, trigger_duration_seconds: 0,
+      recovery: { operator: booleanEntity ? 'eq' : 'ne', value: booleanEntity ? false : '故障' }, recovery_duration_seconds: 3,
       notification_throttle_seconds: 300, unit: null, fault_map_id: null,
     }
   }

@@ -48,3 +48,34 @@ test('typed drafts use safe defaults and produce a readable Chinese preview', as
     'PCS-01 有功功率 ≥ 100 kW 持续 3 秒，产生重要告警；≤ 95 kW 持续 3 秒后恢复。',
   )
 })
+
+test('alarm trial stays blocked until one entity and a valid typed value are ready', async () => {
+  const { prepareAlarmTrialInput } = await import('./alarmCenterModel.ts')
+
+  assert.deepEqual(prepareAlarmTrialInput('NUMBER', null, ''), {
+    ready: false,
+    message: '请先在第 1 步勾选一个实体。',
+  })
+  assert.deepEqual(prepareAlarmTrialInput('NUMBER', 'INT', ''), {
+    ready: false,
+    message: '请输入有效的数值再试算。',
+  })
+  assert.deepEqual(prepareAlarmTrialInput('NUMBER', 'INT', '0'), {
+    ready: true,
+    value: 0,
+    message: '可以试算。',
+  })
+})
+
+test('boolean alarm trials use real booleans instead of free-text state values', async () => {
+  const { defaultAlarmDraft, prepareAlarmTrialInput } = await import('./alarmCenterModel.ts')
+
+  const draft = defaultAlarmDraft('STATE', 'BOOL')
+  assert.equal(draft.trigger.value, true)
+  assert.equal(draft.recovery.value, false)
+  assert.deepEqual(prepareAlarmTrialInput('STATE', 'BOOL', 'false'), {
+    ready: true,
+    value: false,
+    message: '可以试算。',
+  })
+})

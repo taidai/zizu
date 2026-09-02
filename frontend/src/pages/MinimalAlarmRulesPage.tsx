@@ -19,6 +19,7 @@ import {
   defaultAlarmDraft,
   describeAlarmDraft,
   parseFaultCodePaste,
+  prepareAlarmTrialInput,
   type AlarmDraftDataType,
 } from '../components/alarm-center/alarmCenterModel'
 
@@ -63,6 +64,15 @@ export default function MinimalAlarmRulesPage() {
 
   const selectableEntities = useMemo(() => entities.filter((entity) => compatible(entity, dataType)), [entities, dataType])
   const firstRule = rules[0]
+  const selectedEntity = useMemo(
+    () => entities.find((item) => item.id === selectedEntities[0]),
+    [entities, selectedEntities],
+  )
+  const selectedEntityIsBoolean = ['BOOL', 'BOOLEAN'].includes((selectedEntity?.data_type || '').toUpperCase())
+  const trialInput = useMemo(
+    () => prepareAlarmTrialInput(dataType, selectedEntity?.data_type, trialValue),
+    [dataType, selectedEntity?.data_type, trialValue],
+  )
   const resetResult = () => { setTrialText(''); setPlan(null); setMessage('') }
   const patchRule = (patch: Partial<AlarmRule>) => {
     setRules((items) => [{ ...items[0], ...patch }, ...items.slice(1)]); resetResult()
@@ -81,11 +91,10 @@ export default function MinimalAlarmRulesPage() {
   }
 
   const runTrial = async () => {
-    if (!firstRule || !selectedEntities[0]) { setError('请先选择实体并填写规则。'); return }
+    if (!firstRule || !selectedEntity || !trialInput.ready) { setError(trialInput.message); return }
     setBusy('trial'); setError('')
     try {
-      const value = dataType === 'NUMBER' ? Number(trialValue) : dataType === 'CODE_SET' ? trialValue.split(/[,，\s]+/).filter(Boolean) : trialValue
-      const result = await trialAlarmRule({ entity_instance_id: selectedEntities[0], rule: firstRule, value, quality: 192 })
+      const result = await trialAlarmRule({ entity_instance_id: selectedEntity.id, rule: firstRule, value: trialInput.value, quality: 192 })
       setTrialText(result.description)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '试算失败。') }
     finally { setBusy('') }
@@ -147,13 +156,22 @@ export default function MinimalAlarmRulesPage() {
     <section className="neu-card p-4 space-y-4">
       <h3 className="text-sm font-bold text-gray-800">1. 选择实体</h3>
       <div className="flex gap-2">{(['NUMBER', 'STATE', 'CODE_SET'] as AlarmDraftDataType[]).map((type) => <button key={type} onClick={() => changeType(type)} className={`rounded px-3 py-1.5 text-xs ${dataType === type ? 'bg-[#52c41a] text-white' : 'bg-white/50 text-gray-600'}`}>{type === 'NUMBER' ? '数值' : type === 'STATE' ? '状态' : '多故障码'}</button>)}</div>
-      <div className="grid gap-2 md:grid-cols-2">{selectableEntities.map((entity) => <label key={entity.id} className="flex items-center gap-2 rounded border border-white/70 p-2 text-xs"><input type="checkbox" checked={selectedEntities.includes(entity.id)} onChange={(event) => { setSelectedEntities((items) => event.target.checked ? [...items, entity.id] : items.filter((id) => id !== entity.id)); resetResult() }} /><span><strong>{entity.node_display_name}</strong> / {entity.display_name} <span className="text-gray-400">{entity.unit || entity.data_type}</span></span></label>)}</div>
+      <div className="grid gap-2 md:grid-cols-2">{selectableEntities.map((entity) => <label key={entity.id} className="flex items-center gap-2 rounded border border-white/70 p-2 text-xs"><input type="checkbox" checked={selectedEntities.includes(entity.id)} onChange={(event) => {
+        const selectingFirst = event.target.checked && selectedEntities.length === 0
+        setSelectedEntities((items) => event.target.checked ? [...items, entity.id] : items.filter((id) => id !== entity.id))
+        if (selectingFirst && dataType === 'STATE' && ['BOOL', 'BOOLEAN'].includes(entity.data_type.toUpperCase())) {
+          setRules([defaultAlarmDraft('STATE', entity.data_type)])
+          setTrialValue('false')
+        }
+        setError(''); resetResult()
+      }} /><span><strong>{entity.node_display_name}</strong> / {entity.display_name} <span className="text-gray-400">{entity.unit || entity.data_type}</span></span></label>)}</div>
       <h3 className="text-sm font-bold text-gray-800">2. 设置规则</h3>
       <label className="block text-xs">规则名称<input value={name} onChange={(event) => setName(event.target.value)} className="neu-input mt-1 w-full px-3 py-2" /></label>
-      {dataType === 'CODE_SET' ? <div><textarea value={faultPaste} onChange={(event) => setFaultPaste(event.target.value)} rows={5} placeholder={'E30\t压缩机故障\tMAJOR\nE42\t直流母线过压\tCRITICAL'} className="neu-input w-full px-3 py-2 font-mono text-xs"/><button onClick={() => { try { setRules(compileFaultCodeRules(parseFaultCodePaste(faultPaste))); resetResult(); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : '故障码格式错误。') } }} className="mt-2 rounded bg-white/70 px-3 py-1.5 text-xs">解析故障码</button><p className="mt-1 text-xs text-gray-500">已解析 {rules.length} 条规则</p></div> : firstRule && <div className="grid gap-3 md:grid-cols-4"><label className="text-xs">故障名称<input value={firstRule.name} onChange={(event) => patchRule({ name: event.target.value })} className="neu-input mt-1 w-full px-2 py-2" /></label><label className="text-xs">等级<select value={firstRule.severity} onChange={(event) => patchRule({ severity: event.target.value as AlarmSeverity })} className="neu-input mt-1 w-full px-2 py-2"><option value="CRITICAL">紧急</option><option value="MAJOR">重要</option><option value="WARNING">警告</option><option value="INFO">提示</option></select></label><label className="text-xs">触发值<input value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" /></label><label className="text-xs">恢复值<input value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" /></label></div>}
+      {dataType === 'CODE_SET' ? <div><textarea value={faultPaste} onChange={(event) => setFaultPaste(event.target.value)} rows={5} placeholder={'E30\t压缩机故障\tMAJOR\nE42\t直流母线过压\tCRITICAL'} className="neu-input w-full px-3 py-2 font-mono text-xs"/><button onClick={() => { try { setRules(compileFaultCodeRules(parseFaultCodePaste(faultPaste))); resetResult(); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : '故障码格式错误。') } }} className="mt-2 rounded bg-white/70 px-3 py-1.5 text-xs">解析故障码</button><p className="mt-1 text-xs text-gray-500">已解析 {rules.length} 条规则</p></div> : firstRule && <div className="grid gap-3 md:grid-cols-4"><label className="text-xs">故障名称<input value={firstRule.name} onChange={(event) => patchRule({ name: event.target.value })} className="neu-input mt-1 w-full px-2 py-2" /></label><label className="text-xs">等级<select value={firstRule.severity} onChange={(event) => patchRule({ severity: event.target.value as AlarmSeverity })} className="neu-input mt-1 w-full px-2 py-2"><option value="CRITICAL">紧急</option><option value="MAJOR">重要</option><option value="WARNING">警告</option><option value="INFO">提示</option></select></label><label className="text-xs">触发值{selectedEntityIsBoolean ? <select value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="true">true（故障）</option><option value="false">false（正常）</option></select> : <input value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label><label className="text-xs">恢复值{selectedEntityIsBoolean ? <select value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label></div>}
       {firstRule && selectedEntities[0] && <p className="rounded bg-white/50 p-3 text-xs text-gray-700">{describeAlarmDraft(firstRule, { displayName: entities.find((item) => item.id === selectedEntities[0])?.display_name || '所选实体', unit: entities.find((item) => item.id === selectedEntities[0])?.unit || null })}</p>}
       <h3 className="text-sm font-bold text-gray-800">3. 试算并发布</h3>
-      <div className="flex flex-wrap items-end gap-2"><label className="text-xs">试算值<input value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} placeholder={dataType === 'CODE_SET' ? 'E30,E42' : '当前值'} className="neu-input mt-1 block px-3 py-2" /></label><button onClick={() => void runTrial()} disabled={!!busy} className="rounded bg-white/70 px-3 py-2 text-xs">试算</button><button onClick={() => void preview()} disabled={!!busy || !trialText} className="rounded bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">生成发布预览</button></div>
+      <div className="flex flex-wrap items-end gap-2"><label className="text-xs">试算值{selectedEntityIsBoolean ? <select value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} className="neu-input mt-1 block px-3 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} placeholder={dataType === 'CODE_SET' ? 'E30,E42' : '当前值'} className="neu-input mt-1 block px-3 py-2" />}</label><button onClick={() => void runTrial()} disabled={!!busy || !trialInput.ready} className="rounded bg-white/70 px-3 py-2 text-xs disabled:opacity-40">试算</button><button onClick={() => void preview()} disabled={!!busy || !trialText} className="rounded bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">生成发布预览</button></div>
+      {!trialInput.ready && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">{trialInput.message}</p>}
       {trialText && <p className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">{trialText}</p>}
       {plan && <div className="rounded border border-white/70 p-3 text-xs"><p>将影响 {selectedEntities.length} 个实体，共 {plan.items.length} 项变更。</p><button onClick={() => void publish()} disabled={!!busy || plan.status !== 'ready'} className="mt-3 rounded bg-[#52c41a] px-3 py-2 font-semibold text-white disabled:opacity-40">确认发布</button></div>}
     </section>

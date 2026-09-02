@@ -1468,9 +1468,9 @@ export interface AlarmRule {
   id: string
   name: string
   severity: AlarmSeverity
-  trigger: AlarmCondition & { value: number | string }
+  trigger: AlarmCondition
   trigger_duration_seconds: number
-  recovery: AlarmCondition & { value: number | string }
+  recovery: AlarmCondition
   recovery_duration_seconds: number
   notification_throttle_seconds: number
   unit: string | null
