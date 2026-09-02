@@ -17,6 +17,7 @@ import {
   readAlarmConfigurationApplyResult,
   type AlarmConditionValue,
 } from '../components/alarm-configuration/alarmConfigurationContracts'
+import { describeHttpNotificationError } from '../components/admin/alarmHttpNotificationModel'
 
 export { AlarmConfigurationResultUnknownError } from '../components/alarm-configuration/alarmConfigurationContracts'
 export type { AlarmConditionValue } from '../components/alarm-configuration/alarmConfigurationContracts'
@@ -2367,4 +2368,149 @@ export async function applyDeviceTemplate(
   })
   if (!res.ok) throw new Error(`Apply template failed: ${res.status}`)
   return res.json()
+}
+
+// ── Alarm HTTP notifications ──
+
+export interface HttpNotificationField {
+  key: string
+  value?: string
+  sensitive: boolean
+  configured?: boolean
+  clear?: boolean
+}
+
+export interface HttpNotificationTestResult {
+  delivered: boolean
+  outcome: string
+  http_status: number | null
+  duration_ms: number
+  error_code: string | null
+  error_detail: string | null
+  response_excerpt: string | null
+}
+
+export interface AlarmHttpNotificationConfig {
+  id: string
+  name: string
+  description: string | null
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  url_display: string
+  query_params: HttpNotificationField[]
+  headers: HttpNotificationField[]
+  content_type: string
+  body_template: string
+  timeout_seconds: number
+  current_digest: string
+  tested_digest: string | null
+  tested_at: string | null
+  last_test_status: HttpNotificationTestResult | null
+  enabled: boolean
+}
+
+export interface AlarmHttpNotificationRequest {
+  name: string
+  description: string | null
+  method: AlarmHttpNotificationConfig['method']
+  url: string
+  query_params: HttpNotificationField[]
+  headers: HttpNotificationField[]
+  content_type: string
+  body_template: string
+  timeout_seconds: number
+}
+
+export class AlarmHttpNotificationApiError extends Error {
+  constructor(message: string, readonly code: string | null, readonly status: number) {
+    super(message)
+    this.name = 'AlarmHttpNotificationApiError'
+  }
+}
+
+async function alarmHttpNotificationError(
+  response: Response,
+  fallback: string,
+): Promise<AlarmHttpNotificationApiError> {
+  const payload = await response.json().catch(() => null) as {
+    detail?: { code?: string; message?: string } | string
+  } | null
+  const detail = payload?.detail
+  const code = typeof detail === 'string' ? null : detail?.code || null
+  return new AlarmHttpNotificationApiError(
+    code ? describeHttpNotificationError(code) : fallback,
+    code,
+    response.status,
+  )
+}
+
+const ALARM_HTTP_NOTIFICATION_PATH = `${API_BASE}/admin/alarm-http-notifications`
+
+export async function fetchAlarmHttpNotifications(): Promise<AlarmHttpNotificationConfig[]> {
+  const response = await apiFetch(ALARM_HTTP_NOTIFICATION_PATH)
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `读取 HTTP 通知失败：${response.status}`)
+  }
+  return response.json()
+}
+
+export async function createAlarmHttpNotification(
+  input: AlarmHttpNotificationRequest,
+): Promise<AlarmHttpNotificationConfig> {
+  const response = await apiFetch(ALARM_HTTP_NOTIFICATION_PATH, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `新增 HTTP 通知失败：${response.status}`)
+  }
+  return response.json()
+}
+
+export async function updateAlarmHttpNotification(
+  configId: string,
+  input: AlarmHttpNotificationRequest,
+): Promise<AlarmHttpNotificationConfig> {
+  const response = await apiFetch(`${ALARM_HTTP_NOTIFICATION_PATH}/${encodeURIComponent(configId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `保存 HTTP 通知失败：${response.status}`)
+  }
+  return response.json()
+}
+
+async function alarmHttpNotificationAction(
+  configId: string,
+  action: 'test' | 'enable' | 'disable',
+): Promise<AlarmHttpNotificationConfig> {
+  const response = await apiFetch(
+    `${ALARM_HTTP_NOTIFICATION_PATH}/${encodeURIComponent(configId)}/${action}`,
+    { method: 'POST' },
+  )
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `HTTP 通知操作失败：${response.status}`)
+  }
+  return response.json()
+}
+
+export const testAlarmHttpNotification = (configId: string) =>
+  alarmHttpNotificationAction(configId, 'test')
+
+export const enableAlarmHttpNotification = (configId: string) =>
+  alarmHttpNotificationAction(configId, 'enable')
+
+export const disableAlarmHttpNotification = (configId: string) =>
+  alarmHttpNotificationAction(configId, 'disable')
+
+export async function deleteAlarmHttpNotification(configId: string): Promise<void> {
+  const response = await apiFetch(
+    `${ALARM_HTTP_NOTIFICATION_PATH}/${encodeURIComponent(configId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `删除 HTTP 通知失败：${response.status}`)
+  }
 }

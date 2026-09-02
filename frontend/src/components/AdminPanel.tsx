@@ -7,6 +7,7 @@ import {
 import DataBrowser from './DataBrowser'
 import NanoMQManager from './NanoMQManager'
 import FaultMapManager from './FaultMapManager'
+import AlarmHttpNotificationPanel from './admin/AlarmHttpNotificationPanel'
 
 export default function AdminPanel() {
   // 入库节拍
@@ -190,6 +191,9 @@ export default function AdminPanel() {
 
       {/* 故障码映射表 */}
       <FaultMapManager />
+
+      {/* 告警 HTTP 通知 */}
+      <AlarmHttpNotificationPanel />
 
       {/* nanoMQ 配置与管理 */}
       <NanoMQManager />
