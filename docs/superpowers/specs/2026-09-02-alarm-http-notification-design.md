@@ -1,5 +1,5 @@
 ---
-status: pending-review
+status: accepted
 date: 2026-09-02
 authority:
   - 2026-08-27-zizu-platform-core-architecture-design.md

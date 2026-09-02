@@ -1,5 +1,23 @@
 ---
 
+## Session 2026-09-02 — 告警 HTTP 通知规格已接受并完成实施计划
+
+- 维护者已明确“规格确认”；正式规格
+  `docs/superpowers/specs/2026-09-02-alarm-http-notification-design.md` 的状态已从 `pending-review`
+  更新为 `accepted`，已确认设计不再等待产品决策。
+- 实施计划已写入
+  `docs/superpowers/plans/2026-09-02-alarm-http-notification-implementation.md`，共 12 个可独立复核的
+  TDD 任务，覆盖 Schema 060、HTTP 深模块、密钥、配置 CRUD/测试/启停、告警规则绑定、发生/恢复通知、
+  提交后投递、固定重试、通知记录/手工重发、三处前端、快速无头验收、v0.7.4 和 1 号机部署证据。
+- 计划复用现有 `AlarmRuntime`、告警配置 apply 事务和 `t_alarm_notification_outbox`；不新增微服务、
+  依赖、消息系统或第二套规则引擎。复核时补实 `context_snapshot`：HTTP 配置可在重试时取当前版本，
+  但告警值、节点、实体和转换时间使用提交时不可变快照，不能随现场后续数据漂移。
+- 为减少现场等待，单元/PostgreSQL 测试使用可控时钟证明 5 秒/30 秒/5 分钟时序；1 号机安全 E2E
+  只对本轮 `E2E验证` 通知任务推进 `next_attempt_at`，不改状态、次数或告警，不实际空等 5 分钟。
+- 当前仍只有规格状态、实施计划和本交接记录变化；未修改产品代码、未升版、未部署。1 号机仍为
+  v0.7.3 / Schema 059。下一步按计划执行；推荐使用 subagent-driven development 逐任务双阶段复核，
+  也可在本任务中按 executing-plans 批次执行。
+
 ## Session 2026-09-02 — 告警 HTTP 通知设计已整体确认并形成待复核规格
 
 - 维护者已整体确认：ZiZu 不内置邮件渠道，改为可配置 HTTP 请求通知；系统工具维护多个配置，告警规则
