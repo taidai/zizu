@@ -376,10 +376,9 @@ test.describe.serial('节点管理主干', () => {
     const rawRow = page.getByRole('row').filter({ hasText: names.bitTag })
     await expect(rawRow).toBeVisible()
 
-    await publish(names.bitTag, 0)
-    await expect(rawRow).toContainText('0', { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS })
+    await publishUntilShows(names.bitTag, 0, rawRow, '正常')
+    await expect(rawRow).toContainText('0')
     await expect(rawRow).toContainText('BIT')
-    await expect(rawRow).toContainText('正常')
 
     await page.getByRole('checkbox', { name: `选择 ${names.bitTag}` }).check()
     await page.getByRole('button', { name: '加工为实体', exact: true }).click()
