@@ -36,6 +36,7 @@ class AlarmRule:
     notification_throttle_seconds: float
     unit: str | None = None
     fault_map_id: UUID | None = None
+    http_notification_config_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ class AlarmConfigurationRepository(Protocol):
     def list_rule_groups(self) -> tuple[AlarmRuleGroup, ...]: ...
     def get_rule_set_revision(self, rule_set_id: UUID, revision: int) -> AlarmRuleSetRevision | None: ...
     def resolve_entities(self, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]: ...
+    def http_notification_status(self, config_id: UUID) -> tuple[bool, bool] | None: ...
     def current_configuration_revision(self) -> int: ...
     def current_configuration(self) -> dict[str, Any]: ...
     def save_plan(self, plan: AlarmConfigurationPlan) -> AlarmConfigurationPlan: ...
@@ -202,6 +204,39 @@ def _binding_issues(entity: ResolvedAlarmEntity, rule: AlarmRule) -> tuple[dict[
     if rule.unit is not None and (entity.unit or "").strip() != rule.unit.strip():
         issues.append(_blocker("ALARM_UNIT_MISMATCH", "alarm rule and L2 entity units must match"))
     return tuple(issues)
+
+
+def _notification_issues(
+    repository: AlarmConfigurationRepository,
+    rule: AlarmRule,
+) -> tuple[dict[str, Any], ...]:
+    config_id = rule.http_notification_config_id
+    if config_id is None:
+        return ()
+    state = repository.http_notification_status(config_id)
+    if state is None:
+        return (
+            _blocker(
+                "HTTP_NOTIFICATION_NOT_FOUND",
+                "selected HTTP notification does not exist",
+            ),
+        )
+    enabled, test_is_current = state
+    if not enabled:
+        return (
+            _blocker(
+                "HTTP_NOTIFICATION_DISABLED",
+                "selected HTTP notification is disabled",
+            ),
+        )
+    if not test_is_current:
+        return (
+            _blocker(
+                "HTTP_NOTIFICATION_TEST_STALE",
+                "selected HTTP notification must be tested again",
+            ),
+        )
+    return ()
 
 
 def validate_rules(rules: tuple[AlarmRule, ...]) -> None:
@@ -300,7 +335,11 @@ class AlarmConfiguration:
                 after = {"entity_instance_id": str(entity.id), "rule": _json_value(rule)}
                 before_record = existing.get(key)
                 before = None if before_record is None else before_record["payload"]
-                issues = _validate_rule(rule) + _binding_issues(entity, rule)
+                issues = (
+                    _validate_rule(rule)
+                    + _binding_issues(entity, rule)
+                    + _notification_issues(self.repository, rule)
+                )
                 blockers.extend(issues)
                 action = "block" if issues else ("add" if before is None else "preserve" if before == after else "update")
                 items.append(AlarmConfigurationPlanItem(key, entity.id, rule.id, action, before, deepcopy(after), issues, None if before_record is None else before_record["id"]))

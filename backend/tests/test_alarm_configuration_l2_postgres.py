@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import unittest
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -9,6 +10,7 @@ import psycopg2
 
 from app.services.alarm_configuration import (
     AlarmConfiguration,
+    AlarmConfigurationError,
     AlarmRule,
     ApplyAlarmConfigurationPlan,
     EntitySelection,
@@ -17,6 +19,15 @@ from app.services.alarm_configuration import (
 from app.services.alarm_configuration_postgres import PostgresAlarmConfigurationRepository
 from app.services.alarm_postgres import PostgresAlarmDefinitionCatalog, PostgresAlarmRepository
 from app.services.alarm_runtime import AlarmObservation, AlarmRuntime
+from app.services.alarm_http_notifications import (
+    HttpNotificationDraft,
+    HttpSendResult,
+    SecretCodec,
+)
+from app.services.alarm_http_notification_postgres import (
+    PostgresAlarmHttpNotificationRepository,
+)
+from cryptography.fernet import Fernet
 from tests import test_alarm_configuration_postgres
 from tests import test_node_data_trunk_hard_cut_migration_postgres
 
@@ -48,6 +59,164 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
                 cursor.execute("INSERT INTO t_entity_instances(id,device_instance_id,definition_id,display_name,data_type,unit,direction,freshness_seconds,source_kind) VALUES (%s,%s,'pcs.activePower','有功功率','FLOAT','kW','R',30,'point_processing')", (str(self.entity_id), str(device_id)))
                 cursor.execute("SET session_replication_role=origin")
                 migration._apply_044(cursor)
+                cursor.execute(
+                    (
+                        Path(__file__).resolve().parents[2]
+                        / "init-db"
+                        / "migration_060_alarm_http_notifications.sql"
+                    ).read_text(encoding="utf-8")
+                )
+
+    def test_apply_writes_definition_and_http_binding_in_one_transaction(self) -> None:
+        connection_factory = lambda: psycopg2.connect(**self.kwargs)
+        notifications = PostgresAlarmHttpNotificationRepository(
+            connection_factory,
+            SecretCodec(Fernet.generate_key().decode("ascii")),
+        )
+        config = notifications.create_config(
+            HttpNotificationDraft(
+                "值班群",
+                None,
+                "POST",
+                "https://receiver.invalid/hook",
+                (),
+                (),
+                "application/json",
+                '{"type":{{event.type}}}',
+                5,
+            ),
+            "operator:test",
+        )
+        notifications.record_test(
+            config.id,
+            config.current_digest,
+            HttpSendResult(True, "delivered", 204, 1, None, None, None),
+            "operator:test",
+        )
+        notifications.set_enabled(config.id, True, "operator:test")
+
+        service = AlarmConfiguration(
+            PostgresAlarmConfigurationRepository(connection_factory)
+        )
+        rule_set = service.create_rule_set(
+            key="pcs-power",
+            name="PCS 功率",
+            rules=(
+                AlarmRule(
+                    "high",
+                    "功率越限",
+                    "MAJOR",
+                    {"operator": "gt", "value": 90},
+                    0,
+                    {"operator": "lt", "value": 85},
+                    0,
+                    60,
+                    "kW",
+                    http_notification_config_id=config.id,
+                ),
+            ),
+            actor="operator:test",
+        )
+        plan = service.plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(self.entity_id,)),
+                rule_set.rule_set_id,
+                rule_set.revision,
+                "operator:test",
+            )
+        )
+        result = service.apply(
+            ApplyAlarmConfigurationPlan(
+                plan.id,
+                plan.digest,
+                "alarm-bound-1",
+                "operator:test",
+            )
+        )
+
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT configuration_id FROM t_alarm_http_notification_bindings WHERE definition_id=%s",
+                (result.definition_ids[0],),
+            )
+            self.assertEqual(config.id, cursor.fetchone()[0])
+        current = service.repository.current_configuration()
+        self.assertEqual(
+            str(config.id),
+            next(iter(current["definitions"].values()))["payload"]["rule"][
+                "http_notification_config_id"
+            ],
+        )
+
+    def test_apply_rechecks_notification_after_plan_and_rolls_back_publication(self) -> None:
+        config_id = uuid4()
+        digest = "d" * 64
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_http_notification_configs
+                  (id,name,method,encrypted_url,url_display,content_type,
+                   current_digest,tested_digest,tested_at,enabled,
+                   created_by,updated_by)
+                VALUES (%s,'值班群','POST','cipher','https://receiver.invalid/***',
+                        'application/json',%s,%s,clock_timestamp(),TRUE,
+                        'operator:test','operator:test')
+                """,
+                (str(config_id), digest, digest),
+            )
+        service = AlarmConfiguration(
+            PostgresAlarmConfigurationRepository(
+                lambda: psycopg2.connect(**self.kwargs)
+            )
+        )
+        rule_set = service.create_rule_set(
+            key="pcs-power",
+            name="PCS 功率",
+            rules=(
+                AlarmRule(
+                    "high",
+                    "功率越限",
+                    "MAJOR",
+                    {"operator": "gt", "value": 90},
+                    0,
+                    {"operator": "lt", "value": 85},
+                    0,
+                    60,
+                    "kW",
+                    http_notification_config_id=config_id,
+                ),
+            ),
+            actor="operator:test",
+        )
+        plan = service.plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(self.entity_id,)),
+                rule_set.rule_set_id,
+                rule_set.revision,
+                "operator:test",
+            )
+        )
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_alarm_http_notification_configs SET enabled=FALSE WHERE id=%s",
+                (config_id,),
+            )
+
+        with self.assertRaises(AlarmConfigurationError) as raised:
+            service.apply(
+                ApplyAlarmConfigurationPlan(
+                    plan.id,
+                    plan.digest,
+                    "alarm-bound-stale-1",
+                    "operator:test",
+                )
+            )
+        self.assertEqual("HTTP_NOTIFICATION_DISABLED", str(raised.exception))
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_alarm_http_notification_bindings")
+            self.assertEqual(0, cursor.fetchone()[0])
+            cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+            self.assertEqual(0, cursor.fetchone()[0])
 
     def test_apply_advances_one_revision_and_installs_l2_alarm(self) -> None:
         service = AlarmConfiguration(PostgresAlarmConfigurationRepository(lambda: psycopg2.connect(**self.kwargs)))

@@ -46,6 +46,7 @@ def _json_value(value: Any) -> Any:
 
 def _rule_from_json(value: dict[str, Any]) -> AlarmRule:
     fault_map_id = value.get("fault_map_id")
+    notification_config_id = value.get("http_notification_config_id")
     return AlarmRule(
         id=value["id"], name=value["name"], severity=value["severity"],
         trigger=dict(value["trigger"]),
@@ -55,6 +56,9 @@ def _rule_from_json(value: dict[str, Any]) -> AlarmRule:
         notification_throttle_seconds=float(value["notification_throttle_seconds"]),
         unit=value.get("unit"),
         fault_map_id=UUID(fault_map_id) if fault_map_id else None,
+        http_notification_config_id=(
+            UUID(notification_config_id) if notification_config_id else None
+        ),
     )
 
 
@@ -262,6 +266,22 @@ class PostgresAlarmConfigurationRepository:
         with self._connection() as connection:
             return self._revisions.current(connection)
 
+    def http_notification_status(
+        self,
+        config_id: UUID,
+    ) -> tuple[bool, bool] | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT enabled,tested_digest=current_digest
+                FROM t_alarm_http_notification_configs
+                WHERE id=%s
+                """,
+                (config_id,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else (bool(row[0]), bool(row[1]))
+
     def current_configuration(self) -> dict[str, Any]:
         with self._connection() as connection:
             revision = self._revisions.current(connection)
@@ -271,10 +291,13 @@ class PostgresAlarmConfigurationRepository:
                            entity.display_name,definition.entity_definition_id,
                            definition.trigger_condition,definition.trigger_duration_seconds,
                            definition.recovery_condition,definition.recovery_duration_seconds,
-                           definition.severity,definition.notification_throttle_seconds
+                           definition.severity,definition.notification_throttle_seconds,
+                           notification.configuration_id
                     FROM t_alarm_definition_current current
                     JOIN t_alarm_definitions definition ON definition.id=current.definition_id
                     JOIN t_entity_instances entity ON entity.id=definition.entity_instance_id
+                    LEFT JOIN t_alarm_http_notification_bindings notification
+                      ON notification.definition_id=definition.id
                     ORDER BY definition.asset_id
                 """)
                 rows = cursor.fetchall()
@@ -287,6 +310,7 @@ class PostgresAlarmConfigurationRepository:
                 "recovery": {"operator": row[7]["op"], "value": row[7].get("value")},
                 "recovery_duration_seconds": row[8],
                 "notification_throttle_seconds": row[10], "unit": None, "fault_map_id": None,
+                "http_notification_config_id": str(row[11]) if row[11] else None,
             }
             definitions[row[0]] = {
                 "id": row[1], "payload": {"entity_instance_id": str(row[2]), "rule": rule},
@@ -393,6 +417,47 @@ class PostgresAlarmConfigurationRepository:
                         ON CONFLICT(asset_id,entity_instance_id) DO UPDATE
                         SET definition_id=EXCLUDED.definition_id,configuration_revision=EXCLUDED.configuration_revision
                     """, (item.definition_key, item.entity_instance_id, definition_id, revision))
+                    notification_config_id = rule.get(
+                        "http_notification_config_id"
+                    )
+                    if notification_config_id:
+                        cursor.execute(
+                            """
+                            SELECT enabled,tested_digest=current_digest
+                            FROM t_alarm_http_notification_configs
+                            WHERE id=%s FOR SHARE
+                            """,
+                            (UUID(notification_config_id),),
+                        )
+                        notification_state = cursor.fetchone()
+                        if notification_state is None:
+                            raise AlarmConfigurationError(
+                                "HTTP_NOTIFICATION_NOT_FOUND"
+                            )
+                        if not notification_state[0]:
+                            raise AlarmConfigurationError(
+                                "HTTP_NOTIFICATION_DISABLED"
+                            )
+                        if not notification_state[1]:
+                            raise AlarmConfigurationError(
+                                "HTTP_NOTIFICATION_TEST_STALE"
+                            )
+                        cursor.execute(
+                            """
+                            INSERT INTO t_alarm_http_notification_bindings
+                              (definition_id,configuration_id,created_by)
+                            VALUES (%s,%s,%s)
+                            ON CONFLICT(definition_id) DO UPDATE
+                            SET configuration_id=EXCLUDED.configuration_id,
+                                created_by=EXCLUDED.created_by,
+                                created_at=clock_timestamp()
+                            """,
+                            (
+                                definition_id,
+                                UUID(notification_config_id),
+                                actor,
+                            ),
+                        )
                     definition_ids.append(definition_id)
                 application_id = uuid4()
                 applied_at = datetime.now(timezone.utc)

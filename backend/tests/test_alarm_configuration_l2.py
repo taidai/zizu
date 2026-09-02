@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 import os
 from threading import Event
@@ -47,6 +48,7 @@ class _Repository:
         self.saved = None
         self.applied = object()
         self.apply_calls = 0
+        self.http_notification_states = {}
 
     def get_rule_set_revision(self, rule_set_id, revision):
         return self.rule_set if (rule_set_id, revision) == (self.rule_set.rule_set_id, 1) else None
@@ -74,6 +76,9 @@ class _Repository:
     def apply_plan(self, plan, *, idempotency_key, actor):
         self.apply_calls += 1
         return self.applied
+
+    def http_notification_status(self, config_id):
+        return self.http_notification_states.get(config_id)
 
 
 class _RuntimeGate:
@@ -107,6 +112,83 @@ class _AwaitingRuntimeGate(_RuntimeGate):
 
 
 class AlarmConfigurationL2Test(unittest.TestCase):
+    def test_public_rule_contract_preserves_http_notification_binding(self) -> None:
+        from app.api.alarm_configurations import AlarmRuleRequest, _error, _rule
+
+        config_id = uuid4()
+        request = AlarmRuleRequest.model_validate(
+            {
+                "id": "high",
+                "name": "功率越限",
+                "severity": "MAJOR",
+                "trigger": {"operator": "gt", "value": 90},
+                "trigger_duration_seconds": 1,
+                "recovery": {"operator": "lt", "value": 85},
+                "recovery_duration_seconds": 1,
+                "notification_throttle_seconds": 60,
+                "unit": "kW",
+                "http_notification_config_id": str(config_id),
+            }
+        )
+
+        rule = request.domain()
+        self.assertEqual(config_id, rule.http_notification_config_id)
+        self.assertEqual(str(config_id), _rule(rule)["http_notification_config_id"])
+        self.assertEqual(
+            409,
+            _error(AlarmConfigurationError("HTTP_NOTIFICATION_DISABLED")).status_code,
+        )
+
+    def test_rule_without_http_notification_remains_valid(self) -> None:
+        repository = _Repository()
+
+        plan = AlarmConfiguration(repository).plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(repository.entity.id,)),
+                repository.rule_set.rule_set_id,
+                1,
+                "operator:test",
+            )
+        )
+
+        self.assertEqual("ready", plan.status)
+
+    def test_plan_blocks_missing_disabled_or_stale_http_notification(self) -> None:
+        for state, expected_code in (
+            (None, "HTTP_NOTIFICATION_NOT_FOUND"),
+            ((False, True), "HTTP_NOTIFICATION_DISABLED"),
+            ((True, False), "HTTP_NOTIFICATION_TEST_STALE"),
+        ):
+            with self.subTest(state=state):
+                repository = _Repository()
+                config_id = uuid4()
+                repository.http_notification_states[config_id] = state
+                bound_rule = replace(
+                    repository.rule_set.rules[0],
+                    http_notification_config_id=config_id,
+                )
+                repository.rule_set = replace(
+                    repository.rule_set,
+                    rules=(bound_rule,),
+                    digest=canonical_digest(bound_rule),
+                )
+
+                plan = AlarmConfiguration(repository).plan(
+                    PlanAlarmConfiguration(
+                        EntitySelection(
+                            entity_instance_ids=(repository.entity.id,)
+                        ),
+                        repository.rule_set.rule_set_id,
+                        1,
+                        "operator:test",
+                    )
+                )
+
+                self.assertEqual("blocked", plan.status)
+                self.assertIn(
+                    expected_code,
+                    {item["code"] for item in plan.blockers},
+                )
     def test_rule_group_summary_survives_an_empty_disable_revision(self) -> None:
         from app.services.alarm_configuration_postgres import _rule_groups
 

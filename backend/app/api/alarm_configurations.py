@@ -60,6 +60,7 @@ class AlarmRuleRequest(BaseModel):
     notification_throttle_seconds: float = Field(ge=0)
     unit: str | None = Field(default=None, max_length=100)
     fault_map_id: UUID | None = None
+    http_notification_config_id: UUID | None = None
 
     def domain(self) -> AlarmRule:
         return AlarmRule(**self.model_dump(exclude={"trigger", "recovery"}), trigger=self.trigger.model_dump(), recovery=self.recovery.model_dump())
@@ -108,7 +109,7 @@ class TrialAlarmRuleRequest(BaseModel):
 
 
 def _rule(rule: AlarmRule) -> dict[str, Any]:
-    return {"id": rule.id, "name": rule.name, "severity": rule.severity, "trigger": dict(rule.trigger), "trigger_duration_seconds": rule.trigger_duration_seconds, "recovery": dict(rule.recovery), "recovery_duration_seconds": rule.recovery_duration_seconds, "notification_throttle_seconds": rule.notification_throttle_seconds, "unit": rule.unit, "fault_map_id": str(rule.fault_map_id) if rule.fault_map_id else None}
+    return {"id": rule.id, "name": rule.name, "severity": rule.severity, "trigger": dict(rule.trigger), "trigger_duration_seconds": rule.trigger_duration_seconds, "recovery": dict(rule.recovery), "recovery_duration_seconds": rule.recovery_duration_seconds, "notification_throttle_seconds": rule.notification_throttle_seconds, "unit": rule.unit, "fault_map_id": str(rule.fault_map_id) if rule.fault_map_id else None, "http_notification_config_id": str(rule.http_notification_config_id) if rule.http_notification_config_id else None}
 
 
 def _revision(revision: AlarmRuleSetRevision) -> dict[str, Any]:
@@ -128,7 +129,7 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
     response_status = 422
     if code in {"ALARM_PLAN_NOT_FOUND", "ALARM_RULE_SET_NOT_FOUND"}:
         response_status = 404
-    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_ENTITY_UNRESOLVED"}:
+    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_ENTITY_UNRESOLVED", "HTTP_NOTIFICATION_NOT_FOUND", "HTTP_NOTIFICATION_DISABLED", "HTTP_NOTIFICATION_TEST_STALE"}:
         response_status = 409
     elif code.endswith("_PERSISTENCE_FAILED") or code.endswith("_PERSISTENCE_UNAVAILABLE"):
         response_status = 503
