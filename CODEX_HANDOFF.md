@@ -5305,3 +5305,20 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   就地说明原因。有效数字严格解析；BOOL 触发、恢复和试算值改为 `true/false` 选择，提交真实布尔值。
 - TDD 红灯先得到 2 个预期失败（缺少就绪模型、BOOL 默认值仍为字符串），修复后告警相关前端测试 8/8，
   TypeScript 与 Vite production build 成功（8191 modules）。未修改后端告警运行内核、配置或 1 号机。
+
+## Session 2026-09-02 — v0.6.9 已部署并完成无头主干复验
+
+- 产品提交与标签 `223dd8b261de5020ebafda1bdbae9e6b9b0b8d93`，Actions `33578491309` 成功；
+  1 号机运行 ARM64 固定摘要
+  `sha256:e6d4f4b6d70f088db710ce094806a52c6428d678a1ab95b4bc8db050b57e8fd9`。
+- 切换前备份位于
+  `/opt/zizu-release-test-0.5.0/backups/v0.6.9-pre/omnithings-20260902T011420Z.dump`，
+  177,943,629 bytes，SHA-256 `f3debf541f538364023e255a2f3fc56343e240d81c4037554b989a98e338192b`，
+  `pg_restore -l` 1,024 项可读。只重建 backend，保留 host 网络和 `/dev/mqueue`，未动其他现场容器。
+- 告警试算修复已上线：就地阻止未选实体/非法值；BOOL 使用真实 `true/false`；无头验证 false 恢复、
+  true 触发均正确，且未生成发布预览或发布告警配置。
+- 无头主干完成节点、L0、L1、L2、BIT、告警、读取失败、点位删除与节点退役。现场时序证明早期失败
+  来自验收脚本把 5/15 秒当成配置栅栏上限，以及配置修订变化后复用了旧帧；测试已统一按条件等待最多
+  40 秒，并在最后一次配置变更后发送新修订帧，全局上限调为 900 秒。
+- 最终 healthy、restart 0、Schema059、最近 30 分钟 failed frame 0、outbox 0、活动 E2E 平台/Neuron
+  临时节点均为 0，错误日志 0。完整证据见 `docs/deploy-1号机-v0.6.9-http.md`。
