@@ -7,12 +7,14 @@ classification; it never changes alarm state.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+import hashlib
 import ipaddress
 import json
 import re
 import time
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
@@ -76,8 +78,9 @@ class HttpNotificationError(ValueError):
 @dataclass(frozen=True)
 class RequestField:
     key: str
-    value: str
+    value: str = ""
     sensitive: bool = False
+    clear: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,146 @@ class SecretCodec:
         return self._fernet
 
 
+class AlarmHttpNotificationRepository(Protocol):
+    def list_configs(self) -> Sequence[StoredHttpNotificationConfig]: ...
+
+    def get_config(
+        self,
+        config_id: UUID,
+    ) -> StoredHttpNotificationConfig | None: ...
+
+    def resolve_config(
+        self,
+        config_id: UUID,
+    ) -> ResolvedHttpNotificationConfig | None: ...
+
+    def create_config(
+        self,
+        draft: HttpNotificationDraft,
+        actor: str,
+    ) -> StoredHttpNotificationConfig: ...
+
+    def update_config(
+        self,
+        config_id: UUID,
+        draft: HttpNotificationDraft,
+        actor: str,
+    ) -> StoredHttpNotificationConfig: ...
+
+    def record_test(
+        self,
+        config_id: UUID,
+        digest: str,
+        result: HttpSendResult,
+        actor: str,
+    ) -> StoredHttpNotificationConfig: ...
+
+    def set_enabled(
+        self,
+        config_id: UUID,
+        enabled: bool,
+        actor: str,
+    ) -> StoredHttpNotificationConfig: ...
+
+    def delete_config(self, config_id: UUID, actor: str) -> None: ...
+
+
+Sender = Callable[[RenderedHttpRequest], Awaitable[HttpSendResult]]
+
+
+class AlarmHttpNotifications:
+    """Small public facade over the notification persistence and sender seams."""
+
+    def __init__(
+        self,
+        repository: AlarmHttpNotificationRepository,
+        sender: Sender | None = None,
+    ) -> None:
+        self._repository = repository
+        self._sender = sender or send_http_request
+
+    @property
+    def repository(self) -> AlarmHttpNotificationRepository:
+        return self._repository
+
+    def list(self) -> Sequence[dict[str, object]]:
+        return tuple(public_config(item) for item in self._repository.list_configs())
+
+    def create(
+        self,
+        draft: HttpNotificationDraft,
+        actor: str,
+    ) -> dict[str, object]:
+        return public_config(
+            self._repository.create_config(normalize_draft(draft), actor)
+        )
+
+    def update(
+        self,
+        config_id: UUID,
+        draft: HttpNotificationDraft,
+        actor: str,
+    ) -> dict[str, object]:
+        return public_config(
+            self._repository.update_config(config_id, draft, actor)
+        )
+
+    async def test(self, config_id: UUID, actor: str) -> dict[str, object]:
+        resolved = self._repository.resolve_config(config_id)
+        if resolved is None:
+            raise HttpNotificationError(
+                "HTTP_NOTIFICATION_NOT_FOUND",
+                "HTTP notification configuration was not found",
+            )
+        notification_id = str(UUID(int=config_id.int ^ 1))
+        now = datetime.now(timezone.utc).isoformat()
+        context = NotificationContext(
+            {
+                "notification.id": notification_id,
+                "event.id": str(UUID(int=config_id.int ^ 2)),
+                "event.type": "TEST",
+                "event.time": now,
+                "alarm.name": "测试告警",
+                "alarm.severity": "WARNING",
+                "alarm.state": "test",
+                "alarm.definition_id": "test-definition",
+                "alarm.rule_key": "test.rule",
+                "node.id": "test-node",
+                "node.name": "测试节点",
+                "node.path": "测试场站/测试节点",
+                "entity.id": "test-entity",
+                "entity.key": "test.value",
+                "entity.name": "测试实体",
+                "entity.value": 1,
+                "entity.unit": None,
+                "entity.quality": 192,
+                "entity.observed_at": now,
+            }
+        )
+        result = await self._sender(render_request(resolved.draft, context))
+        return public_config(
+            self._repository.record_test(
+                config_id,
+                resolved.current_digest,
+                result,
+                actor,
+            )
+        )
+
+    def enable(self, config_id: UUID, actor: str) -> dict[str, object]:
+        return public_config(
+            self._repository.set_enabled(config_id, True, actor)
+        )
+
+    def disable(self, config_id: UUID, actor: str) -> dict[str, object]:
+        return public_config(
+            self._repository.set_enabled(config_id, False, actor)
+        )
+
+    def delete(self, config_id: UUID, actor: str) -> None:
+        self._repository.delete_config(config_id, actor)
+
+
 def normalize_draft(draft: HttpNotificationDraft) -> HttpNotificationDraft:
     name = draft.name.strip()
     if not name:
@@ -242,10 +385,38 @@ def normalize_draft(draft: HttpNotificationDraft) -> HttpNotificationDraft:
     )
 
 
+def draft_digest(draft: HttpNotificationDraft) -> str:
+    """Hash only request material; labels do not invalidate a successful test."""
+    normalized = normalize_draft(draft)
+    material = {
+        "method": normalized.method,
+        "url": normalized.url,
+        "query_params": [
+            {"key": field.key, "value": field.value, "sensitive": field.sensitive}
+            for field in normalized.query_params
+        ],
+        "headers": [
+            {"key": field.key, "value": field.value, "sensitive": field.sensitive}
+            for field in normalized.headers
+        ],
+        "content_type": normalized.content_type,
+        "body_template": normalized.body_template,
+        "timeout_seconds": normalized.timeout_seconds,
+    }
+    canonical = json.dumps(
+        material,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def mask_url(url: str) -> str:
     parsed = urlsplit(url)
     masked_query = urlencode([(key, "***") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)])
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, masked_query, ""))
+    masked_path = "/***" if parsed.path and parsed.path != "/" else "/"
+    return urlunsplit((parsed.scheme, parsed.netloc, masked_path, masked_query, ""))
 
 
 def render_request(
@@ -528,6 +699,8 @@ def _response_excerpt(value: str) -> str:
 
 __all__ = [
     "ALLOWED_VARIABLES",
+    "AlarmHttpNotificationRepository",
+    "AlarmHttpNotifications",
     "DeliveryClaim",
     "HttpNotificationDraft",
     "HttpNotificationError",
@@ -538,6 +711,7 @@ __all__ = [
     "ResolvedHttpNotificationConfig",
     "SecretCodec",
     "StoredHttpNotificationConfig",
+    "draft_digest",
     "mask_url",
     "normalize_draft",
     "public_config",

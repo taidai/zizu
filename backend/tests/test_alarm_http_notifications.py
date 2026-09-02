@@ -119,9 +119,11 @@ class AlarmHttpNotificationContractTest(unittest.TestCase):
 
     def test_public_target_masks_query_values(self) -> None:
         module = _module()
-        display = module.mask_url("https://receiver.invalid/hook?token=hidden&room=ops")
+        display = module.mask_url(
+            "https://receiver.invalid/open-apis/bot/hook/path-hidden?token=hidden&room=ops"
+        )
         self.assertEqual(
-            "https://receiver.invalid/hook?token=%2A%2A%2A&room=%2A%2A%2A",
+            "https://receiver.invalid/***?token=%2A%2A%2A&room=%2A%2A%2A",
             display,
         )
 
