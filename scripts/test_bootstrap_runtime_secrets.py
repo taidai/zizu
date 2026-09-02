@@ -47,6 +47,7 @@ class BootstrapRuntimeSecretsTest(unittest.TestCase):
             self.assertGreaterEqual(len(env["DB_OWNER_PASSWORD"]), 32)
             self.assertNotEqual(env["DB_OWNER_PASSWORD"], env["DB_PASSWORD"])
             self.assertGreaterEqual(len(env["JWT_SECRET"]), 32)
+            self.assertGreaterEqual(len(env["HTTP_NOTIFICATION_ENCRYPTION_KEY"]), 40)
             self.assertGreaterEqual(len(env["NANOMQ_API_PASSWORD"]), 32)
             self.assertEqual(env["NEURON_PASSWORD"], "rotated-neuron-test-value")
             self.assertNotEqual(env["NANOMQ_API_PASSWORD"], "public")
@@ -79,10 +80,19 @@ class BootstrapRuntimeSecretsTest(unittest.TestCase):
 
             bootstrap(env_file, secret_file, rotate=False)
             first_env = env_file.read_bytes()
+            first_http_key = parse_env(first_env.decode("utf-8"))[
+                "HTTP_NOTIFICATION_ENCRYPTION_KEY"
+            ]
             first_secret = secret_file.read_bytes()
             bootstrap(env_file, secret_file, rotate=False)
 
             self.assertEqual(env_file.read_bytes(), first_env)
+            self.assertEqual(
+                parse_env(env_file.read_text(encoding="utf-8"))[
+                    "HTTP_NOTIFICATION_ENCRYPTION_KEY"
+                ],
+                first_http_key,
+            )
             self.assertEqual(secret_file.read_bytes(), first_secret)
 
     def test_existing_public_default_requires_explicit_rotation(self) -> None:

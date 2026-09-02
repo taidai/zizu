@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_ROOT = REPO_ROOT / "backend"
@@ -147,6 +149,7 @@ def bootstrap(
     current_db_owner = env.get("DB_OWNER_PASSWORD", "")
     current_neuron = env.get("NEURON_PASSWORD", "")
     current_jwt = env.get("JWT_SECRET", "")
+    current_http_notification_key = env.get("HTTP_NOTIFICATION_ENCRYPTION_KEY", "")
 
     if existing and (
         not current_db.strip()
@@ -207,6 +210,9 @@ def bootstrap(
     db_password = secrets.token_urlsafe(32) if not existing else current_db
     db_owner_password = secrets.token_urlsafe(32) if not existing else current_db_owner
     jwt_secret = secrets.token_urlsafe(48) if not existing else current_jwt
+    http_notification_key = (
+        current_http_notification_key or Fernet.generate_key().decode("ascii")
+    )
     resolved_neuron = neuron_password or current_neuron
     password = (
         secrets.token_urlsafe(32)
@@ -220,6 +226,11 @@ def bootstrap(
     env_text = replace_env_value(env_text, "NANOMQ_API_USERNAME", username)
     env_text = replace_env_value(env_text, "NANOMQ_API_PASSWORD", password)
     env_text = replace_env_value(env_text, "JWT_SECRET", jwt_secret)
+    env_text = replace_env_value(
+        env_text,
+        "HTTP_NOTIFICATION_ENCRYPTION_KEY",
+        http_notification_key,
+    )
 
     write_runtime_pair(
         env_file,

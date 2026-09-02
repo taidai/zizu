@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440  # 24h
+    http_notification_encryption_key: str | None = None
     auth_session_minutes: int = Field(default=480, ge=5, le=1440)
     auth_require_https: bool = True
     auth_trust_proxy_headers: bool = False
