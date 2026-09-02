@@ -84,6 +84,29 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
         self.assertEqual((self.entity_id,), group.entity_instance_ids)
         self.assertEqual((), group.enabled_entity_instance_ids)
 
+    def test_reenable_reuses_the_existing_immutable_alarm_definition(self) -> None:
+        service = AlarmConfiguration(PostgresAlarmConfigurationRepository(lambda: psycopg2.connect(**self.kwargs)))
+        rule_set = service.create_rule_set(
+            key="pcs-power", name="PCS 功率",
+            rules=(AlarmRule("high", "功率越限", "MAJOR", {"operator": "gt", "value": 90}, 0, {"operator": "lt", "value": 85}, 0, 60, "kW"),),
+            actor="operator:test",
+        )
+        enabled_plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), rule_set.rule_set_id, 1, "operator:test"))
+        first_result = service.apply(ApplyAlarmConfigurationPlan(enabled_plan.id, enabled_plan.digest, "alarm-enable-1", "operator:test"))
+        empty = service.create_rule_set_revision(rule_set_id=rule_set.rule_set_id, rules=(), actor="operator:test")
+        disabled_plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), empty.rule_set_id, empty.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(disabled_plan.id, disabled_plan.digest, "alarm-disable-1", "operator:test"))
+
+        reenabled_plan = service.plan(PlanAlarmConfiguration(EntitySelection(entity_instance_ids=(self.entity_id,)), rule_set.rule_set_id, 1, "operator:test"))
+        reenabled_result = service.apply(ApplyAlarmConfigurationPlan(reenabled_plan.id, reenabled_plan.digest, "alarm-enable-2", "operator:test"))
+
+        self.assertEqual(first_result.definition_ids, reenabled_result.definition_ids)
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_alarm_definitions")
+            self.assertEqual(1, cursor.fetchone()[0])
+            cursor.execute("SELECT definition_id FROM t_alarm_definition_current")
+            self.assertEqual(first_result.definition_ids[0], cursor.fetchone()[0])
+
     def test_event_view_resolves_node_entity_and_rule_names(self) -> None:
         from app.services.telemetry_store import close_db_pool, init_db_pool
 

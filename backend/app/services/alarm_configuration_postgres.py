@@ -372,7 +372,21 @@ class PostgresAlarmConfigurationRepository:
                            trigger_duration_seconds,recovery_condition,recovery_duration_seconds,
                            severity,notification_throttle_seconds,content_digest,content_digest_algorithm)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sha256-v2-content')
+                        ON CONFLICT(asset_id,entity_instance_id,content_digest_algorithm,content_digest)
+                        DO NOTHING
+                        RETURNING id
                     """, (definition_id, item.definition_key, str(revision), revision, item.entity_instance_id, entity[0], Json(trigger), rule["trigger_duration_seconds"], Json(recovery), rule["recovery_duration_seconds"], rule["severity"], rule["notification_throttle_seconds"], digest))
+                    inserted = cursor.fetchone()
+                    if inserted is None:
+                        cursor.execute("""
+                            SELECT id FROM t_alarm_definitions
+                            WHERE asset_id=%s AND entity_instance_id=%s
+                              AND content_digest_algorithm='sha256-v2-content'
+                              AND content_digest=%s
+                        """, (item.definition_key, item.entity_instance_id, digest))
+                        definition_id = cursor.fetchone()[0]
+                    else:
+                        definition_id = inserted[0]
                     cursor.execute("""
                         INSERT INTO t_alarm_definition_current(asset_id,entity_instance_id,definition_id,configuration_revision)
                         VALUES (%s,%s,%s,%s)
