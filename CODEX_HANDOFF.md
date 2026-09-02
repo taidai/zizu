@@ -1,5 +1,30 @@
 ---
 
+## Session 2026-09-02 — v0.7.0 告警试算可解释性修复并部署验收
+
+- 现场复现证明告警 matcher 和试算 API 原本能正确区分 BOOL `false/true`；根因是页面只显示泛化的
+  “命中/未命中”结论，既不显示试算对象、输入和具体条件，批量选择时也不说明以哪个实体为试算基准，
+  因而用户无法判断下拉选择是否生效。
+- 提交 `541ebf5` 新增纯展示模型：结果现在明确显示节点/实体、试算值、会触发/会恢复/无变化、等级，
+  以及触发与恢复的实际运算符、设定值和命中状态；页面同时显示本次试算对象。未复制或修改后端匹配
+  语义，未改变正式发布链。提交 `321b184` 依十进位规则将版本从 0.6.9 升至 0.7.0。
+- TDD 先得到 `describeAlarmTrialResult is not a function` 的 RED，再转绿；最终告警前端专项 `9/9`，
+  TypeScript/Vite production build 成功（8,191 modules），Actions `33583938581` 成功。
+- 1 号机运行 ARM64 固定摘要
+  `ghcr.io/taidai/zizu@sha256:fbd47acba11048c7834fd2bb88cdd97c644c943484f6274ed4344eeb4a0d55ea`，
+  image ID `sha256:6246d51251a7a5ec6438374692b7fc09eabd7e0b9e1dceca924cdd793f9c2553`；版本
+  0.7.0、Schema 059、healthy、restart 0、host 网络、`/dev/mqueue` tmpfs。TimescaleDB 与 NanoMQ
+  继续运行 6 天，未重启；最近 10 分钟日志无 ERROR/Traceback/CRITICAL/tick failure。
+- 切换前数据库备份：
+  `/opt/zizu-release-test-0.5.0/backups/v0.7.0-pre/omnithings-20260902T024519Z.dump`，
+  188,591,543 bytes，SHA-256 `1f26d4ba59bfbecd7d6d191489ae4b1a89b903312d4155ed7db2fc64d2147b55`，
+  容器内 `pg_restore -l` 返回 1,045 项；运行配置备份为
+  `/opt/zizu-release-test-0.5.0/release.env.pre-v0.7.0-20260902T025129Z`。
+- 公网 Chromium 无头聚焦验收依次证明：默认规则下 `false` 请求得到“会恢复”，`true` 请求得到
+  “会触发警告告警”；反转触发/恢复选择后，请求中的值确为 `false/true`，页面条件同步变化；三次 API
+  均 200，Browser 控制台 error 为 0。只调用无副作用试算，未生成预览、发布配置、启停规则或写设备。
+- 完整证据见 `docs/deploy-1号机-v0.7.0-http.md`。当前根分区剩余约 2.6GB；本轮未清理旧镜像。
+
 ## Session 2026-09-01 — L0 原值保真与 BIT 显式加工设计整体确认
 
 - 维护者已整体确认新的硬边界：L0 只保存设备实际原值，不再保存或产生规范值；数字 `0`、字符串
