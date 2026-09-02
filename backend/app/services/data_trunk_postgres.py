@@ -438,7 +438,7 @@ class PostgresFrameRepository:
                 if contract_by_tag:
                     cursor.execute(
                         """
-                        SELECT DISTINCT ON (telemetry.tag_id)
+                        SELECT
                           telemetry.observation_id, telemetry.node_id,
                           telemetry.tag_id, telemetry.ts,
                           telemetry.source_digest,
@@ -453,19 +453,16 @@ class PostgresFrameRepository:
                           telemetry.source_order_mode,
                           telemetry.source_receive_ordinal,
                           telemetry.quality_reason
-                        FROM t_telemetry AS telemetry
-                        JOIN t_tags AS recovered_tag
-                          ON recovered_tag.id=telemetry.tag_id
+                        FROM t_telemetry_latest AS telemetry
                         WHERE telemetry.tag_id = ANY(%s::uuid[])
-                          AND telemetry.frame_sequence IS NOT NULL
+                          AND telemetry.frame_sequence > 0
                           AND num_nonnulls(
                                 telemetry.raw_value_float,
                                 telemetry.raw_value_int,
                                 telemetry.raw_value_bool,
                                 telemetry.raw_value_text
                               ) = 1
-                        ORDER BY telemetry.tag_id,
-                                 telemetry.frame_sequence DESC, telemetry.ts DESC
+                        ORDER BY telemetry.tag_id
                         """,
                         ([str(tag_id) for tag_id in contract_by_tag],),
                     )

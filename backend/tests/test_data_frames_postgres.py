@@ -584,6 +584,12 @@ class DataFramesPostgresTest(unittest.TestCase):
 
     def test_restore_blackboard_uses_last_capture_and_current_configuration(self) -> None:
         self.repository.commit_pending(self._candidate(capture_beat=105))
+        terminal = FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+        self.assertEqual("COMPLETE", terminal.status.value)
         recovered = self.repository.restore_blackboard()
         self.assertGreaterEqual(recovered.capture_beat, 105)
         self.assertEqual(0, recovered.configuration_revision)
@@ -598,8 +604,34 @@ class DataFramesPostgresTest(unittest.TestCase):
             recovered.observations[0].observation.tag_id,
         )
 
+    def test_restore_blackboard_ignores_newer_pending_history(self) -> None:
+        committed = self.repository.commit_pending(self._candidate(capture_beat=105))
+        terminal = FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+        self.assertEqual(committed.frame_id, terminal.frame_id)
+        self.assertEqual("COMPLETE", terminal.status.value)
+
+        pending = self.repository.commit_pending(self._candidate(capture_beat=106))
+        recovered = self.repository.restore_blackboard()
+
+        self.assertEqual(106, recovered.capture_beat)
+        self.assertEqual(1, len(recovered.observations))
+        restored = recovered.observations[0]
+        self.assertEqual(105, restored.accepted_beat)
+        self.assertEqual(TypedValue.float(105.0), restored.observation.value)
+        self.assertNotEqual(pending.frame_id, committed.frame_id)
+
     def test_restore_blackboard_preserves_actual_raw_type_after_tag_metadata_changes(self) -> None:
         self.repository.commit_pending(self._candidate(capture_beat=105))
+        terminal = FrameProcessor(
+            self.repository,
+            evaluator=evaluate_processing,
+            clock=lambda: datetime.now(UTC),
+        ).process_next(datetime.now(UTC))
+        self.assertEqual("COMPLETE", terminal.status.value)
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE t_tags SET data_type='BOOL',value_data_type='BOOL' "
