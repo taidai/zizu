@@ -595,6 +595,7 @@ class _PostgresAlarmTransaction:
         return row[0] if row and row[0] else None
 
     def enqueue_notification(self, notification: AlarmNotification) -> None:
+        context_snapshot = self._notification_context_snapshot(notification)
         with self._connection.cursor() as cur:
             cur.execute(
                 """
@@ -616,12 +617,80 @@ class _PostgresAlarmTransaction:
                     notification.entity_instance_id,
                     notification.configuration_id,
                     notification.configuration_name,
-                    Json(notification.context_snapshot),
+                    Json(context_snapshot),
                     notification.created_at,
                     notification.created_at,
                     notification.created_at,
                 ),
             )
+
+    def _notification_context_snapshot(
+        self,
+        notification: AlarmNotification,
+    ) -> dict[str, object]:
+        snapshot = dict(notification.context_snapshot)
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                WITH RECURSIVE lineage AS (
+                  SELECT node.id,node.parent_id,node.name,0 AS depth
+                  FROM t_nodes node
+                  JOIN t_entity_instances entity ON entity.node_id=node.id
+                  WHERE entity.id=%s
+                  UNION ALL
+                  SELECT parent.id,parent.parent_id,parent.name,lineage.depth+1
+                  FROM t_nodes parent
+                  JOIN lineage ON lineage.parent_id=parent.id
+                )
+                SELECT definition.asset_id,definition.entity_instance_id,
+                       entity.display_name,entity.unit,node.name,
+                       (SELECT string_agg(name,'/' ORDER BY depth DESC)
+                        FROM lineage)
+                FROM t_alarm_definitions definition
+                JOIN t_entity_instances entity
+                  ON entity.id=definition.entity_instance_id
+                LEFT JOIN t_nodes node ON node.id=entity.node_id
+                WHERE definition.id=%s
+                """,
+                (notification.entity_instance_id, notification.definition_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return snapshot
+            (
+                asset_id,
+                entity_instance_id,
+                entity_name,
+                entity_unit,
+                node_name,
+                node_path,
+            ) = row
+            cur.execute(
+                """
+                SELECT rule_set_key,rules
+                FROM t_alarm_rule_set_revisions
+                ORDER BY revision DESC
+                """
+            )
+            revisions = cur.fetchall()
+        snapshot.update(
+            {
+                "alarm.name": _alarm_rule_name(
+                    str(asset_id),
+                    entity_instance_id,
+                    revisions,
+                ),
+                "node.name": str(node_name or snapshot.get("node.name") or ""),
+                "node.path": str(
+                    node_path or node_name or snapshot.get("node.path") or ""
+                ),
+                "entity.name": str(
+                    entity_name or snapshot.get("entity.name") or ""
+                ),
+                "entity.unit": entity_unit,
+            }
+        )
+        return snapshot
 
     def notification_configuration(
         self,

@@ -175,11 +175,7 @@ class AlarmRuntimePostgresTest(unittest.TestCase):
                     source_ref="frame:test",
                     evidence={
                         "node_id": str(self.node_id),
-                        "node_name": "PCS-01",
-                        "node_path": "储能/PCS-01",
-                        "entity_name": "有功功率",
-                        "entity_unit": "kW",
-                        "alarm_name": "功率越限",
+                        "unit": "kW",
                     },
                 )
 
@@ -209,6 +205,9 @@ class AlarmRuntimePostgresTest(unittest.TestCase):
             self.assertTrue(all(row[1] == "pending" for row in rows))
             self.assertTrue(all(row[3] for row in rows))
             self.assertEqual("PCS-01", rows[0][2]["node.name"])
+            self.assertEqual("有功功率", rows[0][2]["entity.name"])
+            self.assertEqual("功率越限", rows[0][2]["alarm.name"])
+            self.assertEqual("kW", rows[0][2]["entity.unit"])
             self.assertEqual(101, rows[0][2]["entity.value"])
 
             with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
