@@ -247,6 +247,20 @@ class AlarmHttpNotificationRepository(Protocol):
 
     def delete_config(self, config_id: UUID, actor: str) -> None: ...
 
+    def list_deliveries(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, object]: ...
+
+    def retry_delivery(
+        self,
+        notification_id: UUID,
+        actor: str,
+        idempotency_key: str,
+    ) -> dict[str, object]: ...
+
 
 class AlarmDeliveryRepository(Protocol):
     def claim_due(
@@ -372,6 +386,26 @@ class AlarmHttpNotifications:
 
     def delete(self, config_id: UUID, actor: str) -> None:
         self._repository.delete_config(config_id, actor)
+
+    def list_deliveries(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, object]:
+        return self._repository.list_deliveries(page=page, page_size=page_size)
+
+    def retry(
+        self,
+        notification_id: UUID,
+        actor: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        return self._repository.retry_delivery(
+            notification_id,
+            actor,
+            idempotency_key,
+        )
 
 
 class AlarmHttpNotificationDispatcher:

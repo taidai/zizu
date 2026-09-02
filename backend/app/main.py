@@ -412,6 +412,15 @@ def create_app() -> FastAPI:
         tags=["Alarm HTTP Notifications"],
     )
 
+    from app.api.alarm_notification_deliveries import (
+        router as alarm_notification_deliveries_router,
+    )
+    app.include_router(
+        alarm_notification_deliveries_router,
+        prefix="/api/v1",
+        tags=["Alarm HTTP Notifications"],
+    )
+
     from app.api.control_commands import router as control_commands_router
     app.include_router(
         control_commands_router,

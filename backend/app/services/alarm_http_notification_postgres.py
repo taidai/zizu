@@ -350,6 +350,193 @@ class PostgresAlarmHttpNotificationRepository:
                 (config_id,),
             )
 
+    def list_deliveries(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, object]:
+        if page < 1 or page_size < 1 or page_size > 200:
+            raise HttpNotificationError(
+                "HTTP_NOTIFICATION_INVALID_PAGE",
+                "Notification delivery page is invalid",
+            )
+        offset = (page - 1) * page_size
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_alarm_notification_outbox")
+            total = int(cursor.fetchone()[0])
+            cursor.execute(
+                """
+                SELECT delivery.id,delivery.event_id,delivery.transition_code,
+                       delivery.configuration_name_snapshot,
+                       delivery.context_snapshot,delivery.status,
+                       delivery.attempt_count,
+                       COALESCE(delivery.last_target_display,config.url_display),
+                       delivery.last_http_status,delivery.last_error_code,
+                       delivery.last_error_detail,delivery.last_response_excerpt,
+                       delivery.created_at,delivery.delivered_at,
+                       delivery.cancelled_at,(config.id IS NOT NULL)
+                FROM t_alarm_notification_outbox delivery
+                LEFT JOIN t_alarm_http_notification_configs config
+                  ON config.id=delivery.configuration_id
+                ORDER BY delivery.created_at DESC,delivery.id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (page_size, offset),
+            )
+            rows = cursor.fetchall()
+            notification_ids = [row[0] for row in rows]
+            attempts_by_notification: dict[UUID, list[dict[str, object]]] = {
+                notification_id: [] for notification_id in notification_ids
+            }
+            if notification_ids:
+                cursor.execute(
+                    """
+                    SELECT notification_id,attempt_no,attempted_at,method,
+                           target_display,duration_ms,outcome,http_status,
+                           error_code,error_detail,response_excerpt
+                    FROM t_alarm_notification_attempts
+                    WHERE notification_id=ANY(%s)
+                    ORDER BY notification_id,attempt_no
+                    """,
+                    (notification_ids,),
+                )
+                for attempt in cursor.fetchall():
+                    attempts_by_notification[attempt[0]].append(
+                        self._attempt_public(attempt)
+                    )
+        items = [
+            self._delivery_public(row, attempts_by_notification[row[0]])
+            for row in rows
+        ]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        }
+
+    def retry_delivery(
+        self,
+        notification_id: UUID,
+        actor: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        self._require_actor(actor)
+        key = idempotency_key.strip()
+        if not key or len(key) > 200:
+            raise HttpNotificationError(
+                "HTTP_NOTIFICATION_INVALID_IDEMPOTENCY_KEY",
+                "Manual retry needs a valid idempotency key",
+            )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"alarm-http-retry:{actor}:{key}",),
+            )
+            cursor.execute(
+                """
+                SELECT notification_id,response
+                FROM t_alarm_notification_retry_idempotency
+                WHERE actor=%s AND idempotency_key=%s
+                """,
+                (actor, key),
+            )
+            replay = cursor.fetchone()
+            if replay is not None:
+                if replay[0] != notification_id:
+                    raise HttpNotificationError(
+                        "HTTP_NOTIFICATION_IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency key was already used for another notification",
+                    )
+                return dict(replay[1])
+
+            cursor.execute(
+                """
+                SELECT delivery.id,delivery.event_id,delivery.transition_code,
+                       delivery.configuration_name_snapshot,
+                       delivery.context_snapshot,delivery.status,
+                       delivery.attempt_count,
+                       COALESCE(delivery.last_target_display,config.url_display),
+                       delivery.last_http_status,delivery.last_error_code,
+                       delivery.last_error_detail,delivery.last_response_excerpt,
+                       delivery.created_at,delivery.delivered_at,
+                       delivery.cancelled_at,(config.id IS NOT NULL)
+                FROM t_alarm_notification_outbox delivery
+                LEFT JOIN t_alarm_http_notification_configs config
+                  ON config.id=delivery.configuration_id
+                WHERE delivery.id=%s
+                FOR UPDATE OF delivery
+                """,
+                (notification_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_DELIVERY_NOT_FOUND",
+                    "HTTP notification delivery was not found",
+                )
+            if not row[15]:
+                self._not_found()
+            if row[5] != "failed":
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_RETRY_NOT_ALLOWED",
+                    "Only failed HTTP notification deliveries can be retried",
+                )
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET status='pending',cycle_attempt_count=0,
+                    next_attempt_at=clock_timestamp(),lease_owner=NULL,
+                    lease_expires_at=NULL,delivered_at=NULL,cancelled_at=NULL,
+                    updated_at=clock_timestamp()
+                WHERE id=%s
+                """,
+                (notification_id,),
+            )
+            cursor.execute(
+                """
+                SELECT delivery.id,delivery.event_id,delivery.transition_code,
+                       delivery.configuration_name_snapshot,
+                       delivery.context_snapshot,delivery.status,
+                       delivery.attempt_count,
+                       COALESCE(delivery.last_target_display,config.url_display),
+                       delivery.last_http_status,delivery.last_error_code,
+                       delivery.last_error_detail,delivery.last_response_excerpt,
+                       delivery.created_at,delivery.delivered_at,
+                       delivery.cancelled_at,(config.id IS NOT NULL)
+                FROM t_alarm_notification_outbox delivery
+                LEFT JOIN t_alarm_http_notification_configs config
+                  ON config.id=delivery.configuration_id
+                WHERE delivery.id=%s
+                """,
+                (notification_id,),
+            )
+            updated = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT notification_id,attempt_no,attempted_at,method,
+                       target_display,duration_ms,outcome,http_status,
+                       error_code,error_detail,response_excerpt
+                FROM t_alarm_notification_attempts
+                WHERE notification_id=%s
+                ORDER BY attempt_no
+                """,
+                (notification_id,),
+            )
+            attempts = [self._attempt_public(item) for item in cursor.fetchall()]
+            response = self._delivery_public(updated, attempts)
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_retry_idempotency
+                  (actor,idempotency_key,notification_id,response)
+                VALUES (%s,%s,%s,%s)
+                """,
+                (actor, key, notification_id, Json(response)),
+            )
+        return response
+
     def claim_due(
         self,
         *,
@@ -539,6 +726,55 @@ class PostgresAlarmHttpNotificationRepository:
                 """,
                 (now, now, claim.id, claim.lease_owner),
             )
+
+    @staticmethod
+    def _iso(value: Any) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    @classmethod
+    def _attempt_public(cls, row: tuple[Any, ...]) -> dict[str, object]:
+        return {
+            "attempt_no": int(row[1]),
+            "attempted_at": cls._iso(row[2]),
+            "method": row[3],
+            "target_display": row[4],
+            "duration_ms": int(row[5]),
+            "outcome": row[6],
+            "http_status": row[7],
+            "error_code": row[8],
+            "error_detail": row[9],
+            "response_excerpt": row[10],
+        }
+
+    @classmethod
+    def _delivery_public(
+        cls,
+        row: tuple[Any, ...],
+        attempts: Sequence[dict[str, object]],
+    ) -> dict[str, object]:
+        context = dict(row[4] or {})
+        return {
+            "id": str(row[0]),
+            "event_id": str(row[1]),
+            "event_type": row[2],
+            "alarm_name": context.get("alarm.name"),
+            "severity": context.get("alarm.severity"),
+            "node_name": context.get("node.name"),
+            "entity_name": context.get("entity.name"),
+            "configuration_name": row[3],
+            "configuration_exists": bool(row[15]),
+            "target_display": row[7],
+            "status": row[5],
+            "attempt_count": int(row[6]),
+            "last_http_status": row[8],
+            "last_error_code": row[9],
+            "last_error_detail": row[10],
+            "last_response_excerpt": row[11],
+            "created_at": cls._iso(row[12]),
+            "delivered_at": cls._iso(row[13]),
+            "cancelled_at": cls._iso(row[14]),
+            "attempts": list(attempts),
+        }
 
     @staticmethod
     def _fetch_public(cursor: Any, config_id: UUID) -> tuple[Any, ...] | None:

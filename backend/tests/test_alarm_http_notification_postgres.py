@@ -359,6 +359,124 @@ class AlarmHttpNotificationPostgresTest(unittest.TestCase):
                 if status == "cancelled":
                     self.assertEqual("HTTP_NOTIFICATION_DELIVERY_CANCELLED", error_code)
 
+    def test_list_deliveries_returns_redacted_history_and_attempts(self) -> None:
+        notification_id, _config_id, now = self._seed_delivery()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET context_snapshot=%s
+                WHERE id=%s
+                """,
+                (
+                    '{"notification.id":"%s","event.type":"ALARM_ACTIVATED",'
+                    '"alarm.name":"PCS 故障","alarm.severity":"MAJOR",'
+                    '"node.name":"1# PCS","entity.name":"故障状态"}'
+                    % notification_id,
+                    notification_id,
+                ),
+            )
+        claim = self.repository.claim_due(worker_id="worker-1", now=now)
+        assert claim is not None
+        self.repository.complete_attempt(
+            claim,
+            HttpSendResult(
+                False,
+                "rejected",
+                500,
+                12,
+                "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                "Remote endpoint rejected the request",
+                "failure",
+                "POST",
+                "https://receiver.invalid/***",
+            ),
+            now,
+        )
+
+        result = self.repository.list_deliveries(page=1, page_size=20)
+
+        self.assertEqual(1, result["total"])
+        item = result["items"][0]
+        self.assertEqual(str(notification_id), item["id"])
+        self.assertEqual("PCS 故障", item["alarm_name"])
+        self.assertEqual("MAJOR", item["severity"])
+        self.assertEqual("1# PCS", item["node_name"])
+        self.assertEqual("故障状态", item["entity_name"])
+        self.assertEqual("retry_wait", item["status"])
+        self.assertEqual(1, len(item["attempts"]))
+        self.assertEqual(500, item["attempts"][0]["http_status"])
+        self.assertNotIn("hidden", str(result))
+
+    def test_manual_retry_reopens_failed_delivery_and_is_idempotent(self) -> None:
+        notification_id, _config_id, _now = self._seed_delivery()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET status='failed',attempt_count=4,cycle_attempt_count=4,
+                    last_error_code='HTTP_NOTIFICATION_DELIVERY_REJECTED'
+                WHERE id=%s
+                """,
+                (notification_id,),
+            )
+
+        first = self.repository.retry_delivery(
+            notification_id,
+            "engineer",
+            "retry-once",
+        )
+        replay = self.repository.retry_delivery(
+            notification_id,
+            "engineer",
+            "retry-once",
+        )
+
+        self.assertEqual(first, replay)
+        self.assertEqual("pending", first["status"])
+        self.assertEqual(4, first["attempt_count"])
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT status,attempt_count,cycle_attempt_count,event_id
+                FROM t_alarm_notification_outbox WHERE id=%s
+                """,
+                (notification_id,),
+            )
+            row = cursor.fetchone()
+        self.assertEqual(("pending", 4, 0), row[:3])
+        self.assertEqual(first["event_id"], str(row[3]))
+
+    def test_manual_retry_rejects_non_failed_or_missing_configuration(self) -> None:
+        notification_id, _config_id, _now = self._seed_delivery()
+        with self.assertRaises(HttpNotificationError) as not_failed:
+            self.repository.retry_delivery(
+                notification_id,
+                "engineer",
+                "retry-pending",
+            )
+        self.assertEqual(
+            "HTTP_NOTIFICATION_RETRY_NOT_ALLOWED",
+            not_failed.exception.code,
+        )
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_alarm_notification_outbox
+                SET status='failed',configuration_id=NULL
+                WHERE id=%s
+                """,
+                (notification_id,),
+            )
+        with self.assertRaises(HttpNotificationError) as missing:
+            self.repository.retry_delivery(
+                notification_id,
+                "engineer",
+                "retry-missing-config",
+            )
+        self.assertEqual("HTTP_NOTIFICATION_NOT_FOUND", missing.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()
