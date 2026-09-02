@@ -259,6 +259,15 @@ class PostgresAlarmRepository:
         with self.transaction() as transaction:
             return transaction.list_events()
 
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ) -> tuple[AlarmEvent, ...]:
+        if not entity_instance_ids:
+            return ()
+        with self.transaction() as transaction:
+            return transaction.list_open_for_entities(entity_instance_ids)
+
     def describe_events(
         self,
         events: tuple[AlarmEvent, ...],
@@ -427,6 +436,29 @@ class _PostgresAlarmTransaction:
                        recovered_at, first_observation, last_observation, recovery_observation
                 FROM t_alarm_events ORDER BY pending_at DESC, id DESC
                 """
+            )
+            rows = cur.fetchall()
+        return tuple(_event(row) for row in rows)
+
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ) -> tuple[AlarmEvent, ...]:
+        if not entity_instance_ids:
+            return ()
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, definition_id, definition_version, entity_instance_id,
+                       state, severity, pending_at, active_at, acknowledged_at,
+                       acknowledged_by, acknowledgement_note, recovery_candidate_since,
+                       recovered_at, first_observation, last_observation, recovery_observation
+                FROM t_alarm_events
+                WHERE entity_instance_id = ANY(%s::uuid[])
+                  AND state IN ('pending', 'active_unacknowledged', 'active_acknowledged')
+                ORDER BY pending_at DESC, id DESC
+                """,
+                ([str(entity_id) for entity_id in entity_instance_ids],),
             )
             rows = cur.fetchall()
         return tuple(_event(row) for row in rows)

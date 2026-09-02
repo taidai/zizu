@@ -115,7 +115,41 @@ def _consumer(*definitions: AlarmDefinition):
     return CommittedL2AlarmConsumer(catalog, runtime), repository
 
 
+class _TargetedOpenEventRepository(InMemoryAlarmRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_event_queries: list[frozenset[UUID]] = []
+
+    def list_events(self):
+        raise AssertionError("committed-frame dispatch must not load every alarm event")
+
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ):
+        self.open_event_queries.append(entity_instance_ids)
+        return super().list_open_for_entities(entity_instance_ids)
+
+
 class CommittedL2AlarmConsumerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_queries_open_events_only_for_entities_in_frame(self) -> None:
+        catalog = InMemoryAlarmDefinitionCatalog(
+            (_definition(DEFINITION_A, ENTITY_A),)
+        )
+        repository = _TargetedOpenEventRepository()
+        consumer = CommittedL2AlarmConsumer(
+            catalog,
+            AlarmRuntime(catalog, repository),
+        )
+
+        await consumer.publish(_frame())
+
+        self.assertEqual(
+            [frozenset({ENTITY_A})],
+            repository.open_event_queries,
+        )
+        self.assertEqual(1, len(repository.active_events()))
+
     async def test_submits_only_l2_with_complete_frame_evidence(self) -> None:
         consumer, repository = _consumer(_definition(DEFINITION_A, ENTITY_A))
         event = _frame()

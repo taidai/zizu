@@ -164,6 +164,11 @@ class AlarmRepository(Protocol):
 
     def list_events(self) -> tuple[AlarmEvent, ...]: ...
 
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ) -> tuple[AlarmEvent, ...]: ...
+
     def transitions(self, event_id: UUID) -> tuple[AlarmTransition, ...]: ...
 
     def save_event(self, event: AlarmEvent) -> AlarmEvent: ...
@@ -321,6 +326,23 @@ class InMemoryAlarmRepository:
         return tuple(
             sorted(
                 self._events.values(),
+                key=lambda event: (event.pending_at, str(event.id)),
+                reverse=True,
+            )
+        )
+
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ) -> tuple[AlarmEvent, ...]:
+        return tuple(
+            sorted(
+                (
+                    event
+                    for event in self._events.values()
+                    if event.entity_instance_id in entity_instance_ids
+                    and event.state in OPEN_STATES
+                ),
                 key=lambda event: (event.pending_at, str(event.id)),
                 reverse=True,
             )
@@ -591,6 +613,14 @@ class AlarmRuntime:
 
     def list(self) -> tuple[AlarmEvent, ...]:
         return self._repository.list_events()
+
+    def list_open_for_entities(
+        self,
+        entity_instance_ids: frozenset[UUID],
+    ) -> tuple[AlarmEvent, ...]:
+        if not entity_instance_ids:
+            return ()
+        return self._repository.list_open_for_entities(entity_instance_ids)
 
     def describe(
         self,

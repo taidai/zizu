@@ -49,11 +49,8 @@ class AlarmDefinitionDispatcher:
         assets_with_open_events: dict[UUID, set[str]] = {
             entity_id: set() for entity_id in entity_instance_ids
         }
-        for event in self._alarm_runtime.list():
-            if (
-                event.entity_instance_id in entity_instance_ids
-                and event.state in OPEN_STATES
-            ):
+        for event in self._alarm_runtime.list_open_for_entities(entity_instance_ids):
+            if event.state in OPEN_STATES:
                 definition = all_versions.get(event.definition_id)
                 if definition is not None:
                     historical[event.entity_instance_id][definition.id] = definition
