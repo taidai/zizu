@@ -1,5 +1,27 @@
 ---
 
+## Session 2026-09-02 — v0.7.1 修复告警发布自锁并完成真实发布闭环
+
+- 现网证据：trial 200、规则集 201、计划 201，只有 apply 在约 30 秒后返回 422
+  `CONFIGURATION_RUNTIME_DRAIN_TIMEOUT`。告警异步接口同步等待配置栅栏，阻塞了同一事件循环里的帧处理和
+  outbox 排空任务，形成自锁；前端因无该码专用映射而显示泛化错误。
+- 提交 `76aa74d` 把 `configuration.apply(...)` 移入工作线程，不改事务、栅栏、规则或 Schema；提交
+  `7f35dbc` 升版并标记 `v0.7.1`。TDD 先稳定复现 422 再转绿；最终后端告警专项 16/16、前端告警模型
+  6/6、生产构建成功。Actions `33588890868` 成功。
+- 1 号机运行 ARM64 固定摘要
+  `ghcr.io/taidai/zizu@sha256:fd698246c5aae9a16c517a2f90854e6220434039a7d478ffd3f334708e8b9164`，
+  image ID `sha256:30049a82e1a2db82c0e58efa9af47b51c359a72586ca7a6e53ed72e0c674a5d1`；
+  v0.7.1、Schema 059、healthy、restart 0、host 网络、`/dev/mqueue`。TimescaleDB/NanoMQ 未重启。
+- 切换前数据库备份：
+  `/opt/zizu-release-test-0.5.0/backups/v0.7.1-pre/omnithings-20260902T0400Z.dump`，
+  214,160,789 bytes，SHA-256 `fb0b44716aed0b44ba385319de0f0f9df239b2b40f68070f946679eba7cbb6d5`，
+  `pg_restore -l` 1,078 项；运行配置备份：
+  `/opt/zizu-release-test-0.5.0/release.env.pre-v0.7.1-20260902T0400Z`。
+- 公网无头 Browser 真实走通试算→预览→apply 200→统一配置版本 451；随后停用临时规则，再次 apply 200，
+  数据库最终统一配置版本 452，当前定义中来自验收版本 451 的记录为 0。刷新后显示 FE 0.7.1 / v0.7.1，
+  控制台 error 0。失败的矛盾规则计划未应用，未执行 JDM、控制或设备写。
+- 完整证据见 `docs/deploy-1号机-v0.7.1-http.md`。当前磁盘约 2.4GB 可用，未清理旧镜像。
+
 ## Session 2026-09-02 — v0.7.0 告警试算可解释性修复并部署验收
 
 - 现场复现证明告警 matcher 和试算 API 原本能正确区分 BOOL `false/true`；根因是页面只显示泛化的
