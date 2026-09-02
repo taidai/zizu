@@ -2518,3 +2518,79 @@ export async function deleteAlarmHttpNotification(configId: string): Promise<voi
     throw await alarmHttpNotificationError(response, `删除 HTTP 通知失败：${response.status}`)
   }
 }
+
+export interface AlarmNotificationAttempt {
+  attempt_no: number
+  attempted_at: string
+  method: string
+  target_display: string
+  duration_ms: number
+  outcome: string
+  http_status: number | null
+  error_code: string | null
+  error_detail: string | null
+  response_excerpt: string | null
+}
+
+export interface AlarmNotificationDelivery {
+  id: string
+  event_id: string
+  event_type: string | null
+  alarm_name: string | null
+  severity: AlarmSeverity | null
+  node_name: string | null
+  entity_name: string | null
+  configuration_name: string | null
+  configuration_exists: boolean
+  target_display: string | null
+  status: 'pending' | 'retry_wait' | 'delivered' | 'failed' | 'cancelled'
+  attempt_count: number
+  last_http_status: number | null
+  last_error_code: string | null
+  last_error_detail: string | null
+  last_response_excerpt: string | null
+  created_at: string
+  delivered_at: string | null
+  cancelled_at: string | null
+  attempts: AlarmNotificationAttempt[]
+}
+
+export interface AlarmNotificationDeliveryPage {
+  items: AlarmNotificationDelivery[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
+const ALARM_NOTIFICATION_DELIVERY_PATH = `${API_BASE}/alarms/notification-deliveries`
+
+export async function fetchAlarmNotificationDeliveries(
+  page = 1,
+  pageSize = 50,
+): Promise<AlarmNotificationDeliveryPage> {
+  const response = await apiFetch(
+    `${ALARM_NOTIFICATION_DELIVERY_PATH}?page=${page}&page_size=${pageSize}`,
+  )
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `读取通知记录失败：${response.status}`)
+  }
+  return response.json()
+}
+
+export async function retryAlarmNotificationDelivery(
+  notificationId: string,
+  idempotencyKey: string,
+): Promise<AlarmNotificationDelivery> {
+  const response = await apiFetch(
+    `${ALARM_NOTIFICATION_DELIVERY_PATH}/${encodeURIComponent(notificationId)}/retry`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
+  )
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `重新发送通知失败：${response.status}`)
+  }
+  return response.json()
+}

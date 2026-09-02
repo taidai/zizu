@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
+import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -238,12 +239,15 @@ function CurrentAlarmView() {
 }
 
 export default function AlarmCenterPage({ actorId, canConfigure }: { actorId: string; canConfigure: boolean }) {
-  const [tab, setTab] = useState<'events' | 'rules'>('events')
+  const [tab, setTab] = useState<'events' | 'notifications' | 'rules'>('events')
   return <div className="space-y-4">
     <div className="flex gap-2 border-b border-white/70 pb-2">
       <button onClick={() => setTab('events')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'events' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>当前告警</button>
+      <button onClick={() => setTab('notifications')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'notifications' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>通知记录</button>
       {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>告警规则</button>}
     </div>
-    {tab === 'events' ? <CurrentAlarmView /> : <MinimalAlarmRulesPage key={actorId} />}
+    {tab === 'events' && <CurrentAlarmView />}
+    {tab === 'notifications' && <AlarmNotificationRecords canRetry={canConfigure} />}
+    {tab === 'rules' && canConfigure && <MinimalAlarmRulesPage key={actorId} />}
   </div>
 }
