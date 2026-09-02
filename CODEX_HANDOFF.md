@@ -5369,3 +5369,17 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
   40 秒，并在最后一次配置变更后发送新修订帧，全局上限调为 900 秒。
 - 最终 healthy、restart 0、Schema059、最近 30 分钟 failed frame 0、outbox 0、活动 E2E 平台/Neuron
   临时节点均为 0，错误日志 0。完整证据见 `docs/deploy-1号机-v0.6.9-http.md`。
+
+## Session 2026-09-02 — v0.7.3 告警规则重新启用已修复并部署
+
+- 根因是停用规则只移除当前指针并保留不可变历史定义，而重新启用错误地再次插入同一内容，违反
+  `uq_alarm_definition_content` 并返回 503 `ALARM_CONFIGURATION_PERSISTENCE_FAILED`。
+- `067545a` 改为按四列内容身份复用历史 definition ID 后重建 current 指针；真实 PostgreSQL TDD 先复现
+  唯一键冲突，再验证启用→停用→重新启用闭环。L2 告警专项 14/14、发布脚本 56/56，独立评审无问题。
+- 发布提交/标签 `784f09c`，Actions `33610304919` 成功。1 号机运行 v0.7.3 ARM64 固定摘要
+  `sha256:cc06898b64d0f175a27923955f412fd9f1cc143cc1767ae947b4c477cef97e29`，实际 image ID
+  `sha256:f5a30f3d2f7f47f5d1ecacc36e0cce48f8e4f7bb56f86a22ff17bb009e359923`；healthy、restart 0、host
+  网络和 `/dev/mqueue` 保持，TimescaleDB/NanoMQ 未重启。
+- 公网 Browser 实际点击专用规则“启用”成功显示“已启用”，再点击“停用”恢复现场；对应 plan/apply 均
+  201/200，最终统一配置版本 457、相同内容历史定义仍为 1、当前指针 0、浏览器控制台 error/warn 0。
+- 本轮未确认告警、执行 JDM、控制或设备写。完整记录见 `docs/deploy-1号机-v0.7.3-http.md`。
