@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.api.business_security import (
     ALARM_ACKNOWLEDGE,
@@ -109,50 +110,19 @@ async def list_alarm_events(
     entity_instance_id: UUID | None = None,
     runtime: AlarmRuntime = Depends(get_alarm_runtime),
 ) -> dict[str, Any]:
-    # ``normal`` is an internal cleared-pending audit state, not an operator
-    # alarm.  It must not appear in the active/default event worklist.
-    all_items = tuple(item for item in runtime.list() if item.state != "normal")
-    all_items = tuple(
-        sorted(
-            all_items,
-            key=lambda item: (
-                item.state not in {"pending", "active_unacknowledged", "active_acknowledged"},
-                -(item.active_at or item.pending_at).timestamp(),
-            ),
-        )
-    )
-    filtered = tuple(
-        item
-        for item in all_items
-        if (
-            state is None
-            or (
-                item.state in {"pending", "active_unacknowledged", "active_acknowledged"}
-                if state == "open"
-                else item.state == state
-            )
-        )
-        and (severity is None or item.severity == severity)
-        and (entity_instance_id is None or item.entity_instance_id == entity_instance_id)
-    )
-    start = (page - 1) * page_size
-    items = filtered[start:start + page_size]
-    presentations = runtime.describe(items)
-    active_items = tuple(
-        item
-        for item in all_items
-        if item.state in {"active_unacknowledged", "active_acknowledged"}
-    )
+    result = await run_in_threadpool(runtime.query, page, page_size, state, severity, entity_instance_id)
+    items = result.items
+    presentations = await run_in_threadpool(runtime.describe, items)
     return {
         "items": [_event_public(item, presentations[item.id]) for item in items],
-        "total": len(filtered),
+        "total": result.total,
         "page": page,
         "page_size": page_size,
-        "total_pages": max(1, (len(filtered) + page_size - 1) // page_size),
+        "total_pages": max(1, (result.total + page_size - 1) // page_size),
         "summary": {
-            "active": len(active_items),
-            "unacknowledged": sum(item.state == "active_unacknowledged" for item in active_items),
-            "critical": sum(item.severity == "CRITICAL" for item in active_items),
+            "active": result.active,
+            "unacknowledged": result.unacknowledged,
+            "critical": result.critical,
         },
         "model_version": "v1",
     }

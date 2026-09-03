@@ -14,6 +14,7 @@ from app.services.alarm_definitions import AlarmDefinitionPlan
 from app.services.alarm_runtime import (
     AlarmDefinition,
     AlarmEvent,
+    AlarmEventPage,
     AlarmEventPresentation,
     AlarmNotification,
     AlarmRuntimeError,
@@ -258,6 +259,59 @@ class PostgresAlarmRepository:
     def list_events(self) -> tuple[AlarmEvent, ...]:
         with self.transaction() as transaction:
             return transaction.list_events()
+
+    def query_events(
+        self, page: int, page_size: int, state: str | None,
+        severity: str | None, entity_instance_id: UUID | None,
+    ) -> AlarmEventPage:
+        conditions = ["state <> 'normal'"]
+        parameters: list[Any] = []
+        if state == "open":
+            conditions.append("state IN ('pending','active_unacknowledged','active_acknowledged')")
+        elif state is not None:
+            conditions.append("state = %s")
+            parameters.append(state)
+        if severity is not None:
+            conditions.append("severity = %s")
+            parameters.append(severity)
+        if entity_instance_id is not None:
+            conditions.append("entity_instance_id = %s")
+            parameters.append(entity_instance_id)
+        where = " AND ".join(conditions)
+        with _connection() as conn, conn.cursor() as cur:
+            # One statement gives totals and the page the same DB snapshot.
+            # Historical observation JSON never crosses the DB boundary unless
+            # the operator actually requested that page of history.
+            cur.execute(
+                f"""
+                WITH totals AS (
+                    SELECT count(*) FILTER (WHERE {where}) AS total,
+                           count(*) FILTER (WHERE state IN ('active_unacknowledged','active_acknowledged')) AS active,
+                           count(*) FILTER (WHERE state = 'active_unacknowledged') AS unacknowledged,
+                           count(*) FILTER (WHERE state IN ('active_unacknowledged','active_acknowledged') AND severity = 'CRITICAL') AS critical
+                    FROM t_alarm_events
+                ), selected AS (
+                    SELECT id, definition_id, definition_version, entity_instance_id,
+                           state, severity, pending_at, active_at, acknowledged_at,
+                           acknowledged_by, acknowledgement_note, recovery_candidate_since,
+                           recovered_at, first_observation, last_observation, recovery_observation
+                    FROM t_alarm_events
+                    WHERE {where}
+                    ORDER BY state IN ('pending','active_unacknowledged','active_acknowledged') DESC,
+                             COALESCE(active_at,pending_at) DESC, id DESC
+                    LIMIT %s OFFSET %s
+                )
+                SELECT totals.*, selected.* FROM totals LEFT JOIN selected ON TRUE
+                ORDER BY selected.state IN ('pending','active_unacknowledged','active_acknowledged') DESC,
+                         COALESCE(selected.active_at,selected.pending_at) DESC, selected.id DESC
+                """,
+                (*parameters, *parameters, page_size, (page - 1) * page_size),
+            )
+            rows = cur.fetchall()
+        return AlarmEventPage(
+            tuple(_event(row[4:]) for row in rows if row[4] is not None),
+            *rows[0][:4],
+        )
 
     def list_open_for_entities(
         self,

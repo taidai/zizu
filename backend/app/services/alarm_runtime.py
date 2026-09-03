@@ -88,6 +88,15 @@ class AlarmEventPresentation:
 
 
 @dataclass(frozen=True)
+class AlarmEventPage:
+    items: tuple[AlarmEvent, ...]
+    total: int
+    active: int
+    unacknowledged: int
+    critical: int
+
+
+@dataclass(frozen=True)
 class AlarmTransition:
     event_id: UUID
     from_state: str | None
@@ -163,6 +172,11 @@ class AlarmRepository(Protocol):
     def get_event(self, event_id: UUID) -> AlarmEvent | None: ...
 
     def list_events(self) -> tuple[AlarmEvent, ...]: ...
+
+    def query_events(
+        self, page: int, page_size: int, state: str | None,
+        severity: str | None, entity_instance_id: UUID | None,
+    ) -> AlarmEventPage: ...
 
     def list_open_for_entities(
         self,
@@ -401,6 +415,31 @@ class InMemoryAlarmRepository:
             configuration_name,
         )
 
+    def query_events(
+        self, page: int, page_size: int, state: str | None,
+        severity: str | None, entity_instance_id: UUID | None,
+    ) -> AlarmEventPage:
+        visible = [item for item in self._events.values() if item.state != "normal"]
+        filtered = sorted(
+            (item for item in visible
+             if (state is None or (item.state in OPEN_STATES if state == "open" else item.state == state))
+             and (severity is None or item.severity == severity)
+             and (entity_instance_id is None or item.entity_instance_id == entity_instance_id)),
+            key=lambda item: (
+                item.state in OPEN_STATES,
+                item.active_at or item.pending_at,
+                item.id,
+            ),
+            reverse=True,
+        )
+        active = [item for item in visible if item.state in {"active_unacknowledged", "active_acknowledged"}]
+        start = (page - 1) * page_size
+        return AlarmEventPage(
+            tuple(filtered[start:start + page_size]), len(filtered), len(active),
+            sum(item.state == "active_unacknowledged" for item in active),
+            sum(item.severity == "CRITICAL" for item in active),
+        )
+
     def unbind_http_notification(self, definition_id: UUID) -> None:
         self._notification_bindings.pop(definition_id, None)
 
@@ -613,6 +652,12 @@ class AlarmRuntime:
 
     def list(self) -> tuple[AlarmEvent, ...]:
         return self._repository.list_events()
+
+    def query(
+        self, page: int, page_size: int, state: str | None = None,
+        severity: str | None = None, entity_instance_id: UUID | None = None,
+    ) -> AlarmEventPage:
+        return self._repository.query_events(page, page_size, state, severity, entity_instance_id)
 
     def list_open_for_entities(
         self,

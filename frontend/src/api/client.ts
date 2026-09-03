@@ -946,6 +946,7 @@ export async function fetchAlarms(
   resolved?: boolean,
   nodeId?: string,
   entityId?: string,
+  signal?: AbortSignal,
 ): Promise<AlarmListResponse> {
   void sourceKey
   void nodeId
@@ -955,7 +956,7 @@ export async function fetchAlarms(
   if (resolved === true) params.set('state', 'recovered')
   else if (acknowledged === true) params.set('state', 'active_acknowledged')
   else if (acknowledged === false && resolved === false) params.set('state', 'open')
-  const res = await apiFetch(`${API_BASE}/alarm-events?${params}`)
+  const res = await apiFetch(`${API_BASE}/alarm-events?${params}`, { signal })
   if (!res.ok) throw new Error(`Fetch alarm events failed: ${res.status}`)
   const data: {
     items: AlarmEventWire[]
