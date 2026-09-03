@@ -1659,6 +1659,7 @@ const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_MIGRATION_PLAN_STALE: '旧配置候选已变化，请重新检查。',
   ALARM_MIGRATION_PLAN_BLOCKED: '旧配置迁移存在阻断项。',
   ALARM_RULE_CONFLICT: '规则稳定标识冲突。',
+  ALARM_CONDITIONS_IDENTICAL: '触发条件与恢复条件不能相同，请分别设置故障值和正常值。',
   ALARM_BATCH_LIMIT_EXCEEDED: '单次配置范围超过系统上限。',
   ALARM_ACCEPTANCE_APPLICATION_NOT_FOUND: '当前没有可验收的已应用告警配置。',
   ALARM_ACCEPTANCE_APPLICATION_STALE: '该配置已不是最新应用版本，验收证据已刷新。',

@@ -192,6 +192,8 @@ def _validate_rule(rule: AlarmRule) -> tuple[dict[str, Any], ...]:
     durations = (rule.trigger_duration_seconds, rule.recovery_duration_seconds, rule.notification_throttle_seconds)
     if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in durations):
         issues.append(_blocker("ALARM_DURATION_INVALID", "alarm durations must be finite and non-negative"))
+    if rule.trigger == rule.recovery:
+        issues.append(_blocker("ALARM_CONDITIONS_IDENTICAL", "触发条件与恢复条件不能相同，请分别设置故障值和正常值。"))
     return tuple(issues)
 
 
@@ -366,6 +368,8 @@ class AlarmConfiguration:
         if plan.digest != command.plan_digest:
             raise AlarmConfigurationError("ALARM_PLAN_DIGEST_MISMATCH")
         if plan.status == "blocked":
+            raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
+        if plan.status != "applied" and any(_validate_rule(rule) for rule in plan.rule_set_revision.rules):
             raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
         if self._runtime_gate is None:
             return self.repository.apply_plan(

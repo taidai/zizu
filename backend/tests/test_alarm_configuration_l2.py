@@ -112,6 +112,79 @@ class _AwaitingRuntimeGate(_RuntimeGate):
 
 
 class AlarmConfigurationL2Test(unittest.TestCase):
+    def test_old_ready_plan_cannot_bypass_new_condition_validation(self) -> None:
+        repository = _Repository()
+        service = AlarmConfiguration(repository)
+        plan = service.plan(PlanAlarmConfiguration(
+            EntitySelection(entity_instance_ids=(repository.entity.id,)),
+            repository.rule_set.rule_set_id, 1, "operator:test",
+        ))
+        legacy_rule = replace(plan.rule_set_revision.rules[0], recovery={"operator": "gt", "value": 90})
+        repository.saved = replace(
+            plan,
+            rule_set_revision=replace(plan.rule_set_revision, rules=(legacy_rule,)),
+            items=tuple(replace(item, after={**item.after, "rule": {
+                **item.after["rule"], "recovery": legacy_rule.recovery,
+            }}) for item in plan.items),
+            digest=canonical_digest(legacy_rule),
+        )
+        command = ApplyAlarmConfigurationPlan(plan.id, repository.saved.digest, "legacy-plan", "operator:test")
+        with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_PLAN_BLOCKED"):
+            service.apply(command)
+        self.assertEqual(0, repository.apply_calls)
+
+        # An already applied historical plan must still replay its saved result.
+        repository.saved = replace(repository.saved, status="applied")
+        self.assertIs(repository.applied, service.apply(command))
+        self.assertEqual(1, repository.apply_calls)
+
+    def test_identical_state_conditions_block_trial_and_publication(self) -> None:
+        for value in (False, True):
+            with self.subTest(value=value):
+                repository = _Repository()
+                repository.entity = replace(repository.entity, data_type="BOOL", unit=None)
+                rule = replace(
+                    repository.rule_set.rules[0],
+                    trigger={"operator": "eq", "value": value},
+                    recovery={"operator": "eq", "value": value},
+                    unit=None,
+                )
+                repository.rule_set = replace(repository.rule_set, rules=(rule,))
+                service = AlarmConfiguration(repository)
+
+                with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_CONDITIONS_IDENTICAL"):
+                    service.trial(entity_instance_id=repository.entity.id, rule=rule, value=value, quality=192)
+                plan = service.plan(PlanAlarmConfiguration(
+                    EntitySelection(entity_instance_ids=(repository.entity.id,)),
+                    repository.rule_set.rule_set_id, 1, "operator:test",
+                ))
+                self.assertEqual("blocked", plan.status)
+                self.assertIn("ALARM_CONDITIONS_IDENTICAL", {item["code"] for item in plan.blockers})
+                with self.assertRaisesRegex(AlarmConfigurationError, "ALARM_PLAN_BLOCKED"):
+                    service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "conflict-test", "operator:test"))
+                self.assertEqual(0, repository.apply_calls)
+
+    def test_opposite_state_conditions_remain_publishable_and_trialable(self) -> None:
+        repository = _Repository()
+        repository.entity = replace(repository.entity, data_type="BOOL", unit=None)
+        rule = replace(
+            repository.rule_set.rules[0],
+            trigger={"operator": "eq", "value": True},
+            recovery={"operator": "eq", "value": False},
+            unit=None,
+        )
+        repository.rule_set = replace(repository.rule_set, rules=(rule,))
+        service = AlarmConfiguration(repository)
+        for value in (False, True):
+            result = service.trial(entity_instance_id=repository.entity.id, rule=rule, value=value, quality=192)
+            self.assertEqual(value, result.trigger_matches)
+            self.assertEqual(not value, result.recovery_matches)
+        plan = service.plan(PlanAlarmConfiguration(
+            EntitySelection(entity_instance_ids=(repository.entity.id,)),
+            repository.rule_set.rule_set_id, 1, "operator:test",
+        ))
+        self.assertEqual("ready", plan.status)
+
     def test_public_rule_contract_preserves_http_notification_binding(self) -> None:
         from app.api.alarm_configurations import AlarmRuleRequest, _error, _rule
 

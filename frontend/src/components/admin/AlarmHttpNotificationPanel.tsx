@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   createAlarmHttpNotification,
   deleteAlarmHttpNotification,
@@ -144,6 +144,15 @@ export default function AlarmHttpNotificationPanel() {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const bodyEditor = useRef<HTMLTextAreaElement>(null)
+  const pendingCaret = useRef<number | null>(null)
+
+  useLayoutEffect(() => {
+    if (pendingCaret.current === null || !bodyEditor.current) return
+    bodyEditor.current.focus()
+    bodyEditor.current.setSelectionRange(pendingCaret.current, pendingCaret.current)
+    pendingCaret.current = null
+  })
 
   const load = async () => {
     setLoading(true)
@@ -242,7 +251,15 @@ export default function AlarmHttpNotificationPanel() {
   }
 
   const insertVariable = (name: string) => {
-    setDraft((current) => ({ ...current, body_template: `${current.body_template}{{${name}}}` }))
+    const editor = bodyEditor.current
+    if (!editor) return
+    const variable = `{{${name}}}`
+    const { selectionStart, selectionEnd } = editor
+    pendingCaret.current = selectionStart + variable.length
+    setDraft((current) => ({
+      ...current,
+      body_template: current.body_template.slice(0, selectionStart) + variable + current.body_template.slice(selectionEnd),
+    }))
   }
 
   return (
@@ -335,11 +352,12 @@ export default function AlarmHttpNotificationPanel() {
                 <input value={draft.content_type} onChange={(event) => setDraft({ ...draft, content_type: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 font-mono" />
               </label>
               <label className="mt-3 block text-xs text-gray-600">请求体模板
-                <textarea rows={10} value={draft.body_template} onChange={(event) => setDraft({ ...draft, body_template: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 font-mono text-[11px]" />
+                <textarea ref={bodyEditor} rows={10} value={draft.body_template} onChange={(event) => setDraft({ ...draft, body_template: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 font-mono text-[11px]" />
               </label>
+              <p className="mt-2 text-[11px] text-gray-500">点击变量插入请求体光标处；选中文字时替换选区。变量仅用于请求体模板。</p>
               <div className="mt-2 flex flex-wrap gap-1">
                 {HTTP_NOTIFICATION_VARIABLES.map(([name, label]) => (
-                  <button key={name} type="button" title={label} onClick={() => insertVariable(name)} className="rounded bg-white px-2 py-1 font-mono text-[10px] text-blue-600">
+                  <button key={name} type="button" title={label} onMouseDown={(event) => event.preventDefault()} onClick={() => insertVariable(name)} className="rounded bg-white px-2 py-1 font-mono text-[10px] text-blue-600">
                     {`{{${name}}}`}
                   </button>
                 ))}
