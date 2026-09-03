@@ -2413,6 +2413,12 @@ export interface AlarmHttpNotificationConfig {
   enabled: boolean
 }
 
+export interface AlarmHttpNotificationOption {
+  id: string
+  name: string
+  status: 'available' | 'disabled' | 'needs_test'
+}
+
 export interface AlarmHttpNotificationRequest {
   name: string
   description: string | null
@@ -2449,6 +2455,14 @@ async function alarmHttpNotificationError(
 }
 
 const ALARM_HTTP_NOTIFICATION_PATH = `${API_BASE}/admin/alarm-http-notifications`
+
+export async function fetchAlarmHttpNotificationOptions(signal?: AbortSignal): Promise<AlarmHttpNotificationOption[]> {
+  const response = await apiFetch(`${API_BASE}/alarm-http-notification-options`, { signal })
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `读取 HTTP 通知失败：${response.status}`)
+  }
+  return response.json()
+}
 
 export async function fetchAlarmHttpNotifications(): Promise<AlarmHttpNotificationConfig[]> {
   const response = await apiFetch(ALARM_HTTP_NOTIFICATION_PATH)

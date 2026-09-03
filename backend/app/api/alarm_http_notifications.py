@@ -1,4 +1,4 @@
-"""System-admin API for configurable alarm HTTP requests."""
+"""Administrator request management and safe read-only alarm rule choices."""
 from __future__ import annotations
 
 from typing import Literal
@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.business_security import (
+    CONFIGURATION_READ,
     SYSTEM_MANAGE,
     capability_metadata,
     principal_for,
@@ -22,7 +23,8 @@ from app.services.alarm_http_notifications import (
 from app.services.identity import Principal
 
 
-router = APIRouter(prefix="/admin/alarm-http-notifications")
+router = APIRouter()
+admin_router = APIRouter(prefix="/admin/alarm-http-notifications")
 _notifications: AlarmHttpNotifications | None = None
 
 
@@ -102,7 +104,17 @@ def _error(error: HttpNotificationError) -> HTTPException:
     )
 
 
-@router.get("", **protected(SYSTEM_MANAGE))
+@router.get("/alarm-http-notification-options", **protected(CONFIGURATION_READ))
+def list_options(
+    notifications: AlarmHttpNotifications = Depends(get_alarm_http_notifications),
+):
+    try:
+        return notifications.list_options()
+    except HttpNotificationError as error:
+        raise _error(error) from error
+
+
+@admin_router.get("", **protected(SYSTEM_MANAGE))
 def list_configs(
     notifications: AlarmHttpNotifications = Depends(get_alarm_http_notifications),
 ):
@@ -112,7 +124,7 @@ def list_configs(
         raise _error(error) from error
 
 
-@router.post(
+@admin_router.post(
     "",
     status_code=status.HTTP_201_CREATED,
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
@@ -128,7 +140,7 @@ def create_config(
         raise _error(error) from error
 
 
-@router.put(
+@admin_router.put(
     "/{config_id}",
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
 )
@@ -144,7 +156,7 @@ def update_config(
         raise _error(error) from error
 
 
-@router.post(
+@admin_router.post(
     "/{config_id}/test",
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
 )
@@ -159,7 +171,7 @@ async def test_config(
         raise _error(error) from error
 
 
-@router.post(
+@admin_router.post(
     "/{config_id}/enable",
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
 )
@@ -174,7 +186,7 @@ def enable_config(
         raise _error(error) from error
 
 
-@router.post(
+@admin_router.post(
     "/{config_id}/disable",
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
 )
@@ -189,7 +201,7 @@ def disable_config(
         raise _error(error) from error
 
 
-@router.delete(
+@admin_router.delete(
     "/{config_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     openapi_extra=capability_metadata(SYSTEM_MANAGE),
@@ -205,5 +217,7 @@ def delete_config(
         raise _error(error) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+
+router.include_router(admin_router)
 
 __all__ = ["get_alarm_http_notifications", "router"]

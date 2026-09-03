@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
 from uuid import UUID
 
 os.environ.setdefault("DB_PASSWORD", "database-secret-value")
@@ -187,6 +189,71 @@ class AlarmHttpNotificationPublicApiTest(unittest.IsolatedAsyncioTestCase):
             "HTTP_NOTIFICATION_NOT_TESTED",
             response.json()["detail"]["code"],
         )
+
+
+class AlarmHttpNotificationOptionsApiTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        from app.api.alarm_http_notifications import get_alarm_http_notifications, router
+        from app.services.alarm_http_notifications import AlarmHttpNotifications, StoredHttpNotificationConfig
+
+        config = StoredHttpNotificationConfig(
+            id=CONFIG_ID, name="值班群", description="private description",
+            method="POST", url_display="https://receiver.invalid/***",
+            public_query_params=(), secret_query_param_names=("token",),
+            public_headers=(), secret_header_names=("Authorization",),
+            content_type="application/json", body_template='{"private":"do not expose"}',
+            timeout_seconds=5, current_digest="a" * 64, tested_digest="a" * 64,
+            tested_at=None, last_test_status={"delivered": True, "response_excerpt": "private"},
+            enabled=False,
+        )
+        self.configs = [config]
+        self.repository = SimpleNamespace(list_configs=lambda: self.configs)
+        self.service = AlarmHttpNotifications(self.repository)
+        self.app = FastAPI()
+        self.app.include_router(router, prefix="/api/v1")
+        self.app.dependency_overrides[get_alarm_http_notifications] = lambda: self.service
+
+    async def test_admin_and_engineer_can_read_safe_availability_without_enabling(self) -> None:
+        self.configs += [
+            replace(self.configs[0], id=UUID(int=202), name="可用", enabled=True),
+            replace(self.configs[0], id=UUID(int=203), name="需重测", enabled=True, tested_digest="old"),
+            replace(self.configs[0], id=UUID(int=204), name="未测试", tested_digest=None),
+        ]
+        async with AuthenticatedApiClient(self.app) as client:
+            for role in ("admin", "engineer"):
+                response = await client._client.get(
+                    "/api/v1/alarm-http-notification-options",
+                    headers={"Authorization": await client._bearer(role)},
+                )
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual([
+                    {"id": str(CONFIG_ID), "name": "值班群", "status": "disabled"},
+                    {"id": str(UUID(int=202)), "name": "可用", "status": "available"},
+                    {"id": str(UUID(int=203)), "name": "需重测", "status": "needs_test"},
+                    {"id": str(UUID(int=204)), "name": "未测试", "status": "needs_test"},
+                ], response.json())
+        self.assertFalse(self.configs[0].enabled)
+
+    async def test_options_require_configuration_read_permission(self) -> None:
+        async with AuthenticatedApiClient(self.app) as client:
+            for headers, expected in (({}, 401), ({"Authorization": await client._bearer("operator")}, 403)):
+                response = await client._client.get("/api/v1/alarm-http-notification-options", headers=headers)
+                self.assertEqual(expected, response.status_code, response.text)
+
+    async def test_unavailable_storage_is_not_reported_as_an_empty_list(self) -> None:
+        from app.services.alarm_http_notifications import HttpNotificationError
+
+        def fail():
+            raise HttpNotificationError("HTTP_NOTIFICATION_PERSISTENCE_UNAVAILABLE", "Unavailable")
+
+        self.repository.list_configs = fail
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client._client.get(
+                "/api/v1/alarm-http-notification-options",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+        self.assertEqual(503, response.status_code, response.text)
+        self.assertEqual("HTTP_NOTIFICATION_PERSISTENCE_UNAVAILABLE", response.json()["detail"]["code"])
 
 
 if __name__ == "__main__":

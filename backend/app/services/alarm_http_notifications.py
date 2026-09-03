@@ -313,6 +313,21 @@ class AlarmHttpNotifications:
     def list(self) -> Sequence[dict[str, object]]:
         return tuple(public_config(item) for item in self._repository.list_configs())
 
+    def list_options(self) -> Sequence[dict[str, object]]:
+        """Read-only rule choices; never expose request contents or credentials."""
+        return tuple(
+            {
+                "id": str(item.id),
+                "name": item.name,
+                "status": (
+                    "needs_test"
+                    if not item.tested_digest or item.tested_digest != item.current_digest
+                    else "available" if item.enabled else "disabled"
+                ),
+            }
+            for item in self._repository.list_configs()
+        )
+
     def create(
         self,
         draft: HttpNotificationDraft,

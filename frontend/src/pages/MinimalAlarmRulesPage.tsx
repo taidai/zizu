@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyAlarmConfigurationPlan,
   createAlarmConfigurationPlan,
   createAlarmRuleSet,
   createAlarmRuleSetRevision,
-  fetchAlarmHttpNotifications,
+  fetchAlarmHttpNotificationOptions,
   fetchAlarmRuleGroups,
   fetchAlarmRuleSets,
   fetchEntityInstances,
   trialAlarmRule,
   type AlarmRule,
-  type AlarmHttpNotificationConfig,
+  type AlarmHttpNotificationOption,
   type AlarmRuleGroup,
   type AlarmRuleSetRevision,
   type AlarmSeverity,
@@ -41,7 +41,10 @@ export default function MinimalAlarmRulesPage() {
   const [groups, setGroups] = useState<AlarmRuleGroup[]>([])
   const [revisions, setRevisions] = useState<AlarmRuleSetRevision[]>([])
   const [entities, setEntities] = useState<EntityInstance[]>([])
-  const [httpNotifications, setHttpNotifications] = useState<AlarmHttpNotificationConfig[]>([])
+  const [httpNotifications, setHttpNotifications] = useState<AlarmHttpNotificationOption[]>([])
+  const [notificationsLoading, setNotificationsLoading] = useState(true)
+  const [notificationsError, setNotificationsError] = useState('')
+  const notificationsRequest = useRef<AbortController | null>(null)
   const [selectedRevision, setSelectedRevision] = useState<AlarmRuleSetRevision | null>(null)
   const [selectedEntities, setSelectedEntities] = useState<string[]>([])
   const [dataType, setDataType] = useState<AlarmDraftDataType>('NUMBER')
@@ -58,21 +61,39 @@ export default function MinimalAlarmRulesPage() {
   const load = useCallback(async () => {
     setBusy('load'); setError('')
     try {
-      const [nextGroups, nextRevisions, response, notifications] = await Promise.all([
+      const [nextGroups, nextRevisions, response] = await Promise.all([
         fetchAlarmRuleGroups(), fetchAlarmRuleSets(), fetchEntityInstances(),
-        fetchAlarmHttpNotifications().catch(() => []),
       ])
-      setGroups(nextGroups); setRevisions(nextRevisions); setEntities(response.items); setHttpNotifications(notifications)
+      setGroups(nextGroups); setRevisions(nextRevisions); setEntities(response.items)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '无法读取告警规则。') }
     finally { setBusy('') }
   }, [])
   useEffect(() => { void load() }, [load])
 
+  const loadNotifications = useCallback(async () => {
+    notificationsRequest.current?.abort()
+    const controller = new AbortController()
+    notificationsRequest.current = controller
+    setNotificationsLoading(true); setNotificationsError('')
+    try {
+      const options = await fetchAlarmHttpNotificationOptions(controller.signal)
+      if (!controller.signal.aborted) setHttpNotifications(options)
+    } catch (reason) {
+      if (!controller.signal.aborted) setNotificationsError(reason instanceof Error ? reason.message : '请求未完成')
+    } finally {
+      if (!controller.signal.aborted) setNotificationsLoading(false)
+    }
+  }, [])
+  useEffect(() => {
+    void loadNotifications()
+    return () => notificationsRequest.current?.abort()
+  }, [loadNotifications])
+
   const selectableEntities = useMemo(() => entities.filter((entity) => compatible(entity, dataType)), [entities, dataType])
   const firstRule = rules[0]
   const selectedHttpNotificationId = firstRule?.http_notification_config_id || ''
   const availableHttpNotifications = useMemo(
-    () => httpNotifications.filter((config) => config.enabled && config.tested_digest === config.current_digest),
+    () => httpNotifications.filter((config) => config.status === 'available'),
     [httpNotifications],
   )
   const selectedEntity = useMemo(
@@ -202,14 +223,25 @@ export default function MinimalAlarmRulesPage() {
       <h3 className="text-sm font-bold text-gray-800">2. 设置规则</h3>
       <label className="block text-xs">规则名称<input value={name} onChange={(event) => setName(event.target.value)} className="neu-input mt-1 w-full px-3 py-2" /></label>
       {dataType === 'CODE_SET' ? <div><textarea value={faultPaste} onChange={(event) => setFaultPaste(event.target.value)} rows={5} placeholder={'E30\t压缩机故障\tMAJOR\nE42\t直流母线过压\tCRITICAL'} className="neu-input w-full px-3 py-2 font-mono text-xs"/><button onClick={() => { try { setRules(compileFaultCodeRules(parseFaultCodePaste(faultPaste)).map((rule) => ({ ...rule, http_notification_config_id: selectedHttpNotificationId || null }))); resetResult(); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : '故障码格式错误。') } }} className="mt-2 rounded bg-white/70 px-3 py-1.5 text-xs">解析故障码</button><p className="mt-1 text-xs text-gray-500">已解析 {rules.length} 条规则</p></div> : firstRule && <div className="grid gap-3 md:grid-cols-4"><label className="text-xs">故障名称<input value={firstRule.name} onChange={(event) => patchRule({ name: event.target.value })} className="neu-input mt-1 w-full px-2 py-2" /></label><label className="text-xs">等级<select value={firstRule.severity} onChange={(event) => patchRule({ severity: event.target.value as AlarmSeverity })} className="neu-input mt-1 w-full px-2 py-2"><option value="CRITICAL">紧急</option><option value="MAJOR">重要</option><option value="WARNING">警告</option><option value="INFO">提示</option></select></label><label className="text-xs">触发值{selectedEntityIsBoolean ? <select value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="true">true（故障）</option><option value="false">false（正常）</option></select> : <input value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label><label className="text-xs">恢复值{selectedEntityIsBoolean ? <select value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label></div>}
-      <label className="block max-w-xl text-xs">HTTP 通知（可选）
-        <select value={selectedHttpNotificationId} onChange={(event) => selectHttpNotification(event.target.value)} className="neu-input mt-1 w-full px-3 py-2">
+      <div className="max-w-xl text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor="alarm-http-notification">HTTP 通知（可选）</label>
+          <button type="button" onClick={() => void loadNotifications()} disabled={notificationsLoading} className="rounded bg-white/70 px-3 py-1.5 text-[#287c12] disabled:opacity-40">刷新通知选项</button>
+        </div>
+        <select id="alarm-http-notification" value={selectedHttpNotificationId} disabled={notificationsLoading || !!notificationsError} aria-describedby="alarm-http-notification-help" onChange={(event) => selectHttpNotification(event.target.value)} className="neu-input mt-1 w-full px-3 py-2">
           <option value="">不发送 HTTP 通知</option>
           {selectedHttpNotificationId && !availableHttpNotifications.some((config) => config.id === selectedHttpNotificationId) && <option value={selectedHttpNotificationId}>已绑定但当前不可用，请到系统工具检查</option>}
           {availableHttpNotifications.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}
         </select>
-        <span className="mt-1 block text-[11px] text-gray-500">只显示已测试并启用的通知；规则发生和恢复时都会发送。</span>
-      </label>
+        <div id="alarm-http-notification-help" className="mt-2 space-y-1 text-[11px] text-gray-600">
+          {notificationsLoading ? <p role="status">正在读取 HTTP 通知选项…</p> : notificationsError ? <p role="alert" className="text-red-700">HTTP 通知选项读取失败：{notificationsError}。请点击“刷新通知选项”重试；原有选择保留。</p> : <>
+            {!httpNotifications.length && <p>尚未配置 HTTP 通知。</p>}
+            {httpNotifications.filter((config) => config.status !== 'available').map((config) => <p key={config.id}>{config.name}：{config.status === 'disabled' ? '已停用' : '需测试并启用'}</p>)}
+            {(!httpNotifications.length || httpNotifications.some((config) => config.status !== 'available') || (selectedHttpNotificationId && !availableHttpNotifications.some((config) => config.id === selectedHttpNotificationId))) && <p>请在“系统工具 → HTTP 通知”新建或检查配置，完成测试并启用后，点击“刷新通知选项”。实施工程师请联系管理员。</p>}
+          </>}
+          <p>仅已测试并启用的通知可选；规则发生和恢复时都会发送。</p>
+        </div>
+      </div>
       {firstRule && selectedEntities[0] && <p className="rounded bg-white/50 p-3 text-xs text-gray-700">{describeAlarmDraft(firstRule, { displayName: entities.find((item) => item.id === selectedEntities[0])?.display_name || '所选实体', unit: entities.find((item) => item.id === selectedEntities[0])?.unit || null })}</p>}
       <h3 className="text-sm font-bold text-gray-800">3. 试算并发布</h3>
       {selectedEntity && <p className="text-xs text-gray-600">本次试算对象：<strong>{selectedEntity.node_display_name} / {selectedEntity.display_name}</strong>{selectedEntities.length > 1 ? `（已批量选择 ${selectedEntities.length} 个实体，试算以此实体为准）` : ''}</p>}
