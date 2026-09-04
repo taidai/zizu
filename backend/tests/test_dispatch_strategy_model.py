@@ -7,11 +7,16 @@ from uuid import UUID
 
 from app.services.dispatch_strategies import (
     DispatchWindow,
+    EntityBindingContract,
     OutputBinding,
+    StrategyBindingDraft,
+    StrategyDraft,
     StrategyModelError,
     build_two_charge_two_discharge_jdm,
     extract_control_intents,
     split_cross_midnight,
+    strategy_draft_digest,
+    validate_publish_bindings,
 )
 
 
@@ -130,6 +135,82 @@ class DispatchStrategyModelTest(unittest.TestCase):
             extract_control_intents({"action_id": "int", "target": True}, {"int": integer})
         with self.assertRaisesRegex(StrategyModelError, "OUTPUT_TYPE_MISMATCH"):
             extract_control_intents({"action_id": "bool", "target": 1}, {"bool": boolean})
+
+    def test_draft_digest_is_stable_but_changes_with_a_binding(self) -> None:
+        model = build_two_charge_two_discharge_jdm(
+            (window("charge-1", "01:00", "03:00", "CHARGE", "-50"),),
+            Decimal("0"),
+        )
+        input_binding = StrategyBindingDraft(
+            "INPUT", "soc", 0, OUTPUT_ID, "FLOAT", "%", 10.0
+        )
+        output_binding = StrategyBindingDraft(
+            "OUTPUT", "power-target", 0, OUTPUT_ID, "FLOAT", "kW", 10.0
+        )
+        first = StrategyDraft(
+            "schedule", None, "FIXED_TICK", "Asia/Shanghai", model, 7,
+            (input_binding, output_binding),
+        )
+        reordered = StrategyDraft(
+            "schedule", None, "FIXED_TICK", "Asia/Shanghai", model, 7,
+            (output_binding, input_binding),
+        )
+        changed = StrategyDraft(
+            "schedule", None, "FIXED_TICK", "Asia/Shanghai", model, 7,
+            (input_binding, StrategyBindingDraft(
+                "OUTPUT", "power-target", 0, OUTPUT_ID, "FLOAT", "MW", 10.0
+            )),
+        )
+
+        self.assertEqual(strategy_draft_digest(first), strategy_draft_digest(reordered))
+        self.assertNotEqual(strategy_draft_digest(first), strategy_draft_digest(changed))
+
+    def test_publish_requires_good_l2_contracts_and_one_confirmed_write_point(self) -> None:
+        input_id = UUID("70000000-0000-0000-0000-000000000002")
+        bindings = (
+            StrategyBindingDraft("INPUT", "soc", 0, input_id, "FLOAT", "%", 10.0),
+            StrategyBindingDraft("OUTPUT", "power-target", 0, OUTPUT_ID, "FLOAT", "kW", 10.0),
+        )
+        contracts = {
+            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None),
+            OUTPUT_ID: EntityBindingContract(True, "FLOAT", "kW", "RW", 1, 0.0, 200.0),
+        }
+
+        validate_publish_bindings(bindings, contracts, static_targets=(156.7,))
+
+        unconfirmed = {
+            **contracts,
+            OUTPUT_ID: EntityBindingContract(True, "FLOAT", "kW", "RW", 0, 0.0, 200.0),
+        }
+        with self.assertRaisesRegex(StrategyModelError, "OUTPUT_WRITE_POINT_UNCONFIRMED"):
+            validate_publish_bindings(bindings, unconfirmed, static_targets=(156.7,))
+
+    def test_publish_rejects_type_unit_limit_and_self_trigger_mismatches(self) -> None:
+        bindings = (
+            StrategyBindingDraft("INPUT", "soc", 0, OUTPUT_ID, "FLOAT", "%", 10.0),
+            StrategyBindingDraft("OUTPUT", "power-target", 0, OUTPUT_ID, "FLOAT", "kW", 10.0),
+        )
+        contract = {
+            OUTPUT_ID: EntityBindingContract(True, "FLOAT", "kW", "RW", 1, 0.0, 200.0)
+        }
+        with self.assertRaisesRegex(StrategyModelError, "STRATEGY_SELF_TRIGGER_FORBIDDEN"):
+            validate_publish_bindings(bindings, contract, static_targets=(156.7,))
+
+        output_only = (bindings[1],)
+        with self.assertRaisesRegex(StrategyModelError, "STRATEGY_INPUT_REQUIRED"):
+            validate_publish_bindings(output_only, contract, static_targets=(156.7,))
+
+        input_id = UUID("70000000-0000-0000-0000-000000000003")
+        valid_bindings = (
+            StrategyBindingDraft("INPUT", "soc", 0, input_id, "FLOAT", "%", 10.0),
+            bindings[1],
+        )
+        contracts = {
+            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None),
+            OUTPUT_ID: contract[OUTPUT_ID],
+        }
+        with self.assertRaisesRegex(StrategyModelError, "OUTPUT_LIMIT_VIOLATION"):
+            validate_publish_bindings(valid_bindings, contracts, static_targets=(250.0,))
 
 
 if __name__ == "__main__":

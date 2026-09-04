@@ -79,6 +79,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatch_strategy_draft
   ON public.t_dispatch_strategy_revisions(strategy_id)
   WHERE lifecycle='DRAFT';
 
+CREATE OR REPLACE FUNCTION public.reject_published_dispatch_revision_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.lifecycle='PUBLISHED' THEN
+    RAISE EXCEPTION 'published dispatch strategy revisions are immutable';
+  END IF;
+  IF TG_OP='DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_dispatch_revision_immutable
+  ON public.t_dispatch_strategy_revisions;
+CREATE TRIGGER trg_dispatch_revision_immutable
+  BEFORE UPDATE OR DELETE ON public.t_dispatch_strategy_revisions
+  FOR EACH ROW EXECUTE FUNCTION public.reject_published_dispatch_revision_mutation();
+
 ALTER TABLE public.t_dispatch_strategies
   DROP CONSTRAINT IF EXISTS fk_dispatch_strategy_active_revision;
 ALTER TABLE public.t_dispatch_strategies
@@ -200,6 +219,19 @@ SELECT create_hypertable(
 
 CREATE INDEX IF NOT EXISTS ix_dispatch_events_strategy_time
   ON public.t_dispatch_strategy_events(strategy_id,occurred_at DESC,id);
+
+CREATE OR REPLACE FUNCTION public.reject_dispatch_event_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'dispatch strategy events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_dispatch_events_append_only
+  ON public.t_dispatch_strategy_events;
+CREATE TRIGGER trg_dispatch_events_append_only
+  BEFORE UPDATE OR DELETE ON public.t_dispatch_strategy_events
+  FOR EACH ROW EXECUTE FUNCTION public.reject_dispatch_event_mutation();
 
 ALTER TABLE public.t_control_commands
   DROP CONSTRAINT IF EXISTS t_control_commands_source_type_check;

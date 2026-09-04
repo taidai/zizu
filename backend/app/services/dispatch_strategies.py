@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import math
 from typing import Mapping, Sequence
@@ -46,6 +47,77 @@ class StrategyInput:
 
 
 @dataclass(frozen=True)
+class StrategyBindingDraft:
+    direction: str
+    binding_key: str
+    ordinal: int
+    entity_instance_id: UUID
+    expected_data_type: str
+    unit: str | None
+    freshness_seconds: float
+
+
+@dataclass(frozen=True)
+class StrategyDraft:
+    name: str
+    description: str | None
+    trigger_kind: str
+    site_timezone: str
+    jdm_content: Mapping[str, object]
+    base_configuration_revision: int
+    bindings: tuple[StrategyBindingDraft, ...]
+
+
+@dataclass(frozen=True)
+class StrategyRevision:
+    id: UUID
+    strategy_id: UUID
+    revision: int
+    lifecycle: str
+    trigger_kind: str
+    site_timezone: str
+    jdm_content: Mapping[str, object]
+    content_digest: str
+    base_configuration_revision: int
+    bindings: tuple[StrategyBindingDraft, ...]
+    created_by: str
+    created_at: datetime
+    published_by: str | None
+    published_at: datetime | None
+
+
+@dataclass(frozen=True)
+class StrategyView:
+    id: UUID
+    name: str
+    description: str | None
+    active_revision_id: UUID | None
+    enabled: bool
+    runtime_health: str
+    last_trigger_key: str | None
+    last_evaluated_at: datetime | None
+    last_desired: object | None
+    last_actual: object | None
+    last_evidence: Mapping[str, object] | None
+    failure_code: str | None
+    created_at: datetime
+    updated_at: datetime
+    draft: StrategyRevision | None
+    active_revision: StrategyRevision | None
+
+
+@dataclass(frozen=True)
+class EntityBindingContract:
+    active: bool
+    data_type: str
+    unit: str | None
+    direction: str
+    confirmed_write_points: int
+    minimum: float | None
+    maximum: float | None
+
+
+@dataclass(frozen=True)
 class OutputBinding:
     action_id: str
     entity_instance_id: UUID
@@ -68,6 +140,136 @@ class StrategyEvaluation:
     matched_rules: tuple[str, ...]
     decision: Mapping[str, object]
     intents: tuple[ControlIntentDraft, ...]
+
+
+def strategy_draft_digest(draft: StrategyDraft) -> str:
+    """Digest every executable field; presentation order of bindings is irrelevant."""
+    bindings = sorted(
+        (
+            {
+                "direction": item.direction,
+                "binding_key": item.binding_key,
+                "ordinal": item.ordinal,
+                "entity_instance_id": str(item.entity_instance_id),
+                "expected_data_type": item.expected_data_type,
+                "unit": item.unit,
+                "freshness_seconds": item.freshness_seconds,
+            }
+            for item in draft.bindings
+        ),
+        key=lambda item: (item["direction"], item["ordinal"], item["binding_key"]),
+    )
+    document = {
+        "name": draft.name.strip(),
+        "description": draft.description,
+        "trigger_kind": draft.trigger_kind,
+        "site_timezone": draft.site_timezone,
+        "jdm_content": draft.jdm_content,
+        "base_configuration_revision": draft.base_configuration_revision,
+        "bindings": bindings,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_publish_bindings(
+    bindings: Sequence[StrategyBindingDraft],
+    contracts: Mapping[UUID, EntityBindingContract],
+    *,
+    static_targets: Sequence[object],
+) -> None:
+    """Fail closed before a strategy revision can own or control L2 outputs."""
+    inputs = tuple(item for item in bindings if item.direction == "INPUT")
+    outputs = tuple(item for item in bindings if item.direction == "OUTPUT")
+    if not inputs:
+        raise StrategyModelError("STRATEGY_INPUT_REQUIRED", "at least one L2 input is required")
+    if not outputs:
+        raise StrategyModelError("STRATEGY_OUTPUT_REQUIRED", "at least one L2 output is required")
+    if {item.entity_instance_id for item in inputs} & {
+        item.entity_instance_id for item in outputs
+    }:
+        raise StrategyModelError(
+            "STRATEGY_SELF_TRIGGER_FORBIDDEN",
+            "an output cannot also be an input",
+        )
+    seen_keys: set[tuple[str, str]] = set()
+    seen_ordinals: set[tuple[str, int]] = set()
+    for binding in bindings:
+        if binding.direction not in {"INPUT", "OUTPUT"}:
+            raise StrategyModelError("BINDING_DIRECTION_INVALID", "binding direction is invalid")
+        if not binding.binding_key.strip():
+            raise StrategyModelError("BINDING_KEY_INVALID", "binding key is required")
+        if binding.freshness_seconds <= 0:
+            raise StrategyModelError("BINDING_FRESHNESS_INVALID", "freshness must be positive")
+        key = (binding.direction, binding.binding_key)
+        ordinal = (binding.direction, binding.ordinal)
+        if key in seen_keys or ordinal in seen_ordinals:
+            raise StrategyModelError("BINDING_DUPLICATED", "binding keys and ordinals must be unique")
+        seen_keys.add(key)
+        seen_ordinals.add(ordinal)
+        contract = contracts.get(binding.entity_instance_id)
+        if contract is None or not contract.active:
+            raise StrategyModelError("L2_BINDING_UNAVAILABLE", "bound L2 entity is unavailable")
+        if contract.data_type != binding.expected_data_type:
+            raise StrategyModelError("L2_BINDING_TYPE_MISMATCH", "bound L2 type changed")
+        if _normalized_unit(contract.unit) != _normalized_unit(binding.unit):
+            raise StrategyModelError("L2_BINDING_UNIT_MISMATCH", "bound L2 unit changed")
+        if binding.direction == "INPUT" and contract.direction not in {"R", "RW"}:
+            raise StrategyModelError("INPUT_NOT_READABLE", "bound L2 cannot be read")
+        if binding.direction == "OUTPUT":
+            if contract.direction not in {"W", "RW"}:
+                raise StrategyModelError("OUTPUT_NOT_CONTROLLABLE", "bound L2 is read-only")
+            if contract.confirmed_write_points != 1:
+                raise StrategyModelError(
+                    "OUTPUT_WRITE_POINT_UNCONFIRMED",
+                    "output needs exactly one confirmed write point",
+                )
+    if len(outputs) != 1 and static_targets:
+        raise StrategyModelError(
+            "OUTPUT_TARGET_AMBIGUOUS",
+            "static targets require one output binding",
+        )
+    if static_targets:
+        output_contract = contracts[outputs[0].entity_instance_id]
+        for raw_target in static_targets:
+            target = _finite_decimal(raw_target, "OUTPUT_TARGET_INVALID")
+            if output_contract.minimum is not None and target < Decimal(str(output_contract.minimum)):
+                raise StrategyModelError("OUTPUT_LIMIT_VIOLATION", "target is below the configured minimum")
+            if output_contract.maximum is not None and target > Decimal(str(output_contract.maximum)):
+                raise StrategyModelError("OUTPUT_LIMIT_VIOLATION", "target is above the configured maximum")
+
+
+def static_jdm_targets(content: Mapping[str, object]) -> tuple[Decimal, ...]:
+    """Read literal targets from decision tables for publish-time limit checks."""
+    targets: list[Decimal] = []
+    nodes = content.get("nodes")
+    if not isinstance(nodes, list):
+        return ()
+    for node in nodes:
+        if not isinstance(node, Mapping) or node.get("type") != "decisionTableNode":
+            continue
+        table = node.get("content")
+        rules = table.get("rules") if isinstance(table, Mapping) else None
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, Mapping) or "target" not in rule:
+                continue
+            raw = rule["target"]
+            if not isinstance(raw, (str, int, float, Decimal)) or isinstance(raw, bool):
+                raise StrategyModelError(
+                    "OUTPUT_TARGET_NOT_STATIC",
+                    "dispatch targets must be literal numbers",
+                )
+            targets.append(_finite_decimal(raw, "OUTPUT_TARGET_INVALID"))
+    return tuple(targets)
 
 
 def split_cross_midnight(window: DispatchWindow) -> tuple[DispatchWindow, ...]:
@@ -272,3 +474,10 @@ def _decimal(value: Decimal) -> str:
     if value.is_zero():
         return "0"
     return format(value.normalize(), "f")
+
+
+def _normalized_unit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
