@@ -4,6 +4,7 @@ import {
   createAlarmConfigurationPlan,
   createAlarmRuleSet,
   createAlarmRuleSetRevision,
+  deleteAlarmRuleSet,
   fetchAlarmHttpNotificationOptions,
   fetchAlarmRuleGroups,
   fetchAlarmRuleSets,
@@ -18,6 +19,7 @@ import {
 } from '../api/client'
 import {
   compileFaultCodeRules,
+  canDeleteAlarmRuleGroup,
   defaultAlarmDraft,
   describeAlarmDraft,
   describeAlarmTrialResult,
@@ -196,6 +198,22 @@ export default function MinimalAlarmRulesPage() {
     finally { setBusy('') }
   }
 
+  const deleteGroup = async (group: AlarmRuleGroup) => {
+    if (!canDeleteAlarmRuleGroup(group)) {
+      setError('请先停用该规则，再删除。')
+      return
+    }
+    if (!window.confirm(`确定删除“${group.name}”吗？\n历史修订和告警证据仍会保留。`)) return
+    setBusy(`delete:${group.rule_set_id}`); setError(''); setMessage('')
+    try {
+      await deleteAlarmRuleSet(group.rule_set_id)
+      if (selectedRevision?.rule_set_id === group.rule_set_id) setSelectedRevision(null)
+      await load()
+      setMessage('规则已删除，历史证据仍保留。')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '删除规则失败。') }
+    finally { setBusy('') }
+  }
+
   return <div className="space-y-4">
     {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</div>}
     {message && <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{message}</div>}
@@ -216,6 +234,7 @@ export default function MinimalAlarmRulesPage() {
               <button onClick={() => editGroup(group, false)} className="text-[#287c12]">编辑</button>
               <button onClick={() => editGroup(group, true)} className="text-gray-600">复制</button>
               <button disabled={!!busy || (!enabled && (!formal || !group.entity_instance_ids.length))} onClick={() => void toggleGroup(group)} className={`${enabled ? 'text-red-600' : 'text-green-700'} disabled:opacity-40`}>{enabled ? '停用' : '启用'}</button>
+              <button disabled={!!busy || !canDeleteAlarmRuleGroup(group)} onClick={() => void deleteGroup(group)} className="text-red-600 disabled:opacity-30">删除</button>
             </div>
           </div>
           {formal ? <div data-testid={`alarm-group-formal-${group.rule_set_id}`} className="mt-2 space-y-1 text-gray-600">

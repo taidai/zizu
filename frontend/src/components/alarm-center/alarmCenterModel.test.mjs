@@ -165,3 +165,18 @@ test('alarm trial summary shows the tested entity, value, conditions, and outcom
     'E2E验证 / 15V电源故障：试算值 false；结果：会恢复。触发条件 = true（未命中），恢复条件 = false（命中）。',
   )
 })
+
+test('only recovered unarchived alarm events expose archive action', async () => {
+  const { canArchiveAlarmEvent } = await import('./alarmCenterModel.ts')
+
+  assert.equal(canArchiveAlarmEvent({ state: 'recovered', archived_at: null }), true)
+  assert.equal(canArchiveAlarmEvent({ state: 'active_acknowledged', archived_at: null }), false)
+  assert.equal(canArchiveAlarmEvent({ state: 'recovered', archived_at: '2026-09-04T00:00:00Z' }), false)
+})
+
+test('only a disabled alarm rule group exposes delete action', async () => {
+  const { canDeleteAlarmRuleGroup } = await import('./alarmCenterModel.ts')
+
+  assert.equal(canDeleteAlarmRuleGroup({ enabled_entity_instance_ids: [] }), true)
+  assert.equal(canDeleteAlarmRuleGroup({ enabled_entity_instance_ids: ['entity-1'] }), false)
+})

@@ -66,6 +66,13 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
                         / "migration_060_alarm_http_notifications.sql"
                     ).read_text(encoding="utf-8")
                 )
+                cursor.execute(
+                    (
+                        Path(__file__).resolve().parents[2]
+                        / "init-db"
+                        / "migration_061_alarm_record_archiving.sql"
+                    ).read_text(encoding="utf-8")
+                )
 
     def test_apply_writes_definition_and_http_binding_in_one_transaction(self) -> None:
         connection_factory = lambda: psycopg2.connect(**self.kwargs)
@@ -147,6 +154,92 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
                 "http_notification_config_id"
             ],
         )
+
+    def test_disabled_rule_set_archives_without_deleting_revisions(self) -> None:
+        service = AlarmConfiguration(
+            PostgresAlarmConfigurationRepository(
+                lambda: psycopg2.connect(**self.kwargs)
+            )
+        )
+        revision = service.create_rule_set(
+            key="archive-safe",
+            name="可归档规则",
+            rules=(
+                AlarmRule(
+                    "high",
+                    "功率越限",
+                    "MAJOR",
+                    {"operator": "gt", "value": 90},
+                    0,
+                    {"operator": "lt", "value": 85},
+                    0,
+                    60,
+                    "kW",
+                ),
+            ),
+            actor="operator:test",
+        )
+
+        service.archive_rule_set(revision.rule_set_id, "operator:test")
+
+        self.assertEqual((), service.list_rule_set_revisions())
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT archived_by FROM t_alarm_rule_sets WHERE id=%s",
+                (revision.rule_set_id,),
+            )
+            self.assertEqual("operator:test", cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT count(*) FROM t_alarm_rule_set_revisions WHERE rule_set_id=%s",
+                (revision.rule_set_id,),
+            )
+            self.assertEqual(1, cursor.fetchone()[0])
+
+    def test_active_rule_set_cannot_be_archived(self) -> None:
+        service = AlarmConfiguration(
+            PostgresAlarmConfigurationRepository(
+                lambda: psycopg2.connect(**self.kwargs)
+            )
+        )
+        revision = service.create_rule_set(
+            key="archive-active",
+            name="生效规则",
+            rules=(
+                AlarmRule(
+                    "high",
+                    "功率越限",
+                    "MAJOR",
+                    {"operator": "gt", "value": 90},
+                    0,
+                    {"operator": "lt", "value": 85},
+                    0,
+                    60,
+                    "kW",
+                ),
+            ),
+            actor="operator:test",
+        )
+        plan = service.plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(self.entity_id,)),
+                revision.rule_set_id,
+                revision.revision,
+                "operator:test",
+            )
+        )
+        service.apply(
+            ApplyAlarmConfigurationPlan(
+                plan.id,
+                plan.digest,
+                "archive-active-apply",
+                "operator:test",
+            )
+        )
+
+        with self.assertRaises(AlarmConfigurationError) as raised:
+            service.archive_rule_set(revision.rule_set_id, "operator:test")
+
+        self.assertEqual("ALARM_RULE_SET_ACTIVE", str(raised.exception))
 
     def test_apply_rechecks_notification_after_plan_and_rolls_back_publication(self) -> None:
         config_id = uuid4()

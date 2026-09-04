@@ -145,7 +145,8 @@ alarm.name            alarm.severity         alarm.state
 alarm.definition_id   alarm.rule_key
 node.id               node.name              node.path
 entity.id             entity.key              entity.name
-entity.value          entity.unit             entity.quality
+entity.value          entity.value_text        entity.unit
+entity.quality
 entity.observed_at
 ```
 
@@ -167,10 +168,13 @@ entity.observed_at
 
 其他 Content-Type 使用普通 UTF-8 文本替换。保存时检查变量名；测试和正式发送前都检查渲染结果。
 JSON 模板渲染后不是合法 JSON 时，请求不得发出，并记录稳定错误码。
+`entity.value` 按原生 JSON 类型输出，适合数值和布尔字段；`entity.value_text` 始终输出字符串，适合飞书
+卡片 `content` 等强制要求文本的字段。
 
 ### 5.3 成功与响应
 
-- HTTP 2xx 视为成功；3xx 不自动跟随，防止密钥被重定向到其他地址；
+- 普通目标 HTTP 2xx 视为成功；飞书机器人必须同时满足 HTTP 2xx 和响应业务 `code=0`；
+- 3xx 不自动跟随，防止密钥被重定向到其他地址；
 - 4xx、5xx、连接失败、DNS 失败和超时均视为失败；
 - 不从响应正文提取字段，不触发规则、JDM 或控制；
 - 只保存经过控制字符清理且不超过 4 KiB 的响应摘要；

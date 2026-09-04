@@ -525,6 +525,7 @@ zizu/
 | GET | `/api/v1/alarm-rule-sets` | 查询告警规则组的全部不可变修订 |
 | POST | `/api/v1/alarm-rule-sets` | 创建包含固定严重度、触发和恢复条件的规则组首个修订 |
 | POST | `/api/v1/alarm-rule-sets/{id}/revisions` | 为既有规则组创建不可变新修订 |
+| DELETE | `/api/v1/alarm-rule-sets/{id}` | 删除已停用规则组的界面入口；实际为软归档，全部不可变修订和告警证据继续保留 |
 | POST | `/api/v1/alarm-configuration-plans` | 按批量实体范围和规则组修订生成确定性展开预览 |
 | GET | `/api/v1/alarm-configuration-plans/{id}` | 查询计划摘要、add/update/preserve/delete_candidate 项和阻断原因 |
 | POST | `/api/v1/alarm-configuration-plans/{id}/apply` | 携带 `Idempotency-Key` 原子应用计划并产生派生站点配置版本 |
@@ -534,6 +535,7 @@ zizu/
 | GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
 | GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
 | POST | `/api/v1/alarm-events/{id}/acknowledgements` | 确认活动未确认事件；不提供人工恢复命令 |
+| POST | `/api/v1/alarm-events/{id}/archivations` | 归档已恢复事件；默认列表隐藏，但事件、转换和通知证据不删除，可用 `state=archived` 查询 |
 | GET/POST/PUT/DELETE | `/api/v1/admin/alarm-http-notifications` | admin 维护、测试和启停告警 HTTP 请求配置；URL 与敏感字段只加密保存并脱敏返回 |
 | GET | `/api/v1/alarm-http-notification-options` | admin/engineer 读取规则通知选项；仅返回 id、name、status（available / disabled / needs_test），不返回请求配置或密钥 |
 | GET | `/api/v1/alarms/notification-deliveries` | operator 及以上查看发生/恢复通知的脱敏发送记录与逐次尝试 |
@@ -581,7 +583,8 @@ POST 与配置应用共用站点状态事务锁，若目标已不是最新应用
 ### 告警 HTTP 通知
 
 admin 在“系统工具 → HTTP 通知”维护请求，先发送测试，成功后才能启用；告警规则只能选择一个已测试且
-已启用的配置。告警发生和现场恢复在数据库提交后异步发送，人工确认不发送。只有 HTTP 2xx 算送达；
+已启用的配置。告警发生和现场恢复在数据库提交后异步发送，人工确认不发送。普通目标只有 HTTP 2xx
+算送达；飞书机器人还必须返回业务 `code=0`，否则按失败记录并重试，不得把“HTTP 200、业务拒绝”误报为送达；
 失败固定在 5 秒、30 秒和 5 分钟后重试，第四次失败进入可手工重发状态。投递采用至少一次语义，每个通知
 都携带稳定 `Idempotency-Key`，接收方应据此去重。修改配置会自动停用并使旧测试失效，未完成任务下次
 尝试使用新配置；删除配置会解除规则绑定并取消未完成任务。通知失败永不反向改变告警状态。
@@ -605,6 +608,8 @@ admin 在“系统工具 → HTTP 通知”维护请求，先发送测试，成�
 
 在“请求体模板”中定位光标或选中文字后，点击变量即可在该位置插入或替换，之后可继续键入或插入。
 变量仅用于请求体模板，不在请求地址、查询参数或请求头中展开；插入本身不会保存配置或发送通知。
+`entity.value` 保留 JSON 原生类型；外部模板字段必须是字符串时使用 `entity.value_text`，例如飞书卡片的
+`content` 字段应写成 `"content": {{entity.value_text}}`，避免数值或布尔值被飞书拒绝。
 
 完整 URL、敏感查询参数和敏感请求头使用独立 `HTTP_NOTIFICATION_ENCRYPTION_KEY` 加密。
 该密钥必须和数据库备份放进同一恢复清单并一同恢复；丢失后系统不会降级为明文，管理员必须重新录入

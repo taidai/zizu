@@ -80,6 +80,17 @@ class AlarmHttpNotificationContractTest(unittest.TestCase):
         )
         self.assertEqual("application/json", rendered.headers["Content-Type"])
 
+    def test_json_template_can_render_entity_value_as_text(self) -> None:
+        module = _module()
+        rendered = module.render_request(
+            module.normalize_draft(
+                _draft(body_template='{"content":{{entity.value_text}}}')
+            ),
+            _context(**{"entity.value": False}),
+        )
+
+        self.assertEqual({"content": "false"}, json.loads(rendered.body))
+
     def test_unknown_template_variable_is_rejected(self) -> None:
         module = _module()
         with self.assertRaises(module.HttpNotificationError) as raised:
@@ -174,6 +185,55 @@ class AlarmHttpNotificationSendTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.delivered)
         self.assertNotIn("\x00", result.response_excerpt or "")
         self.assertLessEqual(len((result.response_excerpt or "").encode("utf-8")), 4096)
+
+    async def test_feishu_business_error_is_not_delivered_despite_http_200(self) -> None:
+        module = _module()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"code": 11246, "msg": "parse card json error"},
+            )
+
+        request = module.render_request(
+            module.normalize_draft(
+                _draft(
+                    url="https://open.feishu.cn/open-apis/bot/v2/hook/test-token"
+                )
+            ),
+            _context(),
+        )
+        result = await module.send_http_request(
+            request,
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertFalse(result.delivered)
+        self.assertEqual("rejected", result.outcome)
+        self.assertEqual("HTTP_NOTIFICATION_DELIVERY_REJECTED", result.error_code)
+        self.assertEqual(200, result.http_status)
+
+    async def test_feishu_code_zero_is_delivered(self) -> None:
+        module = _module()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": 0, "msg": "success"})
+
+        request = module.render_request(
+            module.normalize_draft(
+                _draft(
+                    url="https://open.feishu.cn/open-apis/bot/v2/hook/test-token"
+                )
+            ),
+            _context(),
+        )
+        result = await module.send_http_request(
+            request,
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertTrue(result.delivered)
+        self.assertEqual("delivered", result.outcome)
 
 
 class _DeliveryRepository:

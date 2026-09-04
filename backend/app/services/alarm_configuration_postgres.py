@@ -209,9 +209,9 @@ class PostgresAlarmConfigurationRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("INSERT INTO t_alarm_rule_sets(id, rule_set_key, name, created_by) VALUES (%s,%s,%s,%s) ON CONFLICT(rule_set_key) DO NOTHING", (uuid4(), key, name, actor))
-                cursor.execute("SELECT id, name FROM t_alarm_rule_sets WHERE rule_set_key=%s FOR UPDATE", (key,))
+                cursor.execute("SELECT id, name, archived_at FROM t_alarm_rule_sets WHERE rule_set_key=%s FOR UPDATE", (key,))
                 row = cursor.fetchone()
-                if row is None or row[1] != name:
+                if row is None or row[1] != name or row[2] is not None:
                     raise AlarmConfigurationError("ALARM_RULE_SET_CONFLICT")
                 rule_set_id = row[0]
                 cursor.execute("SELECT COALESCE(max(revision),0)+1 FROM t_alarm_rule_set_revisions WHERE rule_set_id=%s", (rule_set_id,))
@@ -222,16 +222,66 @@ class PostgresAlarmConfigurationRepository:
     def get_rule_set_revision(self, rule_set_id: UUID, revision: int) -> AlarmRuleSetRevision | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT rule_set_key,rule_set_name,rules,digest FROM t_alarm_rule_set_revisions WHERE rule_set_id=%s AND revision=%s", (rule_set_id, revision))
+                cursor.execute("""
+                    SELECT revision.rule_set_key,revision.rule_set_name,
+                           revision.rules,revision.digest
+                    FROM t_alarm_rule_set_revisions revision
+                    JOIN t_alarm_rule_sets rule_set ON rule_set.id=revision.rule_set_id
+                    WHERE revision.rule_set_id=%s AND revision.revision=%s
+                      AND rule_set.archived_at IS NULL
+                """, (rule_set_id, revision))
                 row = cursor.fetchone()
         return None if row is None else AlarmRuleSetRevision(rule_set_id, row[0], row[1], revision, tuple(_rule_from_json(item) for item in row[2]), row[3].strip())
 
     def list_rule_set_revisions(self) -> tuple[AlarmRuleSetRevision, ...]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT rule_set_id,rule_set_key,rule_set_name,revision,rules,digest FROM t_alarm_rule_set_revisions ORDER BY rule_set_key,revision")
+                cursor.execute("""
+                    SELECT revision.rule_set_id,revision.rule_set_key,
+                           revision.rule_set_name,revision.revision,
+                           revision.rules,revision.digest
+                    FROM t_alarm_rule_set_revisions revision
+                    JOIN t_alarm_rule_sets rule_set ON rule_set.id=revision.rule_set_id
+                    WHERE rule_set.archived_at IS NULL
+                    ORDER BY revision.rule_set_key,revision.revision
+                """)
                 rows = cursor.fetchall()
         return tuple(AlarmRuleSetRevision(row[0], row[1], row[2], int(row[3]), tuple(_rule_from_json(item) for item in row[4]), row[5].strip()) for row in rows)
+
+    def archive_rule_set(self, rule_set_id: UUID, actor: str) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT rule_set_key,archived_at FROM t_alarm_rule_sets WHERE id=%s FOR UPDATE",
+                (rule_set_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[1] is not None:
+                raise AlarmConfigurationError("ALARM_RULE_SET_NOT_FOUND")
+            key = row[0]
+            cursor.execute(
+                """
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM t_alarm_definition_current current
+                  JOIN t_alarm_definitions definition
+                    ON definition.id=current.definition_id
+                  WHERE definition.asset_id LIKE
+                    ('alarm.' || replace(replace(replace(%s, '\\', '\\\\'), '%%', '\\%%'), '_', '\\_') || '.%%')
+                    ESCAPE '\\'
+                )
+                """,
+                (key,),
+            )
+            if cursor.fetchone()[0]:
+                raise AlarmConfigurationError("ALARM_RULE_SET_ACTIVE")
+            cursor.execute(
+                """
+                UPDATE t_alarm_rule_sets
+                SET archived_at=clock_timestamp(),archived_by=%s
+                WHERE id=%s AND archived_at IS NULL
+                """,
+                (actor, rule_set_id),
+            )
 
     def list_rule_groups(self) -> tuple[AlarmRuleGroup, ...]:
         revisions = self.list_rule_set_revisions()

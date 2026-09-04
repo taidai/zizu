@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
+import { archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
+import { canArchiveAlarmEvent } from '../components/alarm-center/alarmCenterModel'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -16,7 +17,7 @@ interface Stats {
   critical: number
 }
 
-function CurrentAlarmView() {
+function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -26,7 +27,7 @@ function CurrentAlarmView() {
   const [levelFilter, setLevelFilter] = useState<AlarmLevel | ''>('')
   const [entityFilter, setEntityFilter] = useState<string>('')
   const [alarmEntities, setAlarmEntities] = useState<{ id: string; name: string; display_name: string | null }[]>([])
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('active')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved' | 'archived'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [stats, setStats] = useState<Stats>({ active: 0, unack: 0, critical: 0 })
   const pageSize = 50
@@ -45,7 +46,10 @@ function CurrentAlarmView() {
       const entityId = entityFilter || undefined
       const acknowledged = statusFilter === 'acknowledged' ? true : statusFilter === 'active' ? false : undefined
       const resolved = statusFilter === 'resolved' ? true : statusFilter === 'active' ? false : undefined
-      const data = await fetchAlarms(page, pageSize, level, undefined, acknowledged, resolved, undefined, entityId, request.signal)
+      const data = await fetchAlarms(
+        page, pageSize, level, undefined, acknowledged, resolved, undefined,
+        entityId, request.signal, statusFilter === 'archived' ? 'archived' : undefined,
+      )
       if (request.signal.aborted || pendingRequest.current !== request) return
       setAlarms(data.alarms)
       setTotalPages(data.total_pages || 1)
@@ -93,6 +97,16 @@ function CurrentAlarmView() {
     }
   }
 
+  const handleArchive = async (alarm: Alarm) => {
+    if (!window.confirm(`确定归档“${alarm.message}”吗？\n记录和发送证据仍会保留。`)) return
+    try {
+      await archiveAlarm(alarm.id)
+      void load()
+    } catch {
+      alert('归档失败，请确认该告警已经现场恢复。')
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -135,6 +149,7 @@ function CurrentAlarmView() {
             { key: 'active', label: '未恢复' },
             { key: 'acknowledged', label: '已确认' },
             { key: 'resolved', label: '已恢复' },
+            { key: 'archived', label: '已归档' },
             { key: 'all', label: '全部' },
           ].map((s) => (
             <button
@@ -219,6 +234,17 @@ function CurrentAlarmView() {
                   {alarm.resolved_at && (
                     <span className="text-[10px] text-green-600">已恢复</span>
                   )}
+                  {canArchive && canArchiveAlarmEvent(alarm) && (
+                    <button
+                      onClick={() => void handleArchive(alarm)}
+                      className="neu-btn px-3 py-1 text-xs text-gray-600"
+                    >
+                      归档
+                    </button>
+                  )}
+                  {alarm.archived_at && (
+                    <span className="text-[10px] text-gray-400">已归档</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -262,7 +288,7 @@ export default function AlarmCenterPage({ actorId, canConfigure }: { actorId: st
       <button onClick={() => setTab('notifications')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'notifications' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>通知记录</button>
       {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>告警规则</button>}
     </div>
-    {tab === 'events' && <CurrentAlarmView />}
+    {tab === 'events' && <CurrentAlarmView canArchive={canConfigure} />}
     {tab === 'notifications' && <AlarmNotificationRecords canRetry={canConfigure} />}
     {tab === 'rules' && canConfigure && <MinimalAlarmRulesPage key={actorId} />}
   </div>

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -129,7 +129,7 @@ def _error(error: AlarmConfigurationError) -> HTTPException:
     response_status = 422
     if code in {"ALARM_PLAN_NOT_FOUND", "ALARM_RULE_SET_NOT_FOUND"}:
         response_status = 404
-    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "IDEMPOTENCY_KEY_REUSED", "ALARM_ENTITY_UNRESOLVED", "HTTP_NOTIFICATION_NOT_FOUND", "HTTP_NOTIFICATION_DISABLED", "HTTP_NOTIFICATION_TEST_STALE"}:
+    elif code in {"ALARM_PLAN_STALE", "ALARM_PLAN_DIGEST_MISMATCH", "ALARM_PLAN_BLOCKED", "ALARM_RULE_SET_ACTIVE", "IDEMPOTENCY_KEY_REUSED", "ALARM_ENTITY_UNRESOLVED", "HTTP_NOTIFICATION_NOT_FOUND", "HTTP_NOTIFICATION_DISABLED", "HTTP_NOTIFICATION_TEST_STALE"}:
         response_status = 409
     elif code.endswith("_PERSISTENCE_FAILED") or code.endswith("_PERSISTENCE_UNAVAILABLE"):
         response_status = 503
@@ -212,6 +212,23 @@ async def create_alarm_rule_set_revision(rule_set_id: UUID, body: CreateRuleSetR
         return _revision(configuration.create_rule_set_revision(rule_set_id=rule_set_id, rules=tuple(rule.domain() for rule in body.rules), actor=principal.actor))
     except AlarmConfigurationError as error:
         raise _error(error) from error
+
+
+@router.delete(
+    "/alarm-rule-sets/{rule_set_id}",
+    status_code=204,
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def delete_alarm_rule_set(
+    rule_set_id: UUID,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    configuration: AlarmConfiguration = Depends(get_alarm_configuration),
+) -> Response:
+    try:
+        configuration.archive_rule_set(rule_set_id, principal.actor)
+    except AlarmConfigurationError as error:
+        raise _error(error) from error
+    return Response(status_code=204)
 
 
 @router.post("/alarm-configuration-plans", status_code=201, openapi_extra=capability_metadata(CONFIGURATION_WRITE))

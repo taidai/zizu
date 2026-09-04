@@ -41,6 +41,11 @@ MIGRATION_060 = (
     / "init-db"
     / "migration_060_alarm_http_notifications.sql"
 )
+MIGRATION_061 = (
+    Path(__file__).resolve().parents[2]
+    / "init-db"
+    / "migration_061_alarm_record_archiving.sql"
+)
 
 
 @unittest.skipUnless(
@@ -86,6 +91,7 @@ class AlarmRuntimePostgresTest(unittest.TestCase):
                 cursor.execute("SET session_replication_role=origin")
                 migration._apply_044(cursor)
                 cursor.execute(MIGRATION_060.read_text(encoding="utf-8"))
+                cursor.execute(MIGRATION_061.read_text(encoding="utf-8"))
 
     def test_activation_and_recovery_enqueue_committed_context_and_rollback_together(self) -> None:
         connection_factory = lambda: psycopg2.connect(**self.kwargs)

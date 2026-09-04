@@ -61,6 +61,13 @@ class AcknowledgeAlarm:
 
 
 @dataclass(frozen=True)
+class ArchiveAlarmEvent:
+    event_id: UUID
+    actor: str
+    archived_at: datetime
+
+
+@dataclass(frozen=True)
 class AlarmEvent:
     id: UUID
     definition_id: UUID
@@ -78,6 +85,8 @@ class AlarmEvent:
     first_observation: dict[str, Any] | None = None
     last_observation: dict[str, Any] | None = None
     recovery_observation: dict[str, Any] | None = None
+    archived_at: datetime | None = None
+    archived_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +195,13 @@ class AlarmRepository(Protocol):
     def transitions(self, event_id: UUID) -> tuple[AlarmTransition, ...]: ...
 
     def save_event(self, event: AlarmEvent) -> AlarmEvent: ...
+
+    def archive_event(
+        self,
+        event_id: UUID,
+        actor: str,
+        archived_at: datetime,
+    ) -> AlarmEvent: ...
 
     def append_transition(self, transition: AlarmTransition) -> UUID | None: ...
 
@@ -377,6 +393,19 @@ class InMemoryAlarmRepository:
         self._events[event.id] = event
         return event
 
+    def archive_event(
+        self,
+        event_id: UUID,
+        actor: str,
+        archived_at: datetime,
+    ) -> AlarmEvent:
+        event = self._events.get(event_id)
+        if event is None:
+            raise AlarmRuntimeError("ALARM_EVENT_NOT_FOUND", "Alarm event was not found")
+        archived = replace(event, archived_at=archived_at, archived_by=actor)
+        self._events[event_id] = archived
+        return archived
+
     def append_transition(self, transition: AlarmTransition) -> UUID:
         audit_event_id = transition.audit_event_id or uuid4()
         self._transitions.append(replace(transition, audit_event_id=audit_event_id))
@@ -419,10 +448,20 @@ class InMemoryAlarmRepository:
         self, page: int, page_size: int, state: str | None,
         severity: str | None, entity_instance_id: UUID | None,
     ) -> AlarmEventPage:
-        visible = [item for item in self._events.values() if item.state != "normal"]
+        archived_view = state == "archived"
+        visible = [
+            item
+            for item in self._events.values()
+            if item.state != "normal"
+            and (
+                item.archived_at is not None
+                if archived_view
+                else item.archived_at is None
+            )
+        ]
         filtered = sorted(
             (item for item in visible
-             if (state is None or (item.state in OPEN_STATES if state == "open" else item.state == state))
+             if (archived_view or state is None or (item.state in OPEN_STATES if state == "open" else item.state == state))
              and (severity is None or item.severity == severity)
              and (entity_instance_id is None or item.entity_instance_id == entity_instance_id)),
             key=lambda item: (
@@ -642,6 +681,28 @@ class AlarmRuntime:
                 "ALARM_ACKNOWLEDGED",
                 False,
                 audit_event_id,
+            )
+
+    def archive(self, command: ArchiveAlarmEvent) -> AlarmEvent:
+        actor = command.actor.strip()
+        if not actor:
+            raise AlarmRuntimeError(
+                "ALARM_EVENT_ARCHIVE_ACTOR_INVALID",
+                "Alarm event archive needs an actor",
+            )
+        with self._repository.transaction() as repository:
+            event = repository.get_event(command.event_id)
+            if event is None:
+                raise AlarmRuntimeError("ALARM_EVENT_NOT_FOUND", "Alarm event was not found")
+            if event.state != "recovered" or event.archived_at is not None:
+                raise AlarmRuntimeError(
+                    "ALARM_EVENT_ARCHIVE_NOT_ALLOWED",
+                    "Only an unarchived recovered alarm event can be archived",
+                )
+            return repository.archive_event(
+                event.id,
+                actor,
+                _utc(command.archived_at),
             )
 
     def get(self, event_id: UUID) -> AlarmEvent:

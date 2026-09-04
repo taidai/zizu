@@ -48,7 +48,8 @@ class AlarmEventQueryPostgresTest(unittest.IsolatedAsyncioTestCase):
                     acknowledged_at timestamptz, acknowledged_by text,
                     acknowledgement_note text, recovery_candidate_since timestamptz,
                     recovered_at timestamptz, first_observation jsonb,
-                    last_observation jsonb, recovery_observation jsonb
+                    last_observation jsonb, recovery_observation jsonb,
+                    archived_at timestamptz, archived_by text
                 );
                 CREATE TEMP TABLE t_alarm_definitions (
                     id uuid, asset_id text, entity_instance_id uuid
@@ -85,6 +86,10 @@ class AlarmEventQueryPostgresTest(unittest.IsolatedAsyncioTestCase):
                     ('00000000-0000-0000-0000-000000000012','00000000-0000-0000-0000-000000000003','1','00000000-0000-0000-0000-000000000002','active_acknowledged','WARNING','2026-08-31','2026-08-31'),
                     ('00000000-0000-0000-0000-000000000013','00000000-0000-0000-0000-000000000003','1','00000000-0000-0000-0000-000000000002','pending','MAJOR','2026-08-29',NULL),
                     ('00000000-0000-0000-0000-000000000014','00000000-0000-0000-0000-000000000003','1','00000000-0000-0000-0000-000000000002','normal','CRITICAL','2026-09-03',NULL);
+                UPDATE pg_temp.t_alarm_events
+                SET archived_at='2026-09-03'::timestamptz,
+                    archived_by='user:archivist'
+                WHERE id=md5('1')::uuid;
             """)
 
         @contextmanager
@@ -112,12 +117,13 @@ class AlarmEventQueryPostgresTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(max(self.fetched_rows), 50, "A 50-row page must not transfer 6,200 historical observations")
 
         for state, severity, entity, page, total, states in (
-            ("recovered", None, None, 1, 6200, ["recovered", "recovered"]),
+            ("recovered", None, None, 1, 6199, ["recovered", "recovered"]),
+            ("archived", None, None, 1, 1, ["recovered"]),
             ("open", "CRITICAL", None, 1, 1, ["active_unacknowledged"]),
             ("active_acknowledged", None, None, 1, 1, ["active_acknowledged"]),
             (None, None, UUID(int=99), 1, 0, []),
-            (None, None, None, 4000, 6203, []),
-            (None, None, None, 1, 6203, ["active_acknowledged", "active_unacknowledged"]),
+            (None, None, None, 4000, 6202, []),
+            (None, None, None, 1, 6202, ["active_acknowledged", "active_unacknowledged"]),
         ):
             with self.subTest(state=state, severity=severity, page=page, entity=entity):
                 self.fetched_rows.clear()

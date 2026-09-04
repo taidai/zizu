@@ -25,6 +25,7 @@ MIGRATION_034 = MIGRATIONS_ROOT / "migration_034_unified_alarm_configuration.sql
 MIGRATION_035 = MIGRATIONS_ROOT / "migration_035_legacy_alarm_contract_gate.sql"
 MIGRATION_036 = MIGRATIONS_ROOT / "migration_036_alarm_configuration_acceptance.sql"
 MIGRATION_037 = MIGRATIONS_ROOT / "migration_037_alarm_configuration_application_kinds.sql"
+MIGRATION_061 = MIGRATIONS_ROOT / "migration_061_alarm_record_archiving.sql"
 BASE_MIGRATIONS = tuple(
     MIGRATIONS_ROOT / f"migration_{version:03d}{suffix}"
     for version, suffix in (
@@ -117,6 +118,7 @@ class _PostgresAlarmConfigurationTestBase:
         if include_acceptance:
             cursor.execute(MIGRATION_036.read_text(encoding="utf-8"))
             cursor.execute(MIGRATION_037.read_text(encoding="utf-8"))
+        cursor.execute(MIGRATION_061.read_text(encoding="utf-8"))
 
     @staticmethod
     def _insert_installed_site(cursor) -> tuple[str, str]:

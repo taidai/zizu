@@ -56,3 +56,12 @@ test('masked preview never restores configured sensitive values', async () => {
   assert.doesNotMatch(preview, /Bearer/)
   assert.doesNotMatch(preview, /secret-token/)
 })
+
+test('variable picker exposes an entity value token that always renders text', async () => {
+  const { HTTP_NOTIFICATION_VARIABLES } = await import('./alarmHttpNotificationModel.ts')
+
+  assert.deepEqual(
+    HTTP_NOTIFICATION_VARIABLES.find(([name]) => name === 'entity.value_text'),
+    ['entity.value_text', '实体值（文本）'],
+  )
+})

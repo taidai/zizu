@@ -41,6 +41,7 @@ ALLOWED_VARIABLES = frozenset(
         "entity.key",
         "entity.name",
         "entity.value",
+        "entity.value_text",
         "entity.unit",
         "entity.quality",
         "entity.observed_at",
@@ -566,7 +567,10 @@ def render_request(
     context: NotificationContext,
 ) -> RenderedHttpRequest:
     normalized = normalize_draft(draft)
-    notification_id = context.values.get("notification.id")
+    values = dict(context.values)
+    if "entity.value_text" not in values and "entity.value" in values:
+        values["entity.value_text"] = _text_value(values["entity.value"])
+    notification_id = values.get("notification.id")
     if not isinstance(notification_id, str) or not notification_id.strip():
         raise HttpNotificationError(
             "HTTP_NOTIFICATION_INVALID_TEMPLATE",
@@ -575,7 +579,7 @@ def render_request(
     missing = [
         name
         for name in _TEMPLATE_VARIABLE.findall(normalized.body_template)
-        if name not in context.values
+        if name not in values
     ]
     if missing:
         raise HttpNotificationError(
@@ -585,7 +589,9 @@ def render_request(
     if _is_json(normalized.content_type):
         rendered_body = _TEMPLATE_VARIABLE.sub(
             lambda match: json.dumps(
-                context.values[match.group(1)],
+                values[match.group(1)],
+                # JSON encoding keeps the derived text token safe without
+                # changing the existing native-type token semantics.
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -600,7 +606,7 @@ def render_request(
             ) from error
     else:
         rendered_body = _TEMPLATE_VARIABLE.sub(
-            lambda match: _text_value(context.values[match.group(1)]),
+            lambda match: _text_value(values[match.group(1)]),
             normalized.body_template,
         )
 
@@ -650,6 +656,16 @@ async def send_http_request(
         duration_ms = max(0, round((time.monotonic() - started) * 1000))
         excerpt = _response_excerpt(response.text)
         if 200 <= response.status_code < 300:
+            if _is_feishu_bot_url(request.url) and not _feishu_response_succeeded(response):
+                return HttpSendResult(
+                    False,
+                    "rejected",
+                    response.status_code,
+                    duration_ms,
+                    "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                    "Feishu rejected the notification payload",
+                    excerpt,
+                )
             return HttpSendResult(
                 True,
                 "delivered",
@@ -819,6 +835,26 @@ def _validate_template(template: str, content_type: str) -> None:
 def _is_json(content_type: str) -> bool:
     media_type = content_type.split(";", 1)[0].strip().lower()
     return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _is_feishu_bot_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    return (
+        parsed.hostname is not None
+        and parsed.hostname.rstrip(".").lower() == "open.feishu.cn"
+        and parsed.path.startswith("/open-apis/bot/v2/hook/")
+    )
+
+
+def _feishu_response_succeeded(response: httpx.Response) -> bool:
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    code = payload.get("code", payload.get("StatusCode"))
+    return code == 0 or code == "0"
 
 
 def _text_value(value: object) -> str:

@@ -905,6 +905,8 @@ export interface Alarm {
   alarm_code?: string | null
   duration_seconds?: number
   state?: 'pending' | 'active_unacknowledged' | 'active_acknowledged' | 'recovered'
+  archived_at?: string | null
+  archived_by?: string | null
 }
 
 export interface AlarmListResponse {
@@ -935,6 +937,8 @@ interface AlarmEventWire {
   entity_name: string
   alarm_name: string
   duration_seconds: number
+  archived_at: string | null
+  archived_by: string | null
 }
 
 export async function fetchAlarms(
@@ -947,13 +951,15 @@ export async function fetchAlarms(
   nodeId?: string,
   entityId?: string,
   signal?: AbortSignal,
+  view?: 'archived',
 ): Promise<AlarmListResponse> {
   void sourceKey
   void nodeId
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
   if (level) params.set('severity', level)
   if (entityId) params.set('entity_instance_id', entityId)
-  if (resolved === true) params.set('state', 'recovered')
+  if (view === 'archived') params.set('state', 'archived')
+  else if (resolved === true) params.set('state', 'recovered')
   else if (acknowledged === true) params.set('state', 'active_acknowledged')
   else if (acknowledged === false && resolved === false) params.set('state', 'open')
   const res = await apiFetch(`${API_BASE}/alarm-events?${params}`, { signal })
@@ -983,6 +989,8 @@ export async function fetchAlarms(
       resolved_at: item.recovered_at,
       duration_seconds: item.duration_seconds,
       state: item.state,
+      archived_at: item.archived_at,
+      archived_by: item.archived_by,
     })),
     total: data.total,
     page: data.page,
@@ -1355,6 +1363,13 @@ export async function createPointProcessingDraftPlan(
   return response.json()
 }
 
+export async function archiveAlarm(alarmId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/alarm-events/${alarmId}/archivations`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Archive alarm failed: ${res.status}`)
+}
+
 export interface RawPointMaintenanceInput {
   tag_ids: string[]
   display_name?: string
@@ -1649,6 +1664,7 @@ export class AlarmConfigurationApiError extends Error {
 const ALARM_CONFIGURATION_MESSAGES: Record<string, string> = {
   ALARM_PLAN_NOT_FOUND: '未找到该告警配置计划。',
   ALARM_RULE_SET_NOT_FOUND: '未找到所选规则集。',
+  ALARM_RULE_SET_ACTIVE: '请先停用该规则，再删除。',
   ALARM_PLAN_STALE: '配置基线已变化，请重新生成计划。',
   ALARM_PLAN_DIGEST_MISMATCH: '计划摘要已失效，请重新生成计划。',
   ALARM_PLAN_BLOCKED: '计划存在阻断项，不能应用。',
@@ -2375,6 +2391,13 @@ export async function applyDeviceTemplate(
   })
   if (!res.ok) throw new Error(`Apply template failed: ${res.status}`)
   return res.json()
+}
+
+export async function deleteAlarmRuleSet(ruleSetId: string): Promise<void> {
+  const response = await alarmConfigurationFetch(`${API_BASE}/alarm-rule-sets/${encodeURIComponent(ruleSetId)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw await alarmConfigurationError(response, `删除规则失败：${response.status}`)
 }
 
 // ── Alarm HTTP notifications ──

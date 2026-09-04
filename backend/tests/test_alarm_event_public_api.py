@@ -261,6 +261,110 @@ class AlarmEventPublicApiTest(unittest.IsolatedAsyncioTestCase):
             listed["summary"],
         )
 
+    async def test_recovered_event_can_be_archived_and_remains_queryable_as_evidence(self) -> None:
+        from app.api.alarm_events import get_alarm_runtime, router
+        from app.services.alarm_runtime import (
+            AlarmDefinition,
+            AlarmObservation,
+            AlarmRuntime,
+            InMemoryAlarmDefinitionCatalog,
+            InMemoryAlarmRepository,
+        )
+
+        started_at = datetime(2026, 8, 14, 10, tzinfo=timezone.utc)
+        runtime = AlarmRuntime(
+            InMemoryAlarmDefinitionCatalog((AlarmDefinition(
+                id=DEFINITION_ID,
+                asset_id="alarm.pcs.overpower",
+                version="1.0.0",
+                entity_instance_id=ENTITY_INSTANCE_ID,
+                entity_definition_id="pcs.activePower",
+                trigger={"op": "gt", "value": 100},
+                trigger_duration_seconds=0,
+                recovery={"op": "lte", "value": 90},
+                recovery_duration_seconds=0,
+                severity="MAJOR",
+                notification_throttle_seconds=60,
+            ),)),
+            InMemoryAlarmRepository(),
+        )
+        activated = runtime.submit(AlarmObservation(
+            DEFINITION_ID, ENTITY_INSTANCE_ID, started_at, 101, 192,
+            "entity", "PCS-01.activePower", {"sample": 1},
+        ))
+        runtime.submit(AlarmObservation(
+            DEFINITION_ID, ENTITY_INSTANCE_ID, started_at + timedelta(seconds=1),
+            90, 192, "entity", "PCS-01.activePower", {"sample": 2},
+        ))
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1")
+        app.dependency_overrides[get_alarm_runtime] = lambda: runtime
+        async with AuthenticatedApiClient(app) as client:
+            headers = {"Authorization": await client._bearer("engineer")}
+            archived = await client._client.post(
+                f"/api/v1/alarm-events/{activated.event_id}/archivations",
+                headers=headers,
+            )
+            current = await client._client.get(
+                "/api/v1/alarm-events?state=recovered",
+                headers=headers,
+            )
+            evidence = await client._client.get(
+                "/api/v1/alarm-events?state=archived",
+                headers=headers,
+            )
+
+        self.assertEqual(200, archived.status_code, archived.text)
+        self.assertIsNotNone(archived.json()["archived_at"])
+        self.assertEqual(0, current.json()["total"])
+        self.assertEqual(1, evidence.json()["total"])
+        self.assertEqual(activated.event_id.hex, evidence.json()["items"][0]["id"].replace("-", ""))
+
+    async def test_active_event_cannot_be_archived(self) -> None:
+        from app.api.alarm_events import get_alarm_runtime, router
+        from app.services.alarm_runtime import (
+            AlarmDefinition,
+            AlarmObservation,
+            AlarmRuntime,
+            InMemoryAlarmDefinitionCatalog,
+            InMemoryAlarmRepository,
+        )
+
+        runtime = AlarmRuntime(
+            InMemoryAlarmDefinitionCatalog((AlarmDefinition(
+                id=DEFINITION_ID,
+                asset_id="alarm.pcs.overpower",
+                version="1.0.0",
+                entity_instance_id=ENTITY_INSTANCE_ID,
+                entity_definition_id="pcs.activePower",
+                trigger={"op": "gt", "value": 100},
+                trigger_duration_seconds=0,
+                recovery={"op": "lte", "value": 90},
+                recovery_duration_seconds=0,
+                severity="MAJOR",
+                notification_throttle_seconds=60,
+            ),)),
+            InMemoryAlarmRepository(),
+        )
+        active = runtime.submit(AlarmObservation(
+            DEFINITION_ID, ENTITY_INSTANCE_ID,
+            datetime(2026, 8, 14, 10, tzinfo=timezone.utc), 101, 192,
+            "entity", "PCS-01.activePower", {"sample": 1},
+        ))
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1")
+        app.dependency_overrides[get_alarm_runtime] = lambda: runtime
+        async with AuthenticatedApiClient(app) as client:
+            response = await client._client.post(
+                f"/api/v1/alarm-events/{active.event_id}/archivations",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual("ALARM_EVENT_ARCHIVE_NOT_ALLOWED", response.json()["detail"]["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.business_security import (
     ALARM_ACKNOWLEDGE,
+    CONFIGURATION_WRITE,
     RUNTIME_READ,
     capability_metadata,
     principal_for,
@@ -19,6 +20,7 @@ from app.api.business_security import (
 )
 from app.services.alarm_runtime import (
     AcknowledgeAlarm,
+    ArchiveAlarmEvent,
     AlarmEvent,
     AlarmEventPresentation,
     AlarmRuntime,
@@ -76,6 +78,8 @@ def _event_public(
         "entity_name": presentation.entity_name,
         "alarm_name": presentation.alarm_name,
         "duration_seconds": max(0, int((ended_at - started_at).total_seconds())),
+        "archived_at": event.archived_at.isoformat() if event.archived_at else None,
+        "archived_by": event.archived_by,
     }
 
 
@@ -104,7 +108,7 @@ async def list_alarm_events(
     page_size: int = Query(50, ge=1, le=200),
     state: str | None = Query(
         None,
-        pattern="^(pending|active_unacknowledged|active_acknowledged|recovered|open)$",
+        pattern="^(pending|active_unacknowledged|active_acknowledged|recovered|open|archived)$",
     ),
     severity: str | None = Query(None, pattern="^(INFO|WARNING|MAJOR|CRITICAL)$"),
     entity_instance_id: UUID | None = None,
@@ -182,5 +186,27 @@ async def acknowledge_alarm_event(
             "code": outcome.code,
             "audit_event_id": str(outcome.audit_event_id) if outcome.audit_event_id else None,
         }
+    except AlarmRuntimeError as exc:
+        raise _error(exc) from exc
+
+
+@router.post(
+    "/alarm-events/{event_id}/archivations",
+    openapi_extra=capability_metadata(CONFIGURATION_WRITE),
+)
+async def archive_alarm_event(
+    event_id: UUID,
+    principal: Principal = Depends(principal_for(CONFIGURATION_WRITE)),
+    runtime: AlarmRuntime = Depends(get_alarm_runtime),
+) -> dict[str, Any]:
+    try:
+        event = runtime.archive(
+            ArchiveAlarmEvent(
+                event_id=event_id,
+                actor=principal.actor,
+                archived_at=datetime.now(timezone.utc),
+            )
+        )
+        return _event_public(event, runtime.describe((event,))[event.id])
     except AlarmRuntimeError as exc:
         raise _error(exc) from exc

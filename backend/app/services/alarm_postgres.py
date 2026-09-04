@@ -264,11 +264,15 @@ class PostgresAlarmRepository:
         self, page: int, page_size: int, state: str | None,
         severity: str | None, entity_instance_id: UUID | None,
     ) -> AlarmEventPage:
-        conditions = ["state <> 'normal'"]
+        archived_view = state == "archived"
+        conditions = [
+            "state <> 'normal'",
+            "archived_at IS NOT NULL" if archived_view else "archived_at IS NULL",
+        ]
         parameters: list[Any] = []
         if state == "open":
             conditions.append("state IN ('pending','active_unacknowledged','active_acknowledged')")
-        elif state is not None:
+        elif state is not None and not archived_view:
             conditions.append("state = %s")
             parameters.append(state)
         if severity is not None:
@@ -294,7 +298,8 @@ class PostgresAlarmRepository:
                     SELECT id, definition_id, definition_version, entity_instance_id,
                            state, severity, pending_at, active_at, acknowledged_at,
                            acknowledged_by, acknowledgement_note, recovery_candidate_since,
-                           recovered_at, first_observation, last_observation, recovery_observation
+                           recovered_at, first_observation, last_observation, recovery_observation,
+                           archived_at, archived_by
                     FROM t_alarm_events
                     WHERE {where}
                     ORDER BY state IN ('pending','active_unacknowledged','active_acknowledged') DESC,
@@ -369,6 +374,15 @@ class PostgresAlarmRepository:
     def save_event(self, event: AlarmEvent) -> AlarmEvent:
         with self.transaction() as transaction:
             return transaction.save_event(event)
+
+    def archive_event(
+        self,
+        event_id: UUID,
+        actor: str,
+        archived_at: datetime,
+    ) -> AlarmEvent:
+        with self.transaction() as transaction:
+            return transaction.archive_event(event_id, actor, archived_at)
 
     def append_transition(self, transition: AlarmTransition) -> UUID | None:
         with self.transaction() as transaction:
@@ -472,7 +486,8 @@ class _PostgresAlarmTransaction:
                 SELECT id, definition_id, definition_version, entity_instance_id,
                        state, severity, pending_at, active_at, acknowledged_at,
                        acknowledged_by, acknowledgement_note, recovery_candidate_since,
-                       recovered_at, first_observation, last_observation, recovery_observation
+                       recovered_at, first_observation, last_observation, recovery_observation,
+                       archived_at, archived_by
                 FROM t_alarm_events WHERE id = %s FOR UPDATE
                 """,
                 (event_id,),
@@ -487,7 +502,8 @@ class _PostgresAlarmTransaction:
                 SELECT id, definition_id, definition_version, entity_instance_id,
                        state, severity, pending_at, active_at, acknowledged_at,
                        acknowledged_by, acknowledgement_note, recovery_candidate_since,
-                       recovered_at, first_observation, last_observation, recovery_observation
+                       recovered_at, first_observation, last_observation, recovery_observation,
+                       archived_at, archived_by
                 FROM t_alarm_events ORDER BY pending_at DESC, id DESC
                 """
             )
@@ -594,6 +610,34 @@ class _PostgresAlarmTransaction:
                     ),
                 )
         return event
+
+    def archive_event(
+        self,
+        event_id: UUID,
+        actor: str,
+        archived_at: datetime,
+    ) -> AlarmEvent:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE t_alarm_events
+                SET archived_at=%s, archived_by=%s
+                WHERE id=%s AND state='recovered' AND archived_at IS NULL
+                RETURNING id,definition_id,definition_version,entity_instance_id,
+                          state,severity,pending_at,active_at,acknowledged_at,
+                          acknowledged_by,acknowledgement_note,recovery_candidate_since,
+                          recovered_at,first_observation,last_observation,recovery_observation,
+                          archived_at,archived_by
+                """,
+                (archived_at, actor, event_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise AlarmRuntimeError(
+                "ALARM_EVENT_ARCHIVE_NOT_ALLOWED",
+                "Only an unarchived recovered alarm event can be archived",
+            )
+        return _event(row)
 
     def append_transition(self, transition: AlarmTransition) -> UUID:
         audit_event_id = transition.audit_event_id or uuid4()

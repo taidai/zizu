@@ -49,6 +49,7 @@ class _Repository:
         self.applied = object()
         self.apply_calls = 0
         self.http_notification_states = {}
+        self.archived_rule_sets = []
 
     def get_rule_set_revision(self, rule_set_id, revision):
         return self.rule_set if (rule_set_id, revision) == (self.rule_set.rule_set_id, 1) else None
@@ -79,6 +80,11 @@ class _Repository:
 
     def http_notification_status(self, config_id):
         return self.http_notification_states.get(config_id)
+
+    def archive_rule_set(self, rule_set_id, actor):
+        if rule_set_id != self.rule_set.rule_set_id:
+            raise AlarmConfigurationError("ALARM_RULE_SET_NOT_FOUND")
+        self.archived_rule_sets.append((rule_set_id, actor))
 
 
 class _RuntimeGate:
@@ -618,6 +624,26 @@ class AlarmConfigurationPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("PCS 功率", response.json()["items"][0]["name"])
         self.assertEqual(1, response.json()["items"][0]["device_count"])
         self.assertEqual("MAJOR", response.json()["items"][0]["highest_severity"])
+
+    async def test_disabled_rule_group_can_be_deleted_without_erasing_revisions(self) -> None:
+        from app.api.alarm_configurations import get_alarm_configuration, router
+
+        repository = _Repository()
+        app = FastAPI()
+        app.include_router(router, prefix="/api/v1")
+        app.dependency_overrides[get_alarm_configuration] = lambda: AlarmConfiguration(repository)
+
+        async with AuthenticatedApiClient(app) as client:
+            response = await client._client.delete(
+                f"/api/v1/alarm-rule-sets/{repository.rule_set.rule_set_id}",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+
+        self.assertEqual(204, response.status_code, response.text)
+        self.assertEqual(
+            [(repository.rule_set.rule_set_id, "user:00000000-0000-0000-0000-000000000002")],
+            repository.archived_rule_sets,
+        )
 
 
 if __name__ == "__main__":

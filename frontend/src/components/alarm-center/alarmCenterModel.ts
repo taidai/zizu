@@ -23,6 +23,19 @@ export type AlarmTrialInput =
   | { ready: false; message: string }
   | { ready: true; value: number | boolean | string | string[]; message: string }
 
+export function canArchiveAlarmEvent(event: {
+  state?: string
+  archived_at?: string | null
+}): boolean {
+  return event.state === 'recovered' && !event.archived_at
+}
+
+export function canDeleteAlarmRuleGroup(group: {
+  enabled_entity_instance_ids: string[]
+}): boolean {
+  return group.enabled_entity_instance_ids.length === 0
+}
+
 const SEVERITIES = new Set<AlarmSeverity>(['CRITICAL', 'MAJOR', 'WARNING', 'INFO'])
 const OPERATOR_LABEL = {
   eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤',

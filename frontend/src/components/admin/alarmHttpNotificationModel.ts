@@ -34,6 +34,7 @@ export const HTTP_NOTIFICATION_VARIABLES = [
   ['node.path', '节点路径'],
   ['entity.name', '实体名称'],
   ['entity.value', '实体值'],
+  ['entity.value_text', '实体值（文本）'],
   ['entity.unit', '实体单位'],
   ['entity.quality', '实体质量'],
   ['entity.observed_at', '实体数据时间'],
