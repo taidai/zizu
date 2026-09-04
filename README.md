@@ -1,1426 +1,217 @@
 # ZiZu
 
-> 自足物联网平台 · 开源工业 IoT 低代码平台
->
-> **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
->
-> 1 号机当前运行版本：**v0.8.3**。产品主线已经收口为节点、L0 原始数据、L1 数据来源与计算、L2 标准实体和只消费 L2 的告警/JDM/控制/EMS 工作台。发布状态与现场证据以最新 `docs/deploy-1号机-*.md` 为准。
->
-> 中英文技术概览：[《ZiZu 技术架构说明 / Technical Architecture》](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)。唯一现行设计依据：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。README 后部仍含历史接口说明时，以总纲、最新 accepted ADR 与当前源码为准。
+用于开发和交付 EMS 的配置型工业 IoT 平台。
 
-**中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
+实施工程师不修改平台源码、不直接编写 SQL，只需建立真实节点、接入设备点位、把原始数据加工成稳定
+实体，再配置告警、JDM、控制和固定 EMS 工作台，即可交付单站工业控制系统。光储充 EMS 是首个参考
+交付场景。
 
----
+**当前版本：`v0.8.3`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-## 这是什么
+> 当前状态：核心数据主干已经落地，告警正在现场打磨；JDM、统一控制和固定 EMS 工作台仍需完成真实
+> 光储充站点的端到端验收。ZiZu 尚不能宣称完整 EMS 已经交付就绪。
 
-ZiZu 是一套面向**光储充 EMS、工业能耗监测、设备远程控制**场景的物联网平台。核心理念是「**配置即平台**」——所有业务逻辑通过界面配置产生，不写死代码。
+## 核心结构
 
-唯一产品主线是：物理节点树与挂载其上的 L0 原始点位、L1 点位加工、L2 全局实体共同构成平台数据主干；告警、JDM、控制和画面只消费 L2 稳定业务语义。
-
-L0/L1/L2 是内部技术分层，不要求普通实施工程师理解这些代号。用户只需查看原始数据、定义标准实体的数据来源与计算、检查试算结果并发布；模板只用于后续复用，不是首台设备交付的前置条件。
-
-```
-协议设备 → 节点/L0 原始点位 → L1 点位加工模板 → L2 全局实体 → 告警/JDM/控制/画面
+```text
+真实节点树 → L0 原始点位 → L1 点位加工 → L2 全局实体
+                                           ↓
+                         告警 / JDM / 控制 / 固定 EMS 工作台
 ```
 
-> **节点树负责组织现场，点位加工负责消除品牌差异并执行安全计算，全局实体负责向上提供稳定业务语义。**
+| 部分 | 作用 | 用户看到什么 |
+|---|---|---|
+| 真实节点树 | 表示场站、系统和真实设备 | 光伏、储能、充电、并网、负荷及其设备 |
+| L0 原始点位 | 保存设备实际上传的值、质量、时间和来源 | 原始数据的实时值、历史和链路状态 |
+| L1 点位加工 | 完成映射、换算、状态解析、组合和强类型公式 | 从原始点位定义实体的数据来源与计算 |
+| L2 全局实体 | 为所有上层功能提供稳定业务含义 | 实体的实时值、历史、质量和来源证据 |
+| 上层应用 | 使用 L2 完成运行功能 | 告警、JDM、控制和 EMS 工作台 |
 
----
+L0、L1、L2 是所选真实节点的三个数据视角，不是三类物理子节点。点位、公式和实体不得伪装成节点树
+层级。普通实施人员主要使用“原始数据”和“标准实体”两个页面：从 L0 选择点位、定义加工、预览结果并
+发布 L2。点位加工模板只在同类设备需要复用时使用，不是首台设备接入的前置条件。
 
-## 当前功能模块
+### 数据怎样运行
 
-平台只保留以下可交付模块：
-
-| 模块 | 核心能力 | 用户价值 |
-|----|--------|---------|
-| **节点管理** | 物理拓扑、L0 点位实时值与历史 | 现场结构与原始证据在同一处可见 |
-| **点位加工** | 单文件 JSON 模板完成映射、换算、状态解析、组合及跨节点公式 | 用配置消除品牌差异 |
-| **全局实体** | 节点直属的稳定名称、强类型、单位、质量、时间戳和来源证据 | 上层应用只依赖稳定业务语义 |
-| **告警中心/配置** | 按 L2 实体批量配置等级、条件与字符串多码故障表 | 一次配置即可覆盖同类实体 |
-| **JDM 规则** | GoRules 可视化决策图，输入与输出均使用 L2 | 规则不接触物理地址 |
-| **控制** | L2 控制实体显式映射唯一 L0 写点，带限值、联锁、确认、审计与回读 | 所有写入走同一安全边界 |
-| **EMS 工作台** | 固定光伏、储能、充电、并网视图，直接读取 L2 | 不再引入第二套“解决方案”模型 |
-
-### 既有五层节点树（待迁移）
-
-```
-Site (场站)
- └── Station (电站)
-      └── EnergyNode (能源节点)
-           ├── ESS  储能系统  (PCS / BMS / 电表)
-           ├── PV   光伏系统  (逆变器 / 光伏电表)
-           ├── GRID 电网接入  (并网电表)
-           └── EVSE 充电桩    (充电桩 / 充电电表)
-                └── Tag (点位)
-                     ├── PhysicalTag  ← Neuron 采集
-                     └── LogicalTag   ← 公式计算
+```text
+设备 → Neuron → NanoMQ → 实时黑板 → 统一数据帧 → L1 计算 → committed L2
+                                                                  ↓
+                                              告警 / JDM / 控制 / 页面
 ```
 
-这是一项已实现的历史结构。目标结构中的节点树只表达站点、能源子系统和设备的真实物理拓扑；Tag 不再伪装成物理树层级，L0 原始点位、L1 点位加工和 L2 全局实体改为所选物理节点的三个数据视角。
+- 单站只有一个活动采集写者；实时黑板按默认 1 秒节拍冻结不可变数据帧。
+- 只有数据或质量变化才产生新帧；重复、倒退和迟到数据直接放弃。
+- 数据库提交前不推送页面、不触发告警、不执行 JDM、不下发控制。
+- 质量分为 `GOOD`、`UNCERTAIN`、`BAD`、`STALE`；非 `GOOD` 数据禁止进入自动控制。
+- 每个 L2 都能追溯到实际 L0 观测、L1 修订、配置修订、质量和时间依据。
+- 上层应用只能消费已提交 L2，不能直接依赖品牌点位或原始 MQTT。
 
----
+## 功能模块
 
-## 技术栈
+| 模块 | 主要能力 |
+|---|---|
+| 节点与数据 | 真实节点 CRUD、Neuron 点位导入、L0 实时/历史、数据链诊断、点位加工、L2 实时/历史与来源 |
+| 告警中心 | L2 告警规则、等级、触发与恢复、多码故障映射、确认、历史、HTTP 通知及投递记录 |
+| JDM | GoRules 决策图和决策表，以 L2 为输入，产生判断或控制意图 |
+| 控制 | 人工和 JDM 共用安全入口，经唯一 L0 写点下发，并以新 L2 回读确认结果 |
+| EMS 工作台 | 按节点类型和标准 L2 展示能流、功率、SOC、趋势和告警 |
+| 系统工具 | MQTT、HTTP 通知、系统状态及管理员配置 |
 
-| 层 | 技术 | 说明 |
-|----|------|------|
-| **设备接入** | [Neuron](https://github.com/emqx/neuron) | 工业协议网关（Modbus / OPC-UA / IEC104 …） |
-| **消息总线** | [nanoMQ](https://github.com/nanomq/nanomq) | 轻量 MQTT 5.0 Broker |
-| **后端** | [FastAPI](https://fastapi.tiangolo.com/) + Python 3.12 | 数据管道 + Hook 链 + REST API |
-| **时序存储** | [TimescaleDB](https://www.timescale.com/) | PostgreSQL + Hypertable + 连续聚合 (CAGG) |
-| **规则引擎** | [GoRules ZEN](https://github.com/gorules/zen) | JDM 决策表 / 决策图（F2 控制域） |
-| **前端** | React + Vite + TypeScript + Tailwind | 拟物化 (Neumorphism) 风格 |
-| **单位换算** | [pint](https://github.com/hgrecco/pint) | 归一化器（原始值 → 工程值） |
-| **公式求值** | [SymPy](https://github.com/sympy/sympy) | 虚拟点位符号计算 |
+平台不做多租户、解决方案包、设备实例中间层、第二套规则引擎、任意脚本、Redis、Kafka、新微服务或
+自由页面设计器。统计计算属于 L1，结果仍是普通 L2，不建立新的“统计实体层”。
 
----
+## 使用方式
 
-## 当前进展
+### 1. 建立现场
 
-| 模块 | 状态 | 说明 |
-|------|------|------|
-| **F0 数据管道** | ✅ | MQTT→Parser→Normalizer→TSDB 全链路，~10 msg/s 持续入库 |
-| **F0 可视化** | ✅ | 点位列表 + 行内编辑 offset/scale + 实时值双列 + WebSocket 推送 |
-| **Neuron 点位同步** | ✅ | `sync_neuron_tags.py` 一键发现节点/分组/标签，自动入库 |
-| **F0 快照黑板** | ✅ | 节点级全量 JSONB 快照，时间戳对齐 |
-| **F1 历史数据** | ✅ | `t_telemetry` hypertable + `t_telemetry_latest` 最新值缓存 |
-| **F1 虚拟点位** | ✅ | SymPy 公式引擎，逻辑点位实时求值入库 |
-| **F3 节点聚合** | ✅ | 5 层树 + SUM/AVG/MAX/MIN/COUNT/LAST 汇总（10s 周期） |
-| **F2 控制规则** | ✅ | GoRules ZEN + JDM Editor + 告警 + RPC 下行 |
-| **F2 告警中心** | ✅ | 分级告警（error1/2/3），支持 0/1 与字符串故障信息 |
-| **F4 全局实体** | ✅ | 业务语义实体绑定物理/虚拟点位，实时/历史/规则/控制全局可用 |
+在“节点与数据”中按真实关系建立场站、子系统和设备。节点树只描述现场拓扑，不放点位或公式。
 
-> 验收：`backend/acceptance_f0_f3.py` 14 passed / 0 failed；已部署 e606 线上环境。
+### 2. 接入原始点位
 
-### 实现效果图
+在设备节点上配置 Neuron 接入并导入点位。进入“原始数据”检查：
 
-![ZiZu 首页](docs/images/zizu-home.png)
+- 点位是否出现；
+- 当前值、数据时间和接收时间是否更新；
+- 质量是否为 `GOOD`；
+- `Neuron → MQTT → 数据接收 → 数据帧 → L0` 链路是否连通；
+- 实时与历史是否能查询到同一个点位的数据。
 
----
+L0 必须保留协议原值；例如设备上传 `0/1`，L0 仍显示 `0/1`。布尔含义、故障码和单位换算在 L1 定义。
 
-## 快速开始
+### 3. 加工为全局实体
+
+在原始数据中选择一个或多个 L0 点位，填写实体名称、业务标识、结果类型和单位，再选择加工方式：
+
+- 直接使用；
+- 比例与偏移换算；
+- 枚举或状态解析；
+- 多点组合；
+- 强类型公式；
+- 跨节点计算。跨节点输入只能选择其他节点的 L2。
+
+先“检查结果”，确认输入绑定、类型、单位、质量传播和试算值，再发布。发布后在“标准实体”查看 L2 的
+实时值、历史和来源证据。需要接入第二台同型号设备时，再把已验证加工保存为模板复用。
+
+### 4. 配置上层应用
+
+- 在告警中心选择 L2，设置等级、触发值、恢复值和持续时间；需要外部通知时绑定 HTTP 通知配置。
+- 在 JDM 中使用 L2 作为决策输入；正式执行与试运行使用同一版本模型。
+- 对可控 L2 配置唯一写点、限值、联锁、权限、超时和回读条件。
+- EMS 工作台按稳定 L2 语义显示数据，不直接绑定品牌地址。
+
+### 5. 验证并交付
+
+沿固定主干逐层验收：
+
+```text
+节点 → L0 实时/历史 → L1 检查与发布 → L2 实时/历史/来源
+     → 告警 → JDM → 控制回读 → EMS 工作台
+```
+
+交付时锁定平台版本、镜像摘要、数据库 Schema、模板摘要和配置修订，并完成备份恢复、断线、STALE、
+进程重启和配置并发验证。详细检查见 [验收清单](docs/acceptance-checklist.md)。
+
+## 快速启动
 
 ### 前置条件
 
-- Docker + Docker Compose
-- Python 3.12+（本地开发）
-- Node.js 18+（前端构建）
+- Docker 与 Docker Compose
+- Python 3.12+
+- 已运行并可访问的 Neuron（需要接入现场协议时）
 
-### 1. 克隆 & 配置
+### 本机启动
 
 ```bash
 git clone https://github.com/taidai/zizu.git
 cd zizu
-python scripts/bootstrap_runtime_secrets.py  # 隐式输入已轮换的 Neuron 密码；生成其余 Secret
-```
-
-已有部署若仍使用公开默认值，引导脚本会拒绝静默覆盖。先在数据库、Neuron
-或会话系统侧协调轮换并更新 `.env`；NanoMQ 安排 broker 与 backend 同步重启
-的维护窗口后执行 `python scripts/bootstrap_runtime_secrets.py --rotate`。
-Neuron 已轮换但 `.env` 尚未更新时使用 `--update-neuron` 隐式输入新值。
-
-`DB_OWNER_*` 只属于受控的数据库迁移作业；后端只使用 `DB_USER`/`DB_PASSWORD` 的
-非 owner 应用账号。首次 Compose 初始化会自动创建该账号并给予旧 `t_alarms` 的只读权限。
-升级已有数据库时，先停止 backend，填入原 schema owner 的 `DB_OWNER_*`、为 `DB_USER`
-设置一个新的非 owner 名称和密码，再在受控终端运行：
-
-```bash
-# 使用项目 backend 虚拟环境（其中包含 PostgreSQL 驱动）运行；不要在 web 容器中运行。
-# 在 Compose 宿主机上，timescaledb 只是容器内 DNS，因此显式给 owner job 本机地址。
-DB_OWNER_HOST=127.0.0.1 backend/.venv/Scripts/python.exe scripts/provision_database_roles.py  # Windows PowerShell 请改用 $env:DB_OWNER_HOST='127.0.0.1'
-# Linux/macOS: DB_OWNER_HOST=127.0.0.1 backend/.venv/bin/python scripts/provision_database_roles.py
-```
-
-该作业以 owner 身份执行未应用迁移、撤销应用账号对旧告警历史的写权限并验证它不是
-`t_alarms` owner。生产 backend 若仍以 owner 身份连接、缺少旧表只读权限或发现未应用迁移，
-会直接拒绝启动；不要把 `DB_OWNER_PASSWORD` 注入 web 容器。
-
-生产模式是默认值，缺失、空白或公开示例 Secret 都会阻止后端启动。只有完全
-隔离的本机开发环境才可显式同时设置 `DEPLOYMENT_MODE=development` 和
-`ALLOW_INSECURE_DEV_SECRETS=true`；进程启动时会在标准错误输出显示
-`INSECURE DEVELOPMENT MODE` 警示。此模式不得用于任何可被其他主机访问的部署。
-开发环境如还要跳过登录，必须另行显式设置
-`ALLOW_INSECURE_ANONYMOUS_ACCESS=true`；生产模式设置该值会拒绝启动。匿名开发
-响应带 `X-ZiZu-Security-Mode: insecure-development`，前端持续显示红色警示横幅。
-
-独立验收/同步脚本也不再携带数据库或 Neuron 默认口令。运行
-`backend/acceptance_f0_f3.py` 与 `backend/test_f0_e2e.py` 前必须显式设置
-`ZIZU_API`（生产地址必须是 HTTPS）和 `ZIZU_DSN`。交互终端未设置
-`ZIZU_API_TOKEN` 时，脚本会提示输入用户名并用无回显方式读取密码，再通过登录接口取得
-短期会话；密码和 token 不进入命令行参数或 shell 历史。非交互式运行必须由 Secret
-管理器注入活动 engineer/admin 会话的 `ZIZU_API_TOKEN`。运行
-`backend/scripts/sync_neuron_tags.py` 前必须设置 `ZIZU_DSN` 与 `NEURON_PASSWORD`。
-
-### 2. 一键启动（推荐）
-
-```bash
+python scripts/bootstrap_runtime_secrets.py
 docker compose up -d --build
+docker compose ps
 ```
 
-数据库迁移完成后，首次部署必须创建唯一的首个平台管理员。推荐使用容器内的
-交互式无回显输入；密码至少 14 个字符，不接受会出现在 shell 历史或进程列表中的
-`--password` 参数：
+首次启动后创建唯一平台管理员，密码通过无回显交互输入：
 
 ```bash
-docker compose exec backend \
-  python -m scripts.bootstrap_admin --username admin
+docker compose exec backend python -m scripts.bootstrap_admin --username admin
 ```
 
-非交互式部署只能从标准输入传入。例如下面的 shell 变量不要 `export`，使用后立即
-清除；正式自动化应由 Secret 管理器向标准输入提供值：
-
-```bash
-read -r -s -p "New ZiZu administrator password: " ZIZU_ADMIN_PASSWORD; printf '\n'
-printf '%s\n' "$ZIZU_ADMIN_PASSWORD" | docker compose exec -T backend \
-  python -m scripts.bootstrap_admin --username admin --password-stdin
-unset ZIZU_ADMIN_PASSWORD
-```
-
-引导在数据库事务中串行执行并写入审计。已有同名活动管理员时幂等返回；已有其他
-活动管理员时会拒绝。Ticket #3 的在线用户管理界面交付前，可用同一离线工具显式创建
-engineer/operator 或迁移旧 viewer（密码仍只走交互终端，不进入命令行参数）：
-
-```bash
-docker compose exec backend \
-  python -m scripts.bootstrap_admin \
-  --provision-user --username site-engineer --role engineer
-```
-
-离线供应只有在库中已存在活动管理员时才会放行；创建、密码重置或角色迁移都会增加
-`auth_version`、使旧会话失效并留下追加式审计。它不允许把活动管理员降权。
-
-如需离线重置活动管理员密码，必须显式使用供应模式和 `admin` 角色；普通重复引导仍
-保持幂等，不会改密码：
-
-```bash
-docker compose exec backend \
-  python -m scripts.bootstrap_admin \
-  --provision-user --username admin --role admin
-```
-
-访问（生产环境请使用已配置 TLS 的 HTTPS 域名）：
-- `https://localhost:9000` — 前端页面（点位管理 + 实时趋势 + 规则引擎/告警中心）
-- 规则引擎支持 GoRules JDM Editor 编辑决策图/决策表
-- `https://localhost:9000/api/docs` — Swagger API 文档（仅 development 模式提供）
-
-> 首次启动由 PostgreSQL schema owner 执行 `init-db/*.sql` 初始化数据库；生产 web
-> 进程只验证迁移版本，不拥有 DDL 或旧告警历史写权限。
-
-### 3. 认证与 HTTPS
-
-生产环境保持 `AUTH_REQUIRE_HTTPS=true`。登录接口为 `POST /api/v1/auth/login`；
-通过明文 HTTP 登录或携带 Bearer 调用受保护接口都会返回 `HTTPS_REQUIRED`，不会校验或
-保存提交的凭据。会话默认
-有效 480 分钟，可用 `AUTH_SESSION_MINUTES` 在 5-1440 分钟内调整；客户端通过
-`Authorization: Bearer <opaque-session-token>` 调用受保护接口，并可用
-`GET /api/v1/auth/me` 查询当前身份、`POST /api/v1/auth/logout` 主动注销。
-浏览器先读取 `GET /api/v1/runtime/frame-snapshot?node_id=<uuid>`，一次取得当前节点同一终态帧内的
-完整 L0/L2、帧号和游标；再以 Bearer 调用 `POST /api/v1/auth/ws-ticket` 获取 30 秒一次性票据，
-连接 `WS /api/v1/ws/data-frames`，认证后提交
-`{"subscribe":{"node_id":"<uuid>","after":"<cursor>"}}`。服务端只发送该游标后的已提交原子帧增量；
-普通断线补发，游标过旧则要求重读快照。长期会话令牌不会进入 WebSocket URL、代理日志或浏览器历史。
-
-TLS 由反向代理终结时，backend 必须只允许该代理访问，并同时满足以下条件才可读取
-`X-Forwarded-Proto`：
+默认配置按生产安全要求运行并强制 HTTPS。只有完全隔离的本机开发环境才可在 `.env` 中同时设置：
 
 ```env
-AUTH_REQUIRE_HTTPS=true
-AUTH_TRUST_PROXY_HEADERS=true
-AUTH_TRUSTED_PROXY_CIDRS=["127.0.0.1/32","::1/128"]
+DEPLOYMENT_MODE=development
+ALLOW_INSECURE_DEV_SECRETS=true
+AUTH_REQUIRE_HTTPS=false
 ```
 
-`AUTH_TRUSTED_PROXY_CIDRS` 必须按实际代理源地址最小化配置且不能为空。来自列表之外
-的直连客户端即使伪造 `X-Forwarded-Proto: https` 也不会被信任。默认
-`AUTH_TRUST_PROXY_HEADERS=false`，不读取这些头。只有完全隔离、不可由其他主机
-访问的开发环境，才可同时设置 `DEPLOYMENT_MODE=development` 和
-`AUTH_REQUIRE_HTTPS=false`；生产模式不得关闭 HTTPS。
+随后访问 `http://127.0.0.1:9000`。生产环境必须使用 TLS 入口、非公开凭据和固定镜像摘要；不要使用
+`latest`。常规不可变部署使用 `deploy/docker-compose.release.yml`，裁剪内核 e606 使用
+`deploy/docker-compose.release.e606.yml`。
 
-只有隔离在本机回环地址上的开发环境才可使用 HTTP。服务端必须同时显式设置
-`DEPLOYMENT_MODE=development`、`ALLOW_INSECURE_DEV_SECRETS=true` 和
-`AUTH_REQUIRE_HTTPS=false`；若还要匿名访问，另加
-`ALLOW_INSECURE_ANONYMOUS_ACCESS=true`。运行独立验收脚本时还需显式确认客户端降级：
+常用运维命令：
 
-```env
-ZIZU_API=http://127.0.0.1:9000/api/v1
-ZIZU_ALLOW_INSECURE_LOCAL_HTTP=true
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose restart backend
+docker compose down
 ```
 
-脚本拒绝向非回环 HTTP 地址发送密码或 Bearer token；生产环境不得设置该降级开关。
+`docker compose down` 不删除数据卷；不要使用 `down -v`，除非明确要永久删除数据库和运行数据。
 
-解决方案交付接口权限如下：
+## 本地开发与验证
 
-| 能力 | admin | engineer | operator |
-|------|:-----:|:--------:|:--------:|
-| 导入解决方案包 | ✓ | — | — |
-| 查询已验证解决方案包 | ✓ | ✓ | — |
-| 生成/查询/执行安装计划 | ✓ | ✓ | — |
-| 查询站点配置版本 | ✓ | ✓ | — |
-| 查询安装记录 | ✓ | ✓ | ✓ |
-| 运行机器验收 | ✓ | ✓ | — |
-| 查询交付报告 | ✓ | ✓ | ✓ |
+后端：
 
-非控制业务 REST 使用以下能力矩阵；角色判断只在后端执行，前端隐藏按钮不是安全边界：
-
-| 能力 | admin | engineer | operator |
-|------|:-----:|:--------:|:--------:|
-| 运行状态、遥测与告警读取 | ✓ | ✓ | ✓ |
-| 配置读取与导出 | ✓ | ✓ | — |
-| 配置创建、修改、导入与绑定 | ✓ | ✓ | — |
-| 告警确认 | ✓ | ✓ | ✓ |
-
-operator 读取节点和点位运行视图时不会收到连接参数、来源路径、公式、缩放、阈值等
-配置字段。告警确认主体固定来自服务端会话，客户端不能提交或伪造 `ack_user`。
-配置写在进入业务处理前记录最小 `requested` 审计，成功返回后再记录 `success`；两者只含
-服务端身份、稳定路由和请求 ID，不保存请求体、查询参数或 Bearer。现有存量配置接口
-各自提交事务，因此 `success` 审计暂不能与全部业务写原子提交；后置审计失败会返回
-`AUDIT_UNAVAILABLE`，此时客户端不得盲目重试，应先核对配置状态。解决方案安装主缝
-已经使用同事务审计，存量配置接口将在统一 Unit of Work 后收口这一边界。
-详细 `/api/v1/health` 与 `/api/v1/health/ready` 也需要登录；只有最小
-`/api/v1/health/live` 存活探针匿名可用。
-
-控制写、系统管理、Neuron/NanoMQ 管理和 WebSocket 已使用同一身份与能力边界收口。
-这只证明应用接口已默认拒绝匿名访问；统一控制命令的限值、联锁、幂等与回读状态机，
-以及 TLS、不可变 ARM64 制品和现场凭据轮换仍是生产发布门禁。在这些门禁完成前，不能
-宣称整个公网 API 或 1 号机已生产就绪。
-
-### 4. 本地开发（可选）
-
-**后端**：
 ```bash
 cd backend
-pip install fastapi "uvicorn[standard]" psycopg2-binary paho-mqtt loguru pydantic pydantic-settings pint websockets python-multipart
-uvicorn app.main:app --reload --port 9000
+python -m pip install -e .
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-**前端**：
+前端：
+
 ```bash
 cd frontend
-npm install
-npm run dev    # Vite dev server @5173
+npm ci
+npm run dev
+npm run build
 ```
 
-### 5. 不可变生产发布（Ticket #18）
-
-生产发布以一个经审查的 `release.json` 为唯一输入。它必须同时声明 amd64 与 arm64 的
-ZiZu 镜像摘要、TLS 入口镜像摘要、平台版本和目标 Schema 版本；不接受 `latest`、标签
-引用或宿主机源码覆盖。下面是格式，摘要必须替换成已发布制品的真实值，示例不是可部署
-清单：
-
-```json
-{
-  "platform_version": "0.4.80",
-  "schema_version": "037",
-  "edge_proxy_image": "registry.example/caddy@sha256:<64-hex>",
-  "images": {
-    "linux/amd64": "registry.example/zizu@sha256:<64-hex>",
-    "linux/arm64": "registry.example/zizu@sha256:<64-hex>"
-  }
-}
-```
-
-发布工程师先在制品目录验证清单与随镜像交付的迁移目录一致，再为目标架构渲染只含摘要
-的 Compose 变量。此过程不连接现场、不写数据库：
+无头浏览器验收需要先配置目标地址和测试身份，再运行：
 
 ```bash
-# 推荐路径：在 GitHub Actions 的 “Build immutable release images” 手动工作流中，输入平台版本及
-# 已审核的 TLS 入口镜像 digest。工作流会把 amd64/arm64 制品 push 到 GHCR，并把 release.json
-# 作为构建产物保存；它不会部署、写发布锁或触及现场。
-#
-# 也可先在受控构建机完成 Registry 登录；该命令分别 push amd64/arm64，只有 Buildx 返回的 digest
-# 才会写入 release.json。--platform-version 必须与仓库根 VERSION 完全一致；repository 不能带标签，
-# TLS 入口镜像必须预先以 digest 审核。
-python scripts/build_release_images.py \
-  --repository registry.example/zizu \
-  --platform-version 0.4.80 \
-  --edge-proxy-image registry.example/caddy@sha256:<64-hex> \
-  --output release.json
-python scripts/release_preflight.py verify \
-  --release release.json --migrations-dir init-db
-python scripts/release_preflight.py render-env \
-  --release release.json --architecture linux/arm64 > release.env
+cd frontend
+npm run test:e2e:node
+npm run test:e2e:alarm-http
 ```
 
-在受控维护窗口内，先使用 owner 凭据运行 `scripts/provision_database_roles.py` 完成迁移和
-最小权限收敛，再启动已经加载到宿主机的 digest 镜像。运行时 `.env` 必须是权限受限的
-Secret 文件；它不属于发布包，也不能写入仓库。常规 Docker 主机使用：
-
-```bash
-export ZIZU_RUNTIME_ENV=/secure/path/zizu-runtime.env
-export ZIZU_PUBLIC_HOST=ems.example.invalid
-export ZIZU_ACME_EMAIL=ops@example.invalid
-docker compose --env-file release.env -f deploy/docker-compose.release.yml \
-  up -d --no-build
-```
-
-确认公开 HTTPS liveness 精确返回该平台版本后，仍由 owner 作业写入一次不可变发布锁。Web
-进程只有读取权限；`/api/v1/health` 对已认证角色只展示摘要和两个内容 digest，不显示镜像
-仓库、凭据或内部地址。该作业同时核对容器实际 image ID 与 release.json 的摘要解析结果，并
-核对实际镜像架构，不能只凭相同版本号写锁：
-
-```bash
-# 常规 Docker 主机使用 docker-compose.release.yml；仅 e606 使用 e606 变体。
-RELEASE_COMPOSE=deploy/docker-compose.release.yml
-# RELEASE_COMPOSE=deploy/docker-compose.release.e606.yml
-BACKEND_CONTAINER=$(docker compose --env-file release.env \
-  -f "$RELEASE_COMPOSE" ps -q backend)
-EDGE_CONTAINER=$(docker compose --env-file release.env \
-  -f "$RELEASE_COMPOSE" ps -q edge)
-python scripts/record_release_lock.py \
-  --release release.json --migrations-dir init-db \
-  --architecture linux/arm64 --public-api "https://${ZIZU_PUBLIC_HOST}" \
-  --backend-container "$BACKEND_CONTAINER" --edge-container "$EDGE_CONTAINER"
-```
-
-干净站点可以先记录 `site_configuration_version=0` 的平台锁。工程师安装解决方案包后，必须以
-相同命令再次记录包含该包摘要和站点配置版本的新锁，才可运行包中的 `release_lock` 验收。该
-验收只有在锁的版本、架构、包 ID/版本/摘要和站点配置版本全部一致时通过；缺失、不可读或
-不一致锁都会生成 failed 的不可变交付报告。
-
-回滚不是“替换一个镜像标签”。只能显式选择已存在的锁，并在启动任何容器前运行 owner 校验：
-
-```bash
-python scripts/validate_release_rollback.py \
-  --release previous-release.json --migrations-dir init-db \
-  --architecture linux/arm64 --lock-id "<immutable-release-lock-uuid>"
-```
-
-它要求清单与锁的两个 digest、平台版本和架构完全相同，当前 Schema 与锁相同，且当前站点配置
-版本、包摘要和 Secret 引用仍兼容。跨 Schema 回滚默认拒绝；需要可逆迁移时必须另行提交并演练。
-校验成功后才可用相应 `release.env` 执行受控 Compose 切换，并再次运行 `record_release_lock.py`
-证明运行中的容器与公开 HTTPS 入口。
-
-e606 的裁剪内核使用独立的 host-network 编排；backend 固定绑定 `127.0.0.1:9000`，只有
-固定摘要的 Caddy TLS 入口监听公网 `80/443`：
-
-```bash
-docker compose --env-file release.env -f deploy/docker-compose.release.e606.yml \
-  up -d --no-build
-```
-
-两个生产编排都不启动 PostgreSQL 或 NanoMQ、不发布 `9000`、不挂载 `backend/`、`frontend/`
-或 `init-db/` 源码。Caddy 自动签发证书前，DNS 必须已指向目标主机，且防火墙只能对外放行
-`80/443`。反向代理以固定地址传递 `X-Forwarded-*`，应用只信任该地址。
-
-首个公开参考交付位于
-[`reference-deliveries/pv-storage-charging-ems`](reference-deliveries/pv-storage-charging-ems/README.md)。
-其中的关口购电告警按 WARNING、MAJOR、CRITICAL 分级声明；交付试验会实际触发并经公开告警
-接口验证 WARNING/MAJOR 级别，未触发的 CRITICAL 仍作为独立的安装资产保留，避免把演练阈值
-误当作现场默认值。
-发布流水线用 `scripts/build_reference_delivery.py` 生成并签出 ZIP；实施工程师只使用发布的
-ZIP、本文档和产品界面完成设备接入、参数填写与确定性绑定，绝不修改源码或直接操作数据库。
-手动触发 `Build immutable release images` 后，GitHub Actions 会把该 ZIP、其 SHA-256 文件与
-`release.json` 一起保存为同一个发布 artifact；缺少其中任一文件的候选不可作为交付试验输入。
-固定制品、TLS 和发布锁定准备完毕后，由未参与开发的实施工程师按
-[`交付试验协议`](docs/delivery-trial-protocol.md) 在干净环境中计时完成交付；机器报告与该记录
-共同构成“交付就绪”证据。
-
-旧 `docker-compose*.yml`、`deploy.sh` 和旧 e606 说明属于 v0.4.77 维护遗留，**不得**用于
-认证版本或新的生产发布；不得在 e606 现场构建镜像、使用 `latest` 或覆盖镜像内源码。
-
----
-
-## 目录结构
-
-```
-zizu/
-├── backend/
-│   ├── app/
-│   │   ├── api/            # REST + WebSocket 路由
-│   │   ├── core/           # 配置 (pydantic-settings)
-│   │   ├── db/             # 数据库连接池
-│   │   ├── models/         # Pydantic 数据模型
-│   │   ├── services/       # 核心管道
-│   │   │   ├── mqtt_client.py     # MQTT 接入层
-│   │   │   ├── parser.py          # Neuron 报文解析
-│   │   │   ├── normalizer.py      # pint 单位归一化
-│   │   │   ├── pipeline.py        # Hook 链 + 批量 flush
-│   │   │   ├── telemetry_store.py # TSDB 写入
-│   │   │   ├── entity_resolver.py # F4 实体解析/实时/历史/写入
-│   │   │   └── rule_engine.py     # F2 GoRules 规则求值
-│   │   └── main.py
-│   ├── scripts/
-│   │   └── sync_neuron_tags.py    # Neuron API → t_tags 自动同步
-│   ├── tests/
-│   └── pyproject.toml
-│
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx        # 主页面（点位表 + 实时值 + 状态栏）
-│   │   ├── api/           # HTTP/WS 客户端
-│   │   ├── components/    # charts / tree / ui
-│   │   └── ...
-│   └── Dockerfile         # Nginx 静态服务
-│
-├── init-db/
-│   ├── 001-schema.sql     # 建表 + Hypertable + CAGG
-│   ├── 002-test-data.sql  # 测试数据
-│   ├── 003-real-device-mapping.sql # 真实设备映射
-│   └── 004-node-snapshot.sql # 节点快照表
-│
-├── config/
-│   └── nanomq.conf        # nanoMQ 配置
-│
-├── docs/
-│   ├── architecture-v1.md      # 架构设计书
-│   ├── ui-style-guide.md      # UI 风格规范
-│   └── decisions/             # ADR 决策记录
-│       ├── g11-feature-domains.md   # 功能域架构
-│       ├── g7-goal-breakdown.md      # 目标拆解
-│       └── ...
-│
-├── docker-compose.yml        # 三服务编排 (TimescaleDB + FastAPI + NanoMQ)
-├── docker-compose.e606.yml   # e606 裁剪内核 override
-└── .env.example             # 环境变量模板
-```
-
----
-
-## 核心 API
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/v1/health` | 管道运行状态 (msg/s、入库率、最后消息) |
-| GET | `/api/v1/nodes` | 节点列表（含 tag 数量） |
-| GET | `/api/v1/tags?node_id=X&page=1` | 点位分页查询（含 offset/scale） |
-| PUT | `/api/v1/tags/{tag_id}` | 修改 scale / offset / unit |
-| PUT | `/api/v1/tags/batch` | 批量修改 scale / offset |
-| GET | `/api/v1/telemetry` | 原始遥测游标分页；返回 `points/has_more/next_cursor/total:null`，不执行交互式精确计数 |
-| GET | `/api/v1/snapshots` | 节点快照查询（数据黑板） |
-| POST | `/api/v1/query` | admin：SELECT-only SQL 查询 |
-| POST | `/api/v1/auth/ws-ticket` | 为实时订阅签发 30 秒一次性票据 |
-| GET | `/api/v1/runtime/frame-snapshot?node_id=X` | 读取当前节点同一终态帧的完整 L0/L2 与游标 |
-| WS | `/api/v1/ws/data-frames` | 认证后按节点和游标订阅已提交原子帧增量 |
-| POST | `/api/v1/rules/{id}/simulate` | 模拟规则（返回 triggered/actions/engine） |
-| GET | `/api/v1/entities` | 全局实体列表 |
-| POST | `/api/v1/entities` | 创建全局实体 |
-| GET | `/api/v1/entities/{id}` | 实体详情及绑定 |
-| PUT | `/api/v1/entities/{id}` | 更新实体元数据 |
-| DELETE | `/api/v1/entities/{id}` | 删除实体 |
-| POST | `/api/v1/entities/{id}/bindings` | 实体绑定点位 |
-| DELETE | `/api/v1/entities/{id}/bindings/{bid}` | 删除绑定 |
-| GET | `/api/v1/entities/{id}/realtime` | 实体实时值 |
-| GET | `/api/v1/entities/{id}/history` | 实体历史数据 |
-| POST | `/api/v1/entities/{id}/write` | 旧全局实体写入兼容入口：仅在唯一映射到确认实体实例时创建控制命令，必须携带 `Idempotency-Key` |
-| GET | `/api/v1/health/live` | 最小匿名存活契约，仅返回 `status` 与版本 |
-| POST | `/api/v1/solution-packages/import` | multipart 上传并完整校验解决方案 ZIP |
-| GET | `/api/v1/solution-packages` | 查询已验证的不可变解决方案包 |
-| POST | `/api/v1/solution-packages/{package_record_id}/install-plans` | 为已验证包生成可审查安装计划 |
-| GET | `/api/v1/install-plans/{id}` | 查询已保存的不可变安装计划 |
-| POST | `/api/v1/install-plans/{id}/apply` | 按计划摘要幂等安装解决方案包 |
-| GET | `/api/v1/solution-installations` | 查询解决方案安装记录 |
-| GET | `/api/v1/site-configuration-versions/{version}` | 查询不可变站点配置版本 |
-| GET | `/api/v1/entity-instances/{id}/realtime` | 从实体实例唯一确认主来源读取实时工程值 |
-| GET | `/api/v1/entity-instances` | 查询规则/工作台可引用的稳定实体实例目录 |
-| GET | `/api/v1/ems-workbench` | 读取当前安装包声明的固定 EMS 工作台（导航、分组、KPI、趋势及入口） |
-| GET | `/api/v1/ems-workbench/trends/{trend_id}` | 读取工作台已声明趋势的确认实体实例历史，不接受任意点位查询 |
-| POST | `/api/v1/ems-policies/{policy_id}/simulate` | 以包中固定场景仿真已安装的 EMS 策略，不下发设备写入 |
-| POST | `/api/v1/ems-policies/{policy_id}/enable` | 仅实施工程师可在确认输入实体实例可读、新鲜且质量合格后显式启用策略 |
-| POST | `/api/v1/ems-policies/{policy_id}/disable` | 仅实施工程师可停用当前站点配置版本后续调度；已分派命令仍只靠回读或超时结束 |
-| POST | `/api/v1/ems-policies/{policy_id}/evaluate` | 用当前确认实体实例观测评估已安装策略；触发时仅创建统一控制命令 |
-| GET | `/api/v1/entity-instances/legacy-migration-preview` | 只读预览旧全局实体到实例的唯一、缺失和歧义分类 |
-| GET | `/api/v1/entity-instances/{id}/source-failover` | 读取显式主备策略、当前角色与切换审计 |
-| POST | `/api/v1/entity-instances/{id}/source-failover` | 携带预期当前角色、目标角色和原因执行人工切换 |
-| GET | `/api/v1/alarm-configurations` | 查询当前统一告警定义、来源、版本和启用状态 |
-| GET | `/api/v1/alarm-rule-sets` | 查询告警规则组的全部不可变修订 |
-| POST | `/api/v1/alarm-rule-sets` | 创建包含固定严重度、触发和恢复条件的规则组首个修订 |
-| POST | `/api/v1/alarm-rule-sets/{id}/revisions` | 为既有规则组创建不可变新修订 |
-| DELETE | `/api/v1/alarm-rule-sets/{id}` | 删除已停用规则组的界面入口；实际为软归档，全部不可变修订和告警证据继续保留 |
-| POST | `/api/v1/alarm-configuration-plans` | 按批量实体范围和规则组修订生成确定性展开预览 |
-| GET | `/api/v1/alarm-configuration-plans/{id}` | 查询计划摘要、add/update/preserve/delete_candidate 项和阻断原因 |
-| POST | `/api/v1/alarm-configuration-plans/{id}/apply` | 携带 `Idempotency-Key` 原子应用计划并产生派生站点配置版本 |
-| GET | `/api/v1/alarm-configuration-migrations/legacy` | 只读列出旧点位/实体告警的唯一、缺失和歧义迁移候选 |
-| POST | `/api/v1/alarm-configuration-migrations/legacy/plans` | 按实施工程师的明确实体选择生成零运行态写入的迁移计划；审阅后仍由通用计划 apply 原子执行；没有待迁移定义时返回 409 `ALARM_MIGRATION_NOTHING_TO_MIGRATE`，且不保存计划、不写运行态 |
-| GET | `/api/v1/alarm-events` | 查询 `model_version=v1` 的统一告警事件 |
-| GET | `/api/v1/alarm-events/{id}` | 查询定义版本、实体实例、触发/确认/恢复证据 |
-| GET | `/api/v1/alarm-events/{id}/transitions` | 查询事件的追加式状态转换时间线 |
-| POST | `/api/v1/alarm-events/{id}/acknowledgements` | 确认活动未确认事件；不提供人工恢复命令 |
-| POST | `/api/v1/alarm-events/{id}/archivations` | 归档已恢复事件；默认列表隐藏，但事件、转换和通知证据不删除，可用 `state=archived` 查询 |
-| GET/POST/PUT/DELETE | `/api/v1/admin/alarm-http-notifications` | admin 维护、测试和启停告警 HTTP 请求配置；URL 与敏感字段只加密保存并脱敏返回 |
-| GET | `/api/v1/alarm-http-notification-options` | admin/engineer 读取规则通知选项；仅返回 id、name、status（available / disabled / needs_test），不返回请求配置或密钥 |
-| GET | `/api/v1/alarms/notification-deliveries` | operator 及以上查看发生/恢复通知的脱敏发送记录与逐次尝试 |
-| POST | `/api/v1/alarms/notification-deliveries/{id}/retry` | engineer/admin 携带 `Idempotency-Key` 手工重发终态失败通知 |
-| DELETE | `/api/v1/alarms/notification-deliveries/{id}` | engineer/admin 永久删除一条已结束通知及其发送尝试；发送中任务拒绝删除 |
-| POST | `/api/v1/alarms/notification-deliveries/deletions` | engineer/admin 在一个事务内永久删除 1–200 条已结束通知及其发送尝试，正文为 `delivery_ids` |
-| GET | `/api/v1/alarm-configuration-applications/latest/acceptance-progress` | 只读观察最新已应用告警配置的逐定义验收进度，不生成报告 |
-| POST | `/api/v1/alarm-configuration-applications/{id}/acceptance` | 以 `Idempotency-Key` 为已完整证据生成不可变告警配置验收报告 |
-| GET | `/api/v1/alarm-configuration-reports/{id}` | 读取包含事件、转换时间线、确认审计、站点版本与摘要的不可变报告 |
-| POST | `/api/v1/entity-instances/{id}/control-confirmations` | 为高风险控制申请绑定主体和内容的 60 秒二次确认 |
-| POST | `/api/v1/entity-instances/{id}/control-commands` | 以实体实例提交手动控制命令，必须携带 `Idempotency-Key` |
-| GET | `/api/v1/control-commands/{id}` | 查询命令的持久状态与稳定机器码 |
-| POST | `/api/v1/control-commands/{id}/reconcile` | 触发一次安全回读检查，不重发设备写入 |
-| POST | `/api/v1/neuron/write` | 兼容 Neuron 写入：按已确认的实体实例映射创建控制命令，必须携带 `Idempotency-Key` |
-| POST | `/api/v1/devices/{node_id}/rpc` | 兼容 RPC：新形态使用 `entity_instance_id` + `value`；受限旧形态使用定义 ID `command` + `payload.value`，均创建控制命令 |
-| POST | `/api/v1/solution-installations/{id}/acceptance-runs` | 运行包携带的白名单验收项 |
-| GET | `/api/v1/delivery-reports/{id}` | 查询不可变机器交付报告 |
-
-统一告警配置页会在最新已应用计划下显示每个新增或更新定义的四段中文进度：待触发、
-待操作员在告警中心确认、待现场恢复、通过。该页只观察服务端事件和时间线，不创建遥测、
-告警、确认或恢复，也不提供确认旁路。操作员仍只在告警中心确认，现场恢复仍只来自正常协议
-观测。只有服务端确认全部定义证据完整后，“生成验收报告”才可用；网络或响应不确定时，页面
-按应用和当前登录用户 ID 在 `sessionStorage` 保留同一幂等键供原操作重试，不保存令牌，也不把
-键写入 URL；退出登录、切换登录主体、切换到新的已应用配置或读取到既有报告后会清除该键。
-刷新页面、恢复此前 apply 或从告警中心返回时，进度接口会带回
-该应用已有的不可变报告引用，页面自动通过报告 GET 接口恢复展示并禁止重复生成。
-
-产品按钮只在服务端返回证据完整且该应用尚无报告时启用。公开验收 POST 仍保留底层审计契约：
-直接调用时可以把当时不完整的证据持久为 `failed` 不可变报告；产品页不会借此制造失败报告。
-POST 与配置应用共用站点状态事务锁，若目标已不是最新应用，返回稳定
-`ALARM_ACCEPTANCE_APPLICATION_STALE` 且不写报告或幂等绑定。
-
-告警配置验收由 migration 036 保存报告与幂等绑定；migration 037 让规则组计划和旧配置迁移计划
-共享同一版本化应用链。旧配置迁移的“生成计划”只保存审阅证据，不改变站点版本；确认应用时才
-通过通用 apply 原子创建派生安装、下一站点版本、审计、迁移目标与验收 application。同一 actor 和
-`Idempotency-Key` 只会产生一份应用，旧直写 seam 已删除。
-
-新增和更新定义必须拥有同一不可变定义的
-`ALARM_ACTIVATED`、`ALARM_ACKNOWLEDGED`、`ALARM_RECOVERED` 转换，其中确认转换必须关联非空
-审计事件；质量不合格或新鲜度中断不能补足持续时间。`preserve` 只能引用此前对完全相同定义 ID
-已通过的报告。`delete_candidate` 在计划应用后会停止该定义的新触发，但不会删除不可变定义、既有
-事件、时间线或审计证据；已经打开的事件仍按原定义完成恢复。报告绑定执行主体、应用、站点配置
-版本和内容摘要，写入后禁止更新、删除或清空；
-隔离 PostgreSQL 双连接并发、事务回滚、进程重启重放和公开 Neuron 协议生命周期主缝均已覆盖，
-这些机器证据不等同于现场部署或独立交付试验。
-
-### 告警 HTTP 通知
-
-admin 在“系统工具 → HTTP 通知”维护请求，先发送测试，成功后才能启用；告警规则只能选择一个已测试且
-已启用的配置。告警发生和现场恢复在数据库提交后异步发送，人工确认不发送。普通目标只有 HTTP 2xx
-算送达；飞书机器人还必须返回业务 `code=0`，否则按失败记录并重试，不得把“HTTP 200、业务拒绝”误报为送达；
-失败固定在 5 秒、30 秒和 5 分钟后重试，第四次失败进入可手工重发状态。投递采用至少一次语义，每个通知
-都携带稳定 `Idempotency-Key`，接收方应据此去重。修改配置会自动停用并使旧测试失效，未完成任务下次
-尝试使用新配置；删除配置会解除规则绑定并取消未完成任务。通知失败永不反向改变告警状态。
-
-告警规则页会说明通知不可选的原因：已停用、需测试并启用，或者尚未配置；读取失败单独提示重试，
-不能当作没有通知。管理员到“系统工具 → HTTP 通知”完成配置、测试和启用后，可点击规则页的
-“刷新通知选项”，不清空当前规则草稿或绑定；实施工程师只读取名称和状态，不获得管理接口权限。
-读取和刷新不启用配置，也不发送测试或正式通知。
-
-通知绑定属于具体告警规则，不属于实体：同一实体的另一条规则不会自动继承渠道。排查未通知时，
-先核对实际触发的规则及其绑定，再检查“通知记录”；不要因看到另一条告警就盲目重发。
-触发条件与恢复条件完全相同会阻断试算和发布，并提示分别设置故障值和正常值；已发布的旧规则不自动修改。
-
-规则列表分别展示正式配置的触发/恢复条件与未发布草稿。停用后的“启用”只恢复最近正式应用的非空
-修订，不会发布最新保存的草稿；编辑仍可继续草稿，改变条件必须明确试算、预览并发布。
-`GET /api/v1/alarm-rule-groups` 的 `last_published_revision` 为可恢复的正式修订号；未发布、发布证据
-不完整或绑定实体的正式修订不一致时返回 `null`，界面禁止直接启用并提示重新编辑、试算和发布。
-`last_non_empty_revision` 仅用于查找可编辑草稿，不能作为运行配置依据。
-同一次尚未恢复的告警不会因重复采样、确认或启停规则而产生新的发生通知；已打开事件继续按发生时
-冻结的定义等待真实恢复，修改规则不会改写旧事件或补发历史消息。发送失败的任务仍按既有重试策略处理。
-
-在“请求体模板”中定位光标或选中文字后，点击变量即可在该位置插入或替换，之后可继续键入或插入。
-变量仅用于请求体模板，不在请求地址、查询参数或请求头中展开；插入本身不会保存配置或发送通知。
-`entity.value` 保留 JSON 原生类型；外部模板字段必须是字符串时使用 `entity.value_text`，例如飞书卡片的
-`content` 字段应写成 `"content": {{entity.value_text}}`，避免数值或布尔值被飞书拒绝。
-
-完整 URL、敏感查询参数和敏感请求头使用独立 `HTTP_NOTIFICATION_ENCRYPTION_KEY` 加密。
-该密钥必须和数据库备份放进同一恢复清单并一同恢复；丢失后系统不会降级为明文，管理员必须重新录入
-请求地址与敏感字段、重新测试并启用。
-
-控制与管理能力矩阵：`system.manage` 仅 admin（系统、SQL、NanoMQ）；
-`gateway.manage` 允许 admin/engineer（Neuron 接入管理）；`control.write` 允许三角色。
-新的实体实例控制命令统一执行服务端数据类型、限值、联锁、主体幂等、持久冷却和
-回读确认；写入 Adapter 返回成功只会进入 `dispatched`，只有新鲜 GOOD 回读达到期望值
-与容差后才成为 `readback_confirmed`。命令固定记录 `control.write` 权限动作、来源类型、
-策略快照与每个状态转换关联的不可变审计事件；状态机只会前进，后台恢复只回读、不会重发
-设备写入。所有这些端点在
-业务执行前写不可变 requested 审计，成功后再写 success；审计不可用时 fail closed。
-
-`/neuron/write` 与 `/devices/{node_id}/rpc` 处于有限兼容窗口：它们的 `201` 响应是控制命令
-资源，而不是设备成功回执，统一包含命令 `id`、`status`、稳定 `code` 和
-`migration.replacement`。调用方应随后查询命令或触发安全回读检查，只有
-`readback_confirmed` 才表示现场已达到期望值。Neuron 地址必须唯一映射到已确认的可控实体
-实例；RPC 的新形态必须同时提供属于该节点的 `entity_instance_id` 和 `value`。旧形态仅允许
-`command` 精确等于已确认实体实例的定义 ID，并从 `payload.value` 取得目标值；`topic` 和
-`qos` 不参与路由或执行。无映射、节点不匹配或任意 topic/payload 路由形式均返回稳定的迁移/
-拒绝机器码，绝不执行直接 Neuron 或 MQTT 写入。
-
-解决方案导入使用 `multipart/form-data` 的 `archive` 文件字段。创建安装计划的请求体为
-`{"parameters":{"site.code":"EMS-01","pcs.count":2},"secret_references":{"neuron.credentials":"secret://site/neuron/credentials"}}`。
-参数契约支持 string、integer、number、boolean、enum、address、port、duration、secret 和
-`device_instances`；
-可声明单位、必填、默认值、数值范围、枚举和正则模式。Secret 参数禁止提交明文值，只
-接受 `secret://` 引用；缺失或非法输入产生稳定 blocker，阻止安装且不改变站点版本。
-包导入结果和安装计划都会返回 `parameter_contracts`，实施端可据此生成配置表单；计划
-只返回规范化后的非敏感参数和 Secret 引用，不返回提交过的 Secret 明文或非法原值。
-
-前端“解决方案交付”页提供同一条受保护流程：管理员上传和管理包生命周期；管理员与实施
-工程师都可选择已验证的包，按 `parameter_contracts` 填写站点参数和 `secret://` 引用，审查
-计划中的变更及 blocker 后确认安装。若规范点位名与现场旧名称不同，页面会显示“包内规范名 →
-同一稳定设备键下的兼容现场标签”，实施工程师选择后以独立 `binding_overrides` 重新规划；
-安装记录可在页内运行机器验收、填写手动/策略命令及权限
-拒绝审计映射，并读取不可变报告。页面不保存 Secret 明文，也不会自行下发策略或控制命令；
-operator 不能读取包目录或执行交付动作。
-
-计划与安装以规范化参数、Secret 引用和包摘要共同计算配置摘要；相同配置重复安装为
-`preserve`，参数变化为 `update` 并生成新的追加式站点配置版本。升级计划以旧包、当前
-站点和新包作三方比较：未覆盖参数跟随新默认值；未变的站点覆盖默认 `preserve`；包默认
-值和既有站点覆盖同时改变时，参数 item 为 `conflict`，并附带
-`UPGRADE_PARAMETER_CONFLICT` blocker。实施工程师必须在新计划请求中明确提交该参数值，
-才表示逐项解决冲突。
-
-计划的参数级 items 展示 before/after、unit、来源和
-`add`/`update`/`preserve`/`delete_candidate`/`conflict`/`block` 动作；工程师输入和包默认值
-分别标记为 `engineer_input`、`package_default`，安装版本记录来源与 UTC 修改时间。现有
-实体的量纲或读写方向变化、移除运行实体引用、放宽控制权限或告警恢复语义变化，以及移除
-已使用的 Secret 引用，都会产生稳定升级 blocker，不能自动执行。工程师必须用计划返回的
-`risk_key` 在 `upgrade_risk_resolutions` 中逐项给出非空处理说明；该说明、审查主体和风险项
-会写入不可变计划，风险 item 才从 `block` 转为 `update`。例如：
-`{"upgrade_risk_resolutions":{"UPGRADE_ENTITY_SEMANTICS_CHANGED:pcs.activePower":"已验证来源与下游单位换算"}}`。
-未知风险键、空说明和参数冲突确认均会被拒绝；参数冲突仍只能通过显式参数值解决。回到历史
-参数不是 preserve，而是创建新的版本，避免界面与当前运行配置不一致。
-
-参数契约声明在 `solution.yaml` 顶层。每项都必须有稳定 `id`、`type`、布尔
-`required` 和非空 `description`；非 Secret 项可声明与类型一致的 `default`。类型专属字段
-仅允许：string/address 的 `pattern`，integer/number 的 `unit`、`minimum`、`maximum`，
-port 的 `minimum`、`maximum`，enum 的非空唯一字符串 `values`。Secret 不允许默认值。
-`device_instances` 使用 `minimumItems`、`maximumItems`（1..64），值是由
-`instance_key`、`device_key`、可选 `standby_device_key` 与可选 `display_name` 组成的列表；
-实例键和主来源键必须分别唯一。
-以下片段可直接作为解决方案包的参数入口：
-
-```yaml
-parameters:
-  - id: site.code
-    type: string
-    required: true
-    pattern: '^[A-Z0-9-]{2,16}$'
-    description: Stable site code
-  - id: nominal.power
-    type: number
-    unit: kW
-    required: true
-    minimum: 0
-    maximum: 10000
-    description: Site nominal power
-  - id: dispatch.mode
-    type: enum
-    required: false
-    default: self_consumption
-    values: [self_consumption, peak_shaving]
-    description: Dispatch strategy
-  - id: poll.interval
-    type: duration
-    required: false
-    default: 5s
-    description: Poll interval; use ms, s, m, or h
-  - id: neuron.credentials
-    type: secret
-    required: true
-    description: Runtime Neuron credential reference
-  - id: pcs.instances
-    type: device_instances
-    required: true
-    minimumItems: 1
-    maximumItems: 16
-    description: Site PCS instances and source catalog keys
-```
-
-设备实例与实体实例也由解决方案包声明，不另建一套现场 CRUD。槽位既兼容单设备参数，
-也可通过一个 `device_instances` 站点参数生成多台同类设备；
-安装计划根据稳定设备键与规范点位名列出候选，唯一兼容候选可预选，多候选必须由
-engineer 在 `binding_selections` 中明确确认。若没有精确名称候选，计划还会在
-`override_candidates` 中列出同一稳定设备键下且数据类型、单位和方向兼容的旧现场标签；
-实施工程师只能通过独立的 `binding_overrides` 明确选择并重新规划。覆盖选择在计划中记录
-`selection_source=engineer_override`、主体、理由和来源目录版本；跨设备、不兼容和同时提交
-selection/override 均以稳定机器码阻断。来源目录或站点配置在批准后变化时，执行
-返回过期错误并保持零写入；运行期只读已确认的唯一主来源，不按优先级或创建顺序猜测。
-设备节点可通过 `source_catalog_key` 配置该稳定键；升级迁移仅在节点名称站点内唯一时
-以名称初始化，重复名称必须由实施工程师显式设置不同键。
-实体实时读取要求观测未超过槽位声明的新鲜度且 OPC 质量码为 GOOD(192)；缺失、陈旧
-或坏质量分别返回 `ENTITY_DATA_MISSING`、`ENTITY_DATA_STALE`、
-`ENTITY_DATA_QUALITY_BAD`，不会以带失败布尔值的 200 响应掩盖不可用状态。
-
-实体实例告警也是包资产：它只引用稳定的槽位和实体定义，运行期由已确认实体观测驱动，
-而不是引用 Neuron 节点、点位地址或 MQTT topic。`triggerDuration`、`recoveryDuration`
-与 `notificationThrottle` 只能是正整数秒；恢复条件只能由连续的新鲜 GOOD 观测满足，
-坏质量或陈旧观测会打断恢复计时，不能跨越数据空洞关闭事件。新告警事件 API 固定返回
-`model_version: v1`；操作员只能确认 `active_unacknowledged`，确认后仍保持活动，直到现场
-观测满足恢复条件。旧 `/alarms` 仍是兼容历史面，不能将其 `alarm_count` 当作新事件数量。
-数据管道已停止调用旧实体告警引擎、标签告警引擎和 MQTT 告警写库器；实体、标签与 MQTT
-只会把观测提交给同一状态机。标签必须已唯一确认到实体实例；MQTT 的外部 ID 也必须在该
-确认来源中唯一，重复名称不会猜测路由。MQTT 告警 payload 顶层必须携带整数 `quality`，只有
-OPC GOOD(192) 观测可触发或持续恢复；缺失/坏质量按不可恢复样本处理。无法映射的旧配置不再
-产生新旧表写入，须通过解决方案包完成实体绑定后才可进入统一事件模型。规则告警同样只提交
-观测：规则动作必须给出稳定 `id`、已安装告警资产 `alarm_definition`、目标
-`entity_instance_id` 与计算值 `value`，不能携带等级、消息、物理地址或恢复指令。运行期按资产
-选择当前或仍有活动事件的历史定义版本。旧 `/alarms` 仅保留历史只读查询，删除节点、标签、实体
-或规则也不会改写其中的历史证据；`/alarms/counts`、
-`/alarms/entities` 和 `/alarms/group-counts` 统计统一事件，创建、旧确认和人工恢复接口均已删除。
-`POST /alarm-events/{id}/acknowledgements` 成功响应会返回不透明 `audit_event_id`；同一 ID 也会出现在
-事件 timeline 的 `ALARM_ACKNOWLEDGED` transition。它只用于交付报告核验证据，不是全局审计查询入口。
-
-```yaml
-# solution.yaml 的 assets/acceptance 增量
-assets:
-  - id: alarm.pcs.overpower
-    kind: alarm_definition
-    path: alarms/pcs-overpower.yaml
-    sha256: "<sha256>"
-  - id: acceptance.pcs-overpower-lifecycle
-    kind: acceptance
-    path: acceptance/pcs-overpower-lifecycle.yaml
-    sha256: "<sha256>"
-acceptance:
-  - acceptance.pcs-overpower-lifecycle
-```
-
-```yaml
-# alarms/pcs-overpower.yaml
-schemaVersion: zizu.alarm-definition/v1alpha1
-id: alarm.pcs.overpower
-kind: alarm_definition
-version: 1.0.0
-slot: slot.pcs-primary
-entityDefinition: pcs.activePower
-trigger: {op: gt, value: 100}
-triggerDuration: 10s
-recovery: {op: lte, value: 90}
-recoveryDuration: 5s
-severity: MAJOR
-notificationThrottle: 60s
-```
-
-```yaml
-# 规则中的告警动作：规则只投递观测，定义决定等级、触发和恢复语义
-_config:
-  sourceEntityInstanceIds: ["<PCS-01.activePower-instance-uuid>"]
-  inputMappings:
-    grid_power: "<PCS-01.activePower-instance-uuid>"
-  actions:
-    - id: export-limit
-      type: alarm
-      alarm_definition: alarm.pcs.overpower
-      entity_instance_id: "<PCS-01.activePower-instance-uuid>"
-      value: "{{grid_power}}"
-```
-
-```yaml
-# acceptance/pcs-overpower-lifecycle.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.pcs-overpower-lifecycle
-kind: alarm_lifecycle
-required: true
-alarmDefinition: alarm.pcs.overpower
-expectedState: recovered
-timeout: 5s
-```
-
-告警生命周期验收除确认 pending → active → acknowledged → recovered 的状态机外，也要求
-`ALARM_ACKNOWLEDGED` transition 绑定一条 append-only 审计事件；缺失审计 ID 时报告为 failed。
-
-`alarm_lifecycle` 验收要求本次安装的定义已完成触发、操作员确认和现场恢复，并进入声明
-状态；报告保留事件 ID、状态和机器转换码，不回显物理来源地址或原始协议负载。
-
-```yaml
-# solution.yaml 的 assets 片段
-assets:
-  - id: pcs.activePower
-    kind: entity_definition
-    path: entities/pcs-active-power.yaml
-    sha256: "<sha256>"
-  - id: slot.pcs-primary
-    kind: entity_instance_slot
-    path: entities/pcs-primary.yaml
-    sha256: "<sha256>"
-  - id: acceptance.pcs-active-power
-    kind: acceptance
-    path: acceptance/pcs-active-power.yaml
-    sha256: "<sha256>"
-acceptance: [acceptance.pcs-active-power]
-```
-
-### 固定 EMS 运行工作台
-
-解决方案包只能声明**数据配置**，不能携带任意前端代码、URL、样式或脚本。平台维护固定
-页面组件；工作台引用的 `slot + definition` 在安装后解析为当前站点的确认实体实例。引用
-不存在的槽位或实体定义会在导入阶段拒绝，安装后缺失/失活的引用会让
-`GET /api/v1/ems-workbench` 返回 `WORKBENCH_REFERENCE_UNRESOLVED`，不会猜测其他来源。
-趋势数据只能通过 `GET /api/v1/ems-workbench/trends/{trend_id}?range=1h|24h|7d|30d`
-读取清单中已声明的实体实例；平台不会接受任意标签或物理来源作为图表输入。
-
-```yaml
-# solution.yaml 的 assets 增量
-assets:
-  - id: workbench.ems
-    kind: ems_workbench
-    path: workbench/ems.yaml
-    sha256: "<sha256>"
-```
-
-```yaml
-# workbench/ems.yaml
-schemaVersion: zizu.ems-workbench/v1alpha1
-id: workbench.ems
-kind: ems_workbench
-navigation:
-  - {id: overview, label: 场站概览}
-  - {id: trends, label: 运行趋势}
-  - {id: alarms, label: 告警}
-  - {id: controls, label: 控制}
-groups:
-  - id: pcs
-    label: PCS
-    entities:
-      - {slot: slot.pcs, definition: pcs.activePower}
-kpis:
-  - id: pcs-power
-    label: PCS 功率
-    entity: {slot: slot.pcs, definition: pcs.activePower}
-trends:
-  - id: pcs-power-trend
-    label: PCS 功率趋势
-    defaultRange: 24h # 仅允许 1h、24h、7d、30d
-    entities:
-      - {slot: slot.pcs, definition: pcs.activePower}
-alarms: {visible: true}
-controls: {visible: true}
-```
-
-`overview`、`trends`、`alarms` 与 `controls` 是仅有的内置导航 ID。`controls` 只展示已确认且
-可写的实体实例；真正下发仍必须经过统一控制命令权限、限值、联锁和回读，工作台配置不能扩权。
-
-### 基础 EMS 策略与固定仿真
-
-策略也是包内数据资产，不接受表达式、脚本、设备地址、MQTT 或 Neuron 配置。首版策略只支持
-一个数值输入、一个阈值判断和一个固定数值动作；输入和目标都必须引用同一包中声明的
-`slot + definition`，单位必须精确匹配，目标还必须声明可写控制策略。每个策略都携带一个
-固定仿真；导入时仿真期望不成立即拒绝整个包。
-
-```yaml
-# solution.yaml 的 assets 增量
-assets:
-  - id: policy.grid-import-cap
-    kind: ems_policy
-    path: policies/grid-import-cap.yaml
-    sha256: "<sha256>"
-```
-
-```yaml
-# policies/grid-import-cap.yaml
-schemaVersion: zizu.ems-policy/v1alpha1
-id: policy.grid-import-cap
-kind: ems_policy
-revision: 1
-input: {slot: slot.pcs-primary, definition: grid.activePower, unit: kW}
-condition: {operator: gt, threshold: 100}
-action:
-  id: cap-import
-  target: {slot: slot.pcs-primary, definition: pcs.setpoint}
-  value: 10
-  unit: kW
-  # 仅用于目标 control.highRisk=true 的显式、固定、小功率自动化授权。
-  # 必须大于等于 value 的绝对值；不是现场通用安全值。
-  highRiskAuthorization: {maximumAbsoluteValue: 10}
-simulation:
-  input: {value: 120, unit: kW}
-  expected: {triggered: true, actionValue: 10}
-```
-
-工程师先调用 `simulate` 获得可重放的策略证据；`evaluate` 或平台定时调度使用新鲜、GOOD 的
-确认实例观测。命中条件时只会创建 `source_type=policy` 的统一控制命令，仍受限值、联锁、
-冷却和回读约束；仿真永不下发设备写入。对 `control.highRisk: true` 的目标，默认仍要求每次
-人工确认；唯一例外是策略动作显式携带 `highRiskAuthorization`，固定数值绝对值不超过其上限，且
-当前站点配置版本已由工程师通过 `enable` 启用。统一运行时还要求本次策略评估签发的临时服务端
-授权证明；审计证据字段本身不能构成权限。该例外只适用于声明式 EMS 策略，规则、兼容接口和手动
-命令不能借此绕过二次确认。
-完整的授权主体、服务端复核与停用并发语义见
-[`ADR-0008`](docs/adr/0008-high-risk-policy-automation.md)；策略中的 `.inf`、`.nan` 等非有限数值
-不属于可接受的安全上限或动作值。
-安装计划先验证其输入/目标都能唯一落到确认实体实例；工程师还必须调用 `enable`，让平台在
-当前输入可读、新鲜且质量合格时持久记录启用状态。只有已启用策略会被定时调度；运行期出现
-缺失、陈旧或坏质量观测则明确拒绝本次评估，绝不会猜测数据或下发动作。升级后的新站点配置版本
-需要重新启用，避免包变化静默接管自动控制。工程师可调用 `disable` 立即停止后续策略调度；已经
-分派的命令仍必须通过回读、超时或失败终态收敛，不能由停用操作伪造为成功。
-
-需要把策略闭环纳入交付报告时，包可声明一个严格的 `policy_execution` 验收项。它先记录固定
-仿真，再评估当前确认实例输入，并只在命令变为 `readback_confirmed` 后通过；报告保存输入、
-仿真、命令及回读状态。该验收项会执行已声明的安全测试动作，因此只能指向经现场批准的测试
-策略，不能替代运行期审批或高风险命令确认。
-
-验收运行请求以 `manual_commands` 和 `policy_commands` 显式引用此前已完成的控制命令；报告
-不会自行下发动作。`manual_commands` 只接受由 operator 发起、目标属于本次安装、已二次确认并
-处于 `readback_confirmed` 的人工命令；平台同时要求该命令已有不可变审计证据。`policy_commands`
-只引用此前由工程师通过公开 `evaluate`、协议侧回读和公开 `reconcile` 完成的策略命令：
-
-```json
-{
-  "manual_commands": {"acceptance.manual-pcs-setpoint": "<manual-command-uuid>"},
-  "policy_commands": {"acceptance.policy-grid-import-cap": "<policy-command-uuid>"},
-  "authorization_denials": {"acceptance.operator-configuration-denied": "<audit-event-uuid>"}
-}
-```
-
-```yaml
-# acceptance/policy-grid-import-cap.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.policy-grid-import-cap
-kind: policy_execution
-required: true
-policy: policy.grid-import-cap
-expectedAction: cap-import
-timeout: 5s
-```
-
-```yaml
-# acceptance/manual-pcs-setpoint.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.manual-pcs-setpoint
-kind: manual_control_execution
-required: true
-entityDefinition: pcs.setpoint
-expectedValue: 5
-actorRole: operator
-timeout: 30s
-```
-
-```yaml
-# acceptance/neuron-gateway.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.neuron-gateway
-kind: gateway_readiness
-required: true
-gateway: neuron
-timeout: 10s
-```
-
-`gateway_readiness` 只证明平台可用受控凭据访问已配置的协议网关；它不回显地址、账户、版本或
-连接参数。它必须与实体实时新鲜度和历史样本验收同时通过，才能证明“网关在线且数据已进入平台”。
-
-```yaml
-# acceptance/operator-configuration-denied.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.operator-configuration-denied
-kind: authorization_rejection
-required: true
-capability: configuration.write
-actorRole: operator
-timeout: 5s
-```
-
-`authorization_rejection` 证明一个低权限账号确实被服务端拒绝，而不接受客户端自报。实施人员以
-`operator` 身份请求对应能力保护的安全操作，得到 `403 PERMISSION_DENIED` 后读取响应头
-`X-ZiZu-Audit-Event-ID`，将该 UUID 放进 `authorization_denials`。验收服务只在内部核对这条
-append-only 审计事件的拒绝结果、能力和角色；不会暴露全局审计记录、请求正文或凭据。
-
-```yaml
-# entities/pcs-active-power.yaml
-schemaVersion: zizu.entity-definition/v1alpha1
-id: pcs.activePower
-kind: entity_definition
-displayName: Active power
-deviceCategory: pcs
-dataType: FLOAT
-unit: kW
-direction: R
-```
-
-```yaml
-# entities/pcs-primary.yaml
-schemaVersion: zizu.entity-instance-slot/v1alpha1
-id: slot.pcs-primary
-kind: entity_instance_slot
-deviceCategory: pcs
-count: 1
-instanceKeyParameter: pcs.instance_key
-displayName: Primary PCS
-freshness: 30s
-requiredEntities:
-  - definition: pcs.activePower
-    matcher:
-      id: matcher.pcs-active-power
-      deviceKeyParameter: pcs.device_key
-      tagName: ActivePower
-```
-
-同一实体定义需要多台 PCS 实例时，槽位改为 `instancesParameter`，matcher 的设备键直接
-来自列表中的 `device_key`，无需复制定义或槽位：
-
-```yaml
-# solution.yaml parameters
-parameters:
-  - id: pcs.instances
-    type: device_instances
-    required: true
-    minimumItems: 1
-    maximumItems: 16
-    description: Site PCS instances and source catalog keys
----
-# entities/pcs-fleet.yaml
-schemaVersion: zizu.entity-instance-slot/v1alpha1
-id: slot.pcs
-kind: entity_instance_slot
-deviceCategory: pcs
-instancesParameter: pcs.instances
-displayName: PCS
-freshness: 30s
-requiredEntities:
-  - definition: pcs.activePower
-    matcher:
-      id: matcher.pcs-active-power
-      tagName: ActivePower
-```
-
-创建计划时提交例如
-`{"parameters":{"pcs.instances":[{"instance_key":"PCS-01","device_key":"edge-pcs-a","display_name":"东侧 PCS"},{"instance_key":"PCS-02","device_key":"edge-pcs-b","display_name":"西侧 PCS"}]}}`。
-列表顺序和 `display_name` 变化不改变设备/实体实例 ID；`instance_key` 是站点稳定身份，
-不能用展示名称代替。
-
-```yaml
-# acceptance/pcs-active-power.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.pcs-active-power
-kind: entity_readiness
-required: true
-slot: slot.pcs-primary
-definition: pcs.activePower
-freshness: 30s
-timeout: 5s
-```
-
-创建计划时可提交
-`{"parameters":{"pcs.instance_key":"PCS-01","pcs.device_key":"PCS-01"},"binding_selections":{"slot.pcs-primary/PCS-01/pcs.activePower":"<tag UUID>"}}`。
-当规范点位 `ActivePower` 在该设备上没有精确名称匹配、但计划返回兼容旧标签时，改为提交
-`{"parameters":{"pcs.instance_key":"PCS-01","pcs.device_key":"PCS-01"},"binding_overrides":{"slot.pcs-primary/PCS-01/pcs.activePower":"<legacy tag UUID>"}}`。
-候选与计划使用稳定机器码：`ENTITY_BINDING_MISSING`、`ENTITY_BINDING_AMBIGUOUS`、
-`ENTITY_BINDING_TYPE_MISMATCH`、`ENTITY_BINDING_UNIT_MISMATCH`、
-`ENTITY_BINDING_DIRECTION_MISMATCH`、`ENTITY_BINDING_OVERRIDE_INVALID`、
-`ENTITY_BINDING_OVERRIDE_CONFLICT` 和 `ENTITY_BINDING_PLAN_STALE`。验收同时检查确认
-绑定、声明的新鲜度与质量码；陈旧或非 GOOD 数据不能得到 passed 报告。
-
-`GET /api/v1/telemetry` 的交互查询使用 `(ts, tag_id)` 键集游标。首次请求只需传
-`range/page_size` 及可选 `tag_id/node_id`；若 `has_more=true`，下一页原样回传
-`next_cursor`。游标绑定原筛选条件，跨筛选复用或格式错误返回
-`TELEMETRY_CURSOR_INVALID`。响应的 `total` 固定为 `null`，避免同步扫描数百万行；需要离线
-提取时使用独立的有界 CSV 导出（当前最多 10,000 行）。精确计数必须由独立报表任务承担，
-当前交互 API 不提供，不能用列表页或 CSV 行数推算总量。
-
-```yaml
-# acceptance/grid-power-history.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.grid-power-history
-kind: history_readiness
-required: true
-slot: slot.meter
-definition: grid.activePower
-range: 24h
-minimumSamples: 2
-timeout: 5s
-```
-
-`history_readiness` 对已经确认的实体实例检查指定时间窗内的历史观测，不返回原始遥测值。
-`range` 只能是 `1h`、`24h`、`7d` 或 `30d`，`minimumSamples` 必须是正整数；缺少样本或样本
-质量非 GOOD 时，会以 `HISTORY_SAMPLE_MISSING` 或 `HISTORY_QUALITY_BAD` 记录 failed 报告。
-
-```yaml
-# acceptance/operation-audit.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.operation-audit
-kind: operation_audit
-required: true
-requiredEvidence: [installation, manual_control, policy_control, alarm_acknowledgement, authorization_denial]
-timeout: 5s
-```
-
-`operation_audit` 默认仅证明本次安装已经写入不可变审计流。需要交付报告汇总运行审计闭环时，
-可用 `requiredEvidence` 要求 `manual_control`、`policy_control`、`alarm_acknowledgement` 与
-`authorization_denial`；这些证据必须由同一次报告中的已通过验收项实际给出审计 ID。报告只携带
-事件类型、结果、服务端主体、计数和覆盖结论，不携带请求体、凭据或完整审计详情。实施工程师可通过
-`GET /api/v1/solution-installations/{installation_id}/audit-events` 读取该安装限定范围内的只读证据，
-接口需要 `solution.report.read` 权限。
-
-```yaml
-# acceptance/release-lock.yaml
-schemaVersion: zizu.acceptance/v1alpha1
-id: acceptance.release-lock
-kind: release_lock
-required: true
-timeout: 5s
-```
-
-`release_lock` 是平台维护的白名单验收类型，不携带 URL、镜像名称或脚本。它只读取 owner 作业
-追加写入的当前发布锁，并校验锁中平台版本、架构、当前站点配置版本和该包的 ID、版本与摘要；
-此项用于阻止“包验收成功但运行的并非已锁定制品”的伪交付。
-
-规则输入的公开配置只接受 `_config.sourceEntityInstanceIds` 和将决策字段映射到实例 UUID
-的 `_config.inputMappings`。新建/更新规则出现旧 `_config.sourceEntityIds` 时返回
-`ENTITY_REFERENCE_LEGACY_FORBIDDEN`；已保存旧规则仅只读兼容并返回迁移提示。
-`GET /api/v1/entity-instances/legacy-migration-preview` 根据已确认的物理来源将旧实体分类为
-`unique`、`missing` 或 `ambiguous`，始终返回 `writes_applied: 0`，不自动猜测或改写规则。
-实际规则引用同时持久化到带实体实例外键的 `t_rule_entity_instance_refs`。告警、控制和
-EMS 工作台在各自状态机/命令/工作台票据中复用同一实例目录；Neuron 与 MQTT RPC 旧控制
-入口已在 Ticket 09 转换为统一控制命令，不能把它们的创建响应当作现场成功。Ticket 10
-已将规则控制动作收口为 `entity_instance_id + value`：规则只能创建统一控制命令，命令保存
-`rule:<UUID>` 主体、规则版本、稳定动作标识和触发观测/输出证据；规则配置不得包含
-Neuron 节点/组/点位、MQTT topic/payload/QoS、全局实体或本地冷却。相同触发重放返回原命令，
-新的触发继续受持久命令冷却、联锁和回读确认约束。遗留
-`/entities/{id}/write` 已在 Ticket 11 迁为有限兼容入口：它只接收旧实体 UUID、`value`
-和 `Idempotency-Key`，仅在旧实体的已启用绑定能唯一对应一个已确认、活动、Neuron 来源的
-实体实例时创建 `source_type=compatibility` 控制命令。多个、缺失或非 Neuron 候选均产生
-持久化拒绝命令；此入口不再解析优先级、不再直接调用设备 Adapter，也不会把 `201` 解释为
-设备写入成功。调用方必须使用响应中的 `links.command` 查询状态，只有
-`readback_confirmed` 才表示现场已达到期望值。新集成必须使用
-`POST /api/v1/entity-instances/{id}/control-commands`；兼容入口将在 v1.0 移除。
-EMS 工作台中的手动控制始终先展示目标值并申请 60 秒、与主体和内容绑定的二次确认；操作员必须
-再次点击“确认下发”才会创建命令。下发后可通过“刷新回读”触发一次安全状态检查，它不会重发
-设备写入，只有 `readback_confirmed` 表示现场已达到目标。
-`/api/v1/nanomq/publish` 与前端“发布测试”已关闭，避免任意 MQTT topic/payload 形成未审计的
-设备控制旁路；消息总线的状态、订阅、ACL、配置和重启仍由 `system.manage` 管理。
-
-规则的控制动作是公开配置，必须只指向已确认的设备实体实例；每个 `id` 在同一规则版本内
-必须稳定且唯一，控制规则至少声明一个实体实例输入（`sourceEntityInstanceIds` 或
-`inputMappings`）。`value` 可以是决策输出模板或 JSON 标量。保存时会把每个动作写入实例引用目录，
-避免规则绕过设备范围、控制策略或命令审计。
-
-```yaml
-_config:
-  sourceEntityInstanceIds:
-    - "<confirmed input entity-instance UUID>"
-  inputMappings:
-    bms_ready: "<confirmed input entity-instance UUID>"
-  actions:
-    - id: output:pcs_setpoint
-      type: control
-      entity_instance_id: "<confirmed entity-instance UUID>"
-      value: "{{pcs_setpoint}}"
-```
-
-确需主备来源时，包在 matcher 上显式声明 `failoverPolicy: manual`，对应实例参数必须提供
-与主来源不同的 `standby_device_key`。安装计划分别展示主、备候选并要求两者都唯一兼容；
-安装后默认只读 primary，不会因缺失、陈旧或坏质量自动跳到 standby。engineer/admin 通过
-`POST /api/v1/entity-instances/{id}/source-failover` 提交
-`{"expected_current_role":"primary","target_role":"standby","reason":"..."}`；服务端以
-乐观状态检查执行原子切换并追加不可变审计，重复旧状态请求返回
-`ENTITY_FAILOVER_STATE_CHANGED`。升级若要删除策略或更换主备来源，必须先显式切回
-primary；standby 状态下变更会返回 `ENTITY_FAILOVER_POLICY_CHANGE_REQUIRES_PRIMARY`，
-避免包升级在没有切换审计的情况下静默改源。
-
-可控实体在 `entity_definition` 中显式声明受限控制策略；没有 `control` 的 `W`/`RW`
-定义不能被新命令接口写入。首版只支持同设备实例内的精确联锁和一个回读实体，避免将
-任意表达式或物理地址带进站点配置：
-
-```yaml
-# entities/pcs-setpoint.yaml
-schemaVersion: zizu.entity-definition/v1alpha1
-id: pcs.setpoint
-kind: entity_definition
-displayName: PCS setpoint
-deviceCategory: pcs
-dataType: FLOAT
-unit: kW
-direction: RW
-control:
-  minimum: -100
-  maximum: 100
-  cooldown: 5s
-  readback:
-    definition: pcs.readback
-    tolerance: 0.1
-    timeout: 15s
-  interlocks:
-    - definition: bms.ready
-      equals: true
-  highRisk: false
-```
-
-数值实体必须同时声明 `minimum`、`maximum` 和非负 `tolerance`；`readback` 与目标类型、
-单位必须一致。每个 `interlocks` 条目必须引用同一槽位的读实体定义，且其观测新鲜、
-质量 GOOD 并精确等于 `equals`。`cooldown`、`timeout` 使用正整数秒；高风险值设为
-`highRisk: true` 时，先调用 confirmations 接口，再用返回的 `confirmation_id` 提交相同
-主体、目标和值的命令，确认 60 秒后或首次使用后失效。
-
-命令状态为 `accepted`、`validated`、`dispatched`、`readback_confirmed`；终态为
-`rejected`、`timeout`、`failed`、`mismatch`。同一主体与 `Idempotency-Key` 只能绑定一个
-规范化命令内容；相同内容返回原命令，不同内容返回 `IDEMPOTENCY_KEY_REUSED`。在途命令
-重启后继续观察回读，已到超时才安全进入 `timeout`，`reconcile` 不会再次下发写入。
-
-安装执行请求体为
-`{"plan_digest":"<64位小写SHA-256>"}`；安装和验收命令都必须携带
-`Idempotency-Key` 请求头。相同调用主体、命令和请求摘要重用同一键会返回原结果，
-同一键用于不同请求返回 `IDEMPOTENCY_KEY_REUSED`。归档/清单错误返回 HTTP 422，
-计划过期、摘要不匹配或幂等冲突返回 HTTP 409；错误体稳定表示为：
-
-```json
-{"detail":{"code":"INSTALL_PLAN_STALE","message":"..."}}
-```
-
-包表示中的 `package_id` 是清单声明的稳定字符串标识；计划与安装表示中的
-`package_record_id` 是本实例保存该包后生成的 UUID，二者不会复用同一字段名。
-
-票据 01 的最小包格式、归档限额、机器码和报告字段以
-[`docs/adr/0006-minimal-solution-delivery-tracer.md`](docs/adr/0006-minimal-solution-delivery-tracer.md)
-为准。生产验收探针默认请求本实例 `APP_PORT`；反向代理或端口映射部署需设置
-`PUBLIC_API_BASE_URL` 为 backend 可访问的公开 API 基址。
-
----
-
-## 数据模型（简化）
-
-```sql
--- 节点（五层树）
-t_nodes(id, parent_id, node_type, name, ...)
-
--- 点位（物理 + 逻辑统一表）
-t_tags(
-  id, node_id, name, data_type,
-  scale_factor, value_offset,     -- 工程值换算: eng = (raw + offset) × scale
-  unit_from, unit_to,
-  source, is_virtual, ...
-)
-
--- 遥测（TimescaleDB Hypertable）
-t_telemetry(ts, node_id, tag_id, value_int, value_float, value_bool, value_str)
-
--- 新实体实例交付路径（旧全局实体表在兼容期保留）
-t_device_instances(id, identity_installation_id, slot_id, instance_key, ...)
-t_entity_instances(id, device_instance_id, definition_id, data_type, unit, direction, ...)
-t_entity_instance_bindings(id, entity_instance_id, tag_id, confirmation_audit_id, active)
-t_entity_binding_confirmations(id, entity_instance_id, binding_id, actor, plan_digest, ...)
-
--- 节点快照（数据黑板）
-t_node_snapshot(ts, node_id, data JSONB, raw_data JSONB, raw_message JSONB)
-
--- 全局实体（业务语义层）
-t_entities(id, name, entity_type, data_type, unit, category, enabled)
-
--- 实体 ↔ 点位绑定
-t_entity_bindings(entity_id, tag_id, node_id, binding_type, brand, priority, enabled)
-
--- 实体最新值缓存
-t_entity_telemetry_latest(entity_id, binding_id, tag_id, node_id, ts, value_*)
-
--- 连续聚合（多粒度查询）
-cagg_telemetry_1min, cagg_telemetry_5min, cagg_telemetry_1h
-```
-
-**工程值换算公式**：
-
-```
-engineering_value = (raw_value + value_offset) × scale_factor
-```
-
-例：BMS 电流原始值 16500，`value_offset = -16000`，`scale_factor = 0.1`
-→ `(16500 + (-16000)) × 0.1 = 50 A`
-
----
-
-## Neuron 点位同步
-
-新设备上线后，无需手工录入点位：
-
-```bash
-python backend/scripts/sync_neuron_tags.py \
-  --neuron-url http://localhost:7000 \
-  --dry-run    # 先预览，确认后去掉此参数正式同步
-```
-
-脚本会：登录 Neuron → 发现所有驱动节点 → 枚举分组 → 抓取标签 → upsert 进 `t_nodes` / `t_tags`。
-
----
-
-## 部署须知（裁剪内核 / ARM64）
-
-如果目标服务器内核被裁剪（常见于嵌入式 ARM64 设备），Docker 可能遇到：
-
-- `CONFIG_POSIX_MQUEUE` 缺失 → 容器启动报 mqueue 错误
-- `CONFIG_VETH` 缺失 → bridge 网络残废
-
-**避坑铁律**（缺一不可，`docker-compose.yml` 已内置）：
-
-```yaml
-services:
-  every-service:
-    network_mode: host       # 避坑 #1: 绕开 bridge
-    tmpfs:
-      - /dev/mqueue          # 避坑 #2: 替代内核 mqueue
-```
-
----
-
-## 设计哲学
-
-1. **配置即平台** — 业务逻辑由界面配置产生，不写死代码
-2. **一棵节点树** — 五层统一模型，不拆 Asset/Device/Profile
-3. **物理/逻辑统一寻址** — 前端不区分来源，统一 `node_path.tag_name`
-4. **规则跟随节点** — 规则绑定在任意层级，自动继承给子节点
-5. **最小闭环优先** — 先跑通「设备上线→数据显示→规则触发→控制下发」
-
-详见 [`docs/decisions/`](docs/decisions/) 下的 ADR 决策记录。
-
----
-
-## 链接
-
-- **官网**: [www.holoems.com](https://www.holoems.com)
-- **GitHub**: [github.com/taidai/zizu](https://github.com/taidai/zizu)
-- **文档**: [docs/](docs/)
-
-## 开发
-
-```bash
-# 安装项目依赖后，导出一组仅用于本机测试的非公开默认 Secret
-cd backend
-export DB_PASSWORD=database-secret-value
-export NEURON_PASSWORD=neuron-secret-value
-export NANOMQ_API_PASSWORD=nanomq-secret-value
-export JWT_SECRET=jwt-secret-value-that-is-at-least-32-chars
-
-# 本次安全与交付功能回归、F0 独立验收（不需要额外测试依赖）
-python -m unittest \
-  tests.test_secure_settings \
-  tests.test_authenticated_delivery_public_api \
-  tests.test_delivery_public_api \
-  tests.test_entity_instance_registry \
-  tests.test_entity_delivery_public_api \
-  tests.test_business_rest_authorization -v
-python test_f0_pure.py
-
-# 身份离线供应工具的标准库测试（从仓库根目录运行）
-cd ..
-python -m unittest scripts.test_bootstrap_admin -v
-
-# 其余历史测试使用 pytest；如本机已安装 pytest：python -m pytest tests -q
-# 当前基线有 2 个已知聚合器失败（SUM 去重、LAST 时间排序）。
-# 隔离 Postgres 主缝另需指向名称以 _test 结尾的专用数据库，并设置
-# ZIZU_POSTGRES_TEST=1 后运行：python -m unittest tests.test_delivery_postgres_public_api -v
-
-# 前端构建（此时位于仓库根目录）
-cd frontend && npm run build
-```
-
----
+提交或发布前必须再次按[验收清单](docs/acceptance-checklist.md)走通
+“节点 → L0 → L1 → L2 → 告警”主干。页面能够打开不等于工业系统已经可交付。
+
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 协议接入 | Neuron |
+| 消息总线 | NanoMQ / MQTT |
+| 后端 | Python 3.12、FastAPI |
+| 数据库 | PostgreSQL、TimescaleDB |
+| 决策模型 | GoRules ZEN / JDM |
+| 前端 | React 18、TypeScript、Vite、ECharts |
+| 部署 | Docker Compose、不可变镜像摘要 |
+
+## 文档
+
+- [中英文技术架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+- [核心架构总纲](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)
+- [领域术语](CONTEXT.md)
+- [架构决策记录](docs/adr/)
+- [验收清单](docs/acceptance-checklist.md)
+- [v0.8.3 现场部署记录](docs/deploy-1号机-v0.8.3-http.md)
+
+文档冲突时，解释顺序为：核心架构总纲 → 最新 accepted ADR → 当前专项规格 → 历史记录。
 
 ## 许可证
 
-本项目采用 **[十善业协议 (Daśa-kuśala License) v1.0](LICENSE)** — 以佛教十善业（身三、口四、意三）为伦理基础的开源许可证。
-
-允许自由使用、修改、分发，但**禁止将软件用于有害用途**：
-
-| 十善业 | 对应禁止条款 |
-|--------|------------|
-| 不杀生 | 禁用于武器、致死性设备、自动化杀伤系统 |
-| 不偷盗 | 禁用于窃取数据、侵犯知识产权、入侵系统 |
-| 不邪淫 | 禁用于色情、性剥削、未经同意的偷拍监控 |
-| 不妄言 | 禁用于虚假信息、深度伪造、诈骗 |
-| 不绮语 | 禁用于垃圾信息、恶意刷量、虚假流量 |
-| 不两舌 | 禁用于煽动对立、认知战、舆论操控 |
-| 不恶口 | 禁用于网络暴力、人身攻击、仇恨言论 |
-| 不贪 | 禁用于掠夺性定价、剥削劳动、欺骗性设计 |
-| 不嗔 | 禁用于报复攻击、勒索软件、DDoS |
-| 不痴 | 禁用于传播迷信、伪科学、信息操控 |
-
-> 本许可证非 OSI 认证标准许可证，GitHub 会显示为 "Other"。法律效力等同于自定义合同条款。
-
----
-
-## 致谢
-
-本项目整合了以下优秀开源组件：
-
-- [Neuron](https://github.com/emqx/neuron) · 工业协议网关
-- [nanoMQ](https://github.com/nanomq/nanomq) · 轻量 MQTT Broker
-- [FastAPI](https://github.com/fastapi/fastapi) · 现代 Python Web 框架
-- [TimescaleDB](https://github.com/timescale/timescaledb) · 时序数据库
-- [GoRules ZEN](https://github.com/gorules/zen) · 规则引擎
-- [pint](https://github.com/hgrecco/pint) · 单位换算
-- [SymPy](https://github.com/sympy/sympy) · 符号计算
+ZiZu 按仓库中的[《十善业协议（Daśa-kuśala License）1.0》](LICENSE)授权。使用、修改或分发前请阅读
+完整条款；该许可证包含用途限制和分发义务。

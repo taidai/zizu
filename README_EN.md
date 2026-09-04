@@ -1,306 +1,228 @@
 # ZiZu
 
-> Self-hosted IoT Platform · Open-source Industrial IoT Low-code Platform
->
-> **Deliver industrial control systems with simple configuration** — A lightweight alternative to ThingsBoard.
->
-> Current field baseline: **v0.8.3**. See the bilingual [ZiZu Technical Architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md) for the current product and runtime model. Where older sections of this README disagree, the core architecture specification, latest accepted ADRs, and current source code take precedence.
+A configuration-driven industrial IoT platform for building and delivering energy management systems.
 
-[中文](README.md) | **English** | [官网 www.holoems.com](https://www.holoems.com)
+ZiZu lets an implementation engineer model physical assets, connect device points, process raw data into stable entities,
+and configure alarms, JDM decisions, control, and a fixed EMS workbench without changing platform source code or writing
+SQL. A solar-storage-charging EMS is the first reference delivery.
 
----
+**Current version: `v0.8.3`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-## What is ZiZu
+> Current status: the core data trunk is implemented and alarms are being refined through field use. JDM, unified control,
+> and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
+> complete delivery-ready EMS.
 
-ZiZu is an IoT platform designed for **solar-storage-charging EMS, industrial energy monitoring, and remote device control** scenarios. The core philosophy is "**Configuration as Platform**" — all business logic is generated through UI configuration, with no hard-coded logic.
+## Core structure
 
-It integrates the four pillars of industrial IoT (device access / data pipeline / tag computation / control rules) into a pluggable pipeline:
-
-```
-Neuron ──MQTT──► nanoMQ ──► [F0 Data Pipeline] ──► [TimescaleDB]
-                              │
-                    ┌─────────┼─────────┐
-                    ▼         ▼         ▼
-                  [F1 Hook] [F3 Hook] [F2 Hook]
-                  Tag Calc   Node Agg   Control
+```text
+Physical node tree → L0 raw points → L1 point processing → L2 global entities
+                                                        ↓
+                                  Alarms / JDM / Control / Fixed EMS workbench
 ```
 
-> **The pipeline is the skeleton; feature domains are organs attached to it.**
+| Part | Purpose | What the user sees |
+|---|---|---|
+| Physical node tree | Represents sites, subsystems, and real equipment | Solar, storage, charging, grid, load, and their devices |
+| L0 raw points | Preserves values, quality, time, and source received from equipment | Live data, history, and link health |
+| L1 point processing | Performs mapping, conversion, state decoding, composition, and typed formulas | How raw points become standard entities |
+| L2 global entities | Provides stable business semantics to every upper function | Live values, history, quality, and provenance |
+| Upper applications | Operate exclusively on L2 | Alarms, JDM, control, and the EMS workbench |
 
----
+L0, L1, and L2 are three data views attached to a selected physical node, not three kinds of child node. Points, formulas,
+and entities never become physical tree levels. The normal engineering UI mainly exposes **Raw Data** and **Standard
+Entities**: select L0 inputs, define processing, preview the result, and publish L2. A reusable processing template is
+optional for repeated equipment and is not required for the first device.
 
-## Feature Domains
+### Runtime data flow
 
-ZiZu capabilities are divided into four feature domains with **progressive delivery**:
-
-| Domain | One-liner | Core Capability | User Value |
-|--------|-----------|-----------------|------------|
-| **F0** | Data pipeline stream processing | MQTT → Parse → Normalize → Hook Chain → TSDB | **See raw data as soon as devices come online** |
-| **F1** | Custom physical/virtual tags | PhysicalTag collection mapping + LogicalTag (SymPy formula evaluation) | **Flexibly define any derived metrics** |
-| **F3** | Node tree tag mounting + aggregation | 5-layer unified tree + per-layer SUM/AVG/MAX aggregation | **Every node is a first-class citizen with independent real-time values** |
-| **F2** | Control strategy (GoRules) | RPC write-back + JDM decision tables + audit logs | **Safely and controllably reverse-control devices** |
-
-### 5-Layer Node Tree
-
-```
-Site
- └── Station
-      └── EnergyNode
-           ├── ESS  Energy Storage  (PCS / BMS / Meter)
-           ├── PV   Photovoltaic   (Inverter / PV Meter)
-           ├── GRID Grid Connection (Grid Meter)
-           └── EVSE Charging Pile   (Charger / Charging Meter)
-                └── Tag
-                     ├── PhysicalTag  ← Neuron collection
-                     └── LogicalTag   ← Formula computation
+```text
+Device → Neuron → NanoMQ → real-time blackboard → committed frame → L1 → committed L2
+                                                                            ↓
+                                                        Alarms / JDM / Control / UI
 ```
 
-A single JSON describes the complete hierarchy — no split into multiple concepts (TB's Asset / Device / Profile triple is merged into one Node Tree).
+- One active ingestion writer runs per site; the in-process blackboard freezes immutable frames on a default one-second tick.
+- A frame is created only when data or quality changes; duplicate, regressive, and late samples are discarded.
+- Before the database commit, ZiZu does not push UI data, transition alarms, execute JDM, or issue control.
+- Quality is `GOOD`, `UNCERTAIN`, `BAD`, or `STALE`; non-`GOOD` data cannot drive automatic control.
+- Every L2 fact is traceable to L0 observations, an L1 revision, a configuration revision, quality, and time evidence.
+- Upper applications consume only committed L2, never vendor addresses or raw MQTT.
 
----
+## Modules
 
-## Tech Stack
+| Module | Main capabilities |
+|---|---|
+| Nodes and data | Physical-node CRUD, Neuron point import, L0 live/history, link diagnosis, processing, and L2 live/history/provenance |
+| Alarms | L2 rules, severity, trigger and recovery, multi-code faults, acknowledgement, history, HTTP notifications, and delivery records |
+| JDM | GoRules decision graphs and tables with L2 inputs and decision or control-intent outputs |
+| Control | One safe path for human and JDM intent, one L0 write point, and confirmation through new L2 readback |
+| EMS workbench | Energy flow, power, SOC, trends, and alarms organized by node type and standard L2 semantics |
+| System tools | MQTT, HTTP notifications, runtime health, and administrator configuration |
 
-| Layer | Technology | Description |
-|-------|-----------|-------------|
-| **Device Access** | [Neuron](https://github.com/emqx/neuron) | Industrial protocol gateway (Modbus / OPC-UA / IEC104 ...) |
-| **Message Bus** | [nanoMQ](https://github.com/nanomq/nanomq) | Lightweight MQTT 5.0 Broker |
-| **Backend** | [FastAPI](https://fastapi.tiangolo.com/) + Python 3.12 | Data pipeline + Hook chain + REST API |
-| **Time-series Storage** | [TimescaleDB](https://www.timescale.com/) | PostgreSQL + Hypertable + Continuous Aggregates (CAGG) |
-| **Rule Engine** | [GoRules ZEN](https://github.com/gorules/zen) | JDM decision tables / graphs (F2 control domain) |
-| **Frontend** | React + Vite + TypeScript + Tailwind | Neumorphism style |
-| **Unit Conversion** | [pint](https://github.com/hgrecco/pint) | Normalizer (raw value → engineering value) |
-| **Formula Evaluation** | [SymPy](https://github.com/sympy/sympy) | Virtual tag symbolic computation |
+ZiZu deliberately excludes multi-tenancy, solution packages, a device-instance middle layer, a second rules engine,
+arbitrary scripts, Redis, Kafka, additional microservices, and a free-form page designer. Statistical calculations are L1
+processing rules whose results remain ordinary L2 entities; there is no separate statistical-entity layer.
 
----
+## How to use ZiZu
 
-## Current Progress
+### 1. Model the site
 
-| Module | Status | Description |
-|--------|--------|-------------|
-| **F0 Data Pipeline** | ✅ Delivered | MQTT→Parser→Normalizer→TSDB full pipeline, ~10 msg/s sustained ingestion |
-| **F0 Visualization V1** | ✅ Delivered | Tag list + inline offset/scale editing + dual real-time values (raw/eng) + WebSocket push |
-| **Neuron Tag Sync** | ✅ Delivered | `sync_neuron_tags.py` one-click discovery of nodes/groups/tags, auto-ingestion |
-| **F0 Snapshot Blackboard** | ✅ Delivered | Node-level full JSONB snapshots with timestamp alignment |
-| **F1 Virtual Tags** | 🔨 Planning | SymPy formula engine + cascade propagation |
-| **F3 Node Aggregation** | 🔨 Planning | 5-layer tree + per-layer aggregated values |
-| **F2 Control Rules** | 🔨 Planning | GoRules JDM + RPC write-back + audit logs |
+In **Nodes and Data**, create the site, subsystems, and equipment according to their physical relationships. Keep points
+and formulas out of the node tree.
 
----
+### 2. Connect raw points
 
-## Quick Start
+Configure Neuron for the equipment and import its points on the device node. In **Raw Data**, verify:
 
-### Prerequisites
+- the expected points exist;
+- current value, data time, and receive time keep advancing;
+- quality is `GOOD`;
+- the `Neuron → MQTT → ingestion → frame → L0` path is connected;
+- live and historical views show the same point identity.
 
-- Docker + Docker Compose
-- Python 3.12+ (local development)
-- Node.js 18+ (frontend build)
+L0 preserves the protocol value. If equipment sends `0/1`, L0 shows `0/1`; boolean meaning, fault codes, and unit
+conversion belong in L1.
 
-### 1. Clone & Configure
+### 3. Produce global entities
+
+Select one or more L0 points, then enter the entity name, stable definition key, result type, and unit. Choose a processing
+method:
+
+- direct use;
+- scale and offset;
+- enum or state decoding;
+- multi-point composition;
+- a strongly typed formula;
+- cross-node calculation, whose remote inputs must be L2.
+
+Run **Check Result** before publication to verify bindings, types, units, quality propagation, and the preview value. After
+publication, inspect the L2 live value, history, and provenance in **Standard Entities**. Save the processing as a reusable
+template only when a second device of the same kind needs it.
+
+### 4. Configure upper applications
+
+- In Alarms, select L2 entities and configure severity, trigger, recovery, and duration; bind an HTTP notification when needed.
+- In JDM, use L2 as decision inputs; simulation and production execution use the same versioned model.
+- For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
+- Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
+
+### 5. Verify and deliver
+
+Accept the system along one fixed path:
+
+```text
+Node → L0 live/history → L1 check and publish → L2 live/history/provenance
+     → Alarm → JDM → Control readback → EMS workbench
+```
+
+Lock the platform version, image digest, database Schema, template digests, and configuration revision. Verify backup and
+restore, disconnects, `STALE`, process restart, and concurrent configuration changes. See the
+[acceptance checklist](docs/acceptance-checklist.md).
+
+## Quick start
+
+### Requirements
+
+- Docker and Docker Compose
+- Python 3.12+
+- A reachable Neuron instance when industrial protocols are required
+
+### Start locally
 
 ```bash
 git clone https://github.com/taidai/zizu.git
 cd zizu
-cp .env.example .env   # Modify database password as needed
+python scripts/bootstrap_runtime_secrets.py
+docker compose up -d --build
+docker compose ps
 ```
 
-### 2. One-Click Start (Recommended)
+Create the only initial platform administrator. The command reads the password interactively without echo:
 
 ```bash
-docker compose up -d --build
+docker compose exec backend python -m scripts.bootstrap_admin --username admin
 ```
 
-Access:
-- `http://localhost:9000` — Frontend (tag management + real-time trends)
-- `http://localhost:9000/api/docs` — Swagger API documentation
+The default configuration enforces production security and HTTPS. Only on a fully isolated development machine may these
+three values be set together in `.env`:
 
-> First startup automatically executes `init-db/*.sql` to initialize the database.
+```env
+DEPLOYMENT_MODE=development
+ALLOW_INSECURE_DEV_SECRETS=true
+AUTH_REQUIRE_HTTPS=false
+```
 
-### 3. Local Development (Optional)
+Then open `http://127.0.0.1:9000`. Production requires a TLS entry point, private credentials, and an immutable image
+digest—never `latest`. Use `deploy/docker-compose.release.yml` for a normal host and
+`deploy/docker-compose.release.e606.yml` for the constrained e606 kernel.
 
-**Backend**:
+Common operations:
+
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose restart backend
+docker compose down
+```
+
+`docker compose down` preserves volumes. Do not use `down -v` unless permanent deletion of database and runtime data is
+explicitly intended.
+
+## Development and verification
+
+Backend:
+
 ```bash
 cd backend
-pip install fastapi "uvicorn[standard]" psycopg2-binary paho-mqtt loguru pydantic pydantic-settings pint websockets
-uvicorn app.main:app --reload --port 9000
+python -m pip install -e .
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-**Frontend**:
+Frontend:
+
 ```bash
 cd frontend
-npm install
-npm run dev    # Vite dev server @5173
+npm ci
+npm run dev
+npm run build
 ```
 
-### 4. e606 Trimmed Kernel Deployment
+After configuring the target URL and test identity, run headless acceptance:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.e606.yml up -d
+cd frontend
+npm run test:e2e:node
+npm run test:e2e:alarm-http
 ```
 
-> e606 uses `network_mode: host` + `tmpfs: /dev/mqueue`, ports directly occupy the host.
+Before a commit or release, follow the [acceptance checklist](docs/acceptance-checklist.md) and exercise
+`Node → L0 → L1 → L2 → Alarm`. A page opening successfully is not evidence that an industrial system is delivery-ready.
 
----
+## Technology
 
-## Project Structure
+| Layer | Technology |
+|---|---|
+| Protocol integration | Neuron |
+| Message bus | NanoMQ / MQTT |
+| Backend | Python 3.12, FastAPI |
+| Database | PostgreSQL, TimescaleDB |
+| Decisions | GoRules ZEN / JDM |
+| Frontend | React 18, TypeScript, Vite, ECharts |
+| Deployment | Docker Compose, immutable image digests |
 
-```
-zizu/
-├── backend/
-│   ├── app/
-│   │   ├── api/            # REST + WebSocket routes
-│   │   │   ├── health.py   #   Pipeline health status
-│   │   │   ├── nodes.py    #   Node list
-│   │   │   ├── tags.py     #   Tag CRUD + inline editing
-│   │   │   ├── telemetry.py#   Raw telemetry query
-│   │   │   ├── snapshots.py#   Node snapshot query
-│   │   │   ├── admin.py    #   Developer tools
-│   │   │   └── websocket.py#   Real-time value push
-│   │   ├── core/           # Configuration (pydantic-settings)
-│   │   ├── db/             # Database connection pool
-│   │   ├── models/         # Pydantic data models
-│   │   ├── services/       # Core pipeline
-│   │   │   ├── mqtt_client.py      #  MQTT access layer
-│   │   │   ├── parser.py           #  Neuron message parsing
-│   │   │   ├── normalizer.py      #  pint unit normalization
-│   │   │   ├── pipeline.py        #  Hook chain + batch flush
-│   │   │   └── telemetry_store.py #  TSDB write
-│   │   └── main.py
-│   ├── scripts/
-│   │   └── sync_neuron_tags.py    # Neuron API → t_tags auto sync
-│   ├── tests/
-│   └── pyproject.toml
-│
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx        # Main page (tag table + real-time values + status bar)
-│   │   ├── api/           # HTTP/WS client
-│   │   ├── components/    # charts / tree / ui
-│   │   └── ...
-│   └── Dockerfile         # Nginx static service
-│
-├── init-db/
-│   ├── 001-schema.sql     # Tables + Hypertable + CAGG
-│   ├── 002-test-data.sql  # Test data
-│   ├── 003-real-device-mapping.sql # Real device mapping
-│   └── 004-node-snapshot.sql # Node snapshot table
-│
-├── config/
-│   └── nanomq.conf        # nanoMQ configuration
-│
-├── docs/
-│   ├── architecture-v1.md      # Architecture design
-│   ├── ui-style-guide.md      # UI style guide
-│   └── decisions/             # ADR decision records
-│       ├── g11-feature-domains.md   # Feature domain architecture
-│       ├── g7-goal-breakdown.md      # Goal breakdown
-│       └── ...
-│
-├── docker-compose.yml        # Three-service orchestration (TimescaleDB + FastAPI + NanoMQ)
-├── docker-compose.e606.yml   # e606 trimmed kernel override
-└── .env.example             # Environment variable template
-```
+## Documentation
 
----
+- [Bilingual technical architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+- [Core architecture specification](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)
+- [Domain language](CONTEXT.md)
+- [Architecture decision records](docs/adr/)
+- [Acceptance checklist](docs/acceptance-checklist.md)
+- [v0.8.3 field deployment record](docs/deploy-1号机-v0.8.3-http.md)
 
-## Core API
+If documents disagree, read them in this order: core architecture specification, latest accepted ADR, current subsystem
+specification, then historical records.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/health` | Pipeline status (msg/s, ingestion rate, last message) |
-| GET | `/api/v1/nodes` | Node list (with tag count) |
-| GET | `/api/v1/tags?node_id=X&page=1` | Paginated tag query (with offset/scale) |
-| PUT | `/api/v1/tags/{tag_id}` | Modify scale / offset / unit |
-| PUT | `/api/v1/tags/batch` | Batch update scale / offset |
-| GET | `/api/v1/telemetry` | Raw telemetry data query |
-| GET | `/api/v1/snapshots` | Node snapshot query (data blackboard) |
-| POST | `/api/v1/query` | SELECT-only SQL query |
-| WS | `/api/v1/ws/telemetry` | Real-time raw/engineering value push |
+## License
 
----
-
-## Data Model (Simplified)
-
-```sql
--- Nodes (5-layer tree)
-t_nodes(id, parent_id, node_type, name, ...)
-
--- Tags (physical + logical unified table)
-t_tags(
-  id, node_id, name, data_type,
-  scale_factor, value_offset,     -- Engineering conversion: eng = (raw + offset) × scale
-  unit_from, unit_to,
-  source, is_virtual, ...
-)
-
--- Telemetry (TimescaleDB Hypertable)
-t_telemetry(ts, node_id, tag_id, value_int, value_float, value_bool, value_str)
-
--- Node Snapshots (data blackboard)
-t_node_snapshot(ts, node_id, data JSONB, raw_data JSONB, raw_message JSONB)
-
--- Continuous Aggregates (multi-granularity query)
-cagg_telemetry_1min, cagg_telemetry_5min, cagg_telemetry_1h
-```
-
-**Engineering value conversion formula**:
-
-```
-engineering_value = (raw_value + value_offset) × scale_factor
-```
-
-Example: BMS current raw value 16500, `value_offset = -16000`, `scale_factor = 0.1`
-→ `(16500 + (-16000)) × 0.1 = 50 A`
-
----
-
-## Neuron Tag Sync
-
-After new devices come online, no manual tag entry is required:
-
-```bash
-python backend/scripts/sync_neuron_tags.py \
-  --neuron-url http://localhost:7000 \
-  --dry-run    # Preview first, remove this flag to execute for real
-```
-
-The script will: Login to Neuron → Discover all driver nodes → Enumerate groups → Fetch tags → Upsert into `t_nodes` / `t_tags`.
-
----
-
-## Deployment Notes (Trimmed Kernel / ARM64)
-
-If the target server kernel is trimmed (common on embedded ARM64 devices), Docker may encounter:
-
-- `CONFIG_POSIX_MQUEUE` missing → Container startup mqueue error
-- `CONFIG_VETH` missing → Bridge network failure
-
-**Avoidance rules** (both required, built into `docker-compose.yml`):
-
-```yaml
-services:
-  every-service:
-    network_mode: host       # Avoidance #1: Bypass bridge
-    tmpfs:
-      - /dev/mqueue          # Avoidance #2: Replace kernel mqueue
-```
-
----
-
-## Design Philosophy
-
-1. **Configuration as Platform** — Business logic generated through UI configuration, no hard-coded logic
-2. **One Node Tree** — 5-layer unified model, no split into Asset/Device/Profile
-3. **Physical/Logical Unified Addressing** — Frontend doesn't distinguish sources, unified `node_path.tag_name`
-4. **Rules Follow Nodes** — Rules bind to any layer, automatically inherited by child nodes
-5. **Minimal Closed-Loop First** — First complete "device online → data display → rule trigger → control issuance"
-
-See [`docs/decisions/`](docs/decisions/) for ADR decision records.
-
----
-
-## Links
-
-- **Official Website**: [www.holoems.com](https://www.holoems.com)
-- **GitHub**: [github.com/taidai/zizu](https://github.com/taidai/zizu)
-- **Documentation**: [docs/](docs/)
+ZiZu is licensed under the repository's [Daśa-kuśala License 1.0](LICENSE). Read the full terms before use,
+modification, or distribution; the license includes use restrictions and distribution obligations.
