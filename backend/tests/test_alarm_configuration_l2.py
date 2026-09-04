@@ -315,6 +315,43 @@ class AlarmConfigurationL2Test(unittest.TestCase):
         self.assertEqual(1, groups[0].rule_count)
         self.assertEqual("CRITICAL", groups[0].highest_severity)
 
+    def test_rule_group_restores_published_revision_not_newer_unpublished_draft(self) -> None:
+        from dataclasses import replace
+        from app.services.alarm_configuration_postgres import _rule_groups
+
+        repository = _Repository()
+        published = repository.rule_set
+        draft = replace(published, revision=2, rules=(replace(published.rules[0], severity="CRITICAL"),))
+        disabled = replace(published, revision=3, rules=())
+        bindings = ((f"alarm.{published.key}.{repository.entity.id}.high", repository.entity.id, repository.node_id, False),)
+        publications = ((published.rule_set_id, repository.entity.id, published.revision),)
+
+        group = _rule_groups((published, draft, disabled), bindings, publications)[0]
+
+        self.assertEqual(1, group.last_published_revision)
+        self.assertEqual(2, group.last_non_empty_revision)
+        self.assertEqual(published.rules[0].severity, group.highest_severity)
+
+    def test_rule_group_without_publication_cannot_enable_a_saved_draft(self) -> None:
+        from app.services.alarm_configuration_postgres import _rule_groups
+
+        repository = _Repository()
+        group = _rule_groups((repository.rule_set,), (), ())[0]
+        self.assertIsNone(group.last_published_revision)
+
+    def test_rule_group_with_different_published_versions_does_not_choose_one_for_all_entities(self) -> None:
+        from dataclasses import replace
+        from app.services.alarm_configuration_postgres import _rule_groups
+
+        repository = _Repository()
+        first = repository.rule_set
+        second = replace(first, revision=2)
+        other_id = uuid4()
+        bindings = tuple((f"alarm.{first.key}.{entity_id}.high", entity_id, repository.node_id, False) for entity_id in (repository.entity.id, other_id))
+        publications = ((first.rule_set_id, repository.entity.id, 1), (first.rule_set_id, other_id, 2))
+        group = _rule_groups((first, second), bindings, publications)[0]
+        self.assertIsNone(group.last_published_revision)
+
     def test_plan_targets_active_l2_entity_and_current_revision(self) -> None:
         repository = _Repository()
         plan = AlarmConfiguration(repository).plan(

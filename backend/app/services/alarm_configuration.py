@@ -61,6 +61,7 @@ class AlarmRuleGroup:
     device_count: int
     rule_count: int
     highest_severity: Severity | None
+    last_published_revision: int | None = None
 
 
 @dataclass(frozen=True)

@@ -109,6 +109,7 @@ def _plan_from_json(value: dict[str, Any], *, status: str | None = None, applied
 def _rule_groups(
     revisions: tuple[AlarmRuleSetRevision, ...],
     bindings: tuple[tuple[str, UUID, UUID, bool], ...],
+    publications: tuple[tuple[UUID, UUID, int], ...] = (),
 ) -> tuple[AlarmRuleGroup, ...]:
     severity_rank = {"INFO": 0, "WARNING": 1, "MAJOR": 2, "CRITICAL": 3}
     grouped: dict[UUID, list[AlarmRuleSetRevision]] = {}
@@ -130,7 +131,18 @@ def _rule_groups(
             node_ids.add(node_id)
             if enabled:
                 enabled_ids.add(entity_id)
-        rules = () if last_non_empty is None else last_non_empty.rules
+        published_by_entity = {
+            entity_id: revision
+            for group_id, entity_id, revision in publications
+            if group_id == rule_set_id and entity_id in entity_ids
+        }
+        published_versions = set(published_by_entity.values())
+        published = None
+        if entity_ids and set(published_by_entity) == entity_ids and len(published_versions) == 1:
+            published = next((item for item in candidates if item.revision in published_versions and item.rules), None)
+        # A draft may describe editing work, but must never become a restart target.
+        displayed = published or last_non_empty
+        rules = () if displayed is None else displayed.rules
         highest = max(
             (rule.severity for rule in rules),
             key=severity_rank.__getitem__,
@@ -148,6 +160,7 @@ def _rule_groups(
                 len(node_ids),
                 len(rules),
                 highest,
+                None if published is None else published.revision,
             )
         )
     return tuple(sorted(result, key=lambda item: (item.name, item.key)))
@@ -238,11 +251,27 @@ class PostgresAlarmConfigurationRepository:
                     """
                 )
                 rows = cursor.fetchall()
+                cursor.execute(
+                    """
+                    SELECT DISTINCT ON (plan.rule_set_id, item->>'entity_instance_id')
+                           plan.rule_set_id, (item->>'entity_instance_id')::uuid,
+                           plan.rule_set_revision
+                    FROM t_alarm_configuration_plans plan
+                    CROSS JOIN LATERAL jsonb_array_elements(plan.canonical_plan->'items') item
+                    WHERE plan.status='applied'
+                      AND item->>'action' IN ('add','update','preserve')
+                      AND item->'after' IS NOT NULL AND item->'after' <> 'null'::jsonb
+                    ORDER BY plan.rule_set_id, item->>'entity_instance_id',
+                             (plan.applied_result->>'configuration_revision')::bigint DESC NULLS LAST,
+                             plan.applied_at DESC, plan.id DESC
+                    """
+                )
+                publications = tuple(cursor.fetchall())
         bindings = tuple(
             (str(row[0]), row[1], row[2], bool(row[3]))
             for row in rows
         )
-        return _rule_groups(revisions, bindings)
+        return _rule_groups(revisions, bindings, publications)
 
     def resolve_entities(self, selection: EntitySelection) -> tuple[ResolvedAlarmEntity, ...]:
         clauses = ["entity.active=TRUE"]

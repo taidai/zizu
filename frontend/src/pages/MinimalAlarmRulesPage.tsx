@@ -184,8 +184,8 @@ export default function MinimalAlarmRulesPage() {
       const enabled = group.enabled_entity_instance_ids.length > 0
       let revision: AlarmRuleSetRevision | undefined
       if (enabled) revision = await createAlarmRuleSetRevision(group.rule_set_id, [])
-      else revision = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_non_empty_revision)
-      if (!revision) throw new Error('找不到可重新启用的规则修订。')
+      else revision = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_published_revision)
+      if (!revision) throw new Error('没有可直接恢复的正式配置，请编辑、试算并明确发布；不会自动启用草稿。')
       const nextPlan = await createAlarmConfigurationPlan({
         selection: { entity_instance_ids: group.entity_instance_ids, node_ids: [], entity_definition_ids: [] },
         rule_set_id: revision.rule_set_id, rule_set_revision: revision.revision,
@@ -201,7 +201,30 @@ export default function MinimalAlarmRulesPage() {
     {message && <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{message}</div>}
     <section className="neu-card p-4">
       <div className="flex items-center justify-between"><div><h3 className="text-sm font-bold text-gray-800">已配置规则</h3><p className="mt-1 text-xs text-gray-500">启停也通过正式发布链，数据库提交后才改变。</p></div><button onClick={() => { setSelectedRevision(null); setName('现场告警规则'); changeType('NUMBER') }} className="rounded-lg bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white">新建规则</button></div>
-      <div className="mt-3 space-y-2">{groups.map((group) => { const enabled = group.enabled_entity_instance_ids.length > 0; return <div key={group.rule_set_id} className="flex flex-wrap items-center gap-3 rounded-lg border border-white/70 p-3 text-xs"><strong className="min-w-32">{group.name}</strong><span>{group.device_count} 台设备</span><span>{group.rule_count} 条 · {group.highest_severity ? severityLabel[group.highest_severity] : '空'}</span><span className={enabled ? 'text-green-700' : 'text-gray-400'}>{enabled ? '已启用' : '已停用'}</span><div className="ml-auto flex gap-2"><button onClick={() => editGroup(group, false)} className="text-[#287c12]">编辑</button><button onClick={() => editGroup(group, true)} className="text-gray-600">复制</button><button disabled={!!busy} onClick={() => void toggleGroup(group)} className={enabled ? 'text-red-600' : 'text-green-700'}>{enabled ? '停用' : '启用'}</button></div></div> })}{!groups.length && <p className="py-4 text-xs text-gray-400">暂无规则。</p>}</div>
+      <p className="mt-2 text-xs text-gray-500">启用只恢复正式配置，不发布草稿。同一次未恢复告警不会重复发送 HTTP 通知；启停、确认不补发消息，旧告警仍按发生时的条件等待恢复。</p>
+      <div className="mt-3 space-y-2">{groups.map((group) => {
+        const enabled = group.enabled_entity_instance_ids.length > 0
+        const formal = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_published_revision)
+        const draft = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_non_empty_revision)
+        const hasDraft = formal && draft && draft.revision > formal.revision && draft.digest !== formal.digest
+        return <div key={group.rule_set_id} className="rounded-lg border border-white/70 p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-3">
+            <strong className="min-w-32">{group.name}</strong><span>{group.device_count} 台设备</span>
+            <span>{group.rule_count} 条 · {group.highest_severity ? severityLabel[group.highest_severity] : '空'}</span>
+            <span className={enabled ? 'text-green-700' : 'text-gray-400'}>{enabled ? '已启用' : '已停用'}</span>
+            <div className="ml-auto flex gap-2">
+              <button onClick={() => editGroup(group, false)} className="text-[#287c12]">编辑</button>
+              <button onClick={() => editGroup(group, true)} className="text-gray-600">复制</button>
+              <button disabled={!!busy || (!enabled && (!formal || !group.entity_instance_ids.length))} onClick={() => void toggleGroup(group)} className={`${enabled ? 'text-red-600' : 'text-green-700'} disabled:opacity-40`}>{enabled ? '停用' : '启用'}</button>
+            </div>
+          </div>
+          {formal ? <div data-testid={`alarm-group-formal-${group.rule_set_id}`} className="mt-2 space-y-1 text-gray-600">
+            <p>{enabled ? '当前生效' : '再次启用将恢复'}：正式修订 {formal.revision}</p>
+            {formal.rules.map((rule) => <p key={rule.id}>{describeAlarmDraft(rule, { displayName: rule.name, unit: rule.unit || null })}</p>)}
+          </div> : <p className="mt-2 text-amber-700">没有可直接恢复的正式配置：尚未发布、记录不完整或设备版本不一致。请编辑、试算并明确发布。</p>}
+          {hasDraft && <p className="mt-2 text-amber-700">另有未发布草稿（修订 {draft.revision}），编辑时可继续；启停不会发布它。</p>}
+        </div>
+      })}{!groups.length && <p className="py-4 text-xs text-gray-400">暂无规则。</p>}</div>
     </section>
     <section className="neu-card p-4 space-y-4">
       <h3 className="text-sm font-bold text-gray-800">1. 选择实体</h3>

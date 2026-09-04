@@ -69,6 +69,7 @@ export default function AlarmNotificationRecords({ canRetry }: { canRetry: boole
         <div>
           <h2 className="text-base font-bold text-gray-800">通知记录</h2>
           <p className="mt-1 text-xs text-gray-500">查看每次告警发生或恢复后的 HTTP 发送结果；通知失败不会改变告警状态。</p>
+          <p className="mt-1 text-xs text-gray-500">没有新记录？先核对规则的生效条件与 HTTP 绑定。同一次未恢复告警不会重复发送；启停、确认不会补发消息。</p>
         </div>
         <button type="button" disabled={busy !== ''} onClick={() => void load(page)} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-40">
           刷新

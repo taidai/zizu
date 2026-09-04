@@ -1495,6 +1495,7 @@ export interface AlarmRuleGroup {
   name: string
   latest_revision: number
   last_non_empty_revision: number | null
+  last_published_revision: number | null
   entity_instance_ids: string[]
   enabled_entity_instance_ids: string[]
   device_count: number

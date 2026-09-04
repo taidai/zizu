@@ -252,6 +252,74 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
         self.assertEqual(1, group.last_non_empty_revision)
         self.assertEqual((self.entity_id,), group.entity_instance_ids)
         self.assertEqual((), group.enabled_entity_instance_ids)
+        self.assertEqual(1, group.last_published_revision)
+
+    def test_unpublished_and_unapplied_revisions_do_not_replace_the_reenable_target(self) -> None:
+        from dataclasses import replace
+
+        factory = lambda: psycopg2.connect(**self.kwargs)
+        service = AlarmConfiguration(PostgresAlarmConfigurationRepository(factory))
+        original = AlarmRule("high", "功率越限", "MAJOR", {"operator": "gt", "value": 90}, 0, {"operator": "lt", "value": 85}, 0, 60, "kW")
+        first = service.create_rule_set(key="pcs-power", name="PCS 功率", rules=(original,), actor="operator:test")
+        selection = EntitySelection(entity_instance_ids=(self.entity_id,))
+        plan = service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, 1, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "publish-original", "operator:test"))
+        draft = service.create_rule_set_revision(rule_set_id=first.rule_set_id, rules=(replace(original, trigger={"operator": "gt", "value": 120}),), actor="operator:test")
+        service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, draft.revision, "operator:test"))
+        empty = service.create_rule_set_revision(rule_set_id=first.rule_set_id, rules=(), actor="operator:test")
+        stop = service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, empty.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(stop.id, stop.digest, "stop-original", "operator:test"))
+
+        restarted = AlarmConfiguration(PostgresAlarmConfigurationRepository(factory))
+        group = restarted.list_rule_groups()[0]
+        self.assertEqual(2, group.last_non_empty_revision)
+        self.assertEqual(1, group.last_published_revision)
+        resume = restarted.plan(PlanAlarmConfiguration(selection, first.rule_set_id, group.last_published_revision, "operator:test"))
+        restarted.apply(ApplyAlarmConfigurationPlan(resume.id, resume.digest, "resume-original", "operator:test"))
+        current = restarted.repository.current_configuration()
+        self.assertEqual({"operator": "gt", "value": 90}, next(iter(current["definitions"].values()))["payload"]["rule"]["trigger"])
+        self.assertEqual(2, restarted.list_rule_groups()[0].last_non_empty_revision)
+
+    def test_legacy_publication_does_not_override_a_newer_formal_revision(self) -> None:
+        from dataclasses import replace
+
+        factory = lambda: psycopg2.connect(**self.kwargs)
+        service = AlarmConfiguration(PostgresAlarmConfigurationRepository(factory))
+        original = AlarmRule("high", "功率越限", "MAJOR", {"operator": "gt", "value": 90}, 0, {"operator": "lt", "value": 85}, 0, 60, "kW")
+        first = service.create_rule_set(key="pcs-power", name="PCS 功率", rules=(original,), actor="operator:test")
+        selection = EntitySelection(entity_instance_ids=(self.entity_id,))
+        plan = service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, first.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(plan.id, plan.digest, "publish-legacy", "operator:test"))
+        # Schema 044 retained rule-set plans with the old applied-result field.
+        with factory() as connection, connection.cursor() as cursor:
+            # Construct historical evidence only in the guarded *_test database.
+            # LOCAL also restores the trigger mode if fixture construction fails.
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute(
+                """UPDATE t_alarm_configuration_plans
+                   SET applied_result=(applied_result - 'configuration_revision') ||
+                       jsonb_build_object('site_configuration_version', applied_result->'configuration_revision')
+                   WHERE id=%s""",
+                (plan.id,),
+            )
+            cursor.execute("SET LOCAL session_replication_role=origin")
+
+        formal = service.create_rule_set_revision(rule_set_id=first.rule_set_id, rules=(replace(original, trigger={"operator": "gt", "value": 100}),), actor="operator:test")
+        newer = service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, formal.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(newer.id, newer.digest, "publish-newer", "operator:test"))
+        draft = service.create_rule_set_revision(rule_set_id=first.rule_set_id, rules=(replace(original, trigger={"operator": "gt", "value": 120}),), actor="operator:test")
+        empty = service.create_rule_set_revision(rule_set_id=first.rule_set_id, rules=(), actor="operator:test")
+        stop = service.plan(PlanAlarmConfiguration(selection, first.rule_set_id, empty.revision, "operator:test"))
+        service.apply(ApplyAlarmConfigurationPlan(stop.id, stop.digest, "stop-newer", "operator:test"))
+
+        restarted = AlarmConfiguration(PostgresAlarmConfigurationRepository(factory))
+        group = restarted.list_rule_groups()[0]
+        self.assertEqual(draft.revision, group.last_non_empty_revision)
+        self.assertEqual(formal.revision, group.last_published_revision)
+        resume = restarted.plan(PlanAlarmConfiguration(selection, first.rule_set_id, group.last_published_revision, "operator:test"))
+        restarted.apply(ApplyAlarmConfigurationPlan(resume.id, resume.digest, "resume-newer", "operator:test"))
+        current = restarted.repository.current_configuration()
+        self.assertEqual({"operator": "gt", "value": 100}, next(iter(current["definitions"].values()))["payload"]["rule"]["trigger"])
 
     def test_reenable_reuses_the_existing_immutable_alarm_definition(self) -> None:
         service = AlarmConfiguration(PostgresAlarmConfigurationRepository(lambda: psycopg2.connect(**self.kwargs)))

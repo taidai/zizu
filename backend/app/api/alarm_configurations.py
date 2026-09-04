@@ -186,6 +186,7 @@ async def list_alarm_rule_groups(configuration: AlarmConfiguration = Depends(get
                 "name": item.name,
                 "latest_revision": item.latest_revision,
                 "last_non_empty_revision": item.last_non_empty_revision,
+                "last_published_revision": item.last_published_revision,
                 "entity_instance_ids": [str(value) for value in item.entity_instance_ids],
                 "enabled_entity_instance_ids": [str(value) for value in item.enabled_entity_instance_ids],
                 "device_count": item.device_count,
