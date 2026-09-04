@@ -13,10 +13,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from psycopg2.extras import Json
 
 from app.services.dispatch_strategies import (
+    ControlIntentDraft,
     EntityBindingContract,
+    StrategyEvaluationMutation,
     StrategyBindingDraft,
     StrategyDraft,
+    StrategyInput,
     StrategyRevision,
+    StrategyRuntimeState,
+    StrategySnapshot,
     StrategyView,
     static_jdm_targets,
     strategy_draft_digest,
@@ -305,6 +310,274 @@ class PostgresStrategyRepository:
             cursor.execute(f"{_STRATEGY_SELECT} ORDER BY updated_at DESC,id")
             return tuple(self._view_from_row(connection, row) for row in cursor.fetchall())
 
+    def affected_strategy_ids(
+        self,
+        entity_ids: tuple[UUID, ...] | list[UUID],
+        trigger_kind: str,
+    ) -> tuple[UUID, ...]:
+        if not entity_ids:
+            return ()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT strategy.id
+                FROM t_dispatch_strategies AS strategy
+                JOIN t_dispatch_strategy_revisions AS revision
+                  ON revision.id=strategy.active_revision_id
+                JOIN t_dispatch_strategy_bindings AS binding
+                  ON binding.revision_id=revision.id
+                 AND binding.direction='INPUT'
+                WHERE strategy.enabled=TRUE
+                  AND revision.lifecycle='PUBLISHED'
+                  AND revision.trigger_kind=%s
+                  AND binding.entity_instance_id=ANY(%s::uuid[])
+                ORDER BY strategy.id
+                """,
+                (trigger_kind, [str(item) for item in entity_ids]),
+            )
+            return tuple(UUID(str(row[0])) for row in cursor.fetchall())
+
+    def active_revision(self, strategy_id: UUID) -> StrategyRevision | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                f"""{_REVISION_SELECT}
+                    WHERE id=(
+                      SELECT active_revision_id FROM t_dispatch_strategies
+                      WHERE id=%s AND enabled=TRUE
+                    ) AND lifecycle='PUBLISHED'""",
+                (strategy_id,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else self._revision_from_row(connection, row)
+
+    def get_revision(self, revision_id: UUID) -> StrategyRevision | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(f"{_REVISION_SELECT} WHERE id=%s", (revision_id,))
+            row = cursor.fetchone()
+            return None if row is None else self._revision_from_row(connection, row)
+
+    def runtime_state(self, strategy_id: UUID) -> StrategyRuntimeState:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT runtime_health,last_trigger_key,last_desired,last_actual,
+                       last_evidence,failure_code
+                FROM t_dispatch_strategies WHERE id=%s
+                """,
+                (strategy_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise StrategyRepositoryError("STRATEGY_NOT_FOUND")
+        evidence = row[4] if isinstance(row[4], dict) else {}
+        return StrategyRuntimeState(
+            runtime_health=str(row[0]),
+            last_trigger_key=row[1],
+            last_desired=None if row[2] is None else dict(row[2]),
+            last_actual=None if row[3] is None else dict(row[3]),
+            block_reason=evidence.get("reason_code"),
+            failure_code=row[5],
+        )
+
+    def load_snapshot(
+        self,
+        revision: StrategyRevision,
+        frame_sequence: int | None,
+        evaluated_at: datetime,
+    ) -> StrategySnapshot:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            cursor.execute(
+                """
+                SELECT frame_sequence,configuration_revision
+                FROM t_data_frames
+                WHERE status='COMPLETE' AND (%s::bigint IS NULL OR frame_sequence<=%s)
+                ORDER BY frame_sequence DESC LIMIT 1
+                """,
+                (frame_sequence, frame_sequence),
+            )
+            head = cursor.fetchone()
+            if head is None:
+                raise StrategyRepositoryError("COMMITTED_L2_SNAPSHOT_UNAVAILABLE")
+            head_sequence = int(head[0])
+            configuration_revision = int(head[1])
+            cursor.execute(
+                """
+                SELECT binding.binding_key,binding.entity_instance_id,
+                       entity.data_type,entity.unit,binding.freshness_seconds,
+                       sample.value_float,sample.value_int,sample.value_numeric,
+                       sample.value_bool,sample.value_text,sample.value_codes,
+                       sample.quality,sample.value_observed_at,
+                       sample.configuration_revision,sample.frame_sequence
+                FROM t_dispatch_strategy_bindings AS binding
+                JOIN t_entity_instances AS entity
+                  ON entity.id=binding.entity_instance_id AND entity.active=TRUE
+                LEFT JOIN LATERAL (
+                  SELECT candidate.* FROM (
+                    SELECT latest.value_float,latest.value_int,latest.value_numeric,
+                           latest.value_bool,latest.value_text,latest.value_codes,
+                           latest.quality,
+                           COALESCE(latest.value_observed_at,latest.observed_at)
+                             AS value_observed_at,
+                           latest.configuration_revision,latest.frame_sequence
+                    FROM t_l2_latest AS latest
+                    WHERE latest.entity_instance_id=binding.entity_instance_id
+                      AND latest.frame_sequence<=%s
+                    UNION ALL
+                    SELECT history.value_float,history.value_int,history.value_numeric,
+                           history.value_bool,history.value_text,history.value_codes,
+                           history.quality,history.observed_at AS value_observed_at,
+                           history.configuration_revision,
+                           history.commit_sequence AS frame_sequence
+                    FROM t_l2_observations AS history
+                    WHERE history.entity_instance_id=binding.entity_instance_id
+                      AND history.commit_sequence<=%s
+                  ) AS candidate
+                  ORDER BY candidate.frame_sequence DESC LIMIT 1
+                ) AS sample ON TRUE
+                WHERE binding.revision_id=%s
+                ORDER BY binding.direction,binding.ordinal
+                """,
+                (head_sequence, head_sequence, revision.id),
+            )
+            inputs: list[StrategyInput] = []
+            for row in cursor.fetchall():
+                if row[11] is None:
+                    continue
+                observed_at = row[12]
+                quality = _quality_name(int(row[11]))
+                if (
+                    observed_at is None
+                    or (evaluated_at - observed_at).total_seconds() > float(row[4])
+                ):
+                    quality = "STALE"
+                inputs.append(
+                    StrategyInput(
+                        field_key=str(row[0]),
+                        entity_instance_id=UUID(str(row[1])),
+                        value=_l2_value(str(row[2]), *row[5:11]),
+                        data_type=str(row[2]),
+                        unit=row[3],
+                        quality=quality,
+                        observed_at=observed_at,
+                        frame_sequence=int(row[14]),
+                        configuration_revision=int(row[13]),
+                    )
+                )
+        return StrategySnapshot(
+            frame_sequence=head_sequence,
+            configuration_revision=configuration_revision,
+            evaluated_at=evaluated_at,
+            inputs=tuple(inputs),
+        )
+
+    def has_open_intent(self, strategy_id: UUID, entity_id: UUID) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS(
+                  SELECT 1 FROM t_dispatch_control_intents
+                  WHERE strategy_id=%s AND entity_instance_id=%s
+                    AND status IN ('PENDING','IN_FLIGHT')
+                )
+                """,
+                (strategy_id, entity_id),
+            )
+            return bool(cursor.fetchone()[0])
+
+    def commit_evaluation(self, mutation: StrategyEvaluationMutation) -> bool:
+        evidence = _snapshot_evidence(mutation)
+        with self._write() as connection, connection.cursor() as cursor:
+            strategy = self._lock_strategy(cursor, mutation.strategy_id)
+            if (
+                not bool(strategy[4])
+                or strategy[3] is None
+                or UUID(str(strategy[3])) != mutation.revision_id
+            ):
+                raise StrategyRepositoryError("STRATEGY_ACTIVE_REVISION_CHANGED")
+            if strategy[6] == mutation.trigger.trigger_key:
+                return False
+            for event in mutation.events:
+                cursor.execute(
+                    """
+                    INSERT INTO t_dispatch_strategy_events
+                      (occurred_at,id,strategy_id,revision_id,event_kind,
+                       trigger_kind,trigger_key,frame_sequence,
+                       configuration_revision,snapshot_evidence,decision,
+                       intent_summary,reason_code)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        mutation.trigger.evaluated_at,
+                        uuid4(),
+                        mutation.strategy_id,
+                        mutation.revision_id,
+                        event.kind,
+                        mutation.trigger.kind,
+                        mutation.trigger.trigger_key,
+                        mutation.snapshot.frame_sequence,
+                        mutation.snapshot.configuration_revision,
+                        Json(evidence),
+                        None if mutation.decision is None else Json(_json_safe(dict(mutation.decision))),
+                        Json(_intent_summary(mutation.intents)),
+                        event.reason_code,
+                    ),
+                )
+            for intent in mutation.intents:
+                cursor.execute(
+                    """
+                    SELECT EXISTS(
+                      SELECT 1 FROM t_dispatch_control_intents
+                      WHERE strategy_id=%s AND entity_instance_id=%s
+                        AND status IN ('PENDING','IN_FLIGHT')
+                    )
+                    """,
+                    (mutation.strategy_id, intent.entity_instance_id),
+                )
+                if bool(cursor.fetchone()[0]):
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO t_dispatch_control_intents
+                      (id,strategy_id,revision_id,evaluation_key,action_id,ordinal,
+                       entity_instance_id,expected_value,snapshot_evidence)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (revision_id,evaluation_key,action_id) DO NOTHING
+                    """,
+                    (
+                        uuid4(),
+                        mutation.strategy_id,
+                        mutation.revision_id,
+                        mutation.trigger.trigger_key,
+                        intent.action_id,
+                        intent.ordinal,
+                        intent.entity_instance_id,
+                        Json(_json_safe(intent.value)),
+                        Json(evidence),
+                    ),
+                )
+            cursor.execute(
+                """
+                UPDATE t_dispatch_strategies
+                SET runtime_health=%s,last_trigger_key=%s,last_evaluated_at=%s,
+                    last_desired=%s,last_actual=%s,last_evidence=%s,
+                    failure_code=%s,updated_by='strategy-runtime',
+                    updated_at=clock_timestamp()
+                WHERE id=%s
+                """,
+                (
+                    mutation.runtime_health,
+                    mutation.trigger.trigger_key,
+                    mutation.trigger.evaluated_at,
+                    None if mutation.desired is None else Json(_json_safe(dict(mutation.desired))),
+                    None if mutation.actual is None else Json(_json_safe(dict(mutation.actual))),
+                    Json(evidence),
+                    mutation.failure_code,
+                    mutation.strategy_id,
+                ),
+            )
+        return True
+
     @contextmanager
     def _write(self):
         with self._connection() as connection:
@@ -518,6 +791,85 @@ def _validate_draft(draft: StrategyDraft) -> None:
         raise StrategyRepositoryError("STRATEGY_TIMEZONE_INVALID") from error
     if draft.base_configuration_revision < 0:
         raise StrategyRepositoryError("CONFIGURATION_REVISION_INVALID")
+
+
+def _quality_name(value: int) -> str:
+    return {0: "BAD", 1: "STALE", 64: "UNCERTAIN", 192: "GOOD"}.get(
+        value, "BAD"
+    )
+
+
+def _l2_value(
+    data_type: str,
+    value_float: object,
+    value_int: object,
+    value_numeric: object,
+    value_bool: object,
+    value_text: object,
+    value_codes: object,
+) -> object:
+    if data_type == "FLOAT":
+        value = value_numeric if value_numeric is not None else value_float
+        return None if value is None else float(value)
+    if data_type == "INT":
+        value = value_numeric if value_numeric is not None else value_int
+        return None if value is None else int(value)
+    if data_type == "BOOL":
+        return value_bool
+    if data_type in {"STRING", "ENUM"}:
+        return value_text
+    if data_type == "CODE_SET":
+        return None if value_codes is None else list(value_codes)
+    raise StrategyRepositoryError("L2_DATA_TYPE_UNSUPPORTED", data_type)
+
+
+def _snapshot_evidence(mutation: StrategyEvaluationMutation) -> dict[str, object]:
+    return _json_safe(
+        {
+            "frame_sequence": mutation.snapshot.frame_sequence,
+            "configuration_revision": mutation.snapshot.configuration_revision,
+            "evaluated_at": mutation.snapshot.evaluated_at,
+            "reason_code": mutation.reason_code,
+            "inputs": [
+                {
+                    "binding_key": item.field_key,
+                    "entity_instance_id": item.entity_instance_id,
+                    "value": item.value,
+                    "data_type": item.data_type,
+                    "unit": item.unit,
+                    "quality": item.quality,
+                    "observed_at": item.observed_at,
+                    "frame_sequence": item.frame_sequence,
+                    "configuration_revision": item.configuration_revision,
+                }
+                for item in mutation.snapshot.inputs
+            ],
+        }
+    )
+
+
+def _intent_summary(intents: tuple[ControlIntentDraft, ...]) -> list[dict[str, object]]:
+    return [
+        {
+            "action_id": item.action_id,
+            "entity_instance_id": str(item.entity_instance_id),
+            "value": _json_safe(item.value),
+            "ordinal": item.ordinal,
+        }
+        for item in intents
+    ]
+
+
+def _json_safe(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (UUID, datetime)):
+        return value.isoformat() if isinstance(value, datetime) else str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 _STRATEGY_SELECT = """

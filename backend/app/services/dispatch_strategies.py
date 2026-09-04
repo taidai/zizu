@@ -7,8 +7,11 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
-from typing import Mapping, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 from uuid import UUID
+from zoneinfo import ZoneInfo
+
+from app.services.gorules_adapter import StandardJdmError, evaluate_standard_jdm
 
 
 ALLOWED_DISPATCH_ACTIONS = frozenset({"CHARGE", "DISCHARGE", "HOLD"})
@@ -140,6 +143,287 @@ class StrategyEvaluation:
     matched_rules: tuple[str, ...]
     decision: Mapping[str, object]
     intents: tuple[ControlIntentDraft, ...]
+
+
+@dataclass(frozen=True)
+class StrategyTrigger:
+    kind: Literal["DATA_CHANGE", "FIXED_TICK"]
+    trigger_key: str
+    evaluated_at: datetime
+    frame_sequence: int
+
+
+@dataclass(frozen=True)
+class StrategySnapshot:
+    frame_sequence: int
+    configuration_revision: int
+    evaluated_at: datetime
+    inputs: tuple[StrategyInput, ...]
+
+
+@dataclass(frozen=True)
+class StrategyRuntimeState:
+    runtime_health: str = "READY"
+    last_trigger_key: str | None = None
+    last_desired: Mapping[str, object] | None = None
+    last_actual: Mapping[str, object] | None = None
+    block_reason: str | None = None
+    failure_code: str | None = None
+
+
+@dataclass(frozen=True)
+class StrategyEventDraft:
+    kind: str
+    reason_code: str | None = None
+
+
+@dataclass(frozen=True)
+class StrategyEvaluationMutation:
+    strategy_id: UUID
+    revision_id: UUID
+    trigger: StrategyTrigger
+    snapshot: StrategySnapshot
+    engine_inputs: Mapping[str, object]
+    decision: Mapping[str, object] | None
+    desired: Mapping[str, object] | None
+    actual: Mapping[str, object] | None
+    intents: tuple[ControlIntentDraft, ...]
+    events: tuple[StrategyEventDraft, ...]
+    runtime_health: str
+    reason_code: str | None = None
+    failure_code: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    status: str
+    reason_code: str | None
+    snapshot: StrategySnapshot | None
+    engine_inputs: Mapping[str, object]
+    evaluation: StrategyEvaluation | None
+    desired: Mapping[str, object] | None
+    actual: Mapping[str, object] | None
+    intents: tuple[ControlIntentDraft, ...]
+    events: tuple[StrategyEventDraft, ...]
+    persisted: bool
+
+
+class StrategyRuntimeRepository(Protocol):
+    def affected_strategy_ids(
+        self, entity_ids: Sequence[UUID], trigger_kind: str
+    ) -> tuple[UUID, ...]: ...
+
+    def active_revision(self, strategy_id: UUID) -> StrategyRevision | None: ...
+
+    def get_revision(self, revision_id: UUID) -> StrategyRevision | None: ...
+
+    def load_snapshot(
+        self,
+        revision: StrategyRevision,
+        frame_sequence: int | None,
+        evaluated_at: datetime,
+    ) -> StrategySnapshot: ...
+
+    def runtime_state(self, strategy_id: UUID) -> StrategyRuntimeState: ...
+
+    def has_open_intent(self, strategy_id: UUID, entity_id: UUID) -> bool: ...
+
+    def commit_evaluation(self, mutation: StrategyEvaluationMutation) -> bool: ...
+
+
+JdmEvaluator = Callable[
+    [Mapping[str, object], Mapping[str, object]], dict[str, object]
+]
+
+
+class StrategyRuntime:
+    """The sole seam for snapshot validation, JDM evaluation and intent creation."""
+
+    def __init__(
+        self,
+        repository: StrategyRuntimeRepository,
+        *,
+        evaluator: JdmEvaluator = evaluate_standard_jdm,
+    ) -> None:
+        self._repository = repository
+        self._evaluator = evaluator
+
+    def simulate(
+        self,
+        revision_id: UUID,
+        overrides: Mapping[str, object],
+        evaluated_at: datetime,
+    ) -> EvaluationResult:
+        revision = self._repository.get_revision(revision_id)
+        if revision is None:
+            raise StrategyModelError("STRATEGY_REVISION_NOT_FOUND", "revision does not exist")
+        snapshot = self._repository.load_snapshot(revision, None, evaluated_at)
+        try:
+            engine_inputs, actual = _validated_snapshot(revision, snapshot)
+        except StrategyModelError as error:
+            return EvaluationResult(
+                "BLOCKED", error.code, snapshot, {}, None, None, None,
+                (), (), False,
+            )
+        input_bindings = {
+            item.binding_key: item
+            for item in revision.bindings
+            if item.direction == "INPUT"
+        }
+        for key, value in overrides.items():
+            binding = input_bindings.get(key)
+            if binding is None:
+                raise StrategyModelError(
+                    "SIMULATION_OVERRIDE_UNKNOWN", f"unknown input {key}"
+                )
+            try:
+                engine_inputs[key] = _typed_value(value, binding.expected_data_type)
+            except StrategyModelError as error:
+                raise StrategyModelError(
+                    "SIMULATION_OVERRIDE_TYPE_MISMATCH", str(error)
+                ) from error
+        evaluation = self._run_jdm(revision, engine_inputs)
+        desired = {item.action_id: item.value for item in evaluation.intents}
+        return EvaluationResult(
+            "EVALUATED", None, snapshot, engine_inputs, evaluation, desired, actual,
+            evaluation.intents, (), False,
+        )
+
+    def evaluate(self, strategy_id: UUID, trigger: StrategyTrigger) -> EvaluationResult:
+        if trigger.kind not in {"DATA_CHANGE", "FIXED_TICK"}:
+            raise StrategyModelError("STRATEGY_TRIGGER_INVALID", "unknown trigger kind")
+        if not trigger.trigger_key.strip():
+            raise StrategyModelError("STRATEGY_TRIGGER_KEY_REQUIRED", "trigger key is required")
+        state = self._repository.runtime_state(strategy_id)
+        if state.last_trigger_key == trigger.trigger_key:
+            return EvaluationResult(
+                state.runtime_health,
+                state.block_reason or state.failure_code,
+                None,
+                {},
+                None,
+                state.last_desired,
+                state.last_actual,
+                (),
+                (),
+                False,
+            )
+        revision = self._repository.active_revision(strategy_id)
+        if revision is None:
+            return EvaluationResult(
+                "SKIPPED", "STRATEGY_NOT_ACTIVE", None, {}, None, None, None, (), (), False
+            )
+        snapshot = self._repository.load_snapshot(
+            revision, trigger.frame_sequence, trigger.evaluated_at
+        )
+        if state.failure_code is not None or state.runtime_health == "FAILED":
+            return EvaluationResult(
+                "FAILED", state.failure_code or "STRATEGY_FAILURE_LATCHED", snapshot,
+                {}, None, state.last_desired, state.last_actual, (), (), False,
+            )
+        try:
+            engine_inputs, actual = _validated_snapshot(revision, snapshot)
+        except StrategyModelError as error:
+            return self._commit_blocked(strategy_id, revision, trigger, snapshot, state, error.code)
+        try:
+            evaluation = self._run_jdm(revision, engine_inputs)
+        except (StrategyModelError, StandardJdmError) as error:
+            code = getattr(error, "code", "JDM_EVALUATION_FAILED")
+            events = () if state.failure_code == code else (StrategyEventDraft("FAILED", code),)
+            mutation = StrategyEvaluationMutation(
+                strategy_id, revision.id, trigger, snapshot, engine_inputs, None,
+                state.last_desired, actual, (), events, "FAILED", code, code,
+            )
+            persisted = self._repository.commit_evaluation(mutation)
+            return EvaluationResult(
+                "FAILED", code, snapshot, engine_inputs, None, state.last_desired,
+                actual, (), events if persisted else (), persisted,
+            )
+
+        desired = {item.action_id: item.value for item in evaluation.intents}
+        intents = tuple(
+            item
+            for item in evaluation.intents
+            if not _values_equal(actual.get(item.action_id), item.value)
+            and not self._repository.has_open_intent(strategy_id, item.entity_instance_id)
+        )
+        events: list[StrategyEventDraft] = []
+        if state.runtime_health == "BLOCKED":
+            events.append(StrategyEventDraft("RECOVERED"))
+        if state.last_desired != desired:
+            events.append(StrategyEventDraft("DECISION_CHANGED"))
+        if intents:
+            events.append(StrategyEventDraft("INTENT_CREATED"))
+        mutation = StrategyEvaluationMutation(
+            strategy_id, revision.id, trigger, snapshot, engine_inputs,
+            evaluation.decision, desired, actual, intents, tuple(events), "READY",
+        )
+        persisted = self._repository.commit_evaluation(mutation)
+        return EvaluationResult(
+            "EVALUATED", None, snapshot, engine_inputs, evaluation, desired, actual,
+            intents if persisted else (), tuple(events) if persisted else (), persisted,
+        )
+
+    def evaluate_data_change(
+        self,
+        changed_entity_ids: Sequence[UUID],
+        trigger: StrategyTrigger,
+    ) -> tuple[EvaluationResult, ...]:
+        strategy_ids = self._repository.affected_strategy_ids(
+            changed_entity_ids, "DATA_CHANGE"
+        )
+        return tuple(self.evaluate(strategy_id, trigger) for strategy_id in strategy_ids)
+
+    def _run_jdm(
+        self,
+        revision: StrategyRevision,
+        engine_inputs: Mapping[str, object],
+    ) -> StrategyEvaluation:
+        outputs = self._evaluator(revision.jdm_content, engine_inputs)
+        bindings = {
+            item.binding_key: OutputBinding(
+                item.binding_key,
+                item.entity_instance_id,
+                item.expected_data_type,
+                item.unit,
+                True,
+                True,
+            )
+            for item in revision.bindings
+            if item.direction == "OUTPUT"
+        }
+        intents = extract_control_intents(outputs, bindings)
+        decision = outputs.get("result", outputs)
+        if not isinstance(decision, Mapping):
+            raise StrategyModelError("JDM_RESULT_INVALID", "decision result must be an object")
+        raw_rule = decision.get("matched_rule")
+        matched_rules = (str(raw_rule),) if raw_rule is not None else ()
+        return StrategyEvaluation(matched_rules, dict(decision), intents)
+
+    def _commit_blocked(
+        self,
+        strategy_id: UUID,
+        revision: StrategyRevision,
+        trigger: StrategyTrigger,
+        snapshot: StrategySnapshot,
+        state: StrategyRuntimeState,
+        reason_code: str,
+    ) -> EvaluationResult:
+        if state.runtime_health != "BLOCKED":
+            events = (StrategyEventDraft("BLOCKED", reason_code),)
+        elif state.block_reason != reason_code:
+            events = (StrategyEventDraft("BLOCK_REASON_CHANGED", reason_code),)
+        else:
+            events = ()
+        mutation = StrategyEvaluationMutation(
+            strategy_id, revision.id, trigger, snapshot, {}, None,
+            state.last_desired, state.last_actual, (), events, "BLOCKED", reason_code,
+        )
+        persisted = self._repository.commit_evaluation(mutation)
+        return EvaluationResult(
+            "BLOCKED", reason_code, snapshot, {}, None, state.last_desired,
+            state.last_actual, (), events if persisted else (), persisted,
+        )
 
 
 def strategy_draft_digest(draft: StrategyDraft) -> str:
@@ -335,6 +619,7 @@ def build_two_charge_two_discharge_jdm(
             "soc": f"soc >= {_decimal(row.soc_min)} && soc <= {_decimal(row.soc_max)}",
             "action_id": json.dumps("power-target"),
             "target": _decimal(row.target),
+            "matched_rule": json.dumps(row.key),
             "_description": row.action,
         }
         for start, end, row in validated
@@ -346,6 +631,7 @@ def build_two_charge_two_discharge_jdm(
             "soc": "1 == 1",
             "action_id": json.dumps("power-target"),
             "target": _decimal(safe),
+            "matched_rule": json.dumps("other-time"),
             "_description": "HOLD",
         }
     )
@@ -363,6 +649,7 @@ def build_two_charge_two_discharge_jdm(
         "outputs": [
             {"id": "action_id", "name": "动作标识", "type": "expression", "field": "action_id"},
             {"id": "target", "name": "功率目标", "type": "expression", "field": "target"},
+            {"id": "matched_rule", "name": "命中行", "type": "expression", "field": "matched_rule"},
         ],
         "rules": table_rules,
     }
@@ -444,6 +731,59 @@ def _typed_value(value: object, data_type: str) -> object:
             raise StrategyModelError("OUTPUT_TYPE_MISMATCH", "CODE_SET target must be text list")
         return tuple(value)
     raise StrategyModelError("OUTPUT_TYPE_UNSUPPORTED", f"unsupported output type {data_type}")
+
+
+def _validated_snapshot(
+    revision: StrategyRevision,
+    snapshot: StrategySnapshot,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if snapshot.configuration_revision != revision.base_configuration_revision:
+        raise StrategyModelError(
+            "L2_CONFIGURATION_MISMATCH", "snapshot configuration changed"
+        )
+    samples = {item.entity_instance_id: item for item in snapshot.inputs}
+    engine_inputs: dict[str, object] = {}
+    actual: dict[str, object] = {}
+    for binding in revision.bindings:
+        sample = samples.get(binding.entity_instance_id)
+        if sample is None:
+            kind = "INPUT" if binding.direction == "INPUT" else "OUTPUT"
+            raise StrategyModelError(f"L2_{kind}_MISSING", "bound L2 value is missing")
+        if sample.frame_sequence > snapshot.frame_sequence:
+            raise StrategyModelError("L2_AFTER_SNAPSHOT_HEAD", "L2 is newer than snapshot head")
+        if sample.configuration_revision != snapshot.configuration_revision:
+            raise StrategyModelError(
+                "L2_CONFIGURATION_MISMATCH", "L2 configuration revision changed"
+            )
+        if sample.data_type != binding.expected_data_type:
+            raise StrategyModelError("L2_TYPE_MISMATCH", "L2 data type changed")
+        if _normalized_unit(sample.unit) != _normalized_unit(binding.unit):
+            raise StrategyModelError("L2_UNIT_MISMATCH", "L2 unit changed")
+        if sample.quality != "GOOD":
+            raise StrategyModelError("L2_QUALITY_NOT_GOOD", "L2 quality is not GOOD")
+        if sample.observed_at is None:
+            raise StrategyModelError("L2_TIMESTAMP_MISSING", "L2 timestamp is missing")
+        if (snapshot.evaluated_at - sample.observed_at).total_seconds() > binding.freshness_seconds:
+            raise StrategyModelError("L2_INPUT_STALE", "bound L2 value exceeded freshness")
+        if binding.direction == "INPUT":
+            engine_inputs[binding.binding_key] = sample.value
+        else:
+            actual[binding.binding_key] = sample.value
+    local_time = snapshot.evaluated_at.astimezone(ZoneInfo(revision.site_timezone))
+    engine_inputs["site_local_minute"] = local_time.hour * 60 + local_time.minute
+    engine_inputs["site_local_time"] = local_time.isoformat()
+    return engine_inputs, actual
+
+
+def _values_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float, Decimal)) and isinstance(right, (int, float, Decimal)):
+        try:
+            return Decimal(str(left)) == Decimal(str(right))
+        except InvalidOperation:
+            return False
+    return left == right
 
 
 def _minute(value: str, *, allow_24: bool) -> int:

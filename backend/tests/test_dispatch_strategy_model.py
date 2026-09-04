@@ -87,6 +87,8 @@ class DispatchStrategyModelTest(unittest.TestCase):
         self.assertEqual("first", table["hitPolicy"])
         self.assertEqual("other-time", table["rules"][-1]["_id"])
         self.assertEqual("0", table["rules"][-1]["target"])
+        self.assertEqual('"charge-1"', table["rules"][0]["matched_rule"])
+        self.assertEqual('"other-time"', table["rules"][-1]["matched_rule"])
         self.assertNotIn("when", model)
         self.assertNotIn("actions", model)
 
