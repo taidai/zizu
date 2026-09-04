@@ -1008,6 +1008,12 @@ class PostgresStrategyRepository:
             if row[3] is not None:
                 cursor.execute(f"{_REVISION_SELECT} WHERE id=%s", (row[3],))
                 active_row = cursor.fetchone()
+            cursor.execute(
+                f"{_REVISION_SELECT} WHERE strategy_id=%s AND lifecycle='PUBLISHED' "
+                "ORDER BY revision DESC LIMIT 1",
+                (strategy_id,),
+            )
+            published_row = cursor.fetchone()
         return StrategyView(
             id=strategy_id,
             name=str(row[1]),
@@ -1025,6 +1031,7 @@ class PostgresStrategyRepository:
             updated_at=row[15],
             draft=None if draft_row is None else self._revision_from_row(connection, draft_row),
             active_revision=None if active_row is None else self._revision_from_row(connection, active_row),
+            published_revision=None if published_row is None else self._revision_from_row(connection, published_row),
         )
 
     def _revision_from_row(self, connection, row) -> StrategyRevision:

@@ -345,6 +345,7 @@ def _strategy(value: StrategyView) -> dict[str, object]:
             "updated_at": value.updated_at,
             "draft": None if value.draft is None else _revision(value.draft),
             "active_revision": None if value.active_revision is None else _revision(value.active_revision),
+            "published_revision": None if value.published_revision is None else _revision(value.published_revision),
         }
     )
 

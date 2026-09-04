@@ -709,172 +709,193 @@ export async function updateNode(nodeId: string, updates: NodeUpdateRequest): Pr
   return data.node || data
 }
 
-// ── Rules ──
+// ── Dispatch strategies ──
 
-export interface Rule {
+export type DispatchStrategyTriggerKind = 'DATA_CHANGE' | 'FIXED_TICK'
+export type DispatchStrategyLifecycle = 'DRAFT' | 'PUBLISHED'
+export type DispatchStrategyHealth = 'IDLE' | 'READY' | 'BLOCKED' | 'FAILED'
+
+export interface DispatchStrategyBinding {
+  direction: 'INPUT' | 'OUTPUT'
+  binding_key: string
+  ordinal: number
+  entity_instance_id: string
+  expected_data_type: string
+  unit: string | null
+  freshness_seconds: number
+}
+
+export interface DispatchStrategyRevision {
   id: string
-  name: string
-  rule_type: 'alarm' | 'control' | 'fault_map' | 'linkage'
+  strategy_id: string
+  revision: number
+  lifecycle: DispatchStrategyLifecycle
+  trigger_kind: DispatchStrategyTriggerKind
+  site_timezone: string
   jdm_content: Record<string, any>
-  version: number
-  configuration_revision: number
-  enabled: boolean
+  content_digest: string
+  base_configuration_revision: number
+  bindings: DispatchStrategyBinding[]
+  created_by: string
   created_at: string
-  updated_at: string
+  published_by: string | null
+  published_at: string | null
 }
 
-export interface RuleCreateRequest {
-  name: string
-  rule_type: 'control' | 'linkage'
-  jdm_content?: Record<string, any>
-  enabled?: boolean
-}
-
-export async function fetchRules(): Promise<Rule[]> {
-  const res = await apiFetch(`${API_BASE}/rules`)
-  const data = await res.json()
-  return data.rules || []
-}
-
-export async function fetchRule(ruleId: string): Promise<Rule> {
-  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`)
-  if (!res.ok) throw new Error(`Fetch rule failed: ${res.status}`)
-  return res.json()
-}
-
-export async function createRule(rule: RuleCreateRequest): Promise<Rule> {
-  const res = await apiFetch(`${API_BASE}/rules`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(rule),
-  })
-  if (!res.ok) throw new Error(`Create rule failed: ${res.status}`)
-  return res.json()
-}
-
-export async function updateRule(ruleId: string, updates: Partial<RuleCreateRequest>): Promise<Rule> {
-  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates),
-  })
-  if (!res.ok) throw new Error(`Update rule failed: ${res.status}`)
-  return res.json()
-}
-
-export async function deleteRule(ruleId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/rules/${ruleId}`, {
-    method: 'DELETE',
-  })
-  if (!res.ok) throw new Error(`Delete rule failed: ${res.status}`)
-}
-
-export async function simulateRule(ruleId: string, context: Record<string, any>): Promise<any> {
-  const res = await apiFetch(`${API_BASE}/rules/${ruleId}/simulate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ context }),
-  })
-  if (!res.ok) throw new Error(`Simulate rule failed: ${res.status}`)
-  return res.json()
-}
-
-export interface JdmExecutionSummary {
-  id: string
-  rule_id: string
-  rule_version: number
-  frame_id: string
-  frame_sequence: number
-  configuration_revision: number
-  status: 'executed' | 'rejected'
-  reason_code: string | null
-  outputs: Record<string, any>
-  executed_at: string
-}
-
-export async function fetchRuleExecutions(
-  ruleId: string,
-  limit = 1,
-): Promise<JdmExecutionSummary[]> {
-  const res = await apiFetch(`${API_BASE}/rules/${ruleId}/executions?limit=${limit}`)
-  if (!res.ok) throw new Error(`Fetch rule executions failed: ${res.status}`)
-  const data = await res.json()
-  return data.executions || []
-}
-
-export async function evaluateGraph(graph: Record<string, any>, context: Record<string, any>): Promise<any> {
-  const res = await apiFetch(`${API_BASE}/rules/evaluate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: graph, context }),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(text || `Evaluate graph failed: ${res.status}`)
-  }
-  return res.json()
-}
-
-// ── Rule Templates ──
-
-export interface RuleTemplate {
+export interface DispatchStrategy {
   id: string
   name: string
   description: string | null
-  rule_type: Rule['rule_type']
-  graph: Record<string, any>
-  config: Record<string, any>
+  active_revision_id: string | null
   enabled: boolean
-  is_default: boolean
+  runtime_health: DispatchStrategyHealth
+  last_trigger_key: string | null
+  last_evaluated_at: string | null
+  last_desired: Record<string, unknown> | null
+  last_actual: Record<string, unknown> | null
+  last_evidence: Record<string, unknown> | null
+  failure_code: string | null
   created_at: string
   updated_at: string
+  draft: DispatchStrategyRevision | null
+  active_revision: DispatchStrategyRevision | null
+  published_revision: DispatchStrategyRevision | null
 }
 
-export async function fetchRuleTemplates(): Promise<RuleTemplate[]> {
-  const res = await apiFetch(`${API_BASE}/rule-templates`)
-  if (!res.ok) throw new Error(`Fetch templates failed: ${res.status}`)
-  const data = await res.json()
-  return data.templates || []
-}
-
-export async function fetchRuleTemplate(templateId: string): Promise<RuleTemplate> {
-  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`)
-  if (!res.ok) throw new Error(`Fetch template failed: ${res.status}`)
-  return res.json()
-}
-
-export interface RuleTemplateCreateInput {
+export interface DispatchStrategyDraftInput {
+  expected_digest: string
   name: string
   description?: string | null
-  rule_type: Rule['rule_type']
-  graph?: Record<string, any>
-  config?: Record<string, any>
-  enabled?: boolean
+  trigger_kind: DispatchStrategyTriggerKind
+  site_timezone: string
+  base_configuration_revision: number
+  jdm_content: Record<string, any>
+  bindings: DispatchStrategyBinding[]
 }
 
-export async function createRuleTemplate(input: RuleTemplateCreateInput): Promise<RuleTemplate> {
-  const res = await apiFetch(`${API_BASE}/rule-templates`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+export interface DispatchStrategySimulation {
+  status: string
+  reason_code: string | null
+  frame_sequence: number | null
+  configuration_revision: number | null
+  snapshot: Record<string, EntityInstanceObservation>
+  engine_inputs: Record<string, unknown>
+  matched_rules: string[]
+  decision: Record<string, unknown> | null
+  proposed_intents: Array<{
+    action_id: string
+    entity_instance_id: string
+    value: unknown
+    ordinal: number
+  }>
+}
+
+export interface DispatchStrategyEvent {
+  id: string
+  occurred_at: string
+  event_kind: string
+  trigger_kind: string
+  trigger_key: string
+  frame_sequence: number | null
+  configuration_revision: number
+  snapshot_evidence: Record<string, unknown>
+  decision: Record<string, unknown> | null
+  intent_summary: unknown[]
+  control_command_id: string | null
+  control_status: string | null
+  reason_code: string | null
+}
+
+export class DispatchStrategyApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+    readonly payload: unknown,
+  ) {
+    super(message)
+    this.name = 'DispatchStrategyApiError'
+  }
+}
+
+async function dispatchStrategyError(response: Response, fallback: string): Promise<DispatchStrategyApiError> {
+  const payload = await response.json().catch(() => null) as any
+  const detail = payload?.detail
+  const message = typeof detail === 'string' ? detail : detail?.message
+  return new DispatchStrategyApiError(message || fallback, response.status, detail?.code || null, payload)
+}
+
+async function dispatchStrategyFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(`${API_BASE}${path}`, init)
+  if (!response.ok) throw await dispatchStrategyError(response, `调度策略请求失败：${response.status}`)
+  return response.json() as Promise<T>
+}
+
+export async function fetchDispatchStrategies(): Promise<DispatchStrategy[]> {
+  const result = await dispatchStrategyFetch<{ strategies: DispatchStrategy[] }>('/dispatch-strategies')
+  return result.strategies
+}
+
+export function fetchDispatchStrategy(strategyId: string): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}`)
+}
+
+export function createDispatchStrategy(input: {
+  name: string
+  description?: string | null
+  site_timezone?: string
+  starter?: 'two_charge_two_discharge'
+}): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch('/dispatch-strategies', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
-  if (!res.ok) throw new Error(`Create template failed: ${res.status}`)
-  return res.json()
 }
 
-export async function updateRuleTemplate(templateId: string, updates: Partial<RuleTemplateCreateInput>): Promise<RuleTemplate> {
-  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates),
+export function saveDispatchStrategyDraft(strategyId: string, input: DispatchStrategyDraftInput): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/draft`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
-  if (!res.ok) throw new Error(`Update template failed: ${res.status}`)
-  return res.json()
 }
 
-export async function deleteRuleTemplate(templateId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/rule-templates/${templateId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`Delete template failed: ${res.status}`)
+export function simulateDispatchStrategy(
+  strategyId: string,
+  input: { revision_id?: string | null; overrides?: Record<string, unknown> } = {},
+): Promise<DispatchStrategySimulation> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/simulate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+}
+
+export function publishDispatchStrategy(
+  strategyId: string,
+  input: { expected_digest: string; configuration_revision: number },
+): Promise<DispatchStrategyRevision> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/publish`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+}
+
+export function enableDispatchStrategy(strategyId: string, revisionId: string): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/enable`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision_id: revisionId }),
+  })
+}
+
+export function disableDispatchStrategy(strategyId: string): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/disable`, { method: 'POST' })
+}
+
+export function clearDispatchStrategyFailure(strategyId: string): Promise<DispatchStrategy> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/failure-latch/clear`, { method: 'POST' })
+}
+
+export function fetchDispatchStrategyEvents(
+  strategyId: string,
+  input: { cursor?: string | null; limit?: number } = {},
+): Promise<{ items: DispatchStrategyEvent[]; next_cursor: string | null }> {
+  const search = new URLSearchParams({ limit: String(input.limit ?? 50) })
+  if (input.cursor) search.set('cursor', input.cursor)
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/events?${search}`)
 }
 
 // ── Alarms ──
@@ -1479,6 +1500,14 @@ export async function fetchEntityInstanceHistory(
   const response = await apiFetch(`${API_BASE}/entity-instances/${encodeURIComponent(entityInstanceId)}/history?range=${range}`)
   if (!response.ok) throw await dataTrunkError(response, `读取全局实体历史失败：${response.status}`)
   return (await response.json() as { items: EntityInstanceObservation[] }).items
+}
+
+export async function fetchEntityInstanceRealtime(
+  entityInstanceId: string,
+): Promise<EntityInstanceObservation> {
+  const response = await apiFetch(`${API_BASE}/entity-instances/${encodeURIComponent(entityInstanceId)}/realtime`)
+  if (!response.ok) throw await dataTrunkError(response, `读取全局实体实时数据失败：${response.status}`)
+  return response.json()
 }
 
 export interface AlarmRule {

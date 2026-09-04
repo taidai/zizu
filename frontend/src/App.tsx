@@ -12,7 +12,7 @@ import { clearDataTrunkApplyRetry } from './components/data-trunk/dataTrunkRetry
 import { Network, Scale, Bell, Settings, LayoutDashboard } from 'lucide-react'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
-const RuleEnginePage = lazy(() => import('./pages/RuleEnginePage'))
+const DispatchStrategyPage = lazy(() => import('./pages/DispatchStrategyPage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
 
@@ -52,7 +52,7 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
   )
 }
 
-type PageKey = 'workbench' | 'tree' | 'rules' | 'alarms' | 'admin'
+type PageKey = 'workbench' | 'tree' | 'strategies' | 'alarms' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -75,7 +75,7 @@ const NAV_ITEMS: NavigationItem[] = [
   { key: 'workbench', label: 'EMS 工作台', icon: <LayoutDashboard size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
   { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'rules', label: '规则引擎', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
+  { key: 'strategies', label: '调度策略', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
   // Server-side protection for system/control APIs is intentionally Ticket #4.
   { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} />, roles: ['admin'] },
 ]
@@ -287,7 +287,7 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
                 onRefreshHealth={loadHealth}
               />
             )}
-            {activePage === 'rules' && <RuleEnginePage />}
+            {activePage === 'strategies' && <DispatchStrategyPage />}
             {activePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={CONFIG_ROLES.includes(session.user.role)} />}
           </Suspense>
           {activePage === 'admin' && <AdminPanel />}

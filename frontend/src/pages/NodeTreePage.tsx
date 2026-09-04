@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import {
-  fetchNodes, fetchRules, updateNode, createNode, deleteNode, fetchAlarmCounts,
+  fetchNodes, updateNode, createNode, deleteNode, fetchAlarmCounts,
   fetchCategories, fetchNeuronNodes, fetchNeuronGroups, previewNeuronTags, importNeuronTags,
-  type Node, type Rule, type Category, type NeuronNode, type NeuronGroup,
+  type Node, type Category, type NeuronNode, type NeuronGroup,
   type HealthStatus, type NeuronImportPreview,
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
@@ -100,95 +100,6 @@ function TreeNode({ node, nodes, alarmCounts, depth, selectedId, expanded, onTog
           ))}
         </div>
       )}
-    </div>
-  )
-}
-
-function AssignRuleModal({
-  node,
-  rules,
-  onClose,
-  onSaved,
-}: {
-  node: Node
-  rules: Rule[]
-  onClose: () => void
-  onSaved: () => void
-}) {
-  const currentIds = useMemo(() => {
-    const ids = node.config?.rule_ids
-    return Array.isArray(ids) ? new Set(ids as string[]) : new Set<string>()
-  }, [node])
-  const [selected, setSelected] = useState<Set<string>>(currentIds)
-  const [saving, setSaving] = useState(false)
-
-  const toggle = (id: string) => {
-    const next = new Set(selected)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    setSelected(next)
-  }
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await updateNode(node.id, {
-        config: { ...node.config, rule_ids: Array.from(selected) },
-      })
-      onSaved()
-      onClose()
-    } catch (e: any) {
-      alert('保存失败：' + (e.message || e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="neu-card w-[480px] max-w-[90vw] p-5">
-        <h3 className="text-sm font-bold text-gray-800 mb-3">为节点指定规则</h3>
-        <p className="text-xs text-gray-500 mb-3">节点: <span className="font-medium text-gray-700">{node.name}</span></p>
-
-        <div className="neu-inset p-3 max-h-[300px] overflow-y-auto space-y-2 mb-4">
-          {rules.length === 0 && (
-            <p className="text-xs text-gray-400">暂无规则，请先在「规则引擎」中创建。</p>
-          )}
-          {rules.map((rule) => (
-            <label
-              key={rule.id}
-              className="flex items-center gap-2 p-2 rounded hover:bg-white/40 cursor-pointer"
-            >
-              <input
-                type="checkbox"
-                checked={selected.has(rule.id)}
-                onChange={() => toggle(rule.id)}
-                className="w-4 h-4 accent-[#52c41a]"
-              />
-              <div className="flex-1">
-                <div className="text-xs font-medium text-gray-800">{rule.name}</div>
-                <div className="text-[10px] text-gray-400">{rule.rule_type} · v{rule.version}</div>
-              </div>
-            </label>
-          ))}
-        </div>
-
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="neu-btn px-4 py-1.5 text-xs text-gray-600"
-          >
-            取消
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
-          >
-            {saving ? '保存中...' : '保存'}
-          </button>
-        </div>
-      </div>
     </div>
   )
 }
@@ -522,12 +433,10 @@ export default function NodeTreePage({
   onRefreshHealth?: () => Promise<void> | void
 }) {
   const [nodes, setNodes] = useState<Node[]>([])
-  const [rules, setRules] = useState<Rule[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [selectedId, setSelectedId] = useState<string>('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [activeTab, setActiveTab] = useState<NodeDataTabKey>('raw-points')
-  const [showAssignModal, setShowAssignModal] = useState(false)
   const [nodeFormMode, setNodeFormMode] = useState<FormMode | null>(null)
   const [showImportModal, setShowImportModal] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -551,15 +460,6 @@ export default function NodeTreePage({
     }
   }
 
-  const loadRules = async () => {
-    try {
-      const data = await fetchRules()
-      setRules(data)
-    } catch {
-      setRules([])
-    }
-  }
-
   const loadCategories = async () => {
     try {
       const data = await fetchCategories()
@@ -572,7 +472,6 @@ export default function NodeTreePage({
   useEffect(() => {
     loadNodes()
     if (!readOnly) {
-      loadRules()
       loadCategories()
     }
   }, [readOnly])
@@ -621,16 +520,9 @@ export default function NodeTreePage({
   const refreshWorkspace = () => {
     void loadNodes()
     if (!readOnly) {
-      void loadRules()
       void loadCategories()
     }
   }
-
-  const assignedRules = useMemo(() => {
-    const ids = selectedNode?.config?.rule_ids
-    if (!Array.isArray(ids)) return []
-    return rules.filter((r) => ids.includes(r.id))
-  }, [selectedNode, rules])
 
   const roots = useMemo(() => nodes.filter((n) => !n.parent_id).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)), [nodes])
   const filteredRoots = useMemo(() => filteredNodes.filter((n) => !n.parent_id).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)), [filteredNodes])
@@ -741,28 +633,8 @@ export default function NodeTreePage({
                   >
                     退役
                   </button>
-                  <button
-                    onClick={() => setShowAssignModal(true)}
-                    className="neu-btn px-4 py-1.5 text-xs font-medium text-[#389e0d]"
-                  >
-                    指定规则
-                  </button>
                 </div>}
               </div>
-
-              {assignedRules.length > 0 && (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-gray-500">已绑定规则:</span>
-                  {assignedRules.map((rule) => (
-                    <span
-                      key={rule.id}
-                      className="px-2 py-0.5 rounded text-[10px] font-medium bg-[#534AB7]/10 text-[#534AB8]"
-                    >
-                      {rule.name}
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div className="flex items-center gap-2 mb-3">
@@ -810,15 +682,6 @@ export default function NodeTreePage({
           </div>
         )}
       </div>
-
-      {!readOnly && showAssignModal && selectedNode && (
-        <AssignRuleModal
-          node={selectedNode}
-          rules={rules}
-          onClose={() => setShowAssignModal(false)}
-          onSaved={loadNodes}
-        />
-      )}
 
       {!readOnly && nodeFormMode && (
         <NodeFormModal

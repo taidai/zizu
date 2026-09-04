@@ -75,6 +75,7 @@ def _view(draft=True, enabled=False):
         NOW,
         revision if draft else None,
         revision if enabled else None,
+        revision if not draft else None,
     )
 
 
@@ -278,6 +279,15 @@ class DispatchStrategyPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("DECISION_CHANGED", events.json()["items"][0]["event_kind"])
         self.assertEqual(404, rules.status_code)
         self.assertEqual(404, templates.status_code)
+
+    async def test_disabled_published_revision_remains_visible_for_later_enable(self) -> None:
+        self.repository.view = _view(draft=False, enabled=False)
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.get(f"/api/v1/dispatch-strategies/{STRATEGY_ID}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIsNone(response.json()["active_revision"])
+        self.assertEqual(str(REVISION_ID), response.json()["published_revision"]["id"])
 
 
 if __name__ == "__main__":

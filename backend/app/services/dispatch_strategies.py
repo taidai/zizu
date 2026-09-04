@@ -107,6 +107,7 @@ class StrategyView:
     updated_at: datetime
     draft: StrategyRevision | None
     active_revision: StrategyRevision | None
+    published_revision: StrategyRevision | None = None
 
 
 @dataclass(frozen=True)
