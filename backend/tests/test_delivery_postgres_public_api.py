@@ -833,21 +833,40 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
                 [entity_instance_id],
                 [item["id"] for item in entity_catalog.json()["items"]],
             )
-            stable_rule = client.post(
-                "/api/v1/rules",
+            stable_strategy = client.post(
+                "/api/v1/dispatch-strategies",
                 headers=engineer_auth,
                 json={
                     "name": "PCS instance input",
-                    "rule_type": "alarm",
-                    "jdm_content": {
-                        "_config": {
-                            "sourceEntityInstanceIds": [entity_instance_id],
-                            "inputMappings": {"power": entity_instance_id},
-                        }
-                    },
                 },
             )
-            self.assertEqual(stable_rule.status_code, 200, stable_rule.text)
+            self.assertEqual(stable_strategy.status_code, 200, stable_strategy.text)
+            strategy_body = stable_strategy.json()
+            draft = strategy_body["draft"]
+            saved_strategy = client.put(
+                f"/api/v1/dispatch-strategies/{strategy_body['id']}/draft",
+                headers=engineer_auth,
+                json={
+                    "expected_digest": draft["content_digest"],
+                    "name": strategy_body["name"],
+                    "trigger_kind": draft["trigger_kind"],
+                    "site_timezone": draft["site_timezone"],
+                    "base_configuration_revision": draft["base_configuration_revision"],
+                    "jdm_content": draft["jdm_content"],
+                    "bindings": [
+                        {
+                            "direction": "INPUT",
+                            "binding_key": "power",
+                            "ordinal": 0,
+                            "entity_instance_id": entity_instance_id,
+                            "expected_data_type": "FLOAT",
+                            "unit": "kW",
+                            "freshness_seconds": 10,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(saved_strategy.status_code, 200, saved_strategy.text)
             with psycopg2.connect(
                 host=os.environ["DB_HOST"],
                 port=int(os.environ["DB_PORT"]),
@@ -857,15 +876,13 @@ class DeliveryPostgresPublicApiTest(unittest.TestCase):
             ) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT reference_kind, reference_key, entity_instance_id "
-                        "FROM t_rule_entity_instance_refs WHERE rule_id = %s "
-                        "ORDER BY reference_kind, reference_key",
-                        (stable_rule.json()["id"],),
+                        "SELECT direction,binding_key,entity_instance_id "
+                        "FROM t_dispatch_strategy_bindings WHERE revision_id=%s",
+                        (draft["id"],),
                     )
                     persisted_refs = cursor.fetchall()
             self.assertEqual(
-                [("input", "power", entity_instance_id),
-                 ("source", "0", entity_instance_id)],
+                [("INPUT", "power", entity_instance_id)],
                 persisted_refs,
             )
             entity_acceptance = client.post(

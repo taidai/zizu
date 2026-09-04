@@ -15,7 +15,7 @@ from app.api.alarm_configurations import router as alarm_configurations_router
 from app.api.control_commands import router as control_commands_router
 from app.api.neuron import router as neuron_router
 from app.api.rpc import router as rpc_router
-from app.api.rules import router as rules_router
+from app.api.dispatch_strategies import router as dispatch_strategies_router
 from app.api.point_processings import router as point_processings_router
 from app.api.committed_frames import (
     router as committed_frames_router,
@@ -47,7 +47,7 @@ app.include_router(alarm_configurations_router, prefix="/api/v1")
 app.include_router(control_commands_router, prefix="/api/v1")
 app.include_router(neuron_router, prefix="/api/v1")
 app.include_router(rpc_router, prefix="/api/v1")
-app.include_router(rules_router, prefix="/api/v1")
+app.include_router(dispatch_strategies_router, prefix="/api/v1")
 app.include_router(point_processings_router, prefix="/api/v1")
 app.include_router(committed_frames_router, prefix="/api/v1")
 

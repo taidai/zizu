@@ -311,6 +311,73 @@ class PostgresStrategyRepository:
             cursor.execute(f"{_STRATEGY_SELECT} ORDER BY updated_at DESC,id")
             return tuple(self._view_from_row(connection, row) for row in cursor.fetchall())
 
+    def current_configuration_revision(self) -> int:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT current_revision FROM t_configuration_state WHERE singleton=TRUE"
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise StrategyRepositoryError("CONFIGURATION_REVISION_UNAVAILABLE")
+        return int(row[0])
+
+    def list_events(
+        self,
+        strategy_id: UUID,
+        before_at: datetime | None,
+        before_id: UUID | None,
+        limit: int,
+    ) -> tuple[tuple[dict[str, object], ...], bool]:
+        bounded = min(max(int(limit), 1), 100)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM t_dispatch_strategies WHERE id=%s",
+                (strategy_id,),
+            )
+            if cursor.fetchone() is None:
+                raise StrategyRepositoryError("STRATEGY_NOT_FOUND")
+            cursor.execute(
+                """
+                SELECT event.id,event.occurred_at,event.event_kind,
+                       event.trigger_kind,event.trigger_key,event.frame_sequence,
+                       event.configuration_revision,event.snapshot_evidence,
+                       event.decision,event.intent_summary,event.control_command_id,
+                       command.status,event.reason_code
+                FROM t_dispatch_strategy_events AS event
+                LEFT JOIN t_control_commands AS command
+                  ON command.id=event.control_command_id
+                WHERE event.strategy_id=%s
+                  AND (
+                    %s::timestamptz IS NULL
+                    OR (event.occurred_at,event.id)<(%s,%s)
+                  )
+                ORDER BY event.occurred_at DESC,event.id DESC
+                LIMIT %s
+                """,
+                (strategy_id, before_at, before_at, before_id, bounded + 1),
+            )
+            rows = cursor.fetchall()
+        has_more = len(rows) > bounded
+        items = tuple(
+            {
+                "id": UUID(str(row[0])),
+                "occurred_at": row[1],
+                "event_kind": str(row[2]),
+                "trigger_kind": str(row[3]),
+                "trigger_key": str(row[4]),
+                "frame_sequence": None if row[5] is None else int(row[5]),
+                "configuration_revision": int(row[6]),
+                "snapshot_evidence": dict(row[7]),
+                "decision": None if row[8] is None else dict(row[8]),
+                "intent_summary": list(row[9]),
+                "control_command_id": None if row[10] is None else UUID(str(row[10])),
+                "control_status": row[11],
+                "reason_code": row[12],
+            }
+            for row in rows[:bounded]
+        )
+        return items, has_more
+
     def affected_strategy_ids(
         self,
         entity_ids: tuple[UUID, ...] | list[UUID],

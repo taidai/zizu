@@ -391,14 +391,15 @@ def create_app() -> FastAPI:
     from app.api.categories import router as categories_router
     app.include_router(categories_router, prefix="/api/v1", tags=["Categories"])
 
-    from app.api.rules import router as rules_router
-    app.include_router(rules_router, prefix="/api/v1", tags=["Rules"])
+    from app.api.dispatch_strategies import router as dispatch_strategies_router
+    app.include_router(
+        dispatch_strategies_router,
+        prefix="/api/v1",
+        tags=["Dispatch Strategies"],
+    )
 
     from app.api.alarms import router as alarms_router
     app.include_router(alarms_router, prefix="/api/v1", tags=["Alarms"])
-
-    from app.api.rule_templates import router as rule_templates_router
-    app.include_router(rule_templates_router, prefix="/api/v1", tags=["Rule Templates"])
 
     # ---- Static Frontend (F0 可视化 V1) ----
     from app.api.fault_maps import router as fault_maps_router
