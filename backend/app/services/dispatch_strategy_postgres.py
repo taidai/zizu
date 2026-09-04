@@ -28,6 +28,7 @@ from app.services.dispatch_strategies import (
     validate_publish_bindings,
 )
 from app.services.gorules_adapter import compile_standard_jdm
+from app.services.dispatch_strategy_workers import ControlIntent
 
 
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
@@ -577,6 +578,269 @@ class PostgresStrategyRepository:
                 ),
             )
         return True
+
+    def fixed_tick_strategy_ids(self) -> tuple[UUID, ...]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT strategy.id
+                FROM t_dispatch_strategies AS strategy
+                JOIN t_dispatch_strategy_revisions AS revision
+                  ON revision.id=strategy.active_revision_id
+                WHERE strategy.enabled=TRUE
+                  AND strategy.runtime_health<>'FAILED'
+                  AND revision.lifecycle='PUBLISHED'
+                  AND revision.trigger_kind='FIXED_TICK'
+                ORDER BY strategy.id
+                """
+            )
+            return tuple(UUID(str(row[0])) for row in cursor.fetchall())
+
+    def claim_next(self, now: datetime) -> ControlIntent | None:
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT intent.id,intent.strategy_id,intent.revision_id,
+                       revision.revision,intent.evaluation_key,intent.action_id,
+                       intent.ordinal,intent.entity_instance_id,
+                       intent.expected_value,intent.status,intent.attempt_count,
+                       intent.control_command_id,intent.snapshot_evidence,
+                       intent.next_attempt_at,strategy.enabled,
+                       strategy.active_revision_id,strategy.runtime_health,
+                       EXISTS(
+                         SELECT 1 FROM t_dispatch_strategy_owners AS owner
+                         WHERE owner.entity_instance_id=intent.entity_instance_id
+                           AND owner.strategy_id=intent.strategy_id
+                           AND owner.revision_id=intent.revision_id
+                       ) AS owns_target,
+                       configuration.current_revision
+                FROM t_dispatch_control_intents AS intent
+                JOIN t_dispatch_strategy_revisions AS revision
+                  ON revision.id=intent.revision_id
+                JOIN t_dispatch_strategies AS strategy
+                  ON strategy.id=intent.strategy_id
+                CROSS JOIN t_configuration_state AS configuration
+                WHERE configuration.singleton=TRUE
+                  AND intent.status IN ('PENDING','IN_FLIGHT')
+                  AND intent.next_attempt_at<=%s
+                  AND NOT EXISTS(
+                    SELECT 1 FROM t_dispatch_control_intents AS previous
+                    WHERE previous.revision_id=intent.revision_id
+                      AND previous.evaluation_key=intent.evaluation_key
+                      AND previous.ordinal<intent.ordinal
+                      AND previous.status<>'CONFIRMED'
+                  )
+                ORDER BY intent.created_at,intent.ordinal,intent.id
+                FOR UPDATE OF intent SKIP LOCKED
+                LIMIT 1
+                """,
+                (now,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            evidence = dict(row[12])
+            configuration_revision = evidence.get("configuration_revision")
+            eligible = (
+                bool(row[14])
+                and row[15] is not None
+                and UUID(str(row[15])) == UUID(str(row[2]))
+                and str(row[16]) != "FAILED"
+                and bool(row[17])
+                and configuration_revision is not None
+                and int(configuration_revision) == int(row[18])
+            )
+            if not eligible:
+                cursor.execute(
+                    """
+                    UPDATE t_dispatch_control_intents
+                    SET status='CANCELLED',last_error_code='STRATEGY_FENCE_CHANGED',
+                        updated_at=clock_timestamp()
+                    WHERE id=%s
+                    """,
+                    (row[0],),
+                )
+                return None
+            if str(row[9]) == "PENDING":
+                cursor.execute(
+                    """
+                    UPDATE t_dispatch_control_intents
+                    SET status='IN_FLIGHT',attempt_count=attempt_count+1,
+                        next_attempt_at=%s + interval '250 milliseconds',
+                        updated_at=clock_timestamp()
+                    WHERE id=%s RETURNING attempt_count
+                    """,
+                    (now, row[0]),
+                )
+                attempt_count = int(cursor.fetchone()[0])
+                control_command_id = None
+                status = "IN_FLIGHT"
+            else:
+                cursor.execute(
+                    """
+                    UPDATE t_dispatch_control_intents
+                    SET next_attempt_at=%s + interval '250 milliseconds',
+                        updated_at=clock_timestamp()
+                    WHERE id=%s AND status='IN_FLIGHT'
+                    """,
+                    (now, row[0]),
+                )
+                attempt_count = int(row[10])
+                control_command_id = (
+                    None if row[11] is None else UUID(str(row[11]))
+                )
+                status = str(row[9])
+            return ControlIntent(
+                id=UUID(str(row[0])),
+                strategy_id=UUID(str(row[1])),
+                revision_id=UUID(str(row[2])),
+                revision_number=int(row[3]),
+                evaluation_key=str(row[4]),
+                action_id=str(row[5]),
+                ordinal=int(row[6]),
+                entity_instance_id=UUID(str(row[7])),
+                expected_value=row[8],
+                status=status,
+                attempt_count=attempt_count,
+                control_command_id=control_command_id,
+                snapshot_evidence=evidence,
+                next_attempt_at=row[13],
+            )
+
+    def attach_command(
+        self,
+        intent_id: UUID,
+        attempt_number: int,
+        command_id: UUID,
+    ) -> None:
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_dispatch_control_intents
+                SET control_command_id=%s,updated_at=clock_timestamp()
+                WHERE id=%s AND status='IN_FLIGHT' AND attempt_count=%s
+                  AND (control_command_id IS NULL OR control_command_id=%s)
+                """,
+                (command_id, intent_id, attempt_number, command_id),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyRepositoryError("CONTROL_INTENT_ATTEMPT_CHANGED")
+
+    def mark_confirmed(
+        self,
+        intent_id: UUID,
+        command_id: UUID,
+        now: datetime,
+    ) -> None:
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_dispatch_control_intents
+                SET status='CONFIRMED',confirmed_at=%s,updated_at=clock_timestamp(),
+                    last_error_code=NULL
+                WHERE id=%s AND status='IN_FLIGHT' AND control_command_id=%s
+                """,
+                (now, intent_id, command_id),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
+
+    def schedule_retry(
+        self,
+        intent_id: UUID,
+        command_id: UUID,
+        code: str,
+        next_attempt_at: datetime,
+    ) -> None:
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_dispatch_control_intents
+                SET status='PENDING',control_command_id=NULL,next_attempt_at=%s,
+                    last_error_code=%s,updated_at=clock_timestamp()
+                WHERE id=%s AND status='IN_FLIGHT' AND control_command_id=%s
+                  AND attempt_count<3
+                """,
+                (next_attempt_at, code, intent_id, command_id),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
+
+    def mark_failed(
+        self,
+        intent: ControlIntent,
+        command_id: UUID,
+        code: str,
+        now: datetime,
+    ) -> None:
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE t_dispatch_control_intents
+                SET status='FAILED',last_error_code=%s,updated_at=clock_timestamp()
+                WHERE id=%s AND status='IN_FLIGHT' AND control_command_id=%s
+                  AND attempt_count=3
+                """,
+                (code, intent.id, command_id),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
+            cursor.execute(
+                """
+                UPDATE t_dispatch_control_intents
+                SET status='CANCELLED',last_error_code='STRATEGY_FAILED',
+                    updated_at=clock_timestamp()
+                WHERE strategy_id=%s AND status='PENDING'
+                """,
+                (intent.strategy_id,),
+            )
+            cursor.execute(
+                """
+                UPDATE t_dispatch_strategies
+                SET runtime_health='FAILED',failure_code=%s,
+                    updated_by='strategy-runtime',updated_at=clock_timestamp()
+                WHERE id=%s AND active_revision_id=%s
+                """,
+                (code, intent.strategy_id, intent.revision_id),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyRepositoryError("STRATEGY_ACTIVE_REVISION_CHANGED")
+            evidence = dict(intent.snapshot_evidence)
+            cursor.execute(
+                """
+                INSERT INTO t_dispatch_strategy_events
+                  (occurred_at,id,strategy_id,revision_id,event_kind,trigger_kind,
+                   trigger_key,frame_sequence,configuration_revision,
+                   snapshot_evidence,intent_summary,control_command_id,reason_code)
+                VALUES(%s,%s,%s,%s,'FAILED','CONTROL_RESULT',%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    now,
+                    uuid4(),
+                    intent.strategy_id,
+                    intent.revision_id,
+                    f"intent:{intent.id}:failed",
+                    evidence.get("frame_sequence"),
+                    int(evidence["configuration_revision"]),
+                    Json(_json_safe(evidence)),
+                    Json(
+                        {
+                            "intent_id": str(intent.id),
+                            "attempt_count": intent.attempt_count,
+                        }
+                    ),
+                    command_id,
+                    code,
+                ),
+            )
+
+    def recoverable_count(self) -> int:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_dispatch_control_intents "
+                "WHERE status='IN_FLIGHT'"
+            )
+            return int(cursor.fetchone()[0])
 
     @contextmanager
     def _write(self):

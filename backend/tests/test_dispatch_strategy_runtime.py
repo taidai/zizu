@@ -121,6 +121,7 @@ class _Repository:
         self.mutations = []
         self.open_intents: set[UUID] = set()
         self.fail_commit = False
+        self.requested_frames = []
 
     def affected_strategy_ids(self, entity_ids, trigger_kind):
         if trigger_kind != "DATA_CHANGE" or SOC_ID not in entity_ids:
@@ -134,6 +135,7 @@ class _Repository:
         return self.model if revision_id == REVISION_ID else None
 
     def load_snapshot(self, revision, frame_sequence, evaluated_at):
+        self.requested_frames.append(frame_sequence)
         return replace(
             self.snapshot,
             frame_sequence=self.snapshot.frame_sequence if frame_sequence is None else frame_sequence,
@@ -245,6 +247,7 @@ class DispatchStrategyRuntimeTest(unittest.TestCase):
 
         self.assertEqual(first.evaluation.decision, second.evaluation.decision)
         self.assertEqual(first.engine_inputs, second.engine_inputs)
+        self.assertEqual([42, None], self.repository.requested_frames)
 
     def test_repeated_trigger_is_idempotent(self) -> None:
         first = self.runtime.evaluate(STRATEGY_ID, self.trigger())

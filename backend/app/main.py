@@ -199,17 +199,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.services.committed_l2_alarm_consumer import (
         build_postgres_committed_l2_alarm_consumer,
     )
-    from app.services.committed_l2_jdm_consumer import (
-        build_postgres_committed_l2_jdm_consumer,
+    from app.services.committed_l2_jdm_consumer import CommittedL2JdmConsumer
+    from app.services.dispatch_strategies import StrategyRuntime
+    from app.services.dispatch_strategy_postgres import PostgresStrategyRepository
+    from app.services.dispatch_strategy_workers import (
+        ControlIntentDispatcher,
+        FixedMinuteTickWorker,
     )
+    from app.api.control_commands import get_automated_control_commands
     from app.services.alarm_http_notification_postgres import (
         build_postgres_alarm_http_notification_dispatcher,
     )
 
     committed_frame_stream = get_committed_frame_stream()
+    strategy_repository = PostgresStrategyRepository()
+    strategy_runtime = StrategyRuntime(strategy_repository)
+    strategy_minute_worker = FixedMinuteTickWorker(
+        strategy_repository,
+        strategy_runtime,
+    )
+    strategy_intent_dispatcher = ControlIntentDispatcher(
+        strategy_repository,
+        get_automated_control_commands(),
+    )
     committed_frame_fanout = build_committed_frame_fanout(
         build_postgres_committed_l2_alarm_consumer(),
-        build_postgres_committed_l2_jdm_consumer(),
+        CommittedL2JdmConsumer(strategy_runtime),
         committed_frame_stream,
     )
     frame_outbox_dispatcher = FrameOutboxDispatcher(
@@ -218,6 +233,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     runtime.configuration_gate.register_committed_frame_consumer()
     alarm_http_dispatcher = build_postgres_alarm_http_notification_dispatcher()
+    recovered_strategy_intents = await asyncio.to_thread(
+        strategy_intent_dispatcher.recover,
+        datetime.now(timezone.utc),
+    )
+    if recovered_strategy_intents:
+        logger.info(
+            "[Strategy] Reconciled {} committed in-flight intents",
+            recovered_strategy_intents,
+        )
 
     async def _wait_or_stop(seconds: float) -> None:
         try:
@@ -279,9 +303,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ),
             name="alarm_http_notification",
         ),
+        asyncio.create_task(
+            strategy_minute_worker.run(_data_trunk_stop),
+            name="strategy_minute_tick",
+        ),
+        asyncio.create_task(
+            strategy_intent_dispatcher.run(_data_trunk_stop),
+            name="strategy_intent_dispatcher",
+        ),
     ]
     logger.success(
-        "[Main] data-frame capture, processor, outbox and alarm HTTP delivery started ✅"
+        "[Main] data-frame, alarm HTTP and dispatch-strategy workers started ✅"
     )
 
     yield

@@ -435,6 +435,37 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual(("rejected", "CONTROL_COOLDOWN_ACTIVE"), (cooling_down.status, cooling_down.code))
         self.assertEqual(1, len(self.dispatcher.requests))
 
+    def test_strategy_attempt_uses_the_worker_owned_exact_idempotency_key(self) -> None:
+        from app.services.automated_control_commands import (
+            AutomatedControlCommandRequest,
+            AutomatedControlCommands,
+        )
+
+        strategy_id = UUID("70000000-0000-0000-0000-000000000011")
+        attempt_key = "e" * 64
+        self._observe(INTERLOCK_ID, True)
+        self._observe(READBACK_ID, 20.0)
+        request = AutomatedControlCommandRequest(
+            source_type="strategy",
+            subject_id=strategy_id,
+            subject_version=4,
+            action_key="power-target",
+            entity_instance_id=TARGET_ID,
+            value=20.0,
+            trigger_evidence={"frame_sequence": 42},
+            attempt_idempotency_key=attempt_key,
+        )
+
+        commands = AutomatedControlCommands(self.runtime)
+        submitted = commands.submit(request)
+        replayed = commands.submit(request)
+
+        self.assertEqual("strategy", submitted.source_type)
+        self.assertEqual(f"strategy:{strategy_id}", submitted.actor)
+        self.assertEqual(attempt_key, submitted.idempotency_key)
+        self.assertEqual(submitted.id, replayed.id)
+        self.assertEqual(1, len(self.dispatcher.requests))
+
 
 if __name__ == "__main__":
     unittest.main()

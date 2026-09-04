@@ -314,7 +314,9 @@ class StrategyRuntime:
                 "SKIPPED", "STRATEGY_NOT_ACTIVE", None, {}, None, None, None, (), (), False
             )
         snapshot = self._repository.load_snapshot(
-            revision, trigger.frame_sequence, trigger.evaluated_at
+            revision,
+            None if trigger.kind == "FIXED_TICK" else trigger.frame_sequence,
+            trigger.evaluated_at,
         )
         if state.failure_code is not None or state.runtime_health == "FAILED":
             return EvaluationResult(

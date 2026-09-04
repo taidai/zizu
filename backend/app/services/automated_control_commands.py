@@ -10,7 +10,7 @@ from uuid import UUID
 from app.services.control_commands import ControlCommand, ControlCommandRuntime, SubmitControlCommand
 
 
-AutomatedSourceType = Literal["rule", "policy"]
+AutomatedSourceType = Literal["rule", "policy", "strategy"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class AutomatedControlCommandRequest:
     value: object
     trigger_evidence: dict[str, object]
     policy_authorization: str | None = None
+    attempt_idempotency_key: str | None = None
 
 
 class AutomatedControlCommands:
@@ -34,8 +35,14 @@ class AutomatedControlCommands:
         self._runtime = runtime
 
     def submit(self, request: AutomatedControlCommandRequest) -> ControlCommand:
-        if request.source_type not in {"rule", "policy"}:
-            raise ValueError("Automatic control source must be rule or policy")
+        if request.source_type not in {"rule", "policy", "strategy"}:
+            raise ValueError("Automatic control source must be rule, policy or strategy")
+        if request.source_type == "strategy" and (
+            request.attempt_idempotency_key is None
+            or len(request.attempt_idempotency_key) != 64
+            or any(character not in "0123456789abcdef" for character in request.attempt_idempotency_key)
+        ):
+            raise ValueError("Strategy attempt idempotency key is invalid")
         if request.subject_version < 1:
             raise ValueError("Automatic control subject version must be positive")
         if not request.action_key or len(request.action_key) > 200:
@@ -110,6 +117,9 @@ def _is_unsafe_evidence_field(key: str) -> bool:
 
 
 def _idempotency_key(request: AutomatedControlCommandRequest) -> str:
+    if request.source_type == "strategy":
+        assert request.attempt_idempotency_key is not None
+        return request.attempt_idempotency_key
     evidence = _origin_evidence(request)
     fingerprint = hashlib.sha256(
         json.dumps(
