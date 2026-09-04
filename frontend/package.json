@@ -10,7 +10,8 @@
     "test:e2e:node": "playwright test e2e/node-management.spec.ts",
     "test:e2e:node:list": "playwright test e2e/node-management.spec.ts --list",
     "test:e2e:alarm-http": "playwright test e2e/alarm-http-notification.spec.ts",
-    "test:e2e:alarm-http:list": "playwright test e2e/alarm-http-notification.spec.ts --list"
+    "test:e2e:alarm-http:list": "playwright test e2e/alarm-http-notification.spec.ts --list",
+    "test:e2e:dispatch-strategy": "playwright test e2e/dispatch-strategy.spec.ts"
   },
   "dependencies": {
     "@gorules/jdm-editor": "^1.52.0",

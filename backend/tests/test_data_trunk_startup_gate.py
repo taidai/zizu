@@ -214,6 +214,28 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             self.assertNotIn("dry_run_rule", source)
             self.assertNotIn("rule_alarm_adapter", source)
 
+    def test_strategy_runtime_has_no_side_door_to_l0_or_external_effects(self) -> None:
+        backend = Path(__file__).resolve().parents[1]
+        targets = (
+            backend / "app" / "services" / "dispatch_strategies.py",
+            backend / "app" / "services" / "dispatch_strategy_postgres.py",
+            backend / "app" / "services" / "dispatch_strategy_workers.py",
+            backend / "app" / "api" / "dispatch_strategies.py",
+        )
+        forbidden = (
+            "ast.parse",
+            'content.get("when")',
+            "NeuronClient",
+            "mqtt.publish",
+            "requests.post",
+            "httpx.post",
+            "t_l0_latest",
+        )
+        for target in targets:
+            source = target.read_text(encoding="utf-8")
+            for token in forbidden:
+                self.assertNotIn(token, source, f"{target.name} bypasses strategy boundaries")
+
 
 if __name__ == "__main__":
     unittest.main()

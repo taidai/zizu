@@ -3,12 +3,12 @@
 A configuration-driven industrial IoT platform for building and delivering energy management systems.
 
 ZiZu lets an implementation engineer model physical assets, connect device points, process raw data into stable entities,
-and configure alarms, JDM decisions, control, and a fixed EMS workbench without changing platform source code or writing
+and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
 **Current version: `v0.8.4`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-> Current status: the core data trunk is implemented and alarms are being refined through field use. JDM, unified control,
+> Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
 > complete delivery-ready EMS.
 
@@ -17,7 +17,7 @@ SQL. A solar-storage-charging EMS is the first reference delivery.
 ```text
 Physical node tree → L0 raw points → L1 point processing → L2 global entities
                                                         ↓
-                                  Alarms / JDM / Control / Fixed EMS workbench
+                                  Alarms / Dispatch strategies / Control / Fixed EMS workbench
 ```
 
 | Part | Purpose | What the user sees |
@@ -26,7 +26,7 @@ Physical node tree → L0 raw points → L1 point processing → L2 global entit
 | L0 raw points | Preserves values, quality, time, and source received from equipment | Live data, history, and link health |
 | L1 point processing | Performs mapping, conversion, state decoding, composition, and typed formulas | How raw points become standard entities |
 | L2 global entities | Provides stable business semantics to every upper function | Live values, history, quality, and provenance |
-| Upper applications | Operate exclusively on L2 | Alarms, JDM, control, and the EMS workbench |
+| Upper applications | Operate exclusively on L2 | Alarms, dispatch strategies, control, and the EMS workbench |
 
 L0, L1, and L2 are three data views attached to a selected physical node, not three kinds of child node. Points, formulas,
 and entities never become physical tree levels. The normal engineering UI mainly exposes **Raw Data** and **Standard
@@ -38,7 +38,7 @@ optional for repeated equipment and is not required for the first device.
 ```text
 Device → Neuron → NanoMQ → real-time blackboard → committed frame → L1 → committed L2
                                                                             ↓
-                                                        Alarms / JDM / Control / UI
+                                                        Alarms / Dispatch strategies / Control / UI
 ```
 
 - One active ingestion writer runs per site; the in-process blackboard freezes immutable frames on a default one-second tick.
@@ -54,8 +54,8 @@ Device → Neuron → NanoMQ → real-time blackboard → committed frame → L1
 |---|---|
 | Nodes and data | Physical-node CRUD, Neuron point import, L0 live/history, link diagnosis, processing, and L2 live/history/provenance |
 | Alarms | L2 rules, severity, trigger and recovery, multi-code faults, acknowledgement, history, HTTP notifications, and delivery records |
-| JDM | GoRules decision graphs and tables with L2 inputs and decision or control-intent outputs |
-| Control | One safe path for human and JDM intent, one L0 write point, and confirmation through new L2 readback |
+| Dispatch strategies | Bind L2, configure 2-charge/2-discharge, simulate, publish, enable/disable, and inspect decisions, intents, and readback |
+| Control | One safe path for human and strategy intent, one L0 write point, and confirmation through new L2 readback |
 | EMS workbench | Energy flow, power, SOC, trends, and alarms organized by node type and standard L2 semantics |
 | System tools | MQTT, HTTP notifications, runtime health, and administrator configuration |
 
@@ -102,7 +102,9 @@ template only when a second device of the same kind needs it.
 ### 4. Configure upper applications
 
 - In Alarms, select L2 entities and configure severity, trigger, recovery, and duration; bind an HTTP notification when needed.
-- In JDM, use L2 as decision inputs; simulation and production execution use the same versioned model.
+- In **Dispatch Strategies**, create a 2-charge/2-discharge strategy, bind the SOC input L2 and power-control L2, then enter four windows, targets, SOC bounds, and the mandatory safe target for all other times.
+- Simulate first and inspect snapshot evidence, the matched row, and proposed intent. Simulation never writes a device. Publish an immutable revision, enable it separately, inspect event/control readback, and disable it when required.
+- Standard GoRules JDM is the sole internal execution semantics. The easy table and **Open Full Rule Graph** edit the same JDM document; there is no second rule or action model.
 - For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
 - Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
 
@@ -112,7 +114,7 @@ Accept the system along one fixed path:
 
 ```text
 Node → L0 live/history → L1 check and publish → L2 live/history/provenance
-     → Alarm → JDM → Control readback → EMS workbench
+     → Alarm → Dispatch strategy → Control readback → EMS workbench
 ```
 
 Lock the platform version, image digest, database Schema, template digests, and configuration revision. Verify backup and
@@ -193,6 +195,7 @@ After configuring the target URL and test identity, run headless acceptance:
 cd frontend
 npm run test:e2e:node
 npm run test:e2e:alarm-http
+npm run test:e2e:dispatch-strategy
 ```
 
 Before a commit or release, follow the [acceptance checklist](docs/acceptance-checklist.md) and exercise

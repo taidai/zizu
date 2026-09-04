@@ -192,45 +192,165 @@ def setup() -> dict[str, Any]:
     return {"status": "ready", "resources": asdict(names)}
 
 
-def ensure_rule() -> dict[str, Any]:
+def _safe_dispatch_jdm(target: int | float) -> dict[str, Any]:
+    rows = []
+    for key, start, end, action in (
+        ("charge-1", 0, 360, "CHARGE"),
+        ("discharge-1", 600, 720, "DISCHARGE"),
+        ("charge-2", 720, 840, "CHARGE"),
+        ("discharge-2", 1080, 1320, "DISCHARGE"),
+    ):
+        rows.append({
+            "_id": key,
+            "site_local_minute": f"site_local_minute >= {start} && site_local_minute < {end}",
+            "soc": "soc >= 0 && soc <= 100",
+            "action_id": json.dumps("power-target"),
+            "target": target,
+            "matched_rule": json.dumps(key),
+            "_description": action,
+        })
+    rows.append({
+        "_id": "other-time",
+        "site_local_minute": "1 == 1",
+        "soc": "1 == 1",
+        "action_id": json.dumps("power-target"),
+        "target": target,
+        "matched_rule": json.dumps("other-time"),
+        "_description": "HOLD",
+    })
+    return {
+        "nodes": [
+            {"id": "input", "type": "inputNode", "name": "Input"},
+            {
+                "id": "schedule",
+                "type": "decisionTableNode",
+                "name": "2充2放",
+                "content": {
+                    "hitPolicy": "first",
+                    "inputs": [
+                        {"id": "site_local_minute", "name": "场站本地分钟", "type": "expression", "field": "site_local_minute"},
+                        {"id": "soc", "name": "SOC", "type": "expression", "field": "soc"},
+                    ],
+                    "outputs": [
+                        {"id": "action_id", "name": "动作标识", "type": "expression", "field": "action_id"},
+                        {"id": "target", "name": "功率目标", "type": "expression", "field": "target"},
+                        {"id": "matched_rule", "name": "命中行", "type": "expression", "field": "matched_rule"},
+                    ],
+                    "rules": rows,
+                },
+            },
+            {"id": "output", "type": "outputNode", "name": "Output"},
+        ],
+        "edges": [
+            {"id": "input-schedule", "sourceId": "input", "targetId": "schedule", "type": "edge"},
+            {"id": "schedule-output", "sourceId": "schedule", "targetId": "output", "type": "edge"},
+        ],
+    }
+
+
+def ensure_strategy() -> dict[str, Any]:
     names = _environment_names()
     token = _token()
-    rule_name = f"E2E规则-{os.environ['ZIZU_E2E_RUN_ID']}"
-    rules = _request("GET", "/rules", token=token).get("rules", [])
-    existing = next((rule for rule in rules if rule.get("name") == rule_name), None)
+    strategy_name = f"E2E调度-{os.environ['ZIZU_E2E_RUN_ID']}"
+    strategies = _request("GET", "/dispatch-strategies", token=token).get("strategies", [])
+    existing = next((item for item in strategies if item.get("name") == strategy_name), None)
     if existing is not None:
-        return {"status": "existing", "rule_id": str(existing["id"]), "rule_name": rule_name}
+        if existing.get("enabled"):
+            _request("POST", f"/dispatch-strategies/{existing['id']}/disable", token=token)
+        return {"status": "existing", "strategy_id": str(existing["id"]), "strategy_name": strategy_name}
 
     edited_node_name = f"{names.platform_node}-已编辑"
     entities = _request("GET", "/entity-instances", token=token).get("items", [])
-    matches = [
+    inputs = [
         entity for entity in entities
         if entity.get("node_display_name") == edited_node_name
+        and str(entity.get("data_type", "")).upper() in {"FLOAT", "INT"}
+        and entity.get("direction") in {"R", "RW"}
+        and entity.get("confirmed") is True
     ]
-    if len(matches) != 1:
+    if len(inputs) != 1:
         raise RuntimeError(
-            f"expected exactly one E2E entity for {edited_node_name}, found {len(matches)}"
+            f"expected exactly one numeric E2E input for {edited_node_name}, found {len(inputs)}"
         )
-    entity_id = str(matches[0]["id"])
+    output_id = os.environ.get("ZIZU_E2E_STRATEGY_OUTPUT_ID", "").strip()
+    outputs = [entity for entity in entities if str(entity.get("id")) == output_id]
+    if len(outputs) != 1 or outputs[0].get("direction") not in {"W", "RW"} or outputs[0].get("confirmed") is not True:
+        raise RuntimeError("ZIZU_E2E_STRATEGY_OUTPUT_ID must name one confirmed controllable L2 entity")
+    output_realtime = _request("GET", f"/entity-instances/{output_id}/realtime", token=token)
+    if output_realtime.get("fresh") is not True or output_realtime.get("quality_good") is not True:
+        raise RuntimeError("strategy fixture output must have fresh GOOD readback")
+    target = output_realtime.get("value")
+    if isinstance(target, bool) or not isinstance(target, (int, float)):
+        raise RuntimeError("strategy fixture output readback must be numeric")
     created = _request(
         "POST",
-        "/rules",
+        "/dispatch-strategies",
+        token=token,
+        body={"name": strategy_name, "starter": "two_charge_two_discharge"},
+    )
+    strategy_id = str(created["id"])
+    draft = created.get("draft") or {}
+    input_entity = inputs[0]
+    output_entity = outputs[0]
+    saved = _request(
+        "PUT",
+        f"/dispatch-strategies/{strategy_id}/draft",
         token=token,
         body={
-            "name": rule_name,
-            "rule_type": "control",
-            "enabled": False,
-            "jdm_content": {
-                "when": "e2e_source > 1e308",
-                "_config": {
-                    "sourceEntityInstanceIds": [entity_id],
-                    "inputMappings": {"e2e_source": entity_id},
-                    "actions": [],
+            "expected_digest": draft["content_digest"],
+            "name": strategy_name,
+            "trigger_kind": "FIXED_TICK",
+            "site_timezone": "Asia/Shanghai",
+            "base_configuration_revision": draft["base_configuration_revision"],
+            "jdm_content": _safe_dispatch_jdm(target),
+            "bindings": [
+                {
+                    "direction": "INPUT",
+                    "binding_key": "soc",
+                    "ordinal": 0,
+                    "entity_instance_id": str(input_entity["id"]),
+                    "expected_data_type": str(input_entity["data_type"]).upper(),
+                    "unit": input_entity.get("unit"),
+                    "freshness_seconds": input_entity["freshness_seconds"],
                 },
-            },
+                {
+                    "direction": "OUTPUT",
+                    "binding_key": "power-target",
+                    "ordinal": 0,
+                    "entity_instance_id": output_id,
+                    "expected_data_type": str(output_entity["data_type"]).upper(),
+                    "unit": output_entity.get("unit"),
+                    "freshness_seconds": output_entity["freshness_seconds"],
+                },
+            ],
         },
     )
-    return {"status": "created", "rule_id": str(created["id"]), "rule_name": rule_name}
+    saved_draft = saved["draft"]
+    simulation = _request(
+        "POST",
+        f"/dispatch-strategies/{strategy_id}/simulate",
+        token=token,
+        body={"revision_id": saved_draft["id"], "overrides": {"soc": 50}},
+    )
+    if simulation.get("status") != "EVALUATED" or simulation.get("proposed_intents") != []:
+        raise RuntimeError("strategy fixture refuses enable unless simulation is a no-op")
+    published = _request(
+        "POST",
+        f"/dispatch-strategies/{strategy_id}/publish",
+        token=token,
+        body={
+            "expected_digest": saved_draft["content_digest"],
+            "configuration_revision": saved_draft["base_configuration_revision"],
+        },
+    )
+    _request(
+        "POST",
+        f"/dispatch-strategies/{strategy_id}/enable",
+        token=token,
+        body={"revision_id": published["id"]},
+    )
+    _request("POST", f"/dispatch-strategies/{strategy_id}/disable", token=token)
+    return {"status": "verified", "strategy_id": strategy_id, "strategy_name": strategy_name}
 
 
 def publish(point_key: str, value: int | float | str | bool) -> dict[str, Any]:
@@ -453,12 +573,12 @@ def cleanup() -> dict[str, Any]:
         token,
         os.environ["ZIZU_E2E_RUN_ID"],
     )
-    retired_rules = 0
-    rule_name = f"E2E规则-{os.environ['ZIZU_E2E_RUN_ID']}"
-    for rule in _request("GET", "/rules", token=token).get("rules", []):
-        if rule.get("name") == rule_name:
-            _request("DELETE", f"/rules/{rule['id']}", token=token)
-            retired_rules += 1
+    disabled_strategies = 0
+    strategy_name = f"E2E调度-{os.environ['ZIZU_E2E_RUN_ID']}"
+    for strategy in _request("GET", "/dispatch-strategies", token=token).get("strategies", []):
+        if strategy.get("name") == strategy_name and strategy.get("enabled"):
+            _request("POST", f"/dispatch-strategies/{strategy['id']}/disable", token=token)
+            disabled_strategies += 1
 
     nodes = _request("GET", "/nodes", token=token).get("nodes", [])
     by_id = {str(item["id"]): item for item in nodes}
@@ -479,7 +599,7 @@ def cleanup() -> dict[str, Any]:
         "status": "clean",
         "neuron_node": names.neuron_node,
         "retired_nodes": len(targets),
-        "retired_rules": retired_rules,
+        "disabled_strategies": disabled_strategies,
         "retired_templates": retired_templates,
     }
 
@@ -488,7 +608,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("preflight", "setup", "publish", "ensure-rule", "cleanup"),
+        choices=("preflight", "setup", "publish", "ensure-strategy", "cleanup"),
     )
     parser.add_argument("--point-key", default="e2e_active_power")
     parser.add_argument("--value-json", default="12.5")
@@ -499,7 +619,7 @@ def main() -> int:
         "preflight": preflight,
         "setup": setup,
         "publish": lambda: publish(arguments.point_key, _parse_scalar(arguments.value_json)),
-        "ensure-rule": ensure_rule,
+        "ensure-strategy": ensure_strategy,
         "cleanup": cleanup,
     }[arguments.command]
     print(json.dumps(action(), ensure_ascii=False))

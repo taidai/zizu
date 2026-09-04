@@ -7,7 +7,7 @@ from scripts.node_management_e2e_fixture import (
     build_neuron_tags,
     build_resource_names,
     build_telemetry_payload,
-    ensure_rule,
+    ensure_strategy,
     publish,
     setup,
 )
@@ -79,26 +79,47 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
     )
     @patch("scripts.node_management_e2e_fixture._request")
     @patch("scripts.node_management_e2e_fixture._token", return_value="token")
-    def test_rule_fixture_is_disabled_and_has_no_actions(
+    def test_strategy_fixture_uses_standard_lifecycle_and_disables_after_safe_simulation(
         self,
         _token: MagicMock,
         request: MagicMock,
     ) -> None:
         request.side_effect = [
-            {"rules": []},
-            {"items": [{"id": "entity-1", "node_display_name": "E2E验证-设备-run-20260831-13-已编辑"}]},
-            {"id": "rule-1", "name": "E2E规则-run-20260831-13", "enabled": False},
+            {"strategies": []},
+            {"items": [
+                {"id": "entity-input", "node_display_name": "E2E验证-设备-run-20260831-13-已编辑", "data_type": "FLOAT", "unit": "%", "freshness_seconds": 30, "direction": "R", "confirmed": True},
+                {"id": "entity-output", "node_display_name": "PCS", "data_type": "FLOAT", "unit": "kW", "freshness_seconds": 10, "direction": "RW", "confirmed": True},
+            ]},
+            {"value": 156.8, "fresh": True, "quality_good": True},
+            {"id": "strategy-1", "draft": {"id": "draft-1", "content_digest": "a" * 64, "base_configuration_revision": 7}},
+            {"id": "strategy-1", "draft": {"id": "draft-1", "content_digest": "b" * 64, "base_configuration_revision": 7}},
+            {"status": "EVALUATED", "proposed_intents": []},
+            {"id": "published-1", "lifecycle": "PUBLISHED"},
+            {"id": "strategy-1", "enabled": True},
+            {"id": "strategy-1", "enabled": False},
         ]
 
-        result = ensure_rule()
+        with patch.dict("os.environ", {"ZIZU_E2E_STRATEGY_OUTPUT_ID": "entity-output"}):
+            result = ensure_strategy()
 
-        self.assertEqual("rule-1", result["rule_id"])
-        create_call = request.call_args_list[-1]
-        self.assertEqual("POST", create_call.args[0])
-        self.assertEqual("/rules", create_call.args[1])
-        body = create_call.kwargs["body"]
-        self.assertFalse(body["enabled"])
-        self.assertEqual([], body["jdm_content"]["_config"]["actions"])
+        self.assertEqual("strategy-1", result["strategy_id"])
+        paths = [(call.args[0], call.args[1]) for call in request.call_args_list]
+        self.assertEqual([
+            ("GET", "/dispatch-strategies"),
+            ("GET", "/entity-instances"),
+            ("GET", "/entity-instances/entity-output/realtime"),
+            ("POST", "/dispatch-strategies"),
+            ("PUT", "/dispatch-strategies/strategy-1/draft"),
+            ("POST", "/dispatch-strategies/strategy-1/simulate"),
+            ("POST", "/dispatch-strategies/strategy-1/publish"),
+            ("POST", "/dispatch-strategies/strategy-1/enable"),
+            ("POST", "/dispatch-strategies/strategy-1/disable"),
+        ], paths)
+        save_body = request.call_args_list[4].kwargs["body"]
+        self.assertEqual({"nodes", "edges"}, set(save_body["jdm_content"]))
+        self.assertEqual("decisionTableNode", save_body["jdm_content"]["nodes"][1]["type"])
+        self.assertEqual("power-target", save_body["bindings"][1]["binding_key"])
+        self.assertEqual(156.8, save_body["jdm_content"]["nodes"][1]["content"]["rules"][-1]["target"])
 
     def test_resource_names_are_deterministic_and_namespaced(self) -> None:
         names = build_resource_names("E2E验证", "20260830T120000Z")

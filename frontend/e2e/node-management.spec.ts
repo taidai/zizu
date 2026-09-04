@@ -265,7 +265,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText(/source_digest:/)).toBeVisible()
   })
 
-  test('L1 模板可维护、升级、停用再恢复，规则可指定再取消且不会执行', async () => {
+  test('L1 模板可维护、升级、停用再恢复', async () => {
     test.setTimeout(300_000)
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await page.getByRole('button', { name: '保存为共享模板', exact: true }).click()
@@ -344,27 +344,6 @@ test.describe.serial('节点管理主干', () => {
       '17.5',
     )
 
-    await fixture('ensure-rule')
-    await page.getByRole('button', { name: '刷新', exact: true }).click()
-    await page.getByRole('button', { name: '指定规则', exact: true }).click()
-    let modal = nodeModal(page, '为节点指定规则')
-    const ruleName = `E2E规则-${environment.runId}`
-    const e2eRule = modal.locator('label').filter({ hasText: ruleName }).getByRole('checkbox')
-    await expect(e2eRule).toBeVisible()
-    await e2eRule.check()
-    await modal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(page.getByText('已绑定规则:', { exact: true })).toBeVisible({
-      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
-    })
-    await expect(page.getByText(ruleName, { exact: true })).toBeVisible()
-
-    await page.getByRole('button', { name: '指定规则', exact: true }).click()
-    modal = nodeModal(page, '为节点指定规则')
-    await modal.locator('label').filter({ hasText: ruleName }).getByRole('checkbox').uncheck()
-    await modal.getByRole('button', { name: '保存', exact: true }).click()
-    await expect(page.getByText('已绑定规则:', { exact: true })).toBeHidden({
-      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
-    })
   })
 
   test('BIT 原值 0/1/2 沿 L0、点位加工、L2 到告警选择保持明确', async () => {

@@ -9,7 +9,7 @@ import {
 
 const execFileAsync = promisify(execFile)
 
-export type FixtureCommand = 'preflight' | 'setup' | 'ensure-rule' | 'cleanup'
+export type FixtureCommand = 'preflight' | 'setup' | 'ensure-strategy' | 'cleanup'
 export type FixtureScalar = number | string | boolean
 
 export function fixtureTimeoutMs(command: FixtureCommand | 'publish'): number {
