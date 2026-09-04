@@ -2634,3 +2634,17 @@ export async function retryAlarmNotificationDelivery(
   }
   return response.json()
 }
+
+export async function deleteAlarmNotificationDeliveries(
+  deliveryIds: string[],
+): Promise<{ deleted: number }> {
+  const response = await apiFetch(`${ALARM_NOTIFICATION_DELIVERY_PATH}/deletions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delivery_ids: deliveryIds }),
+  })
+  if (!response.ok) {
+    throw await alarmHttpNotificationError(response, `删除通知记录失败：${response.status}`)
+  }
+  return response.json()
+}

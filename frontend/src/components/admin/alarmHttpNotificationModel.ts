@@ -123,6 +123,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   HTTP_NOTIFICATION_DELIVERY_REJECTED: '目标服务拒绝了请求，请检查地址和请求内容。',
   HTTP_NOTIFICATION_DELIVERY_TIMEOUT: '目标服务响应超时，请检查网络或适当增大超时秒数。',
   HTTP_NOTIFICATION_DELIVERY_NETWORK_ERROR: '无法连接目标服务，请检查网络和地址。',
+  HTTP_NOTIFICATION_DELIVERY_NOT_TERMINAL: '发送中的通知记录不能删除，请等待发送结束。',
+  HTTP_NOTIFICATION_DELIVERY_NOT_FOUND: '通知记录不存在或已被删除。',
+  HTTP_NOTIFICATION_DELIVERY_SELECTION_INVALID: '请选择 1 至 200 条互不重复的通知记录。',
 }
 
 export function describeHttpNotificationError(code: string | null | undefined): string {

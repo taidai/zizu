@@ -477,6 +477,81 @@ class AlarmHttpNotificationPostgresTest(unittest.TestCase):
             )
         self.assertEqual("HTTP_NOTIFICATION_NOT_FOUND", missing.exception.code)
 
+    def test_delete_terminal_deliveries_removes_attempts_atomically(self) -> None:
+        first_id, _config_id, now = self._seed_delivery()
+        second_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_alarm_notification_outbox SET status='failed' WHERE id=%s",
+                (first_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_attempts
+                  (id,notification_id,attempt_no,attempted_at,method,target_display,
+                   duration_ms,outcome)
+                VALUES (%s,%s,1,%s,'POST','https://receiver.invalid/***',1,'rejected')
+                """,
+                (uuid4(), first_id, now),
+            )
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_outbox
+                  (id,event_id,definition_id,entity_instance_id,created_at,status,
+                   attempt_count,cycle_attempt_count,next_attempt_at)
+                SELECT %s,%s,definition_id,%s,%s,'cancelled',0,0,%s
+                FROM t_alarm_notification_outbox WHERE id=%s
+                """,
+                (second_id, uuid4(), uuid4(), now, now, first_id),
+            )
+
+        deleted = self.repository.delete_deliveries(
+            (first_id, second_id), "engineer:test"
+        )
+
+        self.assertEqual(2, deleted)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_alarm_notification_outbox WHERE id=ANY(%s)",
+                ([first_id, second_id],),
+            )
+            self.assertEqual(0, cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT count(*) FROM t_alarm_notification_attempts WHERE notification_id=%s",
+                (first_id,),
+            )
+            self.assertEqual(0, cursor.fetchone()[0])
+
+    def test_delete_rejects_unfinished_delivery_without_deleting_anything(self) -> None:
+        pending_id, _config_id, _now = self._seed_delivery()
+        terminal_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO t_alarm_notification_outbox
+                  (id,event_id,definition_id,entity_instance_id,created_at,status,
+                   attempt_count,cycle_attempt_count,next_attempt_at)
+                SELECT %s,%s,definition_id,%s,created_at,'delivered',0,0,next_attempt_at
+                FROM t_alarm_notification_outbox WHERE id=%s
+                """,
+                (terminal_id, uuid4(), uuid4(), pending_id),
+            )
+
+        with self.assertRaises(HttpNotificationError) as raised:
+            self.repository.delete_deliveries(
+                (terminal_id, pending_id), "engineer:test"
+            )
+
+        self.assertEqual(
+            "HTTP_NOTIFICATION_DELIVERY_NOT_TERMINAL", raised.exception.code
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM t_alarm_notification_outbox WHERE id=ANY(%s)",
+                ([terminal_id, pending_id],),
+            )
+            self.assertEqual(2, cursor.fetchone()[0])
+
 
 if __name__ == "__main__":
     unittest.main()

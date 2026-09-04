@@ -45,3 +45,17 @@ export function canRetryDelivery(delivery: {
 }): boolean {
   return delivery.status === 'failed' && delivery.configuration_exists
 }
+
+export function canDeleteDelivery(delivery: { status: string }): boolean {
+  return ['delivered', 'failed', 'cancelled'].includes(delivery.status)
+}
+
+export function deletableDeliveryIds(
+  deliveries: Array<{ id: string; status: string }>,
+): string[] {
+  return deliveries.filter(canDeleteDelivery).map((delivery) => delivery.id)
+}
+
+export function validDeliveryPage(requestedPage: number, totalPages: number): number {
+  return Math.max(1, Math.min(requestedPage, totalPages))
+}

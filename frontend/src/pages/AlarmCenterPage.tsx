@@ -289,7 +289,7 @@ export default function AlarmCenterPage({ actorId, canConfigure }: { actorId: st
       {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>告警规则</button>}
     </div>
     {tab === 'events' && <CurrentAlarmView canArchive={canConfigure} />}
-    {tab === 'notifications' && <AlarmNotificationRecords canRetry={canConfigure} />}
+    {tab === 'notifications' && <AlarmNotificationRecords canManage={canConfigure} />}
     {tab === 'rules' && canConfigure && <MinimalAlarmRulesPage key={actorId} />}
   </div>
 }

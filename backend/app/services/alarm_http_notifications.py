@@ -262,6 +262,12 @@ class AlarmHttpNotificationRepository(Protocol):
         idempotency_key: str,
     ) -> dict[str, object]: ...
 
+    def delete_deliveries(
+        self,
+        notification_ids: tuple[UUID, ...],
+        actor: str,
+    ) -> int: ...
+
 
 class AlarmDeliveryRepository(Protocol):
     def claim_due(
@@ -422,6 +428,13 @@ class AlarmHttpNotifications:
             actor,
             idempotency_key,
         )
+
+    def delete_deliveries(
+        self,
+        notification_ids: tuple[UUID, ...],
+        actor: str,
+    ) -> int:
+        return self._repository.delete_deliveries(notification_ids, actor)
 
 
 class AlarmHttpNotificationDispatcher:

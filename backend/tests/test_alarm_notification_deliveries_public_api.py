@@ -43,6 +43,7 @@ class _FakeHttpNotifications:
             "attempts": [],
         }
         self.last_retry = None
+        self.last_delete = None
 
     def list_deliveries(self, *, page: int, page_size: int):
         return {
@@ -56,6 +57,10 @@ class _FakeHttpNotifications:
     def retry(self, notification_id: UUID, actor: str, idempotency_key: str):
         self.last_retry = (notification_id, actor, idempotency_key)
         return {**self.item, "status": "pending"}
+
+    def delete_deliveries(self, notification_ids: tuple[UUID, ...], actor: str):
+        self.last_delete = (notification_ids, actor)
+        return len(notification_ids)
 
 
 class AlarmNotificationDeliveriesPublicApiTest(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +114,54 @@ class AlarmNotificationDeliveriesPublicApiTest(unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(403, response.status_code, response.text)
         self.assertIsNone(self.service.last_retry)
+
+    async def test_engineer_can_delete_one_terminal_delivery(self) -> None:
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client._client.delete(
+                f"/api/v1/alarms/notification-deliveries/{DELIVERY_ID}",
+                headers={"Authorization": await client._bearer("engineer")},
+            )
+
+        self.assertEqual(204, response.status_code, response.text)
+        self.assertEqual((DELIVERY_ID,), self.service.last_delete[0])
+        self.assertEqual(
+            "user:00000000-0000-0000-0000-000000000002",
+            self.service.last_delete[1],
+        )
+
+    async def test_engineer_can_delete_selected_deliveries_in_one_request(self) -> None:
+        second_id = UUID("00000000-0000-0000-0000-000000000303")
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.post(
+                "/api/v1/alarms/notification-deliveries/deletions",
+                json={"delivery_ids": [str(DELIVERY_ID), str(second_id)]},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual({"deleted": 2}, response.json())
+        self.assertEqual((DELIVERY_ID, second_id), self.service.last_delete[0])
+
+    async def test_batch_delete_rejects_more_than_two_hundred_ids(self) -> None:
+        ids = [str(UUID(int=value)) for value in range(1, 202)]
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.post(
+                "/api/v1/alarms/notification-deliveries/deletions",
+                json={"delivery_ids": ids},
+            )
+
+        self.assertEqual(422, response.status_code, response.text)
+        self.assertIsNone(self.service.last_delete)
+
+    async def test_operator_cannot_delete_delivery_history(self) -> None:
+        async with AuthenticatedApiClient(self.app) as client:
+            headers = {"Authorization": await client._bearer("operator")}
+            response = await client._client.delete(
+                f"/api/v1/alarms/notification-deliveries/{DELIVERY_ID}",
+                headers=headers,
+            )
+
+        self.assertEqual(403, response.status_code, response.text)
+        self.assertIsNone(self.service.last_delete)
 
 
 if __name__ == "__main__":

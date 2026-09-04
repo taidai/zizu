@@ -537,6 +537,50 @@ class PostgresAlarmHttpNotificationRepository:
             )
         return response
 
+    def delete_deliveries(
+        self,
+        notification_ids: tuple[UUID, ...],
+        actor: str,
+    ) -> int:
+        self._require_actor(actor)
+        if (
+            not 1 <= len(notification_ids) <= 200
+            or len(set(notification_ids)) != len(notification_ids)
+        ):
+            raise HttpNotificationError(
+                "HTTP_NOTIFICATION_DELIVERY_SELECTION_INVALID",
+                "Select between 1 and 200 distinct notification deliveries",
+            )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id,status
+                FROM t_alarm_notification_outbox
+                WHERE id=ANY(%s)
+                FOR UPDATE
+                """,
+                (list(notification_ids),),
+            )
+            rows = cursor.fetchall()
+            if len(rows) != len(notification_ids):
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_DELIVERY_NOT_FOUND",
+                    "HTTP notification delivery was not found",
+                )
+            if any(
+                row[1] not in {"delivered", "failed", "cancelled"}
+                for row in rows
+            ):
+                raise HttpNotificationError(
+                    "HTTP_NOTIFICATION_DELIVERY_NOT_TERMINAL",
+                    "Only completed notification deliveries can be deleted",
+                )
+            cursor.execute(
+                "DELETE FROM t_alarm_notification_outbox WHERE id=ANY(%s)",
+                (list(notification_ids),),
+            )
+            return cursor.rowcount
+
     def claim_due(
         self,
         *,

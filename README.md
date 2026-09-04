@@ -540,6 +540,8 @@ zizu/
 | GET | `/api/v1/alarm-http-notification-options` | admin/engineer 读取规则通知选项；仅返回 id、name、status（available / disabled / needs_test），不返回请求配置或密钥 |
 | GET | `/api/v1/alarms/notification-deliveries` | operator 及以上查看发生/恢复通知的脱敏发送记录与逐次尝试 |
 | POST | `/api/v1/alarms/notification-deliveries/{id}/retry` | engineer/admin 携带 `Idempotency-Key` 手工重发终态失败通知 |
+| DELETE | `/api/v1/alarms/notification-deliveries/{id}` | engineer/admin 永久删除一条已结束通知及其发送尝试；发送中任务拒绝删除 |
+| POST | `/api/v1/alarms/notification-deliveries/deletions` | engineer/admin 在一个事务内永久删除 1–200 条已结束通知及其发送尝试，正文为 `delivery_ids` |
 | GET | `/api/v1/alarm-configuration-applications/latest/acceptance-progress` | 只读观察最新已应用告警配置的逐定义验收进度，不生成报告 |
 | POST | `/api/v1/alarm-configuration-applications/{id}/acceptance` | 以 `Idempotency-Key` 为已完整证据生成不可变告警配置验收报告 |
 | GET | `/api/v1/alarm-configuration-reports/{id}` | 读取包含事件、转换时间线、确认审计、站点版本与摘要的不可变报告 |
