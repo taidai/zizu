@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from scripts.node_management_e2e_fixture import (
     _mqtt_host,
+    _publish_via_ssh,
     _retire_run_templates,
     build_neuron_tags,
     build_resource_names,
@@ -14,6 +15,18 @@ from scripts.node_management_e2e_fixture import (
 
 
 class NodeManagementE2EFixtureTest(unittest.TestCase):
+    @patch("scripts.node_management_e2e_fixture._run_backend_script_via_ssh")
+    def test_ssh_publish_keeps_samples_good_across_multiple_frame_beats(
+        self,
+        run_backend_script: MagicMock,
+    ) -> None:
+        _publish_via_ssh("/neuron/e2e/telemetry", {"timestamp": 1, "tags": {"x": 1}})
+
+        remote_script = run_backend_script.call_args.args[0]
+        self.assertIn("for _ in range(16):", remote_script)
+        self.assertIn("payload['timestamp'] = int(time.time() * 1000)", remote_script)
+        self.assertIn("time.sleep(0.25)", remote_script)
+
     @patch("scripts.node_management_e2e_fixture._request")
     def test_cleanup_retires_only_the_current_run_shared_template(
         self,

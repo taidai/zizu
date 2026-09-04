@@ -368,6 +368,10 @@ test.describe.serial('节点管理主干', () => {
     await editor.getByLabel('实体名称').fill(bitEntityDisplayName)
     await editor.getByText('高级设置', { exact: true }).click()
     await editor.getByLabel('业务标识').fill(bitEntityDefinitionKey)
+    // Live acceptance publishes through an SSH hop into the private MQTT bus.
+    // Keep the test entity fresh long enough for that transport and the next
+    // committed frame; production freshness semantics remain unchanged.
+    await editor.getByLabel('超时秒数').fill('30')
     await editor.getByRole('button', { name: '检查结果', exact: true }).click()
     await expect(editor.getByText('检查通过，可以发布。', { exact: true })).toBeVisible()
     await expect(editor.getByText('当前试算结果', { exact: true })).toBeVisible()
@@ -407,7 +411,9 @@ test.describe.serial('节点管理主干', () => {
     const trialButton = page.getByRole('button', { name: '试算', exact: true })
     await expect(alarmEntity).toBeVisible()
     await expect(trialButton).toBeDisabled()
-    await expect(page.getByRole('status')).toHaveText('请先在第 1 步勾选一个实体。')
+    await expect(
+      page.getByRole('status').filter({ hasText: '请先在第 1 步勾选一个实体。' }),
+    ).toHaveText('请先在第 1 步勾选一个实体。')
 
     await alarmEntity.getByRole('checkbox').check()
     await expect(page.getByLabel('触发值')).toHaveValue('true')

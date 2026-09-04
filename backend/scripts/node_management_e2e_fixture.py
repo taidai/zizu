@@ -411,11 +411,15 @@ def _publish_via_ssh(topic: str, payload: dict[str, Any]) -> None:
     """Publish inside the server because NanoMQ is intentionally not public."""
     remote_script = (
         "import json\n"
+        "import time\n"
         "from paho.mqtt import publish\n"
         f"topic = {topic!r}\n"
         f"payload = json.loads({json.dumps(json.dumps(payload, ensure_ascii=False))})\n"
-        "publish.single(topic, json.dumps(payload, ensure_ascii=False), "
+        "for _ in range(16):\n"
+        "    payload['timestamp'] = int(time.time() * 1000)\n"
+        "    publish.single(topic, json.dumps(payload, ensure_ascii=False), "
         "hostname='127.0.0.1', port=1883, qos=1)\n"
+        "    time.sleep(0.25)\n"
     )
     _run_backend_script_via_ssh(remote_script)
 
