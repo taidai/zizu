@@ -217,7 +217,7 @@ Before a commit or release, follow the [acceptance checklist](docs/acceptance-ch
 - [Domain language](CONTEXT.md)
 - [Architecture decision records](docs/adr/)
 - [Acceptance checklist](docs/acceptance-checklist.md)
-- [v0.8.3 field deployment record](docs/deploy-1号机-v0.8.3-http.md)
+- [v0.8.4 field deployment record](docs/deploy-1号机-v0.8.4-http.md)
 
 If documents disagree, read them in this order: core architecture specification, latest accepted ADR, current subsystem
 specification, then historical records.

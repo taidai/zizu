@@ -207,7 +207,7 @@ npm run test:e2e:alarm-http
 - [领域术语](CONTEXT.md)
 - [架构决策记录](docs/adr/)
 - [验收清单](docs/acceptance-checklist.md)
-- [v0.8.3 现场部署记录](docs/deploy-1号机-v0.8.3-http.md)
+- [v0.8.4 现场部署记录](docs/deploy-1号机-v0.8.4-http.md)
 
 文档冲突时，解释顺序为：核心架构总纲 → 最新 accepted ADR → 当前专项规格 → 历史记录。
 
