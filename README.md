@@ -4,9 +4,9 @@
 >
 > **简单配置即可交付工业控制系统** — 替代 ThingsBoard 的轻量级方案。
 >
-> 1 号机当前运行版本：**v0.7.7**；下一版本待定。产品主线已经收口为节点、L0 原始数据、L1 数据来源与计算、L2 标准实体和只消费 L2 的告警/JDM/控制/EMS 工作台。发布状态与现场证据以最新 `docs/deploy-1号机-*.md` 为准。
+> 1 号机当前运行版本：**v0.8.3**。产品主线已经收口为节点、L0 原始数据、L1 数据来源与计算、L2 标准实体和只消费 L2 的告警/JDM/控制/EMS 工作台。发布状态与现场证据以最新 `docs/deploy-1号机-*.md` 为准。
 >
-> 唯一现行架构入口：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。README 后部仍含历史接口说明时，以总纲、最新 accepted ADR 与当前源码为准。
+> 中英文技术概览：[《ZiZu 技术架构说明 / Technical Architecture》](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)。唯一现行设计依据：[《ZiZu 配置型工业 IoT 平台核心架构总纲》](docs/superpowers/specs/2026-08-27-zizu-platform-core-architecture-design.md)。README 后部仍含历史接口说明时，以总纲、最新 accepted ADR 与当前源码为准。
 
 **中文** | [English](README_EN.md) | [官网 www.holoems.com](https://www.holoems.com)
 

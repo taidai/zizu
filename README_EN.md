@@ -3,6 +3,8 @@
 > Self-hosted IoT Platform · Open-source Industrial IoT Low-code Platform
 >
 > **Deliver industrial control systems with simple configuration** — A lightweight alternative to ThingsBoard.
+>
+> Current field baseline: **v0.8.3**. See the bilingual [ZiZu Technical Architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md) for the current product and runtime model. Where older sections of this README disagree, the core architecture specification, latest accepted ADRs, and current source code take precedence.
 
 [中文](README.md) | **English** | [官网 www.holoems.com](https://www.holoems.com)
 
