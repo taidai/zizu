@@ -241,6 +241,55 @@ class AlarmConfigurationL2PostgresTest(unittest.TestCase):
 
         self.assertEqual("ALARM_RULE_SET_ACTIVE", str(raised.exception))
 
+    def test_ready_plan_cannot_apply_after_rule_set_is_archived(self) -> None:
+        service = AlarmConfiguration(
+            PostgresAlarmConfigurationRepository(
+                lambda: psycopg2.connect(**self.kwargs)
+            )
+        )
+        revision = service.create_rule_set(
+            key="archive-ready-plan",
+            name="待发布后归档",
+            rules=(
+                AlarmRule(
+                    "high",
+                    "功率越限",
+                    "MAJOR",
+                    {"operator": "gt", "value": 90},
+                    0,
+                    {"operator": "lt", "value": 85},
+                    0,
+                    60,
+                    "kW",
+                ),
+            ),
+            actor="operator:test",
+        )
+        plan = service.plan(
+            PlanAlarmConfiguration(
+                EntitySelection(entity_instance_ids=(self.entity_id,)),
+                revision.rule_set_id,
+                revision.revision,
+                "operator:test",
+            )
+        )
+        service.archive_rule_set(revision.rule_set_id, "operator:test")
+
+        with self.assertRaises(AlarmConfigurationError) as raised:
+            service.apply(
+                ApplyAlarmConfigurationPlan(
+                    plan.id,
+                    plan.digest,
+                    "archive-ready-plan-apply",
+                    "operator:test",
+                )
+            )
+
+        self.assertEqual("ALARM_RULE_SET_NOT_FOUND", str(raised.exception))
+        with psycopg2.connect(**self.kwargs) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_alarm_definition_current")
+            self.assertEqual(0, cursor.fetchone()[0])
+
     def test_apply_rechecks_notification_after_plan_and_rolls_back_publication(self) -> None:
         config_id = uuid4()
         digest = "d" * 64

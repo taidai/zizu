@@ -235,6 +235,57 @@ class AlarmHttpNotificationSendTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.delivered)
         self.assertEqual("delivered", result.outcome)
 
+    async def test_feishu_legacy_status_code_zero_is_delivered(self) -> None:
+        module = _module()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"StatusCode": 0, "StatusMessage": "success"})
+
+        request = module.render_request(
+            module.normalize_draft(
+                _draft(url="https://open.feishu.cn/open-apis/bot/v2/hook/test-token")
+            ),
+            _context(),
+        )
+        result = await module.send_http_request(
+            request,
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertTrue(result.delivered)
+        self.assertEqual("delivered", result.outcome)
+
+    async def test_feishu_rejects_missing_or_malformed_business_result(self) -> None:
+        module = _module()
+        responses = (
+            httpx.Response(200, json={"StatusCode": 9499, "StatusMessage": "failed"}),
+            httpx.Response(200, json={"msg": "missing code"}),
+            httpx.Response(200, text="not-json"),
+        )
+
+        for response in responses:
+            with self.subTest(body=response.text):
+                async def handler(request: httpx.Request) -> httpx.Response:
+                    return response
+
+                request = module.render_request(
+                    module.normalize_draft(
+                        _draft(url="https://open.feishu.cn/open-apis/bot/v2/hook/test-token")
+                    ),
+                    _context(),
+                )
+                result = await module.send_http_request(
+                    request,
+                    transport=httpx.MockTransport(handler),
+                )
+
+                self.assertFalse(result.delivered)
+                self.assertEqual("rejected", result.outcome)
+                self.assertEqual(
+                    "HTTP_NOTIFICATION_DELIVERY_REJECTED",
+                    result.error_code,
+                )
+
 
 class _DeliveryRepository:
     def __init__(self, results) -> None:

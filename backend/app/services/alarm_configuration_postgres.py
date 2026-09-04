@@ -433,7 +433,18 @@ class PostgresAlarmConfigurationRepository:
                     if prior[0].strip() != request_digest or prior[1] != plan.id:
                         raise AlarmConfigurationError("IDEMPOTENCY_KEY_REUSED")
                     return _result_from_json(prior[2], plan.items)
-                cursor.execute("SELECT status,base_configuration_revision,applied_result FROM t_alarm_configuration_plans WHERE id=%s FOR UPDATE", (plan.id,))
+                cursor.execute(
+                    """
+                    SELECT plan.status,plan.base_configuration_revision,
+                           plan.applied_result,rule_set.archived_at
+                    FROM t_alarm_configuration_plans plan
+                    JOIN t_alarm_rule_sets rule_set
+                      ON rule_set.id=plan.rule_set_id
+                    WHERE plan.id=%s
+                    FOR UPDATE OF plan,rule_set
+                    """,
+                    (plan.id,),
+                )
                 row = cursor.fetchone()
                 if row is None:
                     raise AlarmConfigurationError("ALARM_PLAN_NOT_FOUND")
@@ -441,6 +452,8 @@ class PostgresAlarmConfigurationRepository:
                     return _result_from_json(row[2], plan.items)
                 if row[0] != "ready":
                     raise AlarmConfigurationError("ALARM_PLAN_BLOCKED")
+                if row[3] is not None:
+                    raise AlarmConfigurationError("ALARM_RULE_SET_NOT_FOUND")
                 if self._revisions.current(connection) != int(row[1]):
                     raise AlarmConfigurationError("ALARM_PLAN_STALE")
                 revision = self._revisions.publish(
