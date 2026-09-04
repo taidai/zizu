@@ -181,6 +181,82 @@ class PointProcessingPostgresTest(unittest.TestCase):
             )
             self.assertEqual((raw["inputs"][0]["id"],), cursor.fetchone())
 
+    def test_rw_passthrough_publishes_bounded_control_entity_and_binding(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan,
+            PointProcessingService,
+        )
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog,
+            PostgresPointProcessingRepository,
+            PostgresPointProcessingTemplates,
+        )
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        raw = PointProcessingTemplateTest.passthrough_template("FLOAT", "W")
+        raw["id"] = "pcs-controlled-passthrough"
+        raw["outputs"][0]["entityDefinition"] = "pcs.max_discharge_power_limit"
+        raw["outputs"][0]["control"] = {
+            "minimum": 0,
+            "maximum": 200000,
+            "tolerance": 100,
+            "cooldownSeconds": 5,
+            "timeoutSeconds": 15,
+            "highRisk": False,
+        }
+        tag_id = uuid5(NAMESPACE_URL, f"test/tag/{NODE_ID}/ActivePowerRaw")
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_tags SET read_write='RW',read_only=FALSE,"
+                "source_type='neuron',source_path='PCS-TEST/group0/ActivePowerRaw' "
+                "WHERE id=%s",
+                (tag_id,),
+            )
+            connection.commit()
+
+        revision = PostgresPointProcessingTemplates().import_template(
+            raw,
+            actor="test:engineer",
+        ).revision_id
+        service = PointProcessingService(
+            PostgresPointProcessingRepository(),
+            PostgresPointProcessingCatalog(),
+        )
+        plan = self._plan(service, revision)
+        self.assertEqual("ready", plan.status)
+        application = service.apply(
+            ApplyPointProcessingPlan(
+                plan.id,
+                plan.digest,
+                "controlled-passthrough",
+                "test:engineer",
+            )
+        )
+        entity_id = application.output_entity_instance_ids[0]
+
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT direction,control_policy FROM t_entity_instances WHERE id=%s",
+                (entity_id,),
+            )
+            direction, policy = cursor.fetchone()
+            self.assertEqual("RW", direction)
+            self.assertEqual(0, policy["minimum"])
+            self.assertEqual(200000, policy["maximum"])
+            self.assertEqual(100, policy["tolerance"])
+            self.assertEqual(5, policy["cooldown_seconds"])
+            self.assertEqual(15, policy["timeout_seconds"])
+            self.assertEqual("pcs.max_discharge_power_limit", policy["readback_definition"])
+            self.assertEqual([], policy["interlocks"])
+            self.assertFalse(policy["high_risk"])
+            cursor.execute(
+                "SELECT l0_tag_id FROM t_l2_control_bindings "
+                "WHERE entity_instance_id=%s",
+                (entity_id,),
+            )
+            self.assertEqual((tag_id,), cursor.fetchone())
+
     def test_passthrough_applies_and_reloads_as_a_runtime_transform(self) -> None:
         from app.services.data_trunk_contracts import (
             PassthroughTransform,

@@ -49,6 +49,7 @@ class PointProcessingOutput:
     unit: str | None
     freshness_seconds: float
     transform: Mapping[str, Any]
+    control: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,16 +177,17 @@ def canonical_point_processing_content(
         if transform.get("kind") in {"formula", "boolean_map"}:
             transform.pop("canonicalAst", None)
             transform.pop("astDigest", None)
-        outputs.append(
-            {
-                "id": item.output_id,
-                "entityDefinition": item.entity_definition_id,
-                "dataType": item.data_type,
-                "unit": item.unit,
-                "freshness": f"{int(item.freshness_seconds)}s",
-                "transform": transform,
-            }
-        )
+        output = {
+            "id": item.output_id,
+            "entityDefinition": item.entity_definition_id,
+            "dataType": item.data_type,
+            "unit": item.unit,
+            "freshness": f"{int(item.freshness_seconds)}s",
+            "transform": transform,
+        }
+        if item.control is not None:
+            output["control"] = _plain(item.control)
+        outputs.append(output)
     return {
         "schemaVersion": _SCHEMA_VERSION,
         "id": template.asset_id,
@@ -428,9 +430,14 @@ def _parse_outputs(
     parsed = []
     seen: set[str] = set()
     for raw in raw_outputs:
-        if not isinstance(raw, Mapping) or set(raw) != {
+        required_fields = {
             "id", "entityDefinition", "dataType", "unit", "freshness", "transform"
-        }:
+        }
+        if (
+            not isinstance(raw, Mapping)
+            or not required_fields.issubset(raw)
+            or set(raw) - (required_fields | {"control"})
+        ):
             raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
                 "Point processing output fields are invalid",
@@ -459,6 +466,12 @@ def _parse_outputs(
             output_data_type=data_type,
             output_unit=unit,
         )
+        control = _parse_control(
+            raw.get("control"),
+            transform=transform,
+            inputs=input_by_id,
+            output_data_type=data_type,
+        )
         expected_type = _OUTPUT_TYPES[transform["kind"]]
         if expected_type is not None and expected_type != data_type:
             raise PointProcessingTemplateError(
@@ -472,6 +485,7 @@ def _parse_outputs(
             or str(definition.get("deviceCategory", "")).casefold()
             != device_category.casefold()
             or definition.get("direction") not in {"R", "RW"}
+            or (control is not None and definition.get("direction") != "RW")
         ):
             raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INCOMPATIBLE",
@@ -491,9 +505,56 @@ def _parse_outputs(
                 unit=unit,
                 freshness_seconds=freshness,
                 transform=_freeze(transform),
+                control=None if control is None else _freeze(control),
             )
         )
     return tuple(sorted(parsed, key=lambda item: item.entity_definition_id))
+
+
+def _parse_control(
+    raw: Any,
+    *,
+    transform: Mapping[str, Any],
+    inputs: Mapping[str, PointProcessingInput],
+    output_data_type: str,
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    fields = {
+        "minimum", "maximum", "tolerance", "cooldownSeconds",
+        "timeoutSeconds", "highRisk",
+    }
+    source = inputs.get(str(transform.get("input", "")))
+    numeric_fields = ("minimum", "maximum", "tolerance")
+    valid_numbers = all(
+        isinstance(raw.get(field), (int, float))
+        and not isinstance(raw.get(field), bool)
+        and math.isfinite(float(raw[field]))
+        for field in numeric_fields
+    ) if isinstance(raw, Mapping) else False
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != fields
+        or transform.get("kind") != "passthrough"
+        or source is None
+        or source.source_kind != "l0"
+        or output_data_type not in {"FLOAT", "INT"}
+        or not valid_numbers
+        or float(raw["minimum"]) > float(raw["maximum"])
+        or float(raw["tolerance"]) < 0
+        or not isinstance(raw.get("cooldownSeconds"), int)
+        or isinstance(raw.get("cooldownSeconds"), bool)
+        or not 1 <= raw["cooldownSeconds"] <= 3600
+        or not isinstance(raw.get("timeoutSeconds"), int)
+        or isinstance(raw.get("timeoutSeconds"), bool)
+        or not 1 <= raw["timeoutSeconds"] <= 300
+        or not isinstance(raw.get("highRisk"), bool)
+    ):
+        raise PointProcessingTemplateError(
+            "POINT_PROCESSING_CONTROL_INVALID",
+            "Controllable output requires one bounded numeric L0 passthrough",
+        )
+    return {field: raw[field] for field in sorted(fields)}
 
 
 def _parse_transform(
@@ -839,6 +900,7 @@ def _template_record(asset: PointProcessingTemplate) -> dict[str, Any]:
                 "unit": item.unit,
                 "freshness_seconds": item.freshness_seconds,
                 "transform": _plain(item.transform),
+                "control": _plain(item.control),
             }
             for item in asset.outputs
         ],
@@ -879,6 +941,7 @@ def _template_from_record(raw: Mapping[str, Any]) -> PointProcessingTemplate:
                 unit=item["unit"],
                 freshness_seconds=item["freshness_seconds"],
                 transform=_freeze(item["transform"]),
+                control=_freeze(item.get("control")),
             )
             for item in raw["outputs"]
         ),

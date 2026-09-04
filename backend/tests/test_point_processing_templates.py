@@ -119,6 +119,43 @@ class PointProcessingTemplateTest(unittest.TestCase):
                     parse_point_processing_template(raw)
                 self.assertEqual("POINT_PROCESSING_RULE_INVALID", caught.exception.code)
 
+    def test_controllable_output_requires_bounded_local_passthrough(self) -> None:
+        raw = self.passthrough_template("FLOAT", "kW")
+        raw["outputs"][0]["control"] = {
+            "minimum": 0,
+            "maximum": 200,
+            "tolerance": 0.1,
+            "cooldownSeconds": 5,
+            "timeoutSeconds": 15,
+            "highRisk": False,
+        }
+
+        parsed = parse_point_processing_template(raw)
+
+        self.assertEqual(raw, canonical_point_processing_content(parsed))
+        self.assertEqual(200, parsed.outputs[0].control["maximum"])
+
+        for mutation in ("readonly_source", "formula", "unbounded"):
+            invalid = copy.deepcopy(raw)
+            if mutation == "readonly_source":
+                invalid["inputs"][0]["sourceKind"] = "l2"
+            elif mutation == "formula":
+                invalid["outputs"][0]["transform"] = {
+                    "kind": "formula",
+                    "expression": "active_power_raw",
+                    "scheduleSeconds": 1,
+                    "controlEligible": False,
+                }
+            else:
+                invalid["outputs"][0]["control"].pop("maximum")
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(PointProcessingTemplateError) as caught:
+                    parse_point_processing_template(invalid)
+                self.assertEqual(
+                    "POINT_PROCESSING_CONTROL_INVALID",
+                    caught.exception.code,
+                )
+
     def test_boolean_map_accepts_zero_and_one_and_keeps_canonical_shape(self) -> None:
         for true_when in (0, 1):
             with self.subTest(true_when=true_when):

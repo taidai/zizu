@@ -9,6 +9,7 @@ export interface InlineRawPoint {
   wire_data_type: string | null
   data_type: string
   unit: string | null
+  read_write: string
 }
 
 export interface InlinePointProcessingForm {
@@ -26,6 +27,12 @@ export interface InlinePointProcessingForm {
   entries?: string
   expression?: string
   trueWhen?: number
+  controlEnabled?: boolean
+  controlMinimum?: number | string
+  controlMaximum?: number | string
+  controlTolerance?: number | string
+  controlCooldownSeconds?: number | string
+  controlTimeoutSeconds?: number | string
 }
 
 export interface InlinePointProcessingDraft {
@@ -181,6 +188,13 @@ function finiteNumber(value: unknown, fallback: number, label: string): number {
   return candidate
 }
 
+function requiredFiniteNumber(value: unknown, label: string): number {
+  if (value === undefined || value === null || value === '') {
+    throw new Error(`请填写控制${label}`)
+  }
+  return finiteNumber(value, 0, `控制${label}`)
+}
+
 function stateEntries(raw: string | undefined): Record<string, string> {
   const entries: Record<string, string> = {}
   for (const rawLine of String(raw ?? '').split(/\r?\n/)) {
@@ -290,6 +304,54 @@ export function buildNodePointProcessingDraft(
     }
   }
 
+  let control: Record<string, unknown> | undefined
+  if (form.controlEnabled) {
+    if (form.mode !== 'passthrough' || points.length !== 1) {
+      throw new Error('允许控制只支持单个点位的直接使用')
+    }
+    if (first.point.read_write.toUpperCase() !== 'RW') {
+      throw new Error('允许控制只能用于 RW 原始点位')
+    }
+    if (!['FLOAT', 'INT'].includes(outputType)) {
+      throw new Error('允许控制目前只支持数值点位')
+    }
+    const minimum = requiredFiniteNumber(form.controlMinimum, '最小值')
+    const maximum = requiredFiniteNumber(form.controlMaximum, '最大值')
+    const tolerance = requiredFiniteNumber(form.controlTolerance, '回读容差')
+    const cooldownSeconds = requiredFiniteNumber(form.controlCooldownSeconds, '冷却秒数')
+    const timeoutSeconds = requiredFiniteNumber(form.controlTimeoutSeconds, '回读超时秒数')
+    if (minimum > maximum) throw new Error('控制最小值不能大于最大值')
+    if (tolerance < 0) throw new Error('控制回读容差不能小于 0')
+    if (!Number.isInteger(cooldownSeconds) || cooldownSeconds < 1) {
+      throw new Error('控制冷却秒数必须是正整数')
+    }
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {
+      throw new Error('控制回读超时秒数必须是正整数')
+    }
+    control = {
+      minimum,
+      maximum,
+      tolerance,
+      cooldownSeconds,
+      timeoutSeconds,
+      highRisk: false,
+    }
+  }
+
+  const output: Record<string, unknown> & {
+    id: string
+    entityDefinition: string
+    transform: Record<string, unknown>
+  } = {
+    id: outputId,
+    entityDefinition: definitionKey,
+    dataType: outputType,
+    unit: outputUnit || null,
+    freshness: `${freshnessSeconds}s`,
+    transform,
+  }
+  if (control) output.control = control
+
   return {
     content: {
       schemaVersion: 'zizu.point-processing/v1alpha1',
@@ -312,14 +374,7 @@ export function buildNodePointProcessingDraft(
         unit: point.unit,
         required: true,
       })),
-      outputs: [{
-        id: outputId,
-        entityDefinition: definitionKey,
-        dataType: outputType,
-        unit: outputUnit || null,
-        freshness: `${freshnessSeconds}s`,
-        transform,
-      }],
+      outputs: [output],
     },
     inputSelections: Object.fromEntries(
       keyedPoints.map(({ point, inputId }) => [inputId, point.id]),

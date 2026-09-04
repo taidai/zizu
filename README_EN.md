@@ -32,6 +32,7 @@ L0, L1, and L2 are three data views attached to a selected physical node, not th
 and entities never become physical tree levels. The normal engineering UI mainly exposes **Raw Data** and **Standard
 Entities**: select L0 inputs, define processing, preview the result, and publish L2. A reusable processing template is
 optional for repeated equipment and is not required for the first device.
+Numeric write points become controllable L2 targets only through one direct Neuron `RW` binding with explicit safety limits, readback tolerance, cooldown, and timeout.
 
 ### Runtime data flow
 

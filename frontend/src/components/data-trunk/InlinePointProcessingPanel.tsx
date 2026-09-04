@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   applyPointProcessingPlan,
   createPointProcessingDraftPlan,
@@ -36,6 +36,12 @@ export default function InlinePointProcessingPanel({
   const [entries, setEntries] = useState('0=STOPPED\n1=RUNNING')
   const [expression, setExpression] = useState('')
   const [trueWhen, setTrueWhen] = useState<'0' | '1'>('1')
+  const [controlEnabled, setControlEnabled] = useState(false)
+  const [controlMinimum, setControlMinimum] = useState('')
+  const [controlMaximum, setControlMaximum] = useState('')
+  const [controlTolerance, setControlTolerance] = useState('0.1')
+  const [controlCooldownSeconds, setControlCooldownSeconds] = useState('5')
+  const [controlTimeoutSeconds, setControlTimeoutSeconds] = useState('15')
   const [plan, setPlan] = useState<PointProcessingPlan | null>(null)
   const [idempotencyKey, setIdempotencyKey] = useState('')
   const [busy, setBusy] = useState<'plan' | 'apply' | null>(null)
@@ -45,6 +51,9 @@ export default function InlinePointProcessingPanel({
   const booleanMapEligible = points.length === 1
     && points[0].wire_data_type?.toUpperCase() === 'BIT'
     && points[0].data_type.toUpperCase() === 'INT'
+  const controlEligible = points.length === 1
+    && points[0].read_write.toUpperCase() === 'RW'
+    && ['FLOAT', 'INT'].includes(points[0].data_type.toUpperCase())
 
   useEffect(() => {
     setPlan(null)
@@ -63,29 +72,11 @@ export default function InlinePointProcessingPanel({
     setExpression(defaults.expression)
     setMode(defaults.mode)
     setTrueWhen('1')
+    setControlEnabled(false)
+    setControlMinimum('')
+    setControlMaximum('')
     setExpanded(true)
   }
-
-  const draft = useMemo(() => {
-    try {
-      return buildNodePointProcessingDraft(points, {
-        mode,
-        definitionKey,
-        displayName,
-        deviceCategory,
-        dataType,
-        unit: unit || null,
-        freshnessSeconds: Number(freshnessSeconds),
-        scale,
-        offset,
-        entries,
-        expression,
-        trueWhen: Number(trueWhen),
-      })
-    } catch {
-      return null
-    }
-  }, [dataType, definitionKey, deviceCategory, displayName, entries, expression, freshnessSeconds, mode, offset, points, scale, trueWhen, unit])
 
   const handlePlan = async () => {
     setBusy('plan')
@@ -105,6 +96,12 @@ export default function InlinePointProcessingPanel({
         entries,
         expression,
         trueWhen: Number(trueWhen),
+        controlEnabled,
+        controlMinimum,
+        controlMaximum,
+        controlTolerance,
+        controlCooldownSeconds,
+        controlTimeoutSeconds,
       })
       const nextPlan = await createPointProcessingDraftPlan(nodeId, {
         content: nextDraft.content,
@@ -170,6 +167,7 @@ export default function InlinePointProcessingPanel({
               <select value={mode} onChange={(event) => {
                 const nextMode = event.target.value as InlinePointProcessingMode
                 setMode(nextMode)
+                if (nextMode !== 'passthrough') setControlEnabled(false)
                 if (nextMode === 'boolean_map') {
                   setDataType('BOOL')
                   setUnit('')
@@ -228,6 +226,30 @@ export default function InlinePointProcessingPanel({
             </div>
           )}
 
+          <div className="mt-3 rounded border border-blue-100 bg-white px-3 py-3">
+            <label className="flex items-center gap-2 text-xs font-semibold text-gray-800">
+              <input
+                type="checkbox"
+                checked={controlEnabled}
+                disabled={!controlEligible || mode !== 'passthrough'}
+                onChange={(event) => { setControlEnabled(event.target.checked); setPlan(null) }}
+              />
+              允许调度控制
+            </label>
+            <p className="mt-1 text-[11px] text-gray-500">
+              仅单个 RW 原始点位“直接使用”时可开启；调度策略只写这个已确认点位。
+            </p>
+            {controlEnabled && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <label className="text-[11px] font-medium text-gray-700">安全最小值<input value={controlMinimum} onChange={(event) => { setControlMinimum(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">安全最大值<input value={controlMaximum} onChange={(event) => { setControlMaximum(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">回读容差<input value={controlTolerance} onChange={(event) => { setControlTolerance(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">冷却秒数<input value={controlCooldownSeconds} onChange={(event) => { setControlCooldownSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">回读期限（秒）<input value={controlTimeoutSeconds} onChange={(event) => { setControlTimeoutSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+              </div>
+            )}
+          </div>
+
           <details className="mt-3 rounded border border-blue-100 bg-white/60 px-3 py-2">
             <summary className="cursor-pointer text-[11px] font-semibold text-gray-600">高级设置</summary>
             <div className="mt-3 grid gap-3 lg:grid-cols-3">
@@ -271,7 +293,7 @@ export default function InlinePointProcessingPanel({
             </div>
           )}
           <div className="mt-3 flex justify-end gap-2">
-            <button type="button" disabled={busy !== null || !draft} onClick={() => void handlePlan()} className="neu-btn px-4 py-2 text-xs font-semibold text-blue-700 disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
+            <button type="button" disabled={busy !== null} onClick={() => void handlePlan()} className="neu-btn px-4 py-2 text-xs font-semibold text-blue-700 disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
             <button type="button" disabled={busy !== null || !planView?.canApply} onClick={() => void handleApply()} className="rounded bg-[#52c41a] px-4 py-2 text-xs font-semibold text-white disabled:bg-gray-300">{busy === 'apply' ? '发布中…' : '发布实体'}</button>
           </div>
         </div>

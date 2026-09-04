@@ -902,6 +902,11 @@ class PostgresPointProcessingCatalog:
             """,
             (revision_id,),
         )
+        content_controls = {
+            str(item.get("id")): item.get("control")
+            for item in (row[8] or {}).get("outputs", ())
+            if isinstance(item, Mapping) and item.get("control") is not None
+        }
         outputs = tuple(
             PointProcessingOutput(
                 output_id=output_row[1],
@@ -914,6 +919,11 @@ class PostgresPointProcessingCatalog:
                         cursor,
                         output_row[0],
                     )
+                ),
+                control=(
+                    None
+                    if output_row[1] not in content_controls
+                    else MappingProxyType(content_controls[output_row[1]])
                 ),
             )
             for output_row in cursor.fetchall()
@@ -1654,6 +1664,7 @@ class PostgresPointProcessingRepository:
                         plan,
                         installed_id,
                         command.actor,
+                        template,
                     )
                     cursor.execute(
                         """
@@ -1772,6 +1783,14 @@ class PostgresPointProcessingRepository:
             )
         installed_id = next(iter(installed_ids))
         output_ids = tuple(sorted(planned_outputs.values(), key=str))
+        for output_id in output_ids:
+            cursor.execute(
+                "SELECT direction FROM t_entity_instances WHERE id=%s",
+                (output_id,),
+            )
+            entity = cursor.fetchone()
+            if entity is not None and entity[0] in {"W", "RW"}:
+                self._assert_control_contract_mutable(cursor, output_id)
         cursor.execute(
             """
             SELECT 1
@@ -1995,8 +2014,10 @@ class PostgresPointProcessingRepository:
         plan: PointProcessingPlan,
         installed_id: UUID,
         actor: str,
+        template: PointProcessingTemplate,
     ) -> tuple[UUID, ...]:
         output_entity_ids: list[UUID] = []
+        outputs = {item.output_id: item for item in template.outputs}
         for item in plan.items:
             if item["action"] == "block":
                 raise PointProcessingError(
@@ -2133,10 +2154,30 @@ class PostgresPointProcessingRepository:
                     "POINT_PROCESSING_PLAN_STALE",
                     "Point processing output relation is no longer available",
                 )
+            output = outputs.get(str(item["output_id"]))
+            if output is None:
+                raise PointProcessingError(
+                    "POINT_PROCESSING_PLAN_STALE",
+                    "Point processing output control contract is unavailable",
+                )
+            control_binding = PostgresPointProcessingRepository._control_binding(
+                cursor,
+                plan=plan,
+                installed_id=installed_id,
+                output_id=relation[0],
+                output=output,
+            )
+            control_policy = (
+                None
+                if control_binding is None
+                else PostgresPointProcessingRepository._control_policy(output)
+            )
+            direction = "RW" if control_binding is not None else "R"
             entity_id = UUID(item["output_entity_instance_id"])
             cursor.execute(
                 """
-                SELECT definition_id, data_type, unit, source_kind
+                SELECT definition_id, data_type, unit, source_kind,
+                       direction, control_policy
                 FROM t_entity_instances WHERE id = %s
                 """,
                 (entity_id,),
@@ -2151,16 +2192,19 @@ class PostgresPointProcessingRepository:
                     data_type=relation[2],
                     unit=relation[3],
                     freshness_seconds=float(relation[4]),
+                    direction=direction,
+                    control_policy=control_policy,
                 )
                 cursor.execute(
                     """
-                    SELECT definition_id, data_type, unit, source_kind
+                    SELECT definition_id, data_type, unit, source_kind,
+                           direction, control_policy
                     FROM t_entity_instances WHERE id = %s
                     """,
                     (entity_id,),
                 )
                 entity = cursor.fetchone()
-            if entity is None or entity != (
+            if entity is None or entity[:4] != (
                 relation[1],
                 relation[2],
                 relation[3],
@@ -2170,11 +2214,47 @@ class PostgresPointProcessingRepository:
                     "POINT_PROCESSING_PLAN_STALE",
                     "Point processing output entity contract changed after planning",
                 )
+            if (entity[4], entity[5]) != (direction, control_policy):
+                PostgresPointProcessingRepository._assert_control_contract_mutable(
+                    cursor,
+                    entity_id,
+                )
             cursor.execute(
-                "UPDATE t_entity_instances SET active=TRUE "
-                "WHERE id=%s AND active=FALSE",
-                (entity_id,),
+                "UPDATE t_entity_instances "
+                "SET active=TRUE,direction=%s,control_policy=%s "
+                "WHERE id=%s",
+                (
+                    direction,
+                    Json(control_policy) if control_policy is not None else None,
+                    entity_id,
+                ),
             )
+            if control_binding is None:
+                cursor.execute(
+                    "DELETE FROM t_l2_control_bindings WHERE entity_instance_id=%s",
+                    (entity_id,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT entity_instance_id FROM t_l2_control_bindings "
+                    "WHERE l0_tag_id=%s AND entity_instance_id<>%s",
+                    (control_binding, entity_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_CONTROL_SOURCE_IN_USE",
+                        "The selected RW raw point already controls another L2 entity",
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO t_l2_control_bindings(entity_instance_id,l0_tag_id)
+                    VALUES(%s,%s)
+                    ON CONFLICT(entity_instance_id) DO UPDATE
+                    SET l0_tag_id=EXCLUDED.l0_tag_id,
+                        created_at=clock_timestamp()
+                    """,
+                    (entity_id, control_binding),
+                )
             cursor.execute(
                 """
                 INSERT INTO t_point_processing_output_bindings
@@ -2187,6 +2267,85 @@ class PostgresPointProcessingRepository:
         return tuple(sorted(output_entity_ids, key=str))
 
     @staticmethod
+    def _control_binding(
+        cursor: Any,
+        *,
+        plan: PointProcessingPlan,
+        installed_id: UUID,
+        output_id: UUID,
+        output: PointProcessingOutput,
+    ) -> UUID | None:
+        if output.control is None:
+            return None
+        cursor.execute(
+            """
+            SELECT binding.l0_tag_id, tag.node_id, tag.read_write,
+                   tag.enabled, tag.source_type, tag.source_path
+            FROM t_point_processing_passthrough_rules AS rule
+            JOIN t_point_processing_input_bindings AS binding
+              ON binding.input_id=rule.input_id
+             AND binding.installed_processing_id=%s
+             AND binding.source_kind='l0'
+            JOIN t_tags AS tag ON tag.id=binding.l0_tag_id
+            WHERE rule.output_id=%s
+            """,
+            (installed_id, output_id),
+        )
+        rows = cursor.fetchall()
+        if len(rows) != 1:
+            raise PointProcessingError(
+                "POINT_PROCESSING_CONTROL_SOURCE_INVALID",
+                "Controllable output requires exactly one bound L0 source",
+            )
+        tag_id, node_id, read_write, enabled, source_type, source_path = rows[0]
+        if (
+            node_id != plan.node_id
+            or read_write != "RW"
+            or enabled is not True
+            or str(source_type or "").lower() != "neuron"
+            or not str(source_path or "").strip()
+        ):
+            raise PointProcessingError(
+                "POINT_PROCESSING_CONTROL_SOURCE_INVALID",
+                "Controllable output requires one enabled local Neuron RW point",
+            )
+        return tag_id
+
+    @staticmethod
+    def _control_policy(output: PointProcessingOutput) -> dict[str, Any]:
+        assert output.control is not None
+        return {
+            "minimum": output.control["minimum"],
+            "maximum": output.control["maximum"],
+            "cooldown_seconds": output.control["cooldownSeconds"],
+            "readback_definition": output.entity_definition_id,
+            "tolerance": output.control["tolerance"],
+            "timeout_seconds": output.control["timeoutSeconds"],
+            "interlocks": [],
+            "high_risk": output.control["highRisk"],
+        }
+
+    @staticmethod
+    def _assert_control_contract_mutable(cursor: Any, entity_id: UUID) -> None:
+        cursor.execute(
+            """
+            SELECT EXISTS(
+              SELECT 1 FROM t_dispatch_strategy_owners WHERE entity_instance_id=%s
+            ) OR EXISTS(
+              SELECT 1 FROM t_control_commands
+              WHERE entity_instance_id=%s
+                AND status IN ('accepted','validated','dispatched')
+            )
+            """,
+            (entity_id, entity_id),
+        )
+        if cursor.fetchone()[0]:
+            raise PointProcessingError(
+                "POINT_PROCESSING_CONTROL_IN_USE",
+                "Disable the active strategy and finish control commands before changing control",
+            )
+
+    @staticmethod
     def _create_output_entity(
         cursor: Any,
         plan: PointProcessingPlan,
@@ -2196,6 +2355,8 @@ class PostgresPointProcessingRepository:
         data_type: str,
         unit: str | None,
         freshness_seconds: float,
+        direction: str,
+        control_policy: Mapping[str, Any] | None,
     ) -> None:
         cursor.execute(
             """
@@ -2220,8 +2381,9 @@ class PostgresPointProcessingRepository:
             """
             INSERT INTO t_entity_instances
               (id, node_id, definition_id, display_name,
-               data_type, unit, direction, freshness_seconds, source_kind)
-            VALUES (%s, %s, %s, %s, %s, %s, 'R', %s, 'point_processing')
+               data_type, unit, direction, freshness_seconds, source_kind,
+               control_policy)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'point_processing', %s)
             ON CONFLICT (id) DO NOTHING
             """,
             (
@@ -2231,7 +2393,9 @@ class PostgresPointProcessingRepository:
                 f"{template_name} · {definition_id}",
                 data_type,
                 unit,
+                direction,
                 freshness_seconds,
+                Json(control_policy) if control_policy is not None else None,
             ),
         )
 

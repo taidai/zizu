@@ -9,6 +9,7 @@ const POWER = {
   wire_data_type: 'FLOAT',
   data_type: 'FLOAT',
   unit: 'W',
+  read_write: 'R',
 }
 
 const CURRENT = {
@@ -18,7 +19,74 @@ const CURRENT = {
   wire_data_type: 'FLOAT',
   data_type: 'FLOAT',
   unit: 'A',
+  read_write: 'R',
 }
+
+test('one RW passthrough point can explicitly publish a bounded controllable L2', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  const result = model.buildNodePointProcessingDraft([{
+    ...POWER,
+    read_write: 'RW',
+  }], {
+    mode: 'passthrough',
+    definitionKey: 'pcs.max_discharge_power_limit',
+    displayName: '最大放电功率限值',
+    deviceCategory: 'PCS',
+    unit: 'W',
+    freshnessSeconds: 10,
+    controlEnabled: true,
+    controlMinimum: 0,
+    controlMaximum: 200000,
+    controlTolerance: 100,
+    controlCooldownSeconds: 5,
+    controlTimeoutSeconds: 15,
+  })
+
+  assert.deepEqual(result.content.outputs[0].control, {
+    minimum: 0,
+    maximum: 200000,
+    tolerance: 100,
+    cooldownSeconds: 5,
+    timeoutSeconds: 15,
+    highRisk: false,
+  })
+})
+
+test('control publishing rejects readonly points and non-passthrough processing', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const control = {
+    controlEnabled: true,
+    controlMinimum: 0,
+    controlMaximum: 200000,
+    controlTolerance: 100,
+    controlCooldownSeconds: 5,
+    controlTimeoutSeconds: 15,
+  }
+  const base = {
+    definitionKey: 'pcs.max_discharge_power_limit',
+    displayName: '最大放电功率限值',
+    deviceCategory: 'PCS',
+    unit: 'W',
+    freshnessSeconds: 10,
+  }
+
+  assert.throws(() => model.buildNodePointProcessingDraft([POWER], {
+    ...base,
+    mode: 'passthrough',
+    ...control,
+  }), /RW 原始点位/)
+  assert.throws(() => model.buildNodePointProcessingDraft([{
+    ...POWER,
+    read_write: 'RW',
+  }], {
+    ...base,
+    mode: 'numeric',
+    scale: 1,
+    offset: 0,
+    ...control,
+  }), /直接使用/)
+})
 
 test('one selected L0 becomes one direct L2 draft', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
@@ -251,6 +319,21 @@ test('technical identity and freshness inputs stay inside advanced settings', as
   assert.ok(advanced >= 0)
   assert.ok(source.indexOf('业务标识') > advanced)
   assert.ok(source.indexOf('超时秒数') > advanced)
+})
+
+test('inline editor exposes an explicit bounded control switch for RW points', async () => {
+  const source = await readFile(new URL('./InlinePointProcessingPanel.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /允许调度控制/)
+  assert.match(source, /安全最小值/)
+  assert.match(source, /安全最大值/)
+  assert.match(source, /回读容差/)
+})
+
+test('inline editor lets users run validation and see why an incomplete draft is invalid', async () => {
+  const source = await readFile(new URL('./InlinePointProcessingPanel.tsx', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(source, /disabled=\{busy !== null \|\| !draft\}/)
 })
 
 test('committed-frame trial projects value quality time and source evidence', async () => {
