@@ -95,7 +95,12 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_data_frames') IS NULL
                      OR to_regclass('public.t_data_frame_outbox') IS NULL
                      OR to_regclass('public.t_committed_frame_consumers') IS NULL
-                     OR to_regclass('public.t_jdm_executions') IS NULL
+                     OR to_regclass('public.t_dispatch_strategies') IS NULL
+                     OR to_regclass('public.t_dispatch_strategy_revisions') IS NULL
+                     OR to_regclass('public.t_dispatch_strategy_bindings') IS NULL
+                     OR to_regclass('public.t_dispatch_strategy_owners') IS NULL
+                     OR to_regclass('public.t_dispatch_control_intents') IS NULL
+                     OR to_regclass('public.t_dispatch_strategy_events') IS NULL
                      OR to_regclass('public.l2_agg_1h') IS NULL
                      OR to_regclass('public.l2_agg_1d') IS NULL
                      OR to_regclass('zizu_internal.retention_guard') IS NULL
@@ -137,20 +142,24 @@ def verify_data_trunk_contract_gate(
                       ('t_l2_observations','frame_id'),
                       ('t_l2_observations','commit_sequence'),
                       ('t_l2_latest','frame_sequence'),
-                      ('t_rules','configuration_revision'),
-                      ('t_jdm_executions','id'),
-                      ('t_jdm_executions','rule_id'),
-                      ('t_jdm_executions','rule_version'),
-                      ('t_jdm_executions','frame_id'),
-                      ('t_jdm_executions','frame_sequence'),
-                      ('t_jdm_executions','configuration_revision'),
-                      ('t_jdm_executions','model_digest'),
-                      ('t_jdm_executions','status'),
-                      ('t_jdm_executions','reason_code'),
-                      ('t_jdm_executions','inputs'),
-                      ('t_jdm_executions','outputs'),
-                      ('t_jdm_executions','actions'),
-                      ('t_jdm_executions','executed_at')
+                      ('t_dispatch_strategies','active_revision_id'),
+                      ('t_dispatch_strategies','enabled'),
+                      ('t_dispatch_strategies','runtime_health'),
+                      ('t_dispatch_strategy_revisions','lifecycle'),
+                      ('t_dispatch_strategy_revisions','trigger_kind'),
+                      ('t_dispatch_strategy_revisions','jdm_content'),
+                      ('t_dispatch_strategy_revisions','content_digest'),
+                      ('t_dispatch_strategy_revisions','base_configuration_revision'),
+                      ('t_dispatch_strategy_bindings','direction'),
+                      ('t_dispatch_strategy_bindings','binding_key'),
+                      ('t_dispatch_strategy_bindings','entity_instance_id'),
+                      ('t_dispatch_strategy_owners','entity_instance_id'),
+                      ('t_dispatch_control_intents','evaluation_key'),
+                      ('t_dispatch_control_intents','action_id'),
+                      ('t_dispatch_control_intents','status'),
+                      ('t_dispatch_control_intents','attempt_count'),
+                      ('t_dispatch_strategy_events','event_kind'),
+                      ('t_dispatch_strategy_events','occurred_at')
                     ) AS required(table_name,column_name)
                     LEFT JOIN information_schema.columns AS actual
                       ON actual.table_schema='public'
@@ -183,7 +192,11 @@ def verify_data_trunk_contract_gate(
                   ) OR NOT EXISTS (
                     SELECT 1 FROM pg_indexes
                     WHERE schemaname='public'
-                      AND indexname='ix_jdm_executions_rule_sequence'
+                      AND indexname='uq_dispatch_strategy_draft'
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname='public'
+                      AND indexname='ix_dispatch_intent_ready'
                   ) THEN
                     RAISE EXCEPTION 'schema 052 frame indexes are incomplete'
                       USING ERRCODE = '55000';
@@ -216,26 +229,25 @@ def verify_data_trunk_contract_gate(
                      ) <> 5
                      OR NOT EXISTS (
                        SELECT 1 FROM pg_constraint
-                       WHERE conrelid='public.t_rules'::regclass
-                         AND conname='fk_rule_configuration_revision'
+                       WHERE conrelid='public.t_dispatch_control_intents'::regclass
+                         AND conname='uq_dispatch_intent_evaluation_action'
                      )
-                     OR (
-                       SELECT count(*) FROM pg_constraint
-                       WHERE conrelid='public.t_jdm_executions'::regclass
-                         AND conname IN (
-                           't_jdm_executions_pkey',
-                           'uq_jdm_execution_rule_frame',
-                           'fk_jdm_execution_frame',
-                           'fk_jdm_execution_configuration_revision',
-                           'chk_jdm_execution_rule_version',
-                           'chk_jdm_execution_frame_sequence',
-                           'chk_jdm_execution_model_digest',
-                           'chk_jdm_execution_status',
-                           'chk_jdm_execution_reason'
-                         )
-                     ) <> 9
+                     OR NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conrelid='public.t_dispatch_control_intents'::regclass
+                         AND conname='chk_dispatch_intent_status'
+                     )
                      ) THEN
-                    RAISE EXCEPTION 'schema 052 frame fencing is incomplete'
+                    RAISE EXCEPTION 'schema 062 strategy fencing is incomplete'
+                      USING ERRCODE = '55000';
+                  END IF;
+                  IF NOT EXISTS (
+                    SELECT 1
+                    FROM timescaledb_information.hypertables
+                    WHERE hypertable_schema='public'
+                      AND hypertable_name='t_dispatch_strategy_events'
+                  ) THEN
+                    RAISE EXCEPTION 'schema 062 strategy event hypertable is incomplete'
                       USING ERRCODE = '55000';
                   END IF;
                   IF (

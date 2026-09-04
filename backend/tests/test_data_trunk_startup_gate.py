@@ -66,11 +66,16 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("uq_committed_frame_consumer_sequence", calls[0])
         self.assertIn("chk_committed_frame_consumer_key", calls[0])
         self.assertIn("fk_committed_frame_consumer_frame", calls[0])
-        self.assertIn("t_jdm_executions", calls[0])
-        self.assertIn("uq_jdm_execution_rule_frame", calls[0])
-        self.assertIn("chk_jdm_execution_status", calls[0])
-        self.assertIn("fk_jdm_execution_frame", calls[0])
-        self.assertIn("fk_rule_configuration_revision", calls[0])
+        self.assertNotIn("t_jdm_executions", calls[0])
+        self.assertIn("t_dispatch_strategies", calls[0])
+        self.assertIn("t_dispatch_strategy_revisions", calls[0])
+        self.assertIn("t_dispatch_strategy_bindings", calls[0])
+        self.assertIn("t_dispatch_strategy_owners", calls[0])
+        self.assertIn("t_dispatch_control_intents", calls[0])
+        self.assertIn("t_dispatch_strategy_events", calls[0])
+        self.assertIn("uq_dispatch_strategy_draft", calls[0])
+        self.assertIn("uq_dispatch_intent_evaluation_action", calls[0])
+        self.assertIn("chk_dispatch_intent_status", calls[0])
         self.assertIn("t_l2_stream_outbox", calls[0])
         self.assertIn("frame_sequence", calls[0])
         self.assertIn("processing_token", calls[0])
@@ -197,17 +202,17 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         )
         self.assertNotIn("candidate.frame_sequence <=", postgres_source)
 
-    def test_jdm_has_no_latest_scan_or_direct_alarm_adapter(self) -> None:
+    def test_strategy_has_no_latest_scan_or_direct_alarm_adapter(self) -> None:
         backend = Path(__file__).resolve().parents[1]
         services = backend / "app" / "services"
         self.assertFalse((services / "rule_engine.py").exists())
         self.assertFalse((services / "rule_alarm_adapter.py").exists())
-        rules_source = (backend / "app" / "api" / "rules.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("t_telemetry_latest", rules_source)
-        self.assertNotIn("dry_run_rule", rules_source)
-        self.assertNotIn("rule_alarm_adapter", rules_source)
+        strategy_api = backend / "app" / "api" / "dispatch_strategies.py"
+        if strategy_api.exists():
+            source = strategy_api.read_text(encoding="utf-8")
+            self.assertNotIn("t_telemetry_latest", source)
+            self.assertNotIn("dry_run_rule", source)
+            self.assertNotIn("rule_alarm_adapter", source)
 
 
 if __name__ == "__main__":
