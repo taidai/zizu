@@ -1,6 +1,6 @@
 # ZiZu 技术架构说明 / Technical Architecture
 
-> 当前基线 / Current baseline: `v0.8.3`
+> 当前基线 / Current baseline: `v0.8.4`
 >
 > 架构状态 / Architecture status: 目标架构已冻结，核心数据主干已落地，上层功能仍在逐项完成现场闭环。
 > The target architecture is frozen. The core data trunk is implemented, while upper-layer functions are still being closed out through field acceptance.
@@ -114,7 +114,7 @@ FastAPI 数据管道 → 单站实时黑板 → 统一节拍冻结不可变数�
 
 ### 7. 当前实现状态
 
-`v0.8.3` 已具备真实节点、L0 导入与实时/历史、L1 点位加工与模板生命周期、L2 实时/历史与来源、实时
+`v0.8.4` 已具备真实节点、L0 导入与实时/历史、L1 点位加工与模板生命周期、L2 实时/历史与来源、实时
 黑板、统一数据帧、节点实时界面，以及告警配置、状态机、HTTP 通知和通知记录管理等主链能力。告警功能
 正在通过现场使用持续打磨。
 
@@ -243,7 +243,7 @@ digest, database Schema, template digests, and configuration revision; deploymen
 
 ### 7. Current implementation status
 
-`v0.8.3` implements the main path for physical nodes, L0 import and live/history views, L1 processing and template lifecycle,
+`v0.8.4` implements the main path for physical nodes, L0 import and live/history views, L1 processing and template lifecycle,
 L2 live/history and provenance, the real-time blackboard, committed frames, the node real-time UI, and core alarm configuration,
 state transitions, HTTP notifications, and notification-record management. Alarm usability is still being refined through
 field operation.

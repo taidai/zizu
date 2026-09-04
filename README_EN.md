@@ -6,7 +6,7 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, JDM decisions, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.8.3`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current version: `v0.8.4`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
 > Current status: the core data trunk is implemented and alarms are being refined through field use. JDM, unified control,
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a

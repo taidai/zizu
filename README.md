@@ -6,7 +6,7 @@
 实体，再配置告警、JDM、控制和固定 EMS 工作台，即可交付单站工业控制系统。光储充 EMS 是首个参考
 交付场景。
 
-**当前版本：`v0.8.3`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**当前版本：`v0.8.4`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
 > 当前状态：核心数据主干已经落地，告警正在现场打磨；JDM、统一控制和固定 EMS 工作台仍需完成真实
 > 光储充站点的端到端验收。ZiZu 尚不能宣称完整 EMS 已经交付就绪。

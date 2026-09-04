@@ -165,6 +165,23 @@ class AlarmRuntimeTest(unittest.TestCase):
             [item.transition_code for item in self.repository.notifications()],
         )
 
+    def test_new_event_after_recovery_notifies_even_within_previous_throttle_window(self) -> None:
+        self.observe(value=101, after_seconds=0)
+        first_activation = self.observe(value=101, after_seconds=10)
+        self.observe(value=90, after_seconds=11)
+        recovered = self.observe(value=90, after_seconds=16)
+        self.observe(value=101, after_seconds=20)
+        second_activation = self.observe(value=101, after_seconds=30)
+
+        self.assertNotEqual(first_activation.event_id, second_activation.event_id)
+        self.assertEqual("ALARM_RECOVERED", recovered.code)
+        self.assertEqual("ALARM_ACTIVATED", second_activation.code)
+        self.assertTrue(second_activation.notification_created)
+        self.assertEqual(
+            ["ALARM_ACTIVATED", "ALARM_RECOVERED", "ALARM_ACTIVATED"],
+            [item.transition_code for item in self.repository.notifications()],
+        )
+
     def test_duplicate_transition_id_does_not_duplicate_outbox(self) -> None:
         from app.services.alarm_runtime import AlarmNotification, AlarmTransition
 

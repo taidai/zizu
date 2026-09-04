@@ -23,6 +23,60 @@ export type AlarmTrialInput =
   | { ready: false; message: string }
   | { ready: true; value: number | boolean | string | string[]; message: string }
 
+export interface AlarmEntityFilterItem {
+  id: string
+  node_id: string
+  node_display_name: string
+  definition_id: string
+  display_name: string
+  data_type: string
+}
+
+export interface AlarmEntityFilters {
+  query: string
+  nodeId: string
+  booleanOnly: boolean
+}
+
+export const MAX_ALARM_ENTITY_SELECTION = 200
+
+export function filterAlarmEntities<T extends AlarmEntityFilterItem>(
+  entities: T[],
+  filters: AlarmEntityFilters,
+): T[] {
+  const query = filters.query.trim().toLocaleLowerCase()
+  return entities.filter((entity) => {
+    if (filters.nodeId && entity.node_id !== filters.nodeId) return false
+    if (filters.booleanOnly && !['BOOL', 'BOOLEAN'].includes(entity.data_type.toUpperCase())) return false
+    if (!query) return true
+    return [entity.node_display_name, entity.display_name, entity.definition_id]
+      .some((value) => value.toLocaleLowerCase().includes(query))
+  })
+}
+
+export function updateFilteredAlarmSelection(
+  selectedIds: string[],
+  filteredIds: string[],
+  select: boolean,
+  limit = MAX_ALARM_ENTITY_SELECTION,
+): { selectedIds: string[]; limitReached: boolean } {
+  const filtered = new Set(filteredIds)
+  if (!select) {
+    return {
+      selectedIds: selectedIds.filter((id) => !filtered.has(id)),
+      limitReached: false,
+    }
+  }
+  const next = [...new Set(selectedIds)]
+  for (const id of filteredIds) {
+    if (!next.includes(id) && next.length < limit) next.push(id)
+  }
+  return {
+    selectedIds: next,
+    limitReached: filteredIds.some((id) => !next.includes(id)),
+  }
+}
+
 export function canArchiveAlarmEvent(event: {
   state?: string
   archived_at?: string | null

@@ -205,12 +205,6 @@ class AlarmRepository(Protocol):
 
     def append_transition(self, transition: AlarmTransition) -> UUID | None: ...
 
-    def last_notification_at(
-        self,
-        definition_id: UUID,
-        entity_instance_id: UUID,
-    ) -> datetime | None: ...
-
     def enqueue_notification(self, notification: AlarmNotification) -> None: ...
 
     def notification_configuration(
@@ -410,20 +404,6 @@ class InMemoryAlarmRepository:
         audit_event_id = transition.audit_event_id or uuid4()
         self._transitions.append(replace(transition, audit_event_id=audit_event_id))
         return audit_event_id
-
-    def last_notification_at(
-        self,
-        definition_id: UUID,
-        entity_instance_id: UUID,
-    ) -> datetime | None:
-        values = [
-            item.created_at
-            for item in self._notifications
-            if item.definition_id == definition_id
-            and item.entity_instance_id == entity_instance_id
-            and item.transition_code == "ALARM_ACTIVATED"
-        ]
-        return max(values) if values else None
 
     def enqueue_notification(self, notification: AlarmNotification) -> None:
         if any(
@@ -894,15 +874,10 @@ class AlarmRuntime:
         configuration = repository.notification_configuration(definition.id)
         if configuration is None:
             return False
-        occurred_at = transition.occurred_at
-        last = repository.last_notification_at(
-            definition.id,
-            definition.entity_instance_id,
-        )
-        if last is not None and occurred_at < last + timedelta(
-            seconds=definition.notification_throttle_seconds
-        ):
-            return False
+        # A recovered alarm ends one event. A later activation belongs to a new
+        # event and must notify even when it occurs inside the old throttle
+        # window. Repeated samples for the same active event never reach this
+        # transition, and transition_id keeps outbox delivery idempotent.
         return self._enqueue_notification(
             repository,
             event,

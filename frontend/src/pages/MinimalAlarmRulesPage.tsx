@@ -23,9 +23,11 @@ import {
   defaultAlarmDraft,
   describeAlarmDraft,
   describeAlarmTrialResult,
+  filterAlarmEntities,
   parseFaultCodePaste,
   prepareAlarmRuleEdit,
   prepareAlarmTrialInput,
+  updateFilteredAlarmSelection,
   type AlarmDraftDataType,
 } from '../components/alarm-center/alarmCenterModel'
 
@@ -49,6 +51,9 @@ export default function MinimalAlarmRulesPage() {
   const notificationsRequest = useRef<AbortController | null>(null)
   const [selectedRevision, setSelectedRevision] = useState<AlarmRuleSetRevision | null>(null)
   const [selectedEntities, setSelectedEntities] = useState<string[]>([])
+  const [entitySearch, setEntitySearch] = useState('')
+  const [nodeFilter, setNodeFilter] = useState('')
+  const [booleanOnly, setBooleanOnly] = useState(false)
   const [dataType, setDataType] = useState<AlarmDraftDataType>('NUMBER')
   const [name, setName] = useState('现场告警规则')
   const [rules, setRules] = useState<AlarmRule[]>([defaultAlarmDraft('NUMBER')])
@@ -92,6 +97,14 @@ export default function MinimalAlarmRulesPage() {
   }, [loadNotifications])
 
   const selectableEntities = useMemo(() => entities.filter((entity) => compatible(entity, dataType)), [entities, dataType])
+  const entityNodeOptions = useMemo(() => Array.from(
+    new Map(selectableEntities.map((entity) => [entity.node_id, entity.node_display_name])).entries(),
+  ).sort((left, right) => left[1].localeCompare(right[1], 'zh-CN')), [selectableEntities])
+  const filteredEntities = useMemo(() => filterAlarmEntities(selectableEntities, {
+    query: entitySearch,
+    nodeId: nodeFilter,
+    booleanOnly: dataType === 'STATE' && booleanOnly,
+  }), [selectableEntities, entitySearch, nodeFilter, booleanOnly, dataType])
   const firstRule = rules[0]
   const selectedHttpNotificationId = firstRule?.http_notification_config_id || ''
   const availableHttpNotifications = useMemo(
@@ -112,7 +125,25 @@ export default function MinimalAlarmRulesPage() {
     setRules((items) => [{ ...items[0], ...patch }, ...items.slice(1)]); resetResult()
   }
   const changeType = (type: AlarmDraftDataType) => {
-    setDataType(type); setRules([defaultAlarmDraft(type)]); setSelectedEntities([]); setSelectedRevision(null); resetResult()
+    setDataType(type); setRules([defaultAlarmDraft(type)]); setSelectedEntities([]); setSelectedRevision(null)
+    setEntitySearch(''); setNodeFilter(''); setBooleanOnly(false); resetResult()
+  }
+
+  const updateFilteredSelection = (select: boolean) => {
+    const next = updateFilteredAlarmSelection(selectedEntities, filteredEntities.map((entity) => entity.id), select)
+    if (select) {
+      const selectedTypes = next.selectedIds
+        .map((id) => entities.find((item) => item.id === id)?.data_type)
+        .filter((item): item is string => !!item)
+      const prepared = prepareAlarmRuleEdit([], selectedTypes)
+      if (!prepared.ready) { setError(prepared.message); return }
+      if (selectedEntities.length === 0 && prepared.booleanEntity && dataType === 'STATE') {
+        setRules([defaultAlarmDraft('STATE', 'BOOL')]); setTrialValue('false')
+      }
+    }
+    setSelectedEntities(next.selectedIds)
+    setError(next.limitReached ? '一次最多选择 200 个实体，已选择筛选结果中的前 200 个。' : '')
+    resetResult()
   }
 
   const editGroup = (group: AlarmRuleGroup, copy: boolean) => {
@@ -219,7 +250,7 @@ export default function MinimalAlarmRulesPage() {
     {message && <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{message}</div>}
     <section className="neu-card p-4">
       <div className="flex items-center justify-between"><div><h3 className="text-sm font-bold text-gray-800">已配置规则</h3><p className="mt-1 text-xs text-gray-500">启停也通过正式发布链，数据库提交后才改变。</p></div><button onClick={() => { setSelectedRevision(null); setName('现场告警规则'); changeType('NUMBER') }} className="rounded-lg bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white">新建规则</button></div>
-      <p className="mt-2 text-xs text-gray-500">启用只恢复正式配置，不发布草稿。同一次未恢复告警不会重复发送 HTTP 通知；启停、确认不补发消息，旧告警仍按发生时的条件等待恢复。</p>
+      <p className="mt-2 text-xs text-gray-500">启用只恢复正式配置，不发布草稿。同一次未恢复告警不会重复发送 HTTP 通知；恢复后再次发生会重新通知。启停、确认不补发消息，旧告警仍按发生时的条件等待恢复。</p>
       <div className="mt-3 space-y-2">{groups.map((group) => {
         const enabled = group.enabled_entity_instance_ids.length > 0
         const formal = revisions.find((item) => item.rule_set_id === group.rule_set_id && item.revision === group.last_published_revision)
@@ -248,20 +279,37 @@ export default function MinimalAlarmRulesPage() {
     <section className="neu-card p-4 space-y-4">
       <h3 className="text-sm font-bold text-gray-800">1. 选择实体</h3>
       <div className="flex gap-2">{(['NUMBER', 'STATE', 'CODE_SET'] as AlarmDraftDataType[]).map((type) => <button key={type} onClick={() => changeType(type)} className={`rounded px-3 py-1.5 text-xs ${dataType === type ? 'bg-[#52c41a] text-white' : 'bg-white/50 text-gray-600'}`}>{type === 'NUMBER' ? '数值' : type === 'STATE' ? '状态' : '多故障码'}</button>)}</div>
-      <div className="grid gap-2 md:grid-cols-2">{selectableEntities.map((entity) => <label key={entity.id} className="flex items-center gap-2 rounded border border-white/70 p-2 text-xs"><input type="checkbox" checked={selectedEntities.includes(entity.id)} onChange={(event) => {
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,0.45fr)_auto]">
+        <input value={entitySearch} onChange={(event) => setEntitySearch(event.target.value)} placeholder="搜索实体名称、业务标识或节点" className="neu-input px-3 py-2 text-xs" />
+        <select value={nodeFilter} onChange={(event) => setNodeFilter(event.target.value)} className="neu-input px-3 py-2 text-xs"><option value="">全部节点</option>{entityNodeOptions.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+        {dataType === 'STATE' && <label className="flex items-center gap-2 rounded border border-white/70 px-3 py-2 text-xs"><input type="checkbox" checked={booleanOnly} onChange={(event) => {
+          setBooleanOnly(event.target.checked)
+          if (event.target.checked) setSelectedEntities((items) => items.filter((id) => ['BOOL', 'BOOLEAN'].includes((entities.find((entity) => entity.id === id)?.data_type || '').toUpperCase())))
+          resetResult()
+        }} />仅布尔实体</label>}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+        <span>筛选结果 {filteredEntities.length} 个，已选 {selectedEntities.length} 个</span>
+        <button type="button" disabled={!filteredEntities.length} onClick={() => updateFilteredSelection(true)} className="rounded bg-white/70 px-3 py-1.5 text-[#287c12] disabled:opacity-40">全选筛选结果</button>
+        <button type="button" disabled={!filteredEntities.some((entity) => selectedEntities.includes(entity.id))} onClick={() => updateFilteredSelection(false)} className="rounded bg-white/70 px-3 py-1.5 text-gray-600 disabled:opacity-40">取消筛选结果</button>
+        <span className="text-gray-400">一次最多 200 个</span>
+      </div>
+      <div className="grid max-h-80 gap-2 overflow-y-auto md:grid-cols-2">{filteredEntities.map((entity) => <label key={entity.id} className="flex items-center gap-2 rounded border border-white/70 p-2 text-xs"><input type="checkbox" checked={selectedEntities.includes(entity.id)} onChange={(event) => {
         const selectingFirst = event.target.checked && selectedEntities.length === 0
         if (event.target.checked && !selectingFirst) {
           const selectedTypes = selectedEntities.map((id) => entities.find((item) => item.id === id)?.data_type).filter((item): item is string => !!item)
           const prepared = prepareAlarmRuleEdit([], [...selectedTypes, entity.data_type])
           if (!prepared.ready) { setError(prepared.message); return }
         }
-        setSelectedEntities((items) => event.target.checked ? [...items, entity.id] : items.filter((id) => id !== entity.id))
+        const next = updateFilteredAlarmSelection(selectedEntities, [entity.id], event.target.checked)
+        setSelectedEntities(next.selectedIds)
+        if (next.limitReached) { setError('一次最多选择 200 个实体。'); return }
         if (selectingFirst && dataType === 'STATE' && ['BOOL', 'BOOLEAN'].includes(entity.data_type.toUpperCase())) {
           setRules([defaultAlarmDraft('STATE', entity.data_type)])
           setTrialValue('false')
         }
         setError(''); resetResult()
-      }} /><span><strong>{entity.node_display_name}</strong> / {entity.display_name} <span className="text-gray-400">{entity.unit || entity.data_type}</span></span></label>)}</div>
+      }} /><span><strong>{entity.node_display_name}</strong> / {entity.display_name} <span className="text-gray-400">{entity.unit || entity.data_type}</span></span></label>)}{!filteredEntities.length && <p className="py-4 text-xs text-gray-400">没有符合条件的实体。</p>}</div>
       <h3 className="text-sm font-bold text-gray-800">2. 设置规则</h3>
       <label className="block text-xs">规则名称<input value={name} onChange={(event) => setName(event.target.value)} className="neu-input mt-1 w-full px-3 py-2" /></label>
       {dataType === 'CODE_SET' ? <div><textarea value={faultPaste} onChange={(event) => setFaultPaste(event.target.value)} rows={5} placeholder={'E30\t压缩机故障\tMAJOR\nE42\t直流母线过压\tCRITICAL'} className="neu-input w-full px-3 py-2 font-mono text-xs"/><button onClick={() => { try { setRules(compileFaultCodeRules(parseFaultCodePaste(faultPaste)).map((rule) => ({ ...rule, http_notification_config_id: selectedHttpNotificationId || null }))); resetResult(); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : '故障码格式错误。') } }} className="mt-2 rounded bg-white/70 px-3 py-1.5 text-xs">解析故障码</button><p className="mt-1 text-xs text-gray-500">已解析 {rules.length} 条规则</p></div> : firstRule && <div className="grid gap-3 md:grid-cols-4"><label className="text-xs">故障名称<input value={firstRule.name} onChange={(event) => patchRule({ name: event.target.value })} className="neu-input mt-1 w-full px-2 py-2" /></label><label className="text-xs">等级<select value={firstRule.severity} onChange={(event) => patchRule({ severity: event.target.value as AlarmSeverity })} className="neu-input mt-1 w-full px-2 py-2"><option value="CRITICAL">紧急</option><option value="MAJOR">重要</option><option value="WARNING">警告</option><option value="INFO">提示</option></select></label><label className="text-xs">触发值{selectedEntityIsBoolean ? <select value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="true">true（故障）</option><option value="false">false（正常）</option></select> : <input value={String(firstRule.trigger.value)} onChange={(event) => patchRule({ trigger: { ...firstRule.trigger, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label><label className="text-xs">恢复值{selectedEntityIsBoolean ? <select value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: event.target.value === 'true' } })} className="neu-input mt-1 w-full px-2 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={String(firstRule.recovery.value)} onChange={(event) => patchRule({ recovery: { ...firstRule.recovery, value: dataType === 'NUMBER' ? Number(event.target.value) : event.target.value } })} className="neu-input mt-1 w-full px-2 py-2" />}</label></div>}

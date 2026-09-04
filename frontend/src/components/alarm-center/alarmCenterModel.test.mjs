@@ -180,3 +180,36 @@ test('only a disabled alarm rule group exposes delete action', async () => {
   assert.equal(canDeleteAlarmRuleGroup({ enabled_entity_instance_ids: [] }), true)
   assert.equal(canDeleteAlarmRuleGroup({ enabled_entity_instance_ids: ['entity-1'] }), false)
 })
+
+test('alarm entity filtering combines search, node, and boolean-only conditions', async () => {
+  const { filterAlarmEntities } = await import('./alarmCenterModel.ts')
+  const entities = [
+    { id: 'bool-1', node_id: 'pcs-1', node_display_name: 'PCS 一号', definition_id: 'pcs.dc_fault', display_name: '15V 电源故障', data_type: 'BOOL' },
+    { id: 'bool-2', node_id: 'pcs-2', node_display_name: 'PCS 二号', definition_id: 'pcs.dc_fault', display_name: '15V 电源故障', data_type: 'BOOLEAN' },
+    { id: 'text-1', node_id: 'pcs-1', node_display_name: 'PCS 一号', definition_id: 'pcs.mode', display_name: '运行模式', data_type: 'STRING' },
+  ]
+
+  assert.deepEqual(
+    filterAlarmEntities(entities, { query: '15v', nodeId: 'pcs-1', booleanOnly: true }).map((item) => item.id),
+    ['bool-1'],
+  )
+  assert.deepEqual(
+    filterAlarmEntities(entities, { query: 'pcs.dc_fault', nodeId: '', booleanOnly: true }).map((item) => item.id),
+    ['bool-1', 'bool-2'],
+  )
+})
+
+test('select all filtered entities preserves hidden selections and enforces the 200 limit', async () => {
+  const { updateFilteredAlarmSelection } = await import('./alarmCenterModel.ts')
+  const filteredIds = Array.from({ length: 205 }, (_, index) => `visible-${index}`)
+
+  const selected = updateFilteredAlarmSelection(['hidden-1'], filteredIds, true)
+  assert.equal(selected.selectedIds.length, 200)
+  assert.equal(selected.selectedIds[0], 'hidden-1')
+  assert.equal(selected.limitReached, true)
+
+  assert.deepEqual(
+    updateFilteredAlarmSelection(['hidden-1', 'visible-0', 'visible-1'], filteredIds, false),
+    { selectedIds: ['hidden-1'], limitReached: false },
+  )
+})

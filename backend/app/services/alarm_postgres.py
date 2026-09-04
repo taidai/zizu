@@ -388,10 +388,6 @@ class PostgresAlarmRepository:
         with self.transaction() as transaction:
             return transaction.append_transition(transition)
 
-    def last_notification_at(self, definition_id: UUID, entity_instance_id: UUID) -> datetime | None:
-        with self.transaction() as transaction:
-            return transaction.last_notification_at(definition_id, entity_instance_id)
-
     def enqueue_notification(self, notification: AlarmNotification) -> None:
         with self.transaction() as transaction:
             transaction.enqueue_notification(notification)
@@ -678,19 +674,6 @@ class _PostgresAlarmTransaction:
                 ),
             )
         return audit_event_id
-
-    def last_notification_at(self, definition_id: UUID, entity_instance_id: UUID) -> datetime | None:
-        with self._connection.cursor() as cur:
-            cur.execute(
-                """
-                SELECT max(created_at) FROM t_alarm_notification_outbox
-                WHERE definition_id = %s AND entity_instance_id = %s
-                  AND transition_code = 'ALARM_ACTIVATED'
-                """,
-                (definition_id, entity_instance_id),
-            )
-            row = cur.fetchone()
-        return row[0] if row and row[0] else None
 
     def enqueue_notification(self, notification: AlarmNotification) -> None:
         context_snapshot = self._notification_context_snapshot(notification)
