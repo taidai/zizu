@@ -102,6 +102,64 @@ class PcsNumericConversionTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.GOOD, output.quality)
         self.assertIsNone(output.reason)
 
+    def test_passthrough_declares_missing_numeric_unit_but_preserves_raw_evidence(self) -> None:
+        for quality in (TrunkQuality.GOOD, TrunkQuality.STALE):
+            with self.subTest(quality=quality):
+                fixture = self.fixture()
+                raw = next(iter(fixture["current_inputs"].values()))
+                raw = replace(raw, raw_unit=None, value=TypedValue.float(12.5), quality=quality)
+                fixture["current_inputs"] = {InputReference.l0(raw.tag_id): raw}
+                fixture["installed"] = (replace(
+                    fixture["installed"][0],
+                    transform=PassthroughTransform(InputReference.l0(raw.tag_id)),
+                ),)
+                output = evaluate_processing(**fixture)[0]
+                self.assertEqual(quality, output.quality)
+                self.assertEqual("kW", output.unit)
+                self.assertIs(raw.value, output.value)
+                self.assertIsNone(raw.raw_unit)
+                self.assertEqual((raw.observation_id,), output.source_observation_ids)
+                self.assertEqual(raw.source_timestamp, output.observed_at)
+
+    def test_passthrough_still_rejects_known_unit_change(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        fixture["installed"] = (replace(
+            fixture["installed"][0],
+            transform=PassthroughTransform(InputReference.l0(raw.tag_id)),
+        ),)
+        output = evaluate_processing(**fixture)[0]
+        self.assertEqual(TrunkQuality.BAD, output.quality)
+        self.assertEqual("UNIT_MISMATCH", output.reason)
+        self.assertIsNone(output.value.value)
+
+    def test_passthrough_does_not_relabel_missing_data_from_known_unit_contract(self) -> None:
+        fixture = self.fixture()
+        raw = next(iter(fixture["current_inputs"].values()))
+        fixture["current_inputs"] = {InputReference.l0(raw.tag_id): replace(raw, raw_unit=None)}
+        fixture["installed"] = (replace(
+            fixture["installed"][0],
+            transform=PassthroughTransform(InputReference.l0(raw.tag_id), input_unit="kW"),
+        ),)
+        output = evaluate_processing(**fixture)[0]
+        self.assertEqual(TrunkQuality.BAD, output.quality)
+        self.assertEqual("UNIT_MISMATCH", output.reason)
+        self.assertIsNone(output.value.value)
+
+    def test_passthrough_cannot_declare_unit_for_cross_node_l2(self) -> None:
+        fixture = self.fixture()
+        source = replace(evaluate_processing(**fixture)[0], unit=None)
+        reference = InputReference.l2(source.entity_instance_id)
+        fixture["current_inputs"] = {reference: source}
+        fixture["installed"] = (replace(
+            fixture["installed"][0],
+            transform=PassthroughTransform(reference),
+        ),)
+        output = evaluate_processing(**fixture)[0]
+        self.assertEqual(TrunkQuality.BAD, output.quality)
+        self.assertEqual("UNIT_MISMATCH", output.reason)
+        self.assertIsNone(output.value.value)
+
     def test_passthrough_keeps_diagnostic_value_for_stale_and_uncertain(self) -> None:
         for quality, source_reason, expected_reason in (
             (TrunkQuality.STALE, None, "INPUT_STALE"),

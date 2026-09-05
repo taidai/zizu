@@ -6,7 +6,7 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.8.5`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current version: `v0.8.9`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
 > Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
@@ -100,6 +100,12 @@ Run **Check Result** before publication to verify bindings, types, units, qualit
 publication, inspect the L2 live value, history, and provenance in **Standard Entities**. Save the processing as a reusable
 template only when a second device of the same kind needs it.
 
+For a numeric local L0 with no declared unit, **Direct Use** can explicitly declare its true engineering unit. For an
+existing entity, use **Standard Entities → Templates and Versions → Edit Current Processing**, fill the output unit,
+check, and publish. This does not rescale values or change L0, entity identity, history, or control limits. Known units,
+boolean values, and cross-node L2 inputs cannot be relabeled this way. Release control ownership or dependent node
+processing before changing a unit they use.
+
 ### 4. Configure upper applications
 
 - In Alarms, select L2 entities and configure severity, trigger, recovery, and duration; bind an HTTP notification when needed.
@@ -108,6 +114,7 @@ template only when a second device of the same kind needs it.
 - Standard GoRules JDM is the sole internal execution semantics. The easy table and **Open Full Rule Graph** edit the same JDM document; there is no second rule or action model.
 - The starter's SOC input requires a numeric L2 with definition `bms.soc` or `storage.soc`, unit `%`, and a finite value from 0 to 100. Convert vendor 0–1 ratios to percentages in L1 first; temperature, power, and unrelated percentage entities are not SOC. Its power target requires a writable numeric L2 in `kW` with safety bounds. These rules apply only to the reserved `soc` / `power-target` bindings, not to other JDM bindings.
 - Renaming or saving preserves the existing JDM, trigger, timezone, all bindings, and freshness contracts. Graphs that cannot be represented losslessly by the built-in table remain editable in the full graph and are never replaced with default windows. Publication, activation, and execution revalidate bindings; invalid entities are not silently substituted.
+- After site configuration changes, **Save Draft** revalidates current entities and refreshes the draft configuration baseline. A missing legacy binding unit can be filled from the current entity; changed known units or types remain blocked. Published revisions and activation state remain unchanged: simulate again, then explicitly publish and enable. Expired inputs still block simulation and control; freshness limits are never extended automatically.
 - For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
 - Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
 

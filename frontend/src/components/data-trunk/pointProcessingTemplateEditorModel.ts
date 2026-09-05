@@ -47,6 +47,46 @@ export function createNodeProcessingEditDraft(
   return deepCopy(source)
 }
 
+function passthroughInputId(transform: Record<string, unknown>): string | null {
+  if (transform.kind === 'passthrough') return String(transform.input ?? '') || null
+  if (visualTransformKind(transform) === 'passthrough') {
+    return String(transform.input ?? '') || null
+  }
+  return null
+}
+
+export function missingUnitDeclarationOutputIds(
+  source: TemplateDocument,
+): string[] {
+  return source.outputs.flatMap((output) => {
+    if (output.unit != null) return []
+    const outputType = String(output.dataType ?? '').toUpperCase()
+    if (!['FLOAT', 'INT'].includes(outputType)) return []
+    const inputId = passthroughInputId(output.transform)
+    if (!inputId) return []
+    const input = source.inputs.find((candidate) => candidate.id === inputId)
+    if (!input || input.sourceKind !== 'l0' || input.unit != null) return []
+    if (String(input.dataType ?? '').toUpperCase() !== outputType) return []
+    return [output.id]
+  })
+}
+
+export function updateNodeProcessingOutputUnit(
+  source: TemplateDocument,
+  outputId: string,
+  unit: string,
+): TemplateDocument {
+  if (!source.outputs.some((candidate) => candidate.id === outputId)) {
+    throw new Error('找不到要更新的输出')
+  }
+  return {
+    ...source,
+    outputs: source.outputs.map((output) => output.id === outputId
+      ? { ...output, unit: unit.trim() || null }
+      : output),
+  }
+}
+
 function finiteNumber(value: unknown, label: string): number {
   const parsed = typeof value === 'number' ? value : Number(String(value ?? '').trim())
   if (!Number.isFinite(parsed)) throw new Error(`${label}必须是数字`)

@@ -276,6 +276,7 @@ class InputReference:
 @dataclass(frozen=True)
 class PassthroughTransform:
     input: InputReference
+    input_unit: str | None = None
 
 
 @dataclass(frozen=True)

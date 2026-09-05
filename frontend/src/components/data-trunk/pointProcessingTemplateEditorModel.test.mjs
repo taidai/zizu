@@ -71,6 +71,55 @@ test('editing current node processing keeps its complete immutable source as an 
   assert.equal(extended.displayName, 'EN9 PCS')
 })
 
+test('current node edit can fill only missing numeric local-L0 passthrough output units', async () => {
+  const model = await import('./pointProcessingTemplateEditorModel.ts')
+  const document = {
+    ...source,
+    inputs: [
+      { id: 'raw_real', sourceKind: 'l0', sourceKey: 'PReal', aliases: [], dataType: 'FLOAT', unit: null, required: true },
+      { id: 'raw_legacy', sourceKind: 'l0', sourceKey: 'PLegacy', aliases: [], dataType: 'INT', unit: null, required: true },
+      { id: 'known', sourceKind: 'l0', sourceKey: 'PKnown', aliases: [], dataType: 'FLOAT', unit: 'W', required: true },
+      { id: 'flag', sourceKind: 'l0', sourceKey: 'Flag', aliases: [], dataType: 'BOOL', unit: null, required: true },
+      { id: 'remote', sourceKind: 'l2', sourceKey: 'site.power', aliases: [], dataType: 'FLOAT', unit: null, required: true },
+    ],
+    outputs: [
+      { id: 'real', entityDefinition: 'pcs.real', dataType: 'FLOAT', unit: null, freshness: '30s', transform: { kind: 'passthrough', input: 'raw_real' }, control: { minimum: 0, maximum: 200 } },
+      { id: 'legacy', entityDefinition: 'pcs.legacy', dataType: 'INT', unit: null, freshness: '30s', transform: { kind: 'numeric', input: 'raw_legacy', scale: 1, offset: 0, minimum: -1000000000, maximum: 1000000000 } },
+      { id: 'already_known', entityDefinition: 'pcs.known', dataType: 'FLOAT', unit: 'W', freshness: '30s', transform: { kind: 'passthrough', input: 'known' } },
+      { id: 'known_input', entityDefinition: 'pcs.known_input', dataType: 'FLOAT', unit: null, freshness: '30s', transform: { kind: 'passthrough', input: 'known' } },
+      { id: 'flag_output', entityDefinition: 'pcs.flag', dataType: 'BOOL', unit: null, freshness: '30s', transform: { kind: 'passthrough', input: 'flag' } },
+      { id: 'remote_output', entityDefinition: 'pcs.remote', dataType: 'FLOAT', unit: null, freshness: '30s', transform: { kind: 'passthrough', input: 'remote' } },
+      { id: 'scaled', entityDefinition: 'pcs.scaled', dataType: 'FLOAT', unit: null, freshness: '30s', transform: { kind: 'numeric', input: 'raw_real', scale: 0.001, offset: 0, minimum: -1000000000, maximum: 1000000000 } },
+    ],
+  }
+
+  assert.deepEqual(model.missingUnitDeclarationOutputIds(document), ['real', 'legacy'])
+})
+
+test('real passthrough remains a real passthrough while declaring a missing unit', async () => {
+  const model = await import('./pointProcessingTemplateEditorModel.ts')
+  const document = {
+    ...source,
+    inputs: [{ id: 'power', sourceKind: 'l0', sourceKey: 'ActivePower', aliases: [], dataType: 'FLOAT', unit: null, required: true }],
+    outputs: [{
+      id: 'active_power',
+      entityDefinition: 'pcs.active_power',
+      dataType: 'FLOAT',
+      unit: null,
+      freshness: '30s',
+      transform: { kind: 'passthrough', input: 'power' },
+      control: { minimum: 0, maximum: 200, tolerance: 0.1 },
+    }],
+  }
+
+  const draft = model.updateNodeProcessingOutputUnit(document, 'active_power', 'kW')
+
+  assert.equal(document.outputs[0].unit, null)
+  assert.equal(draft.outputs[0].unit, 'kW')
+  assert.deepEqual(draft.outputs[0].transform, { kind: 'passthrough', input: 'power' })
+  assert.deepEqual(draft.outputs[0].control, { minimum: 0, maximum: 200, tolerance: 0.1 })
+})
+
 test('a bounded numeric rule is not mislabeled as pass-through', async () => {
   const model = await import('./pointProcessingTemplateEditorModel.ts')
 

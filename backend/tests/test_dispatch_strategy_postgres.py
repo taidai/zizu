@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import os
 import json
 from pathlib import Path
+from queue import Queue
+import time
 import unittest
 from uuid import uuid4
 
@@ -217,6 +220,407 @@ class DispatchStrategyPostgresFixture:
     "set ZIZU_POSTGRES_TEST=1 to run dispatch-strategy repository tests",
 )
 class DispatchStrategyPostgresTest(DispatchStrategyPostgresFixture, unittest.TestCase):
+    def _advance_configuration(self) -> int:
+        next_revision = self.configuration_revision + 1
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_configuration_revisions"
+                "(revision,previous_revision,actor,action,resource_kind,resource_id,after_digest) "
+                "VALUES(%s,%s,'test:strategy','test:change','site','test',%s)",
+                (next_revision, self.configuration_revision, "e" * 64),
+            )
+            cursor.execute(
+                "UPDATE t_configuration_state SET current_revision=%s WHERE singleton=TRUE",
+                (next_revision,),
+            )
+        self.configuration_revision = next_revision
+        return next_revision
+
+    def test_save_rebases_missing_units_to_current_contract_without_mutating_published(self) -> None:
+        original = replace(
+            self._draft(),
+            jdm_content={
+                "nodes": [
+                    {"id": "input", "type": "inputNode", "name": "Input"},
+                    {"id": "custom", "type": "expressionNode", "content": {"expressions": []}},
+                    {"id": "output", "type": "outputNode", "name": "Output"},
+                ],
+                "edges": [
+                    {"id": "input-custom", "sourceId": "input", "targetId": "custom"},
+                    {"id": "custom-output", "sourceId": "custom", "targetId": "output"},
+                ],
+                "metadata": {"preserve": {"layout": [3, 1, 2]}},
+            },
+        )
+        original = replace(
+            original,
+            bindings=(
+                original.bindings[0],
+                StrategyBindingDraft("INPUT", "reserve-soc", 1, self.input_id, "FLOAT", "%", 37),
+                original.bindings[1],
+            ),
+        )
+        created = self.repository.create_strategy(original, "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_dispatch_strategy_bindings SET unit=NULL "
+                "WHERE revision_id=%s AND binding_key IN ('soc','power-target')",
+                (published.id,),
+            )
+        legacy = self.repository.get_strategy(created.id).published_revision
+        self.assertEqual([None, "%", None], [item.unit for item in legacy.bindings])
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_dispatch_strategies "
+                "SET runtime_health='FAILED',failure_code='CONTROL_READBACK_MISMATCH' "
+                "WHERE id=%s",
+                (created.id,),
+            )
+        current_revision = self._advance_configuration()
+        _, evaluated_at = self._commit_samples()
+        runtime = StrategyRuntime(
+            self.repository,
+            evaluator=lambda _content, _inputs: {
+                "result": {"action_id": "power-target", "target": 50.0}
+            },
+        )
+        blocked = runtime.simulate(published.id, {}, evaluated_at)
+        self.assertEqual(("BLOCKED", "L2_CONFIGURATION_MISMATCH", ()), (
+            blocked.status, blocked.reason_code, blocked.intents,
+        ))
+        incoming = replace(
+            original,
+            base_configuration_revision=legacy.base_configuration_revision,
+            bindings=legacy.bindings,
+        )
+
+        saved = self.repository.save_draft(
+            created.id, incoming, legacy.content_digest, "engineer:test",
+        )
+
+        self.assertEqual(current_revision, saved.draft.base_configuration_revision)
+        self.assertEqual(legacy.jdm_content, saved.draft.jdm_content)
+        self.assertEqual(
+            [
+                ("INPUT", "soc", 0, self.input_id, "FLOAT", "%", 10),
+                ("INPUT", "reserve-soc", 1, self.input_id, "FLOAT", "%", 37),
+                ("OUTPUT", "power-target", 0, self.output_id, "FLOAT", "kW", 10),
+            ],
+            [
+                (item.direction, item.binding_key, item.ordinal,
+                 item.entity_instance_id, item.expected_data_type,
+                 item.unit, item.freshness_seconds)
+                for item in saved.draft.bindings
+            ],
+        )
+        unchanged = self.repository.get_strategy(created.id).published_revision
+        self.assertEqual(legacy, unchanged)
+        self.assertFalse(saved.enabled)
+        self.assertIsNone(saved.active_revision_id)
+        self.assertEqual("FAILED", saved.runtime_health)
+        self.assertEqual("CONTROL_READBACK_MISMATCH", saved.failure_code)
+        evaluated = runtime.simulate(saved.draft.id, {}, evaluated_at)
+        self.assertEqual("EVALUATED", evaluated.status)
+        self.assertIsNone(evaluated.reason_code)
+
+    def test_save_rebase_rejects_known_unit_change_for_same_entity(self) -> None:
+        created = self.repository.create_strategy(self._draft(), "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_entity_instances SET unit='W' WHERE id=%s",
+                (self.output_id,),
+            )
+        self._advance_configuration()
+        incoming = replace(
+            self._draft(),
+            base_configuration_revision=published.base_configuration_revision,
+            bindings=published.bindings,
+        )
+
+        with self.assertRaisesRegex(StrategyModelError, "L2_BINDING_UNIT_MISMATCH"):
+            self.repository.save_draft(
+                created.id, incoming, published.content_digest, "engineer:test",
+            )
+
+        view = self.repository.get_strategy(created.id)
+        self.assertIsNone(view.draft)
+        self.assertEqual(published, view.published_revision)
+
+    def test_save_rebase_rejects_known_type_change_for_same_entity(self) -> None:
+        created = self.repository.create_strategy(self._draft(), "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_dispatch_strategy_bindings SET expected_data_type='INT' "
+                "WHERE revision_id=%s AND binding_key='soc'",
+                (published.id,),
+            )
+        legacy = self.repository.get_strategy(created.id).published_revision
+        self._advance_configuration()
+        incoming = replace(
+            self._draft(),
+            base_configuration_revision=legacy.base_configuration_revision,
+            bindings=legacy.bindings,
+        )
+
+        with self.assertRaisesRegex(StrategyModelError, "L2_BINDING_TYPE_MISMATCH"):
+            self.repository.save_draft(
+                created.id, incoming, legacy.content_digest, "engineer:test",
+            )
+
+        view = self.repository.get_strategy(created.id)
+        self.assertIsNone(view.draft)
+        self.assertEqual(legacy, view.published_revision)
+
+    def test_relabeling_binding_cannot_hide_known_unit_change_for_same_entity(self) -> None:
+        strategies = []
+        for name in ("changed-key", "changed-ordinal", "changed-direction"):
+            created = self.repository.create_strategy(self._draft(name), "engineer:test")
+            published = self.repository.publish(
+                created.id, created.draft.content_digest,
+                self.configuration_revision, "engineer:test",
+            )
+            strategies.append((created.id, published))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_entity_instances SET unit='W' WHERE id=%s",
+                (self.output_id,),
+            )
+        self._advance_configuration()
+
+        changes = (
+            {"binding_key": "renamed-target", "ordinal": 0, "direction": "OUTPUT"},
+            {"binding_key": "power-target", "ordinal": 1, "direction": "OUTPUT"},
+            {"binding_key": "renamed-target", "ordinal": 1, "direction": "INPUT"},
+        )
+        for (strategy_id, published), changed in zip(strategies, changes, strict=True):
+            with self.subTest(change=changed):
+                output = next(
+                    item for item in published.bindings
+                    if item.entity_instance_id == self.output_id
+                )
+                relabeled = replace(output, unit="W", **changed)
+                incoming = replace(
+                    self._draft(),
+                    base_configuration_revision=published.base_configuration_revision,
+                    bindings=(published.bindings[0], relabeled),
+                )
+                with self.assertRaisesRegex(
+                    StrategyModelError, "L2_BINDING_UNIT_MISMATCH",
+                ):
+                    self.repository.save_draft(
+                        strategy_id, incoming, published.content_digest,
+                        "engineer:test",
+                    )
+                self.assertIsNone(self.repository.get_strategy(strategy_id).draft)
+
+    def test_relabeling_binding_cannot_hide_known_type_change_for_same_entity(self) -> None:
+        created = self.repository.create_strategy(self._draft(), "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_dispatch_strategy_bindings SET expected_data_type='INT' "
+                "WHERE revision_id=%s AND entity_instance_id=%s",
+                (published.id, self.output_id),
+            )
+        legacy = self.repository.get_strategy(created.id).published_revision
+        self._advance_configuration()
+        output = next(
+            item for item in legacy.bindings
+            if item.entity_instance_id == self.output_id
+        )
+        relabeled = replace(
+            output,
+            binding_key="renamed-target",
+            expected_data_type="FLOAT",
+        )
+        incoming = replace(
+            self._draft(),
+            base_configuration_revision=legacy.base_configuration_revision,
+            bindings=(legacy.bindings[0], relabeled),
+        )
+
+        with self.assertRaisesRegex(StrategyModelError, "L2_BINDING_TYPE_MISMATCH"):
+            self.repository.save_draft(
+                created.id, incoming, legacy.content_digest, "engineer:test",
+            )
+
+        self.assertIsNone(self.repository.get_strategy(created.id).draft)
+
+    def test_rebase_checks_every_historical_contract_for_reused_entity(self) -> None:
+        draft = self._draft()
+        draft = replace(
+            draft,
+            jdm_content={"nodes": [], "edges": [], "metadata": {"kind": "custom"}},
+            bindings=(
+                draft.bindings[0],
+                StrategyBindingDraft(
+                    "OUTPUT", "alias-target", 0, self.output_id, "FLOAT", "kW", 20,
+                ),
+                replace(draft.bindings[1], ordinal=1),
+            ),
+        )
+        created = self.repository.create_strategy(draft, "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE t_dispatch_strategy_bindings SET unit=NULL "
+                "WHERE revision_id=%s AND binding_key='alias-target'",
+                (published.id,),
+            )
+            cursor.execute(
+                "UPDATE t_entity_instances SET unit='W' WHERE id=%s",
+                (self.output_id,),
+            )
+        legacy = self.repository.get_strategy(created.id).published_revision
+        self.assertEqual(
+            [None, "kW"],
+            [item.unit for item in legacy.bindings if item.entity_instance_id == self.output_id],
+        )
+        self._advance_configuration()
+        alias = next(item for item in legacy.bindings if item.binding_key == "alias-target")
+        incoming = replace(
+            draft,
+            base_configuration_revision=legacy.base_configuration_revision,
+            bindings=(legacy.bindings[0], replace(alias, binding_key="renamed", unit="W")),
+        )
+
+        with self.assertRaisesRegex(StrategyModelError, "L2_BINDING_UNIT_MISMATCH"):
+            self.repository.save_draft(
+                created.id, incoming, legacy.content_digest, "engineer:test",
+            )
+
+        self.assertIsNone(self.repository.get_strategy(created.id).draft)
+
+    def test_concurrent_rebase_keeps_compare_and_swap_exclusive(self) -> None:
+        created = self.repository.create_strategy(self._draft(), "engineer:test")
+        published = self.repository.publish(
+            created.id, created.draft.content_digest,
+            self.configuration_revision, "engineer:test",
+        )
+        current_revision = self._advance_configuration()
+        incoming = replace(
+            self._draft(),
+            description="rebased",
+            base_configuration_revision=published.base_configuration_revision,
+            bindings=published.bindings,
+        )
+
+        def save_once(actor: str):
+            try:
+                saved = self.repository.save_draft(
+                    created.id, incoming, published.content_digest, actor,
+                )
+                return ("saved", saved.draft.content_digest)
+            except StrategyRepositoryError as error:
+                return (error.code, None)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(save_once, ("engineer:first", "engineer:second")))
+
+        self.assertEqual(["STRATEGY_DRAFT_STALE", "saved"], sorted(item[0] for item in outcomes))
+        view = self.repository.get_strategy(created.id)
+        self.assertEqual(current_revision, view.draft.base_configuration_revision)
+        self.assertEqual(published, view.published_revision)
+
+    def test_save_locks_configuration_before_waiting_for_strategy(self) -> None:
+        created = self.repository.create_strategy(self._draft(), "engineer:test")
+        worker_pids: Queue[int] = Queue()
+
+        def tracked_connection():
+            connection = self._connection()
+            worker_pids.put(connection.get_backend_pid())
+            return connection
+
+        repository = PostgresStrategyRepository(
+            connection_factory=tracked_connection,
+            compiler=lambda _content: "f" * 64,
+        )
+        holder = self._connection()
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            with holder.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM t_dispatch_strategies WHERE id=%s FOR UPDATE",
+                    (created.id,),
+                )
+            future = pool.submit(
+                repository.save_draft,
+                created.id,
+                replace(self._draft(), description="wait for strategy"),
+                created.draft.content_digest,
+                "engineer:worker",
+            )
+            worker_pid = worker_pids.get(timeout=2)
+            waiting = False
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with self._connection() as observer, observer.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s",
+                        (worker_pid,),
+                    )
+                    row = cursor.fetchone()
+                if row is not None and row[0] == "Lock":
+                    waiting = True
+                    break
+                time.sleep(0.02)
+            self.assertTrue(waiting, "save worker did not reach the strategy lock barrier")
+            configuration_was_locked = False
+            with self._connection() as challenger, challenger.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout='200ms'")
+                try:
+                    cursor.execute(
+                        "UPDATE t_configuration_state "
+                        "SET current_revision=current_revision WHERE singleton=TRUE"
+                    )
+                except psycopg2.errors.LockNotAvailable:
+                    configuration_was_locked = True
+            holder.rollback()
+            saved = future.result(timeout=2)
+            self.assertEqual("wait for strategy", saved.description)
+            self.assertTrue(
+                configuration_was_locked,
+                "save must hold the configuration row before waiting for the strategy",
+            )
+        finally:
+            holder.rollback()
+            holder.close()
+            pool.shutdown(wait=True)
+
+    def test_old_good_sample_reports_input_stale_not_quality_failure(self) -> None:
+        strategy = self.repository.create_strategy(self._draft(), "engineer:test")
+        _, observed_at = self._commit_samples()
+        runtime = StrategyRuntime(
+            self.repository,
+            evaluator=lambda _content, _inputs: {
+                "result": {"action_id": "power-target", "target": 50.0}
+            },
+        )
+
+        result = runtime.simulate(strategy.draft.id, {}, observed_at + timedelta(seconds=11))
+
+        self.assertEqual(("BLOCKED", "L2_INPUT_STALE", ()), (
+            result.status, result.reason_code, result.intents,
+        ))
+
     def test_draft_compare_and_swap_and_published_revision_are_immutable(self) -> None:
         created = self.repository.create_strategy(self._draft(), "engineer:test")
         self.assertIsNotNone(created.draft)

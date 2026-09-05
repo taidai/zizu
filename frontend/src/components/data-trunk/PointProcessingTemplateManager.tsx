@@ -14,7 +14,9 @@ import {
   createNodeProcessingEditDraft,
   createTemplateDraftFromL0,
   formatEnumEntries,
+  missingUnitDeclarationOutputIds,
   parseEnumEntries,
+  updateNodeProcessingOutputUnit,
   visualTransformKind,
   type TemplateCopyMode,
   type TemplateDocument,
@@ -63,6 +65,7 @@ export default function PointProcessingTemplateManager({
   const [baseRevisionId, setBaseRevisionId] = useState(selectedRevisionId)
   const [draft, setDraft] = useState<TemplateDocument | null>(null)
   const [draftMode, setDraftMode] = useState<TemplateCopyMode | 'node-edit'>('next-revision')
+  const [editableOutputUnitIds, setEditableOutputUnitIds] = useState<Set<string>>(() => new Set())
   const [enumTexts, setEnumTexts] = useState<Record<number, string>>({})
   const [checkedContent, setCheckedContent] = useState<Record<string, unknown> | null>(null)
   const [checkedDigest, setCheckedDigest] = useState('')
@@ -79,6 +82,7 @@ export default function PointProcessingTemplateManager({
   const createFromCurrentNode = () => {
     const key = nodeName.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'device'
     setDraftMode('new-template')
+    setEditableOutputUnitIds(new Set())
     setDraft(createTemplateDraftFromL0(l0Points, {
       id: `custom.${String(deviceCategory || 'device').toLowerCase()}.${key}`,
       displayName: `${nodeName} 点位加工模板`,
@@ -115,6 +119,7 @@ export default function PointProcessingTemplateManager({
       const raw = await exportPointProcessingTemplate(activeBaseRevision) as TemplateDocument
       const next = cloneTemplateDraft(raw, mode)
       setDraftMode(mode)
+      setEditableOutputUnitIds(new Set())
       setDraft(next)
       setEnumTexts(Object.fromEntries(next.outputs.map((output, index) => [
         index,
@@ -138,6 +143,7 @@ export default function PointProcessingTemplateManager({
       const raw = await exportPointProcessingTemplate(currentRevisionId) as TemplateDocument
       const next = createNodeProcessingEditDraft(raw)
       setDraftMode('node-edit')
+      setEditableOutputUnitIds(new Set(missingUnitDeclarationOutputIds(next)))
       setDraft(next)
       setEnumTexts(Object.fromEntries(next.outputs.map((output, index) => [
         index,
@@ -387,13 +393,20 @@ export default function PointProcessingTemplateManager({
                 <div className="mt-3 space-y-3">
                   {draft.outputs.map((output, index) => {
                     const transformKind = visualTransformKind(output.transform)
+                    const canDeclareOutputUnit = draftMode === 'node-edit'
+                      && editableOutputUnitIds.has(output.id)
                     return (
                       <div key={`${output.id}:${index}`} className="rounded border border-gray-100 bg-gray-50/70 p-3">
                         <div className="grid gap-2 lg:grid-cols-5">
                           <input aria-label="输出标识" readOnly={draftMode === 'node-edit'} value={String(output.id)} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
                           <input aria-label="实体定义" readOnly={draftMode === 'node-edit'} value={String(output.entityDefinition ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, entityDefinition: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
                           <select aria-label="输出类型" disabled={draftMode === 'node-edit'} value={String(output.dataType ?? 'FLOAT')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, dataType: event.target.value } : item) }))} className="neu-input bg-transparent px-2 py-1 text-xs disabled:bg-gray-100">{DATA_TYPES.map((item) => <option key={item}>{item}</option>)}</select>
-                          <input aria-label="输出单位" readOnly={draftMode === 'node-edit'} value={String(output.unit ?? '')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) }))} placeholder="单位" className="neu-input bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                          <div>
+                            <input aria-label="输出单位" readOnly={draftMode === 'node-edit' && !canDeclareOutputUnit} value={String(output.unit ?? '')} onChange={(event) => patchDraft((current) => draftMode === 'node-edit'
+                              ? updateNodeProcessingOutputUnit(current, output.id, event.target.value)
+                              : { ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value || null } : item) })} placeholder="单位" className="neu-input w-full bg-transparent px-2 py-1 text-xs read-only:bg-gray-100" />
+                            {canDeclareOutputUnit && <p className="mt-1 text-[10px] text-amber-700">仅补录真实工程单位；不会缩放或猜测数值。</p>}
+                          </div>
                           <input aria-label="保鲜时间" value={String(output.freshness ?? '30s')} onChange={(event) => patchDraft((current) => ({ ...current, outputs: current.outputs.map((item, itemIndex) => itemIndex === index ? { ...item, freshness: event.target.value } : item) }))} placeholder="30s" className="neu-input bg-transparent px-2 py-1 text-xs" />
                         </div>
                         <div className="mt-2 grid gap-2 lg:grid-cols-[180px_180px_minmax(0,1fr)]">

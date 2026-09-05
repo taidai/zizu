@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -98,13 +99,15 @@ class PostgresStrategyRepository:
         actor: str,
     ) -> StrategyView:
         _validate_draft(draft)
-        digest = strategy_draft_digest(draft)
         with self._write() as connection, connection.cursor() as cursor:
-            self._lock_strategy(cursor, strategy_id)
-            validate_publish_bindings(
-                draft.bindings, self._load_entity_contracts(cursor, draft.bindings),
-                static_targets=(), require_complete=False,
+            cursor.execute(
+                "SELECT current_revision FROM t_configuration_state "
+                "WHERE singleton=TRUE FOR SHARE"
             )
+            current = cursor.fetchone()
+            if current is None:
+                raise StrategyRepositoryError("DATA_FRAME_CONFIGURATION_UNAVAILABLE")
+            self._lock_strategy(cursor, strategy_id)
             cursor.execute(
                 f"{_REVISION_SELECT} WHERE strategy_id=%s AND lifecycle='DRAFT' FOR UPDATE",
                 (strategy_id,),
@@ -119,8 +122,32 @@ class PostgresStrategyRepository:
                 source = cursor.fetchone()
                 if source is None or str(source[7]) != expected_digest:
                     raise StrategyRepositoryError("STRATEGY_DRAFT_STALE")
+                source_revision = self._revision_from_row(connection, source)
                 revision_id = uuid4()
                 revision = int(source[2]) + 1
+            else:
+                if str(row[7]) != expected_digest:
+                    raise StrategyRepositoryError("STRATEGY_DRAFT_STALE")
+                source_revision = self._revision_from_row(connection, row)
+                revision_id = UUID(str(row[0]))
+                revision = None
+
+            contracts = self._load_entity_contracts(cursor, draft.bindings)
+            refreshed_bindings = _refresh_binding_contracts(
+                draft.bindings, source_revision.bindings, contracts,
+            )
+            draft = replace(
+                draft,
+                base_configuration_revision=int(current[0]),
+                bindings=refreshed_bindings,
+            )
+            validate_publish_bindings(
+                draft.bindings, contracts,
+                static_targets=(), require_complete=False,
+            )
+            digest = strategy_draft_digest(draft)
+
+            if row is None:
                 self._insert_revision(
                     cursor,
                     revision_id=revision_id,
@@ -131,9 +158,6 @@ class PostgresStrategyRepository:
                     actor=actor,
                 )
             else:
-                if str(row[7]) != expected_digest:
-                    raise StrategyRepositoryError("STRATEGY_DRAFT_STALE")
-                revision_id = UUID(str(row[0]))
                 cursor.execute(
                     """
                     UPDATE t_dispatch_strategy_revisions
@@ -542,11 +566,6 @@ class PostgresStrategyRepository:
                     continue
                 observed_at = row[12]
                 quality = _quality_name(int(row[11]))
-                if (
-                    observed_at is None
-                    or (evaluated_at - observed_at).total_seconds() > float(row[4])
-                ):
-                    quality = "STALE"
                 inputs.append(
                     StrategyInput(
                         field_key=str(row[0]),
@@ -1275,6 +1294,51 @@ def _validate_draft(draft: StrategyDraft) -> None:
         raise StrategyRepositoryError("STRATEGY_TIMEZONE_INVALID") from error
     if draft.base_configuration_revision < 0:
         raise StrategyRepositoryError("CONFIGURATION_REVISION_INVALID")
+
+
+def _refresh_binding_contracts(
+    requested: tuple[StrategyBindingDraft, ...],
+    source: tuple[StrategyBindingDraft, ...],
+    contracts: Mapping[UUID, EntityBindingContract],
+) -> tuple[StrategyBindingDraft, ...]:
+    """Refresh unchanged legacy bindings without accepting a changed known contract."""
+    previous: dict[UUID, list[StrategyBindingDraft]] = {}
+    for item in source:
+        previous.setdefault(item.entity_instance_id, []).append(item)
+    refreshed: list[StrategyBindingDraft] = []
+    for binding in requested:
+        old_bindings = previous.get(binding.entity_instance_id, ())
+        contract = contracts.get(binding.entity_instance_id)
+        if not old_bindings or contract is None:
+            refreshed.append(binding)
+            continue
+        if any(item.expected_data_type != contract.data_type for item in old_bindings):
+            raise StrategyModelError("L2_BINDING_TYPE_MISMATCH", "bound L2 type changed")
+        if binding.expected_data_type != contract.data_type:
+            raise StrategyModelError("L2_BINDING_TYPE_MISMATCH", "binding type cannot be rewritten")
+        old_units = tuple(_normalized_unit(item.unit) for item in old_bindings)
+        requested_unit = _normalized_unit(binding.unit)
+        current_unit = _normalized_unit(contract.unit)
+        if any(unit is not None and unit != current_unit for unit in old_units):
+            raise StrategyModelError("L2_BINDING_UNIT_MISMATCH", "bound L2 unit changed")
+        allowed_requested_units = {current_unit}
+        if None in old_units:
+            allowed_requested_units.add(None)
+        if requested_unit not in allowed_requested_units:
+            raise StrategyModelError("L2_BINDING_UNIT_MISMATCH", "binding unit cannot be rewritten")
+        refreshed.append(replace(
+            binding,
+            expected_data_type=contract.data_type,
+            unit=contract.unit,
+        ))
+    return tuple(refreshed)
+
+
+def _normalized_unit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _quality_name(value: int) -> str:

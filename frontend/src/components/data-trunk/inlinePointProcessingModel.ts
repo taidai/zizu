@@ -65,6 +65,16 @@ export interface InlinePointProcessingTrialView {
   message: string
 }
 
+export function canDeclareInlinePassthroughUnit(
+  points: readonly InlineRawPoint[],
+  mode: InlinePointProcessingMode,
+): boolean {
+  if (mode !== 'passthrough' || points.length !== 1) return false
+  const point = points[0]
+  return point.unit === null
+    && ['FLOAT', 'INT'].includes(point.data_type.toUpperCase())
+}
+
 const TRIAL_REASON_MESSAGES: Record<string, string> = {
   POINT_PROCESSING_TRIAL_FRAME_UNAVAILABLE: '当前还没有可用于试算的已提交数据帧。',
   POINT_PROCESSING_TRIAL_UNAVAILABLE: '当前数据无法用于试算，请检查原始数据后重试。',
@@ -247,10 +257,17 @@ export function buildNodePointProcessingDraft(
     : String(form.dataType || first.point.data_type).toUpperCase()
   const outputUnit = form.mode === 'boolean_map'
     ? null
-    : form.unit === undefined ? first.point.unit : form.unit
+    : form.unit === undefined
+      ? first.point.unit
+      : form.unit?.trim() || null
+  const declaresMissingNumericUnit = canDeclareInlinePassthroughUnit(points, form.mode)
+    && (outputUnit || null) !== null
   if (form.mode === 'passthrough' && (
     outputType !== first.point.data_type.toUpperCase()
-    || (outputUnit || null) !== (first.point.unit || null)
+    || (
+      (outputUnit || null) !== (first.point.unit || null)
+      && !declaresMissingNumericUnit
+    )
   )) {
     throw new Error('直接使用不能改变单位，请选择倍率与偏移')
   }

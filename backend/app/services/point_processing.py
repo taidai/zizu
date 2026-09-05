@@ -1092,7 +1092,9 @@ def _installed_processings_for_context(
                 ),
             )
         elif kind == "passthrough":
-            transform = PassthroughTransform(input=input_reference)
+            transform = PassthroughTransform(
+                input=input_reference, input_unit=input_contract.unit,
+            )
         elif kind == "numeric":
             transform = NumericTransform(
                 input=input_reference,

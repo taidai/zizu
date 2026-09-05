@@ -454,6 +454,7 @@ def _parse_outputs(
             or not entity_id.strip()
             or data_type not in _DATA_TYPES
             or not isinstance(unit, (str, type(None)))
+            or (isinstance(unit, str) and (not unit.strip() or unit != unit.strip()))
         ):
             raise PointProcessingTemplateError(
                 "POINT_PROCESSING_OUTPUT_INVALID",
@@ -639,7 +640,15 @@ def _parse_transform(
             or source.cardinality != "one"
             or source.default_value is not None
             or source.data_type != output_data_type
-            or source.unit != output_unit
+            or (
+                source.unit != output_unit
+                and not (
+                    source.source_kind == "l0"
+                    and source.data_type in {"FLOAT", "INT"}
+                    and source.unit is None
+                    and output_unit is not None
+                )
+            )
         ):
             raise PointProcessingTemplateError(
                 "POINT_PROCESSING_RULE_INVALID",

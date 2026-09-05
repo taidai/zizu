@@ -344,6 +344,64 @@ test.describe.serial('节点管理主干', () => {
       '17.5',
     )
 
+    const accessToken = await page.evaluate(() => {
+      const stored = window.sessionStorage.getItem('zizu.auth.session.v1')
+      if (!stored) return ''
+      const session = JSON.parse(stored) as { accessToken?: unknown }
+      return typeof session.accessToken === 'string' ? session.accessToken : ''
+    })
+    expect(accessToken).not.toBe('')
+    const readEntityInstance = async () => {
+      const response = await page.request.get('/api/v1/entity-instances', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      expect(
+        response.ok(),
+        `GET /api/v1/entity-instances failed: ${response.status()} ${await response.text()}`,
+      ).toBeTruthy()
+      const payload = await response.json() as {
+        items: Array<{ id: string; definition_id: string; unit: string | null }>
+      }
+      const matches = payload.items.filter((item) => item.definition_id === entityDefinitionKey)
+      expect(matches).toHaveLength(1)
+      return matches[0]
+    }
+    const entityBeforeUnitDeclaration = await readEntityInstance()
+    expect(entityBeforeUnitDeclaration.unit).toBeNull()
+
+    await page.getByRole('button', { name: '模板与版本', exact: true }).click()
+    await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
+    const outputUnit = page.getByLabel('输出单位')
+    await expect(outputUnit).toHaveValue('')
+    await expect(outputUnit).toBeEditable()
+    await outputUnit.fill('k')
+    await expect(outputUnit).toHaveValue('k')
+    await expect(outputUnit).toBeEditable()
+    await outputUnit.fill('kW')
+    await expect(outputUnit).toHaveValue('kW')
+    await expect(outputUnit).toBeEditable()
+    await page.getByRole('button', { name: '检查修改', exact: true }).click()
+    await expect(page.getByText('检查通过，可以发布当前加工的新修订。', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '发布修改', exact: true }).click()
+    await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible({
+      timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
+    })
+
+    await page.getByRole('button', { name: '本节点配置', exact: true }).click()
+    const entityAfterUnitDeclaration = page.getByRole('button', { name: new RegExp(entityDisplayName) })
+    await publishUntilShows(names.neuronTag, 17.5, entityAfterUnitDeclaration, '17.5')
+    await expect(entityAfterUnitDeclaration).toContainText('kW')
+    const entityAfterUnitDeclarationRead = await readEntityInstance()
+    expect(entityAfterUnitDeclarationRead.id).toBe(entityBeforeUnitDeclaration.id)
+    expect(entityAfterUnitDeclarationRead.unit).toBe('kW')
+
+    await page.getByRole('button', { name: '模板与版本', exact: true }).click()
+    await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
+    const knownOutputUnit = page.getByLabel('输出单位')
+    await expect(knownOutputUnit).toHaveValue('kW')
+    await expect(knownOutputUnit).toHaveJSProperty('readOnly', true)
+    await expect(knownOutputUnit).not.toBeEditable()
+
   })
 
   test('BIT 原值 0/1/2 沿 L0、点位加工、L2 到告警选择保持明确', async () => {

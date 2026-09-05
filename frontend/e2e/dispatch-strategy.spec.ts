@@ -42,7 +42,7 @@ function strategyView() {
   } as any
 }
 
-async function installApi(page: Page, initialStrategy: any = null, entityRows = entities) {
+async function installApi(page: Page, initialStrategy: any = null, entityRows = entities, currentConfigurationRevision = 7) {
   let strategy: any = initialStrategy
   let events: any[] = []
   const calls: string[] = []
@@ -76,7 +76,20 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
     if (path === '/dispatch-strategies/strategy-1/draft' && method === 'PUT') {
       const body = request.postDataJSON()
       savedDrafts.push(body)
-      strategy = { ...strategy, name: body.name, runtime_health: 'READY', draft: revision('draft-1', 'DRAFT', body) }
+      const refreshedBindings = body.bindings.map((binding: any) => {
+        const entity = entityRows.find((item: any) => item.id === binding.entity_instance_id)
+        return entity ? { ...binding, expected_data_type: entity.data_type.toUpperCase(), unit: entity.unit } : binding
+      })
+      strategy = {
+        ...strategy,
+        name: body.name,
+        runtime_health: 'READY',
+        draft: revision('draft-1', 'DRAFT', {
+          ...body,
+          base_configuration_revision: currentConfigurationRevision,
+          bindings: refreshedBindings,
+        }),
+      }
       return json(route, strategy)
     }
     if (path === '/dispatch-strategies/strategy-1/simulate' && method === 'POST') return json(route, {
@@ -151,6 +164,45 @@ test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', 
   expect.soft(submitted.site_timezone).toBe('Europe/Berlin')
   expect.soft(submitted.bindings).toEqual(expectedRevision.bindings)
   expect(pageErrors).toEqual([])
+})
+
+test('非标准 JDM 的旧缺失单位可显式保存并刷新到当前实体合同', async ({ page }) => {
+  const original = strategyView()
+  original.draft.base_configuration_revision = 6
+  original.draft.trigger_kind = 'DATA_CHANGE'
+  original.draft.jdm_content = {
+    nodes: [
+      { id: 'input', type: 'inputNode', name: 'Input' },
+      { id: 'custom', type: 'expressionNode', name: '自定义完整决策', content: { expressions: [] } },
+      { id: 'output', type: 'outputNode', name: 'Output' },
+    ],
+    edges: [
+      { id: 'input-custom', sourceId: 'input', targetId: 'custom', type: 'edge' },
+      { id: 'custom-output', sourceId: 'custom', targetId: 'output', type: 'edge' },
+    ],
+  }
+  original.draft.bindings = [
+    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: null, freshness_seconds: 30 },
+    { direction: 'INPUT', binding_key: 'reserve-soc', ordinal: 1, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: '%', freshness_seconds: 45 },
+    { direction: 'OUTPUT', binding_key: 'power-target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: null, freshness_seconds: 30 },
+  ]
+  const originalGraph = structuredClone(original.draft.jdm_content)
+  const originalBindings = structuredClone(original.draft.bindings)
+  const api = await installApi(page, original, entities, 7)
+  await page.goto('/')
+  await page.getByRole('button', { name: '调度策略' }).click()
+  await expect(page.getByLabel('SOC 输入实体')).toBeDisabled()
+  await expect(page.getByLabel('功率控制实体')).toBeDisabled()
+
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+
+  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  expect(api.savedDrafts).toHaveLength(1)
+  expect(api.savedDrafts[0].base_configuration_revision).toBe(6)
+  expect(api.savedDrafts[0].jdm_content).toEqual(originalGraph)
+  expect(api.savedDrafts[0].bindings).toEqual(originalBindings)
+  expect(api.getStrategy().draft.base_configuration_revision).toBe(7)
+  expect(api.getStrategy().draft.bindings.map((item: any) => item.unit)).toEqual(['%', '%', 'kW'])
 })
 
 test('内置表编辑直接更新完整图并保留原绑定契约和触发', async ({ page }) => {

@@ -114,9 +114,15 @@ export default function DispatchStrategyPage() {
   const socBinding = currentRevision?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')
   const outputBinding = currentRevision?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')
   const socBindingInvalid = !!socId && (!isDispatchSocEntity(socEntity)
-    || (socBinding?.entity_instance_id === socId && (socBinding.expected_data_type !== socEntity?.data_type.toUpperCase() || socBinding.unit !== '%')))
+    || (socBinding?.entity_instance_id === socId && (
+      socBinding.expected_data_type !== socEntity?.data_type.toUpperCase()
+      || (!!socBinding.unit?.trim() && socBinding.unit.trim() !== '%')
+    )))
   const outputBindingInvalid = !!outputId && (!isDispatchPowerTargetEntity(outputEntity)
-    || (outputBinding?.entity_instance_id === outputId && (outputBinding.expected_data_type !== outputEntity?.data_type.toUpperCase() || outputBinding.unit !== 'kW')))
+    || (outputBinding?.entity_instance_id === outputId && (
+      outputBinding.expected_data_type !== outputEntity?.data_type.toUpperCase()
+      || (!!outputBinding.unit?.trim() && outputBinding.unit.trim() !== 'kW')
+    )))
   const socBindingIssue = '当前 SOC 绑定不符合要求，请明确选择已确认、可读的 bms.soc / storage.soc 数值百分比实体。'
   const outputBindingIssue = '当前功率控制绑定不符合要求，请明确选择已确认、可写的 kW 数值实体。'
 
@@ -346,7 +352,7 @@ export default function DispatchStrategyPage() {
                 {outputId && <span className="mt-2 block font-normal text-gray-500">可控：是 · 质量：{qualityText(observations[outputId])} · 当前回读 {valueText(observations[outputId]?.value)}</span>}
               </label>
             </div>
-            {bindingReadOnly && <div className="mt-3 text-xs text-gray-600"><p>此策略的实体绑定在当前页面只读，保存将原样保留全部输入、输出及其契约。</p><ul className="mt-2 space-y-1">{currentRevision?.bindings.map((binding) => <li key={`${binding.direction}:${binding.binding_key}`}>{binding.direction === 'INPUT' ? '输入' : '输出'} · {binding.binding_key} → {entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id} · {binding.expected_data_type} {binding.unit || ''} · 新鲜度 {binding.freshness_seconds}s · 顺序 {binding.ordinal}</li>)}</ul></div>}
+            {bindingReadOnly && <div className="mt-3 text-xs text-gray-600"><p>此策略的实体绑定在当前页面只读；保存会保留全部绑定与新鲜度，并核对当前实体契约、更新配置基线。</p><ul className="mt-2 space-y-1">{currentRevision?.bindings.map((binding) => <li key={`${binding.direction}:${binding.binding_key}`}>{binding.direction === 'INPUT' ? '输入' : '输出'} · {binding.binding_key} → {entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id} · {binding.expected_data_type} {binding.unit || ''} · 新鲜度 {binding.freshness_seconds}s · 顺序 {binding.ordinal}</li>)}</ul></div>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="schedule-heading">

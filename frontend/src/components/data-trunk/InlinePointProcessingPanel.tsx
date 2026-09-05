@@ -8,6 +8,7 @@ import {
 import { buildDataTrunkViewModel } from './dataTrunkViewModel'
 import {
   buildNodePointProcessingDraft,
+  canDeclareInlinePassthroughUnit,
   projectInlinePointProcessingTrial,
   suggestInlinePointProcessingDefaults,
   type InlinePointProcessingMode,
@@ -54,6 +55,7 @@ export default function InlinePointProcessingPanel({
   const controlEligible = points.length === 1
     && points[0].read_write.toUpperCase() === 'RW'
     && ['FLOAT', 'INT'].includes(points[0].data_type.toUpperCase())
+  const canDeclareUnit = canDeclareInlinePassthroughUnit(points, mode)
 
   useEffect(() => {
     setPlan(null)
@@ -186,7 +188,8 @@ export default function InlinePointProcessingPanel({
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               单位
-              <input disabled={mode === 'passthrough' || mode === 'boolean_map'} value={unit} onChange={(event) => { setUnit(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100" placeholder="无单位可留空" />
+              <input disabled={mode === 'boolean_map' || (mode === 'passthrough' && !canDeclareUnit)} value={unit} onChange={(event) => { setUnit(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100" placeholder="无单位可留空" />
+              {canDeclareUnit && <span className="mt-1 block font-normal text-amber-700">原始数值未声明单位；仅填写真实工程单位，直接使用不会缩放或猜测数值。</span>}
             </label>
           </div>
 

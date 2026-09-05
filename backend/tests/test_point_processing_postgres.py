@@ -257,6 +257,222 @@ class PointProcessingPostgresTest(unittest.TestCase):
             )
             self.assertEqual((tag_id,), cursor.fetchone())
 
+    def _unit_declaration_fixture(self, *, legacy_identity: bool = False):
+        from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingService
+        from app.services.point_processing_postgres import (
+            PostgresPointProcessingCatalog, PostgresPointProcessingRepository,
+        )
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        with get_connection() as connection, connection.cursor() as cursor:
+            for version in (52, 53, 55, 57, 58, 60, 61, 62):
+                migration = next((MIGRATION_050.parent).glob(f"migration_{version:03d}_*.sql"))
+                cursor.execute(migration.read_text(encoding="utf-8"))
+            cursor.execute(
+                "UPDATE t_tags SET unit=NULL,read_write='RW',read_only=FALSE,"
+                "source_type='neuron',source_path='PCS-TEST/group0/ActivePowerRaw' "
+                "WHERE node_id=%s AND name='ActivePowerRaw' RETURNING id", (NODE_ID,),
+            )
+            tag_id = cursor.fetchone()[0]
+            connection.commit()
+        raw = PointProcessingTemplateTest.passthrough_template("FLOAT", None)
+        raw["outputs"][0]["entityDefinition"] = "pcs.test_power_limit"
+        raw["outputs"][0]["control"] = {
+            "minimum": 0, "maximum": 20, "tolerance": 0.05,
+            "cooldownSeconds": 5, "timeoutSeconds": 15, "highRisk": False,
+        }
+        if legacy_identity:
+            raw["outputs"][0].pop("control")
+            raw["outputs"][0]["transform"] = {
+                "kind": "numeric", "input": "active_power_raw", "scale": 1,
+                "offset": 0, "minimum": -1000000000, "maximum": 1000000000,
+            }
+        repository = PostgresPointProcessingRepository()
+        service = PointProcessingService(repository, PostgresPointProcessingCatalog())
+        plan = service.preview_node_definition(
+            node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer",
+        )
+        self.assertEqual("ready", plan.status)
+        first = service.apply(ApplyPointProcessingPlan(
+            plan.id, plan.digest, "unitless-install", "test:engineer",
+        ))
+        raw["outputs"][0]["unit"] = "kW"
+        return service, repository, raw, first, tag_id
+
+    def test_unit_declaration_supports_legacy_identity_without_rewriting_transform(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.point_processing_postgres import PostgresPointProcessingCatalog
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, raw, first, _tag_id = self._unit_declaration_fixture(legacy_identity=True)
+        plan = service.preview_node_definition(node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer")
+        updated = service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, "unit-identity", "test:engineer"))
+        self.assertEqual(first.output_entity_instance_ids, updated.output_entity_instance_ids)
+        output = PostgresPointProcessingCatalog().get_template(updated.revision_id).outputs[0]
+        self.assertEqual(raw["outputs"][0]["transform"], dict(output.transform))
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT unit,direction,control_policy FROM t_entity_instances WHERE id=%s", (updated.output_entity_instance_ids[0],))
+            self.assertEqual(("kW", "R", None), cursor.fetchone())
+
+    def test_unit_declaration_preserves_entity_history_raw_point_and_control(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.telemetry_store import get_connection
+        from app.services.data_trunk_contracts import SourceOrder
+        from app.services.data_trunk_postgres import PostgresFrameRepository
+        from app.services.data_trunk_conversion import evaluate_processing
+        from tests.test_data_trunk_conversion import PcsNumericConversionTest
+
+        service, repository, raw, first, tag_id = self._unit_declaration_fixture()
+        entity_id = first.output_entity_instance_ids[0]
+        observed_at = datetime.now(UTC)
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT to_jsonb(e) FROM t_entity_instances e WHERE id=%s", (entity_id,))
+            before = cursor.fetchone()[0]
+            cursor.execute(
+                "INSERT INTO t_l2_latest(entity_instance_id,event_id,observed_at,received_at,"
+                "calculated_at,value_observed_at,value_float,quality,processing_revision_id,"
+                "configuration_revision,source_digest,source_order_key,event_time_basis,frame_sequence) "
+                "VALUES(%s,%s,%s,%s,%s,%s,12.5,192,%s,%s,%s,'unit-before','received_at',0)",
+                (entity_id, uuid4(), observed_at, observed_at, observed_at, observed_at,
+                 first.revision_id, first.configuration_revision, "a" * 64),
+            )
+            cursor.execute("SELECT to_jsonb(l) FROM t_l2_latest l WHERE entity_instance_id=%s", (entity_id,))
+            previous_sample = cursor.fetchone()[0]
+            cursor.execute(
+                "INSERT INTO t_l2_observations(entity_instance_id,event_id,observed_at,received_at,calculated_at,"
+                "value_float,quality,processing_revision_id,configuration_revision,source_digest,source_order_key,event_time_basis,commit_sequence) "
+                "SELECT entity_instance_id,event_id,observed_at,received_at,calculated_at,value_float,quality,"
+                "processing_revision_id,configuration_revision,source_digest,source_order_key,event_time_basis,0 "
+                "FROM t_l2_latest WHERE entity_instance_id=%s", (entity_id,),
+            )
+            cursor.execute("SELECT to_jsonb(h) FROM t_l2_observations h WHERE entity_instance_id=%s", (entity_id,))
+            previous_history = cursor.fetchone()[0]
+            connection.commit()
+        plan = service.preview_node_definition(
+            node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer",
+        )
+        self.assertEqual("ready", plan.status)
+        updated = service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, "declare-unit", "test:engineer"))
+        self.assertEqual(first.output_entity_instance_ids, updated.output_entity_instance_ids)
+        self.assertEqual(first.configuration_revision + 1, updated.configuration_revision)
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT to_jsonb(e) FROM t_entity_instances e WHERE id=%s", (entity_id,))
+            after = cursor.fetchone()[0]
+            self.assertEqual("kW", after["unit"])
+            for key in ("id", "definition_id", "data_type", "direction", "control_policy", "freshness_seconds"):
+                self.assertEqual(before[key], after[key], key)
+            cursor.execute("SELECT unit,scale_factor,value_offset FROM t_tags WHERE id=%s", (tag_id,))
+            self.assertEqual((None, 1, 0), cursor.fetchone())
+            cursor.execute("SELECT to_jsonb(l) FROM t_l2_latest l WHERE entity_instance_id=%s", (entity_id,))
+            self.assertEqual(previous_sample, cursor.fetchone()[0])
+            cursor.execute("SELECT to_jsonb(h) FROM t_l2_observations h WHERE entity_instance_id=%s", (entity_id,))
+            self.assertEqual(previous_history, cursor.fetchone()[0])
+            cursor.execute("SELECT l0_tag_id FROM t_l2_control_bindings WHERE entity_instance_id=%s", (entity_id,))
+            self.assertEqual((tag_id,), cursor.fetchone())
+            source = next(iter(PcsNumericConversionTest.fixture()["current_inputs"].values()))
+            source = replace(source, tag_id=tag_id, node_id=NODE_ID, raw_unit=None,
+                             source_timestamp=observed_at, received_at=observed_at,
+                             source_order=SourceOrder.received_at(observed_at, 1))
+            snapshot = PostgresFrameRepository._load_conversion_snapshot(cursor, (source,), calculated_at=observed_at)
+        value = evaluate_processing(installed=snapshot.installed, current_inputs={snapshot.installed[0].transform.input: source},
+                                    configuration_revision=updated.configuration_revision, calculated_at=observed_at)[0]
+        self.assertEqual(source.value, value.value)
+        self.assertEqual("kW", value.unit)
+        self.assertEqual(192, int(value.quality))
+        self.assertEqual((source.observation_id,), value.source_observation_ids)
+
+    def test_unit_declaration_rolls_back_if_publication_fails(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan
+        from app.services.telemetry_store import get_connection
+
+        service, repository, raw, first, _tag_id = self._unit_declaration_fixture()
+        plan = service.preview_node_definition(node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer")
+        original = repository._install_bindings
+
+        def fail_after_bindings(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("injected unit publication failure")
+
+        with patch.object(repository, "_install_bindings", side_effect=fail_after_bindings):
+            with self.assertRaisesRegex(RuntimeError, "injected unit publication failure"):
+                service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, "unit-rollback", "test:engineer"))
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT unit FROM t_entity_instances WHERE id=%s", (first.output_entity_instance_ids[0],))
+            self.assertEqual((None,), cursor.fetchone())
+            cursor.execute("SELECT current_revision FROM t_configuration_state")
+            self.assertEqual((first.configuration_revision,), cursor.fetchone())
+            cursor.execute("SELECT revision_id FROM t_installed_point_processings WHERE node_id=%s AND current", (NODE_ID,))
+            self.assertEqual((first.revision_id,), cursor.fetchone())
+
+    def test_unit_declaration_blocks_existing_cross_node_l1_consumer(self) -> None:
+        self._assert_unit_declaration_blocks_consumer(selector=False)
+
+    def test_unit_declaration_blocks_selector_formula_consumer(self) -> None:
+        self._assert_unit_declaration_blocks_consumer(selector=True)
+
+    def _assert_unit_declaration_blocks_consumer(self, *, selector: bool) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingError
+        from app.services.telemetry_store import get_connection
+        from tests.test_point_processing_templates import PointProcessingTemplateTest
+
+        service, _repository, raw, first, _tag_id = self._unit_declaration_fixture()
+        other_node = uuid4()
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("INSERT INTO t_nodes(id,name,node_type,enabled,layer) VALUES(%s,'CONSUMER','PCS',TRUE,1)", (other_node,))
+            if selector:
+                cursor.execute("UPDATE t_nodes SET parent_id=%s WHERE id=%s", (other_node, NODE_ID))
+            connection.commit()
+        consumer = PointProcessingTemplateTest.passthrough_template("FLOAT", None)
+        consumer["inputs"][0]["sourceKind"] = "l2"
+        consumer["inputs"][0]["sourceKey"] = "pcs.test_power_limit"
+        consumer["outputs"][0]["entityDefinition"] = "pcs.test_copy"
+        if selector:
+            consumer["inputs"][0].update({
+                "cardinality": "many",
+                "selector": {"scope": "descendants", "nodeType": "PCS", "entityDefinition": "pcs.test_power_limit"},
+            })
+            consumer["outputs"][0]["transform"] = {
+                "kind": "formula", "expression": "sum(active_power_raw)",
+                "scheduleSeconds": 1, "controlEligible": False,
+            }
+        dependent = service.preview_node_definition(
+            node_id=other_node, content=consumer,
+            input_selections={} if selector else {"active_power_raw": first.output_entity_instance_ids[0]}, actor="test:engineer",
+        )
+        self.assertEqual("ready", dependent.status, dependent.public_dict())
+        service.apply(ApplyPointProcessingPlan(dependent.id, dependent.digest, "dependent-install", "test:engineer"))
+        plan = service.preview_node_definition(node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer")
+        with self.assertRaises(PointProcessingError) as caught:
+            service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, "unit-dependent", "test:engineer"))
+        self.assertEqual("POINT_PROCESSING_OUTPUT_IN_USE", caught.exception.code)
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT unit FROM t_entity_instances WHERE id=%s", (first.output_entity_instance_ids[0],))
+            self.assertEqual((None,), cursor.fetchone())
+
+    def test_unit_declaration_blocks_an_owned_control_target(self) -> None:
+        from app.services.point_processing import ApplyPointProcessingPlan, PointProcessingError
+        from app.services.telemetry_store import get_connection
+
+        service, _repository, raw, first, _tag_id = self._unit_declaration_fixture()
+        strategy_id, revision_id = uuid4(), uuid4()
+        with get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute("INSERT INTO t_dispatch_strategies(id,name,created_by,updated_by) VALUES(%s,'Unit guard','test','test')", (strategy_id,))
+            cursor.execute(
+                "INSERT INTO t_dispatch_strategy_revisions(id,strategy_id,revision,lifecycle,trigger_kind,"
+                "site_timezone,jdm_content,content_digest,base_configuration_revision,created_by,published_by,published_at) "
+                "VALUES(%s,%s,1,'PUBLISHED','FIXED_TICK','UTC','{}',%s,%s,'test','test',now())",
+                (revision_id, strategy_id, "b" * 64, first.configuration_revision),
+            )
+            cursor.execute("UPDATE t_dispatch_strategies SET active_revision_id=%s,enabled=TRUE WHERE id=%s", (revision_id, strategy_id))
+            cursor.execute("INSERT INTO t_dispatch_strategy_owners(entity_instance_id,strategy_id,revision_id) VALUES(%s,%s,%s)",
+                           (first.output_entity_instance_ids[0], strategy_id, revision_id))
+            connection.commit()
+        plan = service.preview_node_definition(node_id=NODE_ID, content=raw, input_selections={}, actor="test:engineer")
+        with self.assertRaises(PointProcessingError) as caught:
+            service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, "unit-owned", "test:engineer"))
+        self.assertEqual("POINT_PROCESSING_CONTROL_IN_USE", caught.exception.code)
+
     def test_passthrough_applies_and_reloads_as_a_runtime_transform(self) -> None:
         from app.services.data_trunk_contracts import (
             PassthroughTransform,

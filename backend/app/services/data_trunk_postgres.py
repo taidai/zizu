@@ -2142,7 +2142,7 @@ class PostgresFrameRepository:
                     output_kind=ValueKind(output_type),
                     output_unit=output_unit,
                     freshness_seconds=freshness_seconds,
-                    transform=PassthroughTransform(input_reference),
+                    transform=PassthroughTransform(input_reference, input_unit=input_unit),
                 )
             elif scale is not None:
                 if output_type != ValueKind.FLOAT.value:

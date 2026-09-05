@@ -173,12 +173,75 @@ test('direct mapping cannot relabel units and numeric conversion always outputs 
   assert.equal(converted.content.outputs[0].dataType, 'FLOAT')
 })
 
-test('direct mapping rejects adding a unit when the raw point has none', async () => {
+test('direct numeric L0 with no declared unit may declare its true engineering unit without scaling', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
-  assert.throws(() => model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
+  const rawPoint = { ...POWER, unit: null }
+  const before = structuredClone(rawPoint)
+
+  const result = model.buildNodePointProcessingDraft([rawPoint], {
     mode: 'passthrough',
     definitionKey: 'pcs.active_power',
     displayName: 'PCS 有功功率',
+    deviceCategory: 'PCS',
+    unit: 'kW',
+    freshnessSeconds: 30,
+  })
+
+  assert.deepEqual(rawPoint, before)
+  assert.equal(result.content.inputs[0].unit, null)
+  assert.equal(result.content.outputs[0].unit, 'kW')
+  assert.deepEqual(result.content.outputs[0].transform, {
+    kind: 'passthrough',
+    input: 'activepowerraw',
+  })
+})
+
+test('passthrough unit input trims real declarations and treats whitespace as missing', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const base = {
+    mode: 'passthrough',
+    definitionKey: 'pcs.active_power',
+    displayName: 'PCS 有功功率',
+    deviceCategory: 'PCS',
+    freshnessSeconds: 30,
+  }
+
+  const blank = model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
+    ...base,
+    unit: '   ',
+  })
+  const declared = model.buildNodePointProcessingDraft([{ ...POWER, unit: null }], {
+    ...base,
+    unit: '  kW  ',
+  })
+  const known = model.buildNodePointProcessingDraft([POWER], {
+    ...base,
+    unit: '  W  ',
+  })
+
+  assert.equal(blank.content.outputs[0].unit, null)
+  assert.equal(declared.content.outputs[0].unit, 'kW')
+  assert.equal(known.content.outputs[0].unit, 'W')
+})
+
+test('missing-unit declaration is limited to one numeric L0 passthrough', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const missingNumeric = { ...POWER, unit: null }
+
+  assert.equal(model.canDeclareInlinePassthroughUnit([missingNumeric], 'passthrough'), true)
+  assert.equal(model.canDeclareInlinePassthroughUnit([POWER], 'passthrough'), false)
+  assert.equal(model.canDeclareInlinePassthroughUnit([{ ...missingNumeric, data_type: 'BOOL' }], 'passthrough'), false)
+  assert.equal(model.canDeclareInlinePassthroughUnit([{ ...missingNumeric, data_type: 'STRING' }], 'passthrough'), false)
+  assert.equal(model.canDeclareInlinePassthroughUnit([missingNumeric], 'numeric'), false)
+  assert.equal(model.canDeclareInlinePassthroughUnit([missingNumeric, { ...CURRENT, unit: null }], 'passthrough'), false)
+
+  assert.throws(() => model.buildNodePointProcessingDraft([{
+    ...missingNumeric,
+    data_type: 'STRING',
+  }], {
+    mode: 'passthrough',
+    definitionKey: 'pcs.serial_number',
+    displayName: 'PCS 序列号',
     deviceCategory: 'PCS',
     unit: 'kW',
     freshnessSeconds: 30,

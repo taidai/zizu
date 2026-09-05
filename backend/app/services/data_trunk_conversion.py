@@ -247,7 +247,13 @@ def _evaluate_passthrough_output(
         reason = "TYPE_MISMATCH"
         quality = TrunkQuality.BAD
         value = TypedValue(installed.output_kind, None)
-    elif source_unit != installed.output_unit:
+    elif source_unit != installed.output_unit and not (
+        isinstance(source, RawObservation)
+        and source.value.kind in {ValueKind.FLOAT, ValueKind.INT}
+        and transform.input_unit is None
+        and source_unit is None
+        and installed.output_unit is not None
+    ):
         reason = "UNIT_MISMATCH"
         quality = TrunkQuality.BAD
         value = TypedValue(installed.output_kind, None)

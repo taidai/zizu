@@ -83,6 +83,33 @@ class PointProcessingTemplateTest(unittest.TestCase):
                     self.assertEqual("passthrough", parsed.outputs[0].transform["kind"])
         compile_formula.assert_not_called()
 
+    def test_passthrough_can_declare_missing_numeric_l0_unit_without_scaling(self) -> None:
+        for data_type, unit in (("FLOAT", "kW"), ("INT", "%")):
+            with self.subTest(data_type=data_type):
+                raw = self.passthrough_template(data_type, None)
+                raw["outputs"][0]["unit"] = unit
+                parsed = parse_point_processing_template(raw)
+                self.assertIsNone(parsed.inputs[0].unit)
+                self.assertEqual(unit, parsed.outputs[0].unit)
+                self.assertEqual(raw, canonical_point_processing_content(parsed))
+
+    def test_missing_unit_declaration_cannot_relabel_l2_or_nonnumeric_values(self) -> None:
+        for data_type, source_kind in (("FLOAT", "l2"), ("BOOL", "l0"), ("STRING", "l0")):
+            with self.subTest(data_type=data_type, source_kind=source_kind):
+                raw = self.passthrough_template(data_type, None)
+                raw["inputs"][0]["sourceKind"] = source_kind
+                raw["outputs"][0]["unit"] = "kW"
+                with self.assertRaises(PointProcessingTemplateError):
+                    parse_point_processing_template(raw)
+
+    def test_unit_declaration_rejects_blank_or_padded_output_unit(self) -> None:
+        for unit in ("", "   ", " kW", "kW "):
+            with self.subTest(unit=unit):
+                raw = self.passthrough_template("FLOAT", None)
+                raw["outputs"][0]["unit"] = unit
+                with self.assertRaises(PointProcessingTemplateError):
+                    parse_point_processing_template(raw)
+
     def test_passthrough_rejects_type_unit_and_input_contract_mismatches(self) -> None:
         cases = []
         wrong_type = self.passthrough_template("INT", None)

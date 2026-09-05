@@ -2204,28 +2204,74 @@ class PostgresPointProcessingRepository:
                     (entity_id,),
                 )
                 entity = cursor.fetchone()
-            if entity is None or entity[:4] != (
-                relation[1],
-                relation[2],
-                relation[3],
-                "point_processing",
+            input_contract = next((
+                source for source in template.inputs
+                if source.input_id == output.transform.get("input")
+            ), None)
+            declares_missing_unit = (
+                entity is not None
+                and entity[2] is None
+                and bool(relation[3] and relation[3].strip())
+                and relation[2] in {"FLOAT", "INT"}
+                and (
+                    output.transform["kind"] == "passthrough"
+                    or (
+                        output.transform["kind"] == "numeric"
+                        and output.transform["scale"] == 1
+                        and output.transform["offset"] == 0
+                    )
+                )
+                and input_contract is not None
+                and input_contract.source_kind == "l0"
+                and input_contract.unit is None
+            )
+            if entity is None or (
+                (entity[0], entity[1], entity[3]) != (relation[1], relation[2], "point_processing")
+                or (entity[2] != relation[3] and not declares_missing_unit)
             ):
                 raise PointProcessingError(
                     "POINT_PROCESSING_PLAN_STALE",
                     "Point processing output entity contract changed after planning",
                 )
-            if (entity[4], entity[5]) != (direction, control_policy):
+            if declares_missing_unit or (entity[4], entity[5]) != (direction, control_policy):
                 PostgresPointProcessingRepository._assert_control_contract_mutable(
                     cursor,
                     entity_id,
                 )
+            if declares_missing_unit:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM t_installed_point_processings AS installed
+                    WHERE installed.current AND installed.id<>%s
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM t_point_processing_dependencies AS dependency
+                          WHERE dependency.installed_processing_id=installed.id
+                            AND dependency.source_entity_instance_id=%s
+                        ) OR EXISTS (
+                          SELECT 1 FROM t_point_processing_input_bindings AS binding
+                          WHERE binding.installed_processing_id=installed.id
+                            AND binding.l2_entity_instance_id=%s
+                        )
+                      )
+                    LIMIT 1
+                    """,
+                    (installed_id, entity_id, entity_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise PointProcessingError(
+                        "POINT_PROCESSING_OUTPUT_IN_USE",
+                        "Deactivate dependent point processing before declaring the source unit",
+                    )
             cursor.execute(
                 "UPDATE t_entity_instances "
-                "SET active=TRUE,direction=%s,control_policy=%s "
+                "SET active=TRUE,direction=%s,control_policy=%s,unit=%s "
                 "WHERE id=%s",
                 (
                     direction,
                     Json(control_policy) if control_policy is not None else None,
+                    relation[3],
                     entity_id,
                 ),
             )
