@@ -1216,7 +1216,9 @@ class PostgresFrameRepository:
                                 "DATA_FRAME_CLAIM_LOST",
                             )
                         previous_l0 = capture_previous_l0_state(
-                            cursor, claimed.frame_sequence
+                            cursor, claimed.frame_sequence,
+                            capture_beat=claimed.capture_beat,
+                            updated_tag_ids=tuple(snapshot.l0_by_tag),
                         )
                         self._advance_frame_l0_latest(
                             cursor,
@@ -1539,7 +1541,9 @@ class PostgresFrameRepository:
                             )
                         candidate_digest = str(frame_row[0]).strip()
                         previous_l0 = capture_previous_l0_state(
-                            cursor, claimed.frame_sequence
+                            cursor, claimed.frame_sequence,
+                            capture_beat=claimed.capture_beat,
+                            updated_tag_ids=() if snapshot is None else tuple(snapshot.l0_by_tag),
                         )
                         if snapshot is not None:
                             self._advance_frame_l0_latest(

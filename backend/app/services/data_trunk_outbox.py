@@ -74,6 +74,13 @@ class CommittedL0Change:
 
 
 @dataclass(frozen=True)
+class L0PublicationBaseline:
+    # None means no terminal predecessor, not merely zero changed points.
+    capture_beat: int | None
+    changes: Mapping[UUID, CommittedL0Change]
+
+
+@dataclass(frozen=True)
 class CommittedL2Change:
     entity_instance_id: UUID
     event_id: UUID
@@ -548,7 +555,7 @@ class PostgresFrameOutboxRepository:
         frame_time: datetime,
         failure_id: UUID | None = None,
         failure_code: str | None = None,
-        previous_l0: Mapping[UUID, CommittedL0Change] | None = None,
+        previous_l0: L0PublicationBaseline | None = None,
     ) -> FrameOutboxEvent:
         use_transaction_latest = previous_l0 is not None
         if previous_l0 is None:
@@ -562,7 +569,7 @@ class PostgresFrameOutboxRepository:
                 (frame_sequence,),
             )
             previous_row = cursor.fetchone()
-            previous_l0 = {}
+            previous_changes = {}
             if previous_row is not None and previous_row[0] is not None:
                 previous_sequence = int(previous_row[0])
                 cursor.execute(
@@ -570,27 +577,28 @@ class PostgresFrameOutboxRepository:
                     (previous_sequence,),
                 )
                 previous_capture = int(cursor.fetchone()[0])
-                previous_l0 = cls._load_l0_state(
+                previous_changes = cls._load_l0_state(
                     cursor, previous_sequence, previous_capture
                 )
         else:
+            previous_changes = previous_l0.changes
             # Transaction B only changes its own latest rows. Untouched rows can
             # change the published delta only by crossing the three-beat STALE
             # boundary; don't rebuild every long-stale point a second time.
             stale_transition_ids = tuple(
-                tag_id for tag_id, change in previous_l0.items()
+                tag_id for tag_id, change in previous_changes.items()
                 if change.effective_quality != TrunkQuality.STALE
                 and capture_beat - change.accepted_beat >= 3
             )
             current_l0 = cls._load_l0_latest_state(
                 cursor, capture_beat,
-                frame_sequence=frame_sequence if previous_l0 else None,
+                frame_sequence=frame_sequence if previous_l0.capture_beat is not None else None,
                 stale_transition_ids=stale_transition_ids,
             )
         l0_changes = tuple(
             change
             for tag_id, change in sorted(current_l0.items(), key=lambda item: str(item[0]))
-            if previous_l0.get(tag_id) != change
+            if previous_changes.get(tag_id) != change
         )
         # Transaction B has already advanced latest, including the last GOOD
         # value/time. Re-reading history here grows with retention and can lose
@@ -778,8 +786,11 @@ class PostgresFrameOutboxRepository:
 def capture_previous_l0_state(
     cursor,
     frame_sequence: int,
-) -> Mapping[UUID, CommittedL0Change]:
-    """Capture the last terminal L0 state before latest advances in transaction B."""
+    *,
+    capture_beat: int,
+    updated_tag_ids: tuple[UUID, ...],
+) -> L0PublicationBaseline:
+    """Read only rows transaction B can change, before latest advances."""
     cursor.execute(
         """
         SELECT capture_beat
@@ -792,9 +803,32 @@ def capture_previous_l0_state(
     )
     row = cursor.fetchone()
     if row is None:
-        return {}
-    return PostgresFrameOutboxRepository._load_l0_latest_state(
-        cursor, int(row[0])
+        return L0PublicationBaseline(None, {})
+    previous_beat = int(row[0])
+    # An untouched row can differ only as it crosses the STALE boundary.
+    # Filter in SQL before UUID/value conversion, including when nothing changes.
+    cursor.execute(
+        """
+        SELECT latest.tag_id,latest.observation_id,tag.data_type,
+               latest.raw_value_float,latest.raw_value_int,
+               latest.raw_value_bool,latest.raw_value_text,
+               latest.quality,latest.ts,latest.event_received_at,
+               latest.accepted_beat,tag.node_id,tag.unit,
+               tag.source_path,tag.source_type,latest.quality_reason
+        FROM t_telemetry_latest AS latest
+        JOIN t_tags AS tag ON tag.id=latest.tag_id
+        WHERE latest.frame_sequence > 0
+          AND (latest.tag_id=ANY(%s::uuid[]) OR (
+            latest.accepted_beat > 0 AND latest.accepted_beat > %s
+            AND latest.accepted_beat <= %s AND latest.quality <> %s))
+        ORDER BY latest.tag_id
+        """,
+        ([str(tag_id) for tag_id in updated_tag_ids], previous_beat - 3,
+         capture_beat - 3, int(TrunkQuality.STALE)),
+    )
+    return L0PublicationBaseline(
+        previous_beat,
+        PostgresFrameOutboxRepository._l0_state_from_rows(cursor.fetchall(), previous_beat),
     )
 
 
@@ -809,7 +843,7 @@ def build_frame_outbox_event(
     frame_time: datetime,
     failure_id: UUID | None = None,
     failure_code: str | None = None,
-    previous_l0: Mapping[UUID, CommittedL0Change] | None = None,
+    previous_l0: L0PublicationBaseline | None = None,
 ) -> FrameOutboxEvent:
     """Build the immutable delta once, inside the terminal-frame transaction."""
     return PostgresFrameOutboxRepository.build_event_from_history(

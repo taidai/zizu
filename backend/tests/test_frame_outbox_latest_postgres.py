@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from contextlib import nullcontext
 import os
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 import psycopg2
 from psycopg2.extras import execute_values
 
-from app.services.data_trunk_contracts import DataTrunkError, FrameStatus, TrunkQuality
+from app.services.data_trunk_contracts import (
+    ClaimedFrame, DataTrunkError, FrameStatus, FramedRawObservation,
+    ProcessingSnapshot, RawObservation, SourceOrder, TrunkQuality, TypedValue,
+)
+from app.services.data_trunk_postgres import PostgresFrameRepository
 from app.services.data_trunk_outbox import (
+    L0PublicationBaseline,
     PostgresFrameOutboxRepository,
     build_frame_outbox_event,
 )
@@ -33,8 +40,11 @@ class FrameOutboxLatestPostgresTest(unittest.TestCase):
         self.node_id, self.revision_id = uuid4(), uuid4()
         with self.connection.cursor() as cursor:
             for table in ("t_l2_observations", "t_l2_latest", "t_entity_instances",
-                          "t_telemetry_latest", "t_tags"):
-                cursor.execute(f"CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING DEFAULTS) ON COMMIT DROP")
+                          "t_telemetry_latest", "t_tags", "t_data_frames",
+                          "t_data_frame_outbox", "t_runtime_instances"):
+                cursor.execute(f"CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING DEFAULTS)")
+            cursor.execute("CREATE UNIQUE INDEX ON t_telemetry_latest(node_id,tag_id)")
+            cursor.execute("CREATE UNIQUE INDEX ON t_runtime_instances(id)")
             cursor.execute(
                 "INSERT INTO t_entity_instances(id,node_id,definition_id,display_name,data_type,direction,"
                 "freshness_seconds,active,source_kind,created_at,updated_at) "
@@ -67,7 +77,7 @@ class FrameOutboxLatestPostgresTest(unittest.TestCase):
         return build_frame_outbox_event(
             cursor, frame_id=self.frame_id, frame_sequence=20, status=status,
             configuration_revision=1, capture_beat=capture_beat, frame_time=self.now,
-            previous_l0={} if previous_l0 is None else previous_l0,
+            previous_l0=L0PublicationBaseline(None if previous_l0 is None else 19, previous_l0 or {}),
         )
 
     def _seed_l0(self, count=1, *, beat=1, quality=192, value=0):
@@ -86,6 +96,118 @@ class FrameOutboxLatestPostgresTest(unittest.TestCase):
                  for tag, observation in tags],
             )
         return tags
+
+    def _complete(self, tags, *, previous=True, fault_hook=None):
+        lease = datetime.now(UTC) + timedelta(minutes=1)
+        owner, token = uuid4(), uuid4()
+        with self.connection.cursor() as cursor:
+            if previous:
+                cursor.execute(
+                    "INSERT INTO t_data_frames(frame_id,frame_sequence,candidate_digest,"
+                    "capture_beat,shot_at,configuration_revision,status,finished_at) "
+                    "VALUES(%s,19,%s,19,%s,1,'COMPLETE',%s)",
+                    (str(uuid4()), 'a'*64, self.now, self.now),
+                )
+            cursor.execute(
+                "INSERT INTO t_data_frames(frame_id,frame_sequence,candidate_digest,capture_beat,"
+                "shot_at,configuration_revision,status,attempt_count,processing_owner,processing_token,lease_until) "
+                "VALUES(%s,20,%s,20,%s,1,'PROCESSING',1,%s,%s,%s)",
+                (str(self.frame_id), 'b'*64, self.now, str(owner), str(token), lease),
+            )
+        cells = {}
+        for tag in tags:
+            observation = RawObservation(
+                observation_id=uuid4(), node_id=self.node_id, tag_id=tag,
+                source_key='fixture', value=TypedValue.integer(0), raw_unit=None,
+                quality=TrunkQuality.GOOD, source_timestamp=self.now, received_at=self.now,
+                source_message_id='next', source_sequence=20, source_digest='b'*64,
+                event_time_basis='received_at', source_order=SourceOrder.sequence(20),
+            )
+            cells[tag] = FramedRawObservation(observation, 20, TrunkQuality.GOOD)
+        # Fixture setup survives a production rollback; temporary tables vanish
+        # when this test's private connection closes, never touching site data.
+        self.connection.commit()
+        repository = PostgresFrameRepository(
+            connection_factory=lambda: nullcontext(self.connection),
+            clock=lambda: self.now, fault_hook=fault_hook,
+        )
+        repository.complete(
+            ClaimedFrame(self.frame_id, 20, 20, self.now, 1, 1, owner, token, lease, self.now),
+            ProcessingSnapshot(cells, {}, (), ()), (),
+        )
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT payload FROM t_data_frame_outbox WHERE frame_id=%s", (str(self.frame_id),))
+            return cursor.fetchone()[0]
+
+    def test_complete_materializes_only_updated_or_newly_stale_l0(self):
+        self._seed_l0(1800)
+        (tag_id, _), = self._seed_l0(beat=19)
+        materialized = []
+        convert = PostgresFrameOutboxRepository._l0_state_from_rows
+
+        def measure(rows, beat):
+            materialized.append(len(rows))
+            return convert(rows, beat)
+
+        with patch.object(PostgresFrameOutboxRepository, '_l0_state_from_rows', side_effect=measure):
+            result = self._complete((tag_id,))
+        change, = result['l0_changes']
+        self.assertEqual(str(tag_id), change['tag_id'])
+        self.assertIs(type(change['value']), int)
+        self.assertEqual(0, change['value'])
+        self.assertEqual(192, change['effective_quality'])
+        self.assertLessEqual(sum(materialized), 2, 'transaction B rebuilt unrelated old L0 baseline')
+
+    def test_complete_empty_delta_does_not_republish_retained_points(self):
+        self._seed_l0(3, beat=1)
+        self._seed_l0(2, beat=19)
+        self.assertEqual([], self._complete(())['l0_changes'])
+
+    def test_complete_first_frame_publishes_retained_points(self):
+        tags = self._seed_l0(3, beat=19)
+        changes = self._complete((), previous=False)['l0_changes']
+        self.assertEqual({str(tag) for tag, _ in tags}, {row['tag_id'] for row in changes})
+
+    def test_complete_new_point_does_not_republish_unrelated_old_points(self):
+        self._seed_l0(3, beat=1)
+        (tag_id, _), = self._seed_l0(beat=19)
+        with self.connection.cursor() as cursor:
+            cursor.execute('DELETE FROM t_telemetry_latest WHERE tag_id=%s', (str(tag_id),))
+        change, = self._complete((tag_id,))['l0_changes']
+        self.assertEqual(str(tag_id), change['tag_id'])
+        self.assertEqual(192, change['effective_quality'])
+
+    def test_complete_includes_only_new_stale_transitions_and_revival(self):
+        self._seed_l0(3, beat=1)
+        self._seed_l0(beat=18)
+        (stale_tag, old_observation), = self._seed_l0(beat=17)
+        (bad_tag, _), = self._seed_l0(beat=17, quality=0)
+        (revived_tag, _), = self._seed_l0(beat=1)
+        rows = {row['tag_id']: row for row in self._complete((revived_tag,))['l0_changes']}
+        self.assertEqual({str(stale_tag), str(bad_tag), str(revived_tag)}, set(rows))
+        self.assertEqual(int(TrunkQuality.STALE), rows[str(stale_tag)]['effective_quality'])
+        self.assertEqual(str(old_observation), rows[str(stale_tag)]['observation_id'])
+        self.assertEqual(0, rows[str(stale_tag)]['value'])
+        self.assertEqual(int(TrunkQuality.STALE), rows[str(bad_tag)]['effective_quality'])
+        self.assertEqual(192, rows[str(revived_tag)]['effective_quality'])
+
+    def test_complete_outbox_failure_rolls_back_latest_and_frame(self):
+        (tag_id, observation_id), = self._seed_l0(beat=19, value=7)
+
+        def fail(stage):
+            if stage == 'outbox':
+                raise RuntimeError('injected outbox failure')
+
+        with self.assertRaises(DataTrunkError):
+            self._complete((tag_id,), fault_hook=fail)
+        with self.connection.cursor() as cursor:
+            cursor.execute('SELECT observation_id,raw_value_int,frame_sequence FROM t_telemetry_latest')
+            row = cursor.fetchone()
+            self.assertEqual((str(observation_id), 7, 19), (str(row[0]), row[1], row[2]))
+            cursor.execute('SELECT status FROM t_data_frames WHERE frame_id=%s', (str(self.frame_id),))
+            self.assertEqual('PROCESSING', cursor.fetchone()[0])
+            cursor.execute('SELECT count(*) FROM t_data_frame_outbox')
+            self.assertEqual(0, cursor.fetchone()[0])
 
     def test_publication_does_not_rematerialize_unchanged_stale_points(self):
         # Adding old, unchanged points must not multiply transaction B's second
