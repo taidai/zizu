@@ -1,7 +1,7 @@
 """PostgreSQL authority for dispatch-strategy lifecycle and ownership."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from decimal import Decimal

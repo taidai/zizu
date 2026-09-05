@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -19,12 +20,36 @@ from app.services.dispatch_strategies import (
 from app.services.dispatch_strategy_postgres import (
     PostgresStrategyRepository,
     StrategyRepositoryError,
+    _json_safe,
 )
 from tests import test_data_frames_postgres as frame_runtime
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_062 = ROOT / "init-db" / "migration_062_dispatch_strategies.sql"
+
+
+class DispatchStrategyEvidenceSerializationTest(unittest.TestCase):
+    def test_mapping_evidence_is_converted_to_json_safe_values(self) -> None:
+        observed_at = datetime(2026, 9, 5, 8, 0, tzinfo=UTC)
+        entity_id = uuid4()
+
+        evidence = _json_safe(
+            {
+                "observed_at": observed_at,
+                "entity_instance_id": entity_id,
+                "value": Decimal("156.8"),
+            }
+        )
+
+        self.assertEqual(
+            {
+                "observed_at": "2026-09-05T08:00:00+00:00",
+                "entity_instance_id": str(entity_id),
+                "value": 156.8,
+            },
+            evidence,
+        )
 
 
 @unittest.skipUnless(

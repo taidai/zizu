@@ -8,6 +8,8 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
+from loguru import logger
+
 from app.services.automated_control_commands import (
     AutomatedControlCommandRequest,
     AutomatedControlCommands,
@@ -113,7 +115,13 @@ class FixedMinuteTickWorker:
                 continue
             except TimeoutError:
                 pass
-            await asyncio.to_thread(self.run_once, boundary)
+            try:
+                await asyncio.to_thread(self.run_once, boundary)
+            except Exception as error:
+                logger.error(
+                    "[DispatchStrategy] fixed minute tick failed: {}",
+                    type(error).__name__,
+                )
 
 
 class ControlIntentDispatcher:
@@ -193,7 +201,14 @@ class ControlIntentDispatcher:
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
-            result = await asyncio.to_thread(self.run_once, self._clock())
+            try:
+                result = await asyncio.to_thread(self.run_once, self._clock())
+            except Exception as error:
+                logger.error(
+                    "[DispatchStrategy] intent dispatcher tick failed: {}",
+                    type(error).__name__,
+                )
+                result = None
             if result is None or result.status == "IN_FLIGHT":
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.25)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -34,6 +35,32 @@ class _Runtime:
 class _TickRepository:
     def fixed_tick_strategy_ids(self):
         return (STRATEGY_ID,)
+
+
+class _FlakyRuntime:
+    def __init__(self, stop: asyncio.Event) -> None:
+        self.stop = stop
+        self.calls = 0
+
+    def evaluate(self, strategy_id, trigger):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary tick failure")
+        self.stop.set()
+        return SimpleNamespace(status="EVALUATED")
+
+
+class _FlakyIntentRepository:
+    def __init__(self, stop: asyncio.Event) -> None:
+        self.stop = stop
+        self.calls = 0
+
+    def claim_next(self, now):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary dispatcher failure")
+        self.stop.set()
+        return None
 
 
 @dataclass
@@ -242,6 +269,38 @@ class DispatchStrategyWorkersTest(unittest.TestCase):
 
         self.assertEqual(("CONFIRMED", "CONFIRMED"), (one.status, two.status))
         self.assertEqual(2, len(control.requests))
+
+
+class DispatchStrategyWorkerLoopsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fixed_tick_loop_survives_one_evaluation_failure(self) -> None:
+        stop = asyncio.Event()
+        runtime = _FlakyRuntime(stop)
+        clock_values = iter(
+            (
+                NOW,
+                NOW + timedelta(minutes=1),
+                NOW + timedelta(minutes=1),
+                NOW + timedelta(minutes=2),
+            )
+        )
+        worker = FixedMinuteTickWorker(
+            _TickRepository(),
+            runtime,
+            clock=lambda: next(clock_values),
+        )
+
+        await asyncio.wait_for(worker.run(stop), timeout=1)
+
+        self.assertEqual(2, runtime.calls)
+
+    async def test_intent_dispatcher_loop_survives_one_repository_failure(self) -> None:
+        stop = asyncio.Event()
+        repository = _FlakyIntentRepository(stop)
+        dispatcher = ControlIntentDispatcher(repository, _Control([]), clock=lambda: NOW)
+
+        await asyncio.wait_for(dispatcher.run(stop), timeout=1)
+
+        self.assertEqual(2, repository.calls)
 
 
 def replace_namespace_id(value, command_id):
