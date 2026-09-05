@@ -550,6 +550,7 @@ class PostgresFrameOutboxRepository:
         failure_code: str | None = None,
         previous_l0: Mapping[UUID, CommittedL0Change] | None = None,
     ) -> FrameOutboxEvent:
+        use_transaction_latest = previous_l0 is not None
         if previous_l0 is None:
             current_l0 = cls._load_l0_state(cursor, frame_sequence, capture_beat)
             cursor.execute(
@@ -579,26 +580,26 @@ class PostgresFrameOutboxRepository:
             for tag_id, change in sorted(current_l0.items(), key=lambda item: str(item[0]))
             if previous_l0.get(tag_id) != change
         )
-        cursor.execute(
-            """
-            SELECT observation.entity_instance_id,observation.event_id,
-                   entity.data_type,baseline.value_float,
-                   baseline.value_int,baseline.value_numeric,
-                   baseline.value_bool,baseline.value_text,
-                   baseline.value_codes,observation.quality,
-                   observation.reason,entity.node_id,entity.unit,
-                   observation.observed_at,observation.received_at,
-                   observation.calculated_at,
-                   observation.processing_revision_id,
-                   observation.source_digest,baseline.observed_at
-            FROM t_l2_observations AS observation
-            JOIN t_entity_instances AS entity
-              ON entity.id=observation.entity_instance_id
+        # Transaction B has already advanced latest, including the last GOOD
+        # value/time. Re-reading history here grows with retention and can lose
+        # a retained value after its historical chunk has expired. Bind to this
+        # exact frame/event; never borrow a later frame's result.
+        baseline_join = """
+            LEFT JOIN LATERAL (
+              SELECT latest.value_float,latest.value_int,latest.value_numeric,
+                     latest.value_bool,latest.value_text,latest.value_codes,
+                     latest.value_observed_at AS observed_at,latest.entity_instance_id
+              FROM t_l2_latest AS latest
+              WHERE latest.entity_instance_id=observation.entity_instance_id
+                AND latest.event_id=observation.event_id
+                AND latest.frame_sequence=observation.commit_sequence
+            ) AS baseline ON TRUE
+        """ if use_transaction_latest else """
             LEFT JOIN LATERAL (
               SELECT candidate.value_float,candidate.value_int,
                      candidate.value_numeric,candidate.value_bool,
                      candidate.value_text,candidate.value_codes,
-                     candidate.observed_at
+                     candidate.observed_at,candidate.entity_instance_id
               FROM t_l2_observations AS candidate
               WHERE candidate.entity_instance_id=observation.entity_instance_id
                 AND candidate.commit_sequence <= observation.commit_sequence
@@ -611,11 +612,34 @@ class PostgresFrameOutboxRepository:
               ORDER BY candidate.commit_sequence DESC,candidate.observed_at DESC
               LIMIT 1
             ) AS baseline ON TRUE
+        """
+        cursor.execute(
+            f"""
+            SELECT observation.entity_instance_id,observation.event_id,
+                   entity.data_type,baseline.value_float,
+                   baseline.value_int,baseline.value_numeric,
+                   baseline.value_bool,baseline.value_text,
+                   baseline.value_codes,observation.quality,
+                   observation.reason,entity.node_id,entity.unit,
+                   observation.observed_at,observation.received_at,
+                   observation.calculated_at,
+                   observation.processing_revision_id,
+                   observation.source_digest,baseline.observed_at,
+                   baseline.entity_instance_id
+            FROM t_l2_observations AS observation
+            JOIN t_entity_instances AS entity
+              ON entity.id=observation.entity_instance_id
+            {baseline_join}
             WHERE observation.frame_id=%s
             ORDER BY observation.entity_instance_id
             """,
             (str(frame_id),),
         )
+        l2_rows = cursor.fetchall()
+        if use_transaction_latest and any(row[19] is None for row in l2_rows):
+            raise DataTrunkError(
+                "DATA_FRAME_L2_LATEST_MISMATCH", "DATA_FRAME_L2_LATEST_MISMATCH"
+            )
         l2_changes = tuple(
             CommittedL2Change(
                 entity_instance_id=UUID(str(row[0])),
@@ -632,7 +656,7 @@ class PostgresFrameOutboxRepository:
                 source_digest=str(row[17]).strip(),
                 value_observed_at=row[18],
             )
-            for row in cursor.fetchall()
+            for row in l2_rows
         )
         return FrameOutboxEvent(
             frame_id=frame_id,
