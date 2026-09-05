@@ -850,7 +850,12 @@ class ControlCommandRuntime:
             )
         except Exception:
             return self._transition(command, "failed", "CONTROL_DISPATCH_FAILED", at=now)
-        command = self._transition(command, "dispatched", "CONTROL_DISPATCHED", at=now, dispatched_at=now)
+        # Validation, persistence and the adapter can block while telemetry arrives.
+        # Only observations after adapter acceptance qualify as write readback.
+        dispatched_at = self._now()
+        command = self._transition(
+            command, "dispatched", "CONTROL_DISPATCHED", at=dispatched_at, dispatched_at=dispatched_at
+        )
         return self.reconcile(command.id)
 
     def reject_unresolved_compatibility_target(

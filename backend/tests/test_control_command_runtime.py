@@ -252,6 +252,66 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (command.status, command.code))
         self.assertEqual("mismatch", self.runtime.reconcile(command.id).status)
 
+    def _submit_with_delayed_dispatch(self, old_value: float):
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        original_dispatch = self.dispatcher.dispatch
+
+        def delayed_dispatch(request: object) -> None:
+            self.clock.advance(1)
+            self._observe(READBACK_ID, old_value, after_seconds=0)
+            self.clock.advance(2)
+            original_dispatch(request)
+
+        self.dispatcher.dispatch = delayed_dispatch
+        return self.runtime.submit(self._request())
+
+    def test_pre_dispatch_matching_sample_cannot_confirm_after_delayed_acceptance(self) -> None:
+        started_at = self.clock.now()
+        command = self._submit_with_delayed_dispatch(20.0)
+
+        self.assertEqual(("dispatched", "CONTROL_DISPATCHED"), (command.status, command.code))
+        self.assertEqual(started_at, command.created_at)
+        self.assertEqual(started_at + timedelta(seconds=3), command.dispatched_at)
+        dispatched_event = self.repository.events(command.id)[-1]
+        self.assertEqual(command.dispatched_at, dispatched_event.at)
+        restarted = type(self.runtime)(
+            registry=self.runtime._registry,
+            policies=self.runtime._policies,
+            readback=self.readback,
+            dispatcher=self.dispatcher,
+            repository=self.repository,
+            clock=self.clock.now,
+        )
+        self.assertEqual("dispatched", restarted.recover()[0].status)
+        self.assertEqual(command.id, restarted.submit(self._request()).id)
+        self.clock.advance(1)
+        self._observe(READBACK_ID, 20.05, after_seconds=0)
+        self.assertEqual("readback_confirmed", restarted.reconcile(command.id).status)
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_pre_dispatch_different_sample_cannot_fail_after_delayed_acceptance(self) -> None:
+        command = self._submit_with_delayed_dispatch(10.0)
+
+        self.assertEqual(("dispatched", "CONTROL_DISPATCHED"), (command.status, command.code))
+        self.clock.advance(1)
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        mismatch = self.runtime.reconcile(command.id)
+        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (mismatch.status, mismatch.code))
+        self.clock.advance(1)
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        self.assertEqual("mismatch", self.runtime.reconcile(command.id).status)
+
+    def test_delayed_dispatch_does_not_extend_original_timeout(self) -> None:
+        started_at = self.clock.now()
+        command = self._submit_with_delayed_dispatch(10.0)
+
+        self.assertEqual("dispatched", command.status)
+        self.assertEqual(started_at + timedelta(seconds=10), command.timeout_at)
+        self.clock.advance(7)
+        timed_out = self.runtime.reconcile(command.id)
+        self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (timed_out.status, timed_out.code))
+        self.assertEqual(1, len(self.dispatcher.requests))
+
     def test_missing_readback_times_out_after_restart(self) -> None:
         self._observe(INTERLOCK_ID, True)
         dispatched = self.runtime.submit(self._request())
