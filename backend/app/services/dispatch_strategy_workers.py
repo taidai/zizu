@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -48,6 +49,8 @@ class StrategyWorkerRepository(Protocol):
     def fixed_tick_strategy_ids(self) -> tuple[UUID, ...]: ...
 
     def claim_next(self, now: datetime) -> ControlIntent | None: ...
+
+    def submission_guard(self, intent: ControlIntent, now: datetime) -> AbstractContextManager[bool]: ...
 
     def attach_command(
         self, intent_id: UUID, attempt_number: int, command_id: UUID
@@ -156,7 +159,10 @@ class ControlIntentDispatcher:
                 },
                 attempt_idempotency_key=_attempt_key(intent.id, intent.attempt_count),
             )
-            command = self._control.submit(request)
+            with self._repository.submission_guard(intent, max(attempted_at, self._clock())) as allowed:
+                if not allowed:
+                    return None
+                command = self._control.submit(request)
             self._repository.attach_command(
                 intent.id, intent.attempt_count, command.id
             )

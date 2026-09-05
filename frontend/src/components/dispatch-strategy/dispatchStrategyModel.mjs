@@ -12,6 +12,13 @@ const ERROR_MESSAGES = {
   COMMITTED_L2_SNAPSHOT_UNAVAILABLE: '当前还没有完整、已提交的实体快照。',
   STRATEGY_DRAFT_CONFLICT: '策略已被其他人修改，请刷新后重试。',
   CONFIGURATION_REVISION_CHANGED: '实体配置已经变化，请重新保存后发布。',
+  SOC_BINDING_DEFINITION_INVALID: 'SOC 输入必须绑定 bms.soc 或 storage.soc 标准实体。',
+  SOC_BINDING_TYPE_INVALID: 'SOC 输入必须是 INT 或 FLOAT 数值实体。',
+  SOC_BINDING_UNIT_INVALID: 'SOC 输入必须使用百分比（%）单位。',
+  SOC_VALUE_INVALID: 'SOC 当前值必须是 0 到 100 之间的有效数字。',
+  POWER_TARGET_BINDING_TYPE_INVALID: '功率控制目标必须是 INT 或 FLOAT 数值实体。',
+  POWER_TARGET_BINDING_UNIT_INVALID: '功率控制目标必须使用 kW 单位。',
+  POWER_TARGET_VALUE_INVALID: '功率目标必须是有效的有限数字。',
 }
 
 const FIELD_LABELS = {
@@ -123,6 +130,21 @@ export function makeStrategyBinding(entity, direction, bindingKey, ordinal) {
   }
 }
 
+export function isDispatchSocEntity(entity) {
+  return !!entity?.confirmed
+    && ['R', 'RW'].includes(entity.direction)
+    && ['bms.soc', 'storage.soc'].includes(entity.definition_id)
+    && ['INT', 'FLOAT'].includes(String(entity.data_type).toUpperCase())
+    && entity.unit === '%'
+}
+
+export function isDispatchPowerTargetEntity(entity) {
+  return !!entity?.confirmed
+    && ['W', 'RW'].includes(entity.direction)
+    && ['INT', 'FLOAT'].includes(String(entity.data_type).toUpperCase())
+    && entity.unit === 'kW'
+}
+
 export function buildTwoChargeTwoDischargeJdm(windows, safeTarget) {
   const validation = validateDispatchWindows(windows, safeTarget)
   if (!validation.valid) throw new Error(validation.message)
@@ -174,6 +196,43 @@ export function buildTwoChargeTwoDischargeJdm(windows, safeTarget) {
   }
 }
 
+export function isJdmGraphUnchanged(left, right) {
+  const json = (value) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+    : item)
+  return json(left) === json(right)
+}
+
+export function readTwoChargeTwoDischargeJdm(graph) {
+  const rules = graph?.nodes?.find((node) => node.id === 'schedule')?.content?.rules
+  if (!Array.isArray(rules) || rules.length < 2) return null
+  const toTime = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+  const rows = []
+  for (const rule of rules.slice(0, -1)) {
+    const time = /^site_local_minute >= (\d+) && site_local_minute < (\d+)$/.exec(rule?.site_local_minute)
+    const soc = /^soc >= (\S+) && soc <= (\S+)$/.exec(rule?.soc)
+    if (!time || !soc) return null
+    rows.push({
+      key: rule._id,
+      start: toTime(Number(time[1])),
+      end: toTime(Number(time[2])),
+      action: rule._description,
+      target: Number(rule.target),
+      socMin: Number(soc[1]),
+      socMax: Number(soc[2]),
+    })
+  }
+  const safeTarget = Number(rules.at(-1)?.target)
+  // Only our exact table is editable here. Unknown nodes, expressions and fields
+  // stay in the original graph; this is not a general JDM reverse compiler.
+  try {
+    if (!isJdmGraphUnchanged(graph, buildTwoChargeTwoDischargeJdm(rows, safeTarget))) return null
+  } catch {
+    return null
+  }
+  return { rows, safeTarget }
+}
+
 export function describeDispatchStrategyError(reason) {
   const payload = reason?.payload || reason
   const detail = payload?.detail
@@ -190,12 +249,12 @@ export function describeDispatchStrategyError(reason) {
 
 export function projectStrategyStatus(strategy) {
   const draftRevision = strategy.draft?.revision ?? null
-  const publishedRevision = strategy.active_revision?.revision ?? null
+  const publishedRevision = strategy.published_revision?.revision ?? null
   const hasUnpublished = draftRevision !== null
     && (
       publishedRevision === null
       || draftRevision > publishedRevision
-      || (strategy.draft?.id && strategy.draft.id !== strategy.active_revision?.id)
+      || (strategy.draft?.id && strategy.draft.id !== strategy.published_revision?.id)
     )
   const health = {
     READY: '就绪',

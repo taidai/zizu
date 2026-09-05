@@ -131,23 +131,36 @@ class DataFramesPostgresTest(unittest.TestCase):
         migration_test = frame_migration.DataFramesMigrationPostgresTest
         migration_test.connection_kwargs = cls.connection_kwargs
         migration_test().setUp()
-        with psycopg2.connect(**cls.connection_kwargs) as connection:
-            with connection.cursor() as cursor:
-                migration_test._apply_046(cursor)
-                payload_migration.CommittedFramePayloadMigrationPostgresTest._apply_047(cursor)
-                cursor.execute(
-                    retention_migration.MIGRATION_048.read_text(encoding="utf-8")
-                )
-                cursor.execute(
-                    consumer_migration.MIGRATION_049.read_text(encoding="utf-8")
-                )
-                cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
-                cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
-                cursor.execute(
-                    frame_migration.MIGRATION_054.read_text(encoding="utf-8")
-                )
-                cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
-            connection.commit()
+        # The nested reset restarts workers after 045. Keep the remaining DDL
+        # isolated from its newly scheduled retention/compression jobs too.
+        worker_connection = psycopg2.connect(**cls.connection_kwargs)
+        worker_connection.autocommit = True
+        try:
+            with worker_connection.cursor() as worker_cursor:
+                worker_cursor.execute("SELECT _timescaledb_functions.stop_background_workers()")
+                try:
+                    with psycopg2.connect(**cls.connection_kwargs) as connection:
+                        with connection.cursor() as cursor:
+                            migration_test._apply_046(cursor)
+                            payload_migration.CommittedFramePayloadMigrationPostgresTest._apply_047(cursor)
+                            cursor.execute(
+                                retention_migration.MIGRATION_048.read_text(encoding="utf-8")
+                            )
+                            cursor.execute(
+                                consumer_migration.MIGRATION_049.read_text(encoding="utf-8")
+                            )
+                            cursor.execute(MIGRATION_050.read_text(encoding="utf-8"))
+                            cursor.execute(MIGRATION_051.read_text(encoding="utf-8"))
+                            cursor.execute(
+                                frame_migration.MIGRATION_054.read_text(encoding="utf-8")
+                            )
+                            cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
+                        connection.commit()
+                finally:
+                    # The migration connection has committed or rolled back.
+                    worker_cursor.execute("SELECT _timescaledb_functions.start_background_workers()")
+        finally:
+            worker_connection.close()
 
     def setUp(self) -> None:
         self.now = datetime.now(UTC)

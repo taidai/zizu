@@ -4,9 +4,12 @@ import test from 'node:test'
 import {
   buildTwoChargeTwoDischargeJdm,
   describeDispatchStrategyError,
+  isDispatchSocEntity,
+  isDispatchPowerTargetEntity,
   makeStrategyBinding,
   normalizeDispatchWindows,
   projectStrategyStatus,
+  readTwoChargeTwoDischargeJdm,
   splitCrossMidnight,
   validateDispatchWindows,
 } from './dispatchStrategyModel.mjs'
@@ -83,6 +86,7 @@ test('API validation error maps to one plain-Chinese field message', () => {
 test('strategy status keeps revision, enable state and runtime health separate', () => {
   assert.deepEqual(projectStrategyStatus({
     draft: { revision: 3, lifecycle: 'DRAFT' },
+    published_revision: { revision: 2, lifecycle: 'PUBLISHED' },
     active_revision: { revision: 2, lifecycle: 'PUBLISHED' },
     enabled: true,
     runtime_health: 'BLOCKED',
@@ -97,6 +101,36 @@ test('strategy status keeps revision, enable state and runtime health separate',
   })
 })
 
+test('a published strategy is published before it is enabled', () => {
+  assert.deepEqual(projectStrategyStatus({
+    draft: null,
+    published_revision: { id: 'published-2', revision: 2 },
+    active_revision: null,
+    enabled: false,
+    runtime_health: 'READY',
+  }), {
+    draftRevision: null,
+    publishedRevision: 2,
+    lifecycleLabel: '已发布',
+    enableLabel: '已停用',
+    healthLabel: '就绪',
+    healthDetail: '',
+  })
+})
+
+test('the latest published revision is not confused with the older running revision', () => {
+  const status = projectStrategyStatus({
+    draft: null,
+    published_revision: { id: 'published-3', revision: 3 },
+    active_revision: { id: 'published-2', revision: 2 },
+    enabled: true,
+    runtime_health: 'READY',
+  })
+  assert.equal(status.publishedRevision, 3)
+  assert.equal(status.lifecycleLabel, '已发布')
+  assert.equal(status.enableLabel, '已启用')
+})
+
 test('easy table compiles to the sole standard JDM document', () => {
   const graph = buildTwoChargeTwoDischargeJdm([
     row('charge-1', '00:00', '06:00', -60),
@@ -107,4 +141,65 @@ test('easy table compiles to the sole standard JDM document', () => {
   assert.equal(table.rules.at(-1)._id, 'other-time')
   assert.equal(table.rules.at(-1).target, '0')
   assert.deepEqual(graph.edges.map((edge) => edge.type), ['edge', 'edge'])
+})
+
+test('only an exactly representable JDM exposes editable schedule cells', () => {
+  const windows = [row('day', '08:00', '24:00', 50)]
+  const graph = buildTwoChargeTwoDischargeJdm(windows, 0)
+  // PostgreSQL JSON object key order is not part of the JDM contract.
+  const reordered = { edges: graph.edges, nodes: graph.nodes }
+  assert.deepEqual(readTwoChargeTwoDischargeJdm(reordered), { rows: windows, safeTarget: 0 })
+})
+
+test('unrepresented JDM structure never exposes editable schedule cells', () => {
+  const mutations = [
+    (graph) => { graph.nodes.push({ id: 'extra', type: 'expressionNode', content: {} }) },
+    (graph) => { graph.edges[0].targetId = 'output' },
+    (graph) => { graph.nodes[1].content.hitPolicy = 'collect' },
+    (graph) => { graph.nodes[1].content.rules[0].soc += ' || override' },
+    (graph) => { graph.nodes[1].content.rules[0].action_id = '"other-target"' },
+    (graph) => { graph.nodes[1].content.rules[0].temperature = 'temperature < 40' },
+    (graph) => { graph.nodes[1].content.rules.at(-1).soc = 'soc > 20' },
+    (graph) => { graph.nodes[1].content.rules.reverse() },
+    (graph) => { graph.metadata = { custom: true } },
+  ]
+  for (const mutate of mutations) {
+    const graph = buildTwoChargeTwoDischargeJdm([row('day', '08:00', '10:00', 50)], 0)
+    mutate(graph)
+    const original = structuredClone(graph)
+    assert.equal(readTwoChargeTwoDischargeJdm(graph), null)
+    assert.deepEqual(graph, original)
+  }
+  assert.equal(readTwoChargeTwoDischargeJdm({ nodes: [], edges: [] }), null)
+})
+
+test('SOC candidates require confirmed readable standard numeric percentage entities', () => {
+  const entity = { confirmed: true, direction: 'R', definition_id: 'bms.soc', data_type: 'FLOAT', unit: '%' }
+  assert.equal(isDispatchSocEntity(entity), true)
+  assert.equal(isDispatchSocEntity({ ...entity, definition_id: 'storage.soc', data_type: 'INT', direction: 'RW' }), true)
+  for (const patch of [
+    { confirmed: false }, { direction: 'W' }, { definition_id: 'ess.soc' },
+    { definition_id: 'bms.current', display_name: 'SOC' }, { data_type: 'BOOL' },
+    { unit: 'ratio' }, { unit: null },
+  ]) assert.equal(isDispatchSocEntity({ ...entity, ...patch }), false)
+  assert.equal(isDispatchSocEntity(null), false)
+})
+
+test('power-target candidates require confirmed writable numeric kW entities', () => {
+  const entity = { confirmed: true, direction: 'RW', data_type: 'FLOAT', unit: 'kW' }
+  assert.equal(isDispatchPowerTargetEntity(entity), true)
+  assert.equal(isDispatchPowerTargetEntity({ ...entity, direction: 'W', data_type: 'INT' }), true)
+  for (const patch of [{ confirmed: false }, { direction: 'R' }, { data_type: 'BOOL' }, { unit: 'W' }, { unit: 'V' }]) {
+    assert.equal(isDispatchPowerTargetEntity({ ...entity, ...patch }), false)
+  }
+  assert.equal(isDispatchPowerTargetEntity(null), false)
+})
+
+test('SOC and power contract errors explain the field that must be corrected', () => {
+  for (const code of ['SOC_BINDING_DEFINITION_INVALID', 'SOC_BINDING_TYPE_INVALID', 'SOC_BINDING_UNIT_INVALID', 'SOC_VALUE_INVALID']) {
+    assert.match(describeDispatchStrategyError({ code }), /SOC/)
+  }
+  for (const code of ['POWER_TARGET_BINDING_TYPE_INVALID', 'POWER_TARGET_BINDING_UNIT_INVALID', 'POWER_TARGET_VALUE_INVALID']) {
+    assert.match(describeDispatchStrategyError({ code }), /功率/)
+  }
 })

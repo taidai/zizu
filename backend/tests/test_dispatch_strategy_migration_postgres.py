@@ -6,6 +6,7 @@ import unittest
 from uuid import uuid4
 
 import psycopg2
+from psycopg2.extras import register_uuid
 
 from tests import test_data_frames_postgres as frame_runtime
 
@@ -42,7 +43,9 @@ class DispatchStrategyMigrationPostgresTest(unittest.TestCase):
             connection.commit()
 
     def _connection(self):
-        return psycopg2.connect(**self.connection_kwargs)
+        connection = psycopg2.connect(**self.connection_kwargs)
+        register_uuid(conn_or_curs=connection)
+        return connection
 
     def test_migration_is_replayable_and_installs_the_complete_contract(self) -> None:
         sql = MIGRATION_062.read_text(encoding="utf-8")
@@ -111,6 +114,7 @@ class DispatchStrategyMigrationPostgresTest(unittest.TestCase):
     def test_only_one_draft_revision_can_exist_per_strategy(self) -> None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(MIGRATION_062.read_text(encoding="utf-8"))
+            connection.commit()
             cursor.execute("SELECT current_revision FROM t_configuration_state")
             configuration_revision = int(cursor.fetchone()[0])
             strategy_id = uuid4()

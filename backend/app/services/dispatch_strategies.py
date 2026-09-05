@@ -15,6 +15,7 @@ from app.services.gorules_adapter import StandardJdmError, evaluate_standard_jdm
 
 
 ALLOWED_DISPATCH_ACTIONS = frozenset({"CHARGE", "DISCHARGE", "HOLD"})
+_VALUE_UNSET = object()
 
 
 class StrategyModelError(ValueError):
@@ -47,6 +48,7 @@ class StrategyInput:
     observed_at: datetime
     frame_sequence: int
     configuration_revision: int
+    definition_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,7 @@ class EntityBindingContract:
     confirmed_write_points: int
     minimum: float | None
     maximum: float | None
+    definition_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,7 +263,7 @@ class StrategyRuntime:
             raise StrategyModelError("STRATEGY_REVISION_NOT_FOUND", "revision does not exist")
         snapshot = self._repository.load_snapshot(revision, None, evaluated_at)
         try:
-            engine_inputs, actual = _validated_snapshot(revision, snapshot)
+            engine_inputs, actual = validate_strategy_snapshot(revision, snapshot)
         except StrategyModelError as error:
             return EvaluationResult(
                 "BLOCKED", error.code, snapshot, {}, None, None, None,
@@ -277,6 +280,11 @@ class StrategyRuntime:
                 raise StrategyModelError(
                     "SIMULATION_OVERRIDE_UNKNOWN", f"unknown input {key}"
                 )
+            sample = next(
+                item for item in snapshot.inputs
+                if item.entity_instance_id == binding.entity_instance_id
+            )
+            validate_strategy_binding_role(binding, sample, value=value)
             try:
                 engine_inputs[key] = _typed_value(value, binding.expected_data_type)
             except StrategyModelError as error:
@@ -325,7 +333,7 @@ class StrategyRuntime:
                 {}, None, state.last_desired, state.last_actual, (), (), False,
             )
         try:
-            engine_inputs, actual = _validated_snapshot(revision, snapshot)
+            engine_inputs, actual = validate_strategy_snapshot(revision, snapshot)
         except StrategyModelError as error:
             return self._commit_blocked(strategy_id, revision, trigger, snapshot, state, error.code)
         try:
@@ -471,13 +479,14 @@ def validate_publish_bindings(
     contracts: Mapping[UUID, EntityBindingContract],
     *,
     static_targets: Sequence[object],
+    require_complete: bool = True,
 ) -> None:
     """Fail closed before a strategy revision can own or control L2 outputs."""
     inputs = tuple(item for item in bindings if item.direction == "INPUT")
     outputs = tuple(item for item in bindings if item.direction == "OUTPUT")
-    if not inputs:
+    if require_complete and not inputs:
         raise StrategyModelError("STRATEGY_INPUT_REQUIRED", "at least one L2 input is required")
-    if not outputs:
+    if require_complete and not outputs:
         raise StrategyModelError("STRATEGY_OUTPUT_REQUIRED", "at least one L2 output is required")
     if {item.entity_instance_id for item in inputs} & {
         item.entity_instance_id for item in outputs
@@ -508,6 +517,7 @@ def validate_publish_bindings(
             raise StrategyModelError("L2_BINDING_TYPE_MISMATCH", "bound L2 type changed")
         if _normalized_unit(contract.unit) != _normalized_unit(binding.unit):
             raise StrategyModelError("L2_BINDING_UNIT_MISMATCH", "bound L2 unit changed")
+        validate_strategy_binding_role(binding, contract)
         if binding.direction == "INPUT" and contract.direction not in {"R", "RW"}:
             raise StrategyModelError("INPUT_NOT_READABLE", "bound L2 cannot be read")
         if binding.direction == "OUTPUT":
@@ -531,6 +541,42 @@ def validate_publish_bindings(
                 raise StrategyModelError("OUTPUT_LIMIT_VIOLATION", "target is below the configured minimum")
             if output_contract.maximum is not None and target > Decimal(str(output_contract.maximum)):
                 raise StrategyModelError("OUTPUT_LIMIT_VIOLATION", "target is above the configured maximum")
+
+
+def validate_strategy_binding_role(
+    binding: StrategyBindingDraft,
+    contract: EntityBindingContract | StrategyInput,
+    *,
+    value: object = _VALUE_UNSET,
+) -> None:
+    """Enforce the starter's reserved roles without restricting generic JDM bindings."""
+    role = (binding.direction, binding.binding_key)
+    if role == ("INPUT", "soc"):
+        prefix, unit = "SOC", "%"
+        if contract.definition_id not in {"bms.soc", "storage.soc"}:
+            raise StrategyModelError(
+                "SOC_BINDING_DEFINITION_INVALID", "SOC requires bms.soc or storage.soc"
+            )
+    elif role == ("OUTPUT", "power-target"):
+        prefix, unit = "POWER_TARGET", "kW"
+    else:
+        return
+    if contract.data_type not in {"INT", "FLOAT"}:
+        raise StrategyModelError(f"{prefix}_BINDING_TYPE_INVALID", "role requires numeric L2")
+    if _normalized_unit(contract.unit) != unit:
+        raise StrategyModelError(f"{prefix}_BINDING_UNIT_INVALID", f"role requires {unit}")
+    if value is _VALUE_UNSET:
+        return
+    code = f"{prefix}_VALUE_INVALID"
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float, Decimal))
+        or (contract.data_type == "INT" and type(value) is not int)
+    ):
+        raise StrategyModelError(code, "role value must match its numeric type")
+    number = _finite_decimal(value, code)
+    if prefix == "SOC" and not 0 <= number <= 100:
+        raise StrategyModelError(code, "SOC value must be within 0..100 percent")
 
 
 def static_jdm_targets(content: Mapping[str, object]) -> tuple[Decimal, ...]:
@@ -736,7 +782,7 @@ def _typed_value(value: object, data_type: str) -> object:
     raise StrategyModelError("OUTPUT_TYPE_UNSUPPORTED", f"unsupported output type {data_type}")
 
 
-def _validated_snapshot(
+def validate_strategy_snapshot(
     revision: StrategyRevision,
     snapshot: StrategySnapshot,
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -768,6 +814,7 @@ def _validated_snapshot(
             raise StrategyModelError("L2_TIMESTAMP_MISSING", "L2 timestamp is missing")
         if (snapshot.evaluated_at - sample.observed_at).total_seconds() > binding.freshness_seconds:
             raise StrategyModelError("L2_INPUT_STALE", "bound L2 value exceeded freshness")
+        validate_strategy_binding_role(binding, sample, value=sample.value)
         if binding.direction == "INPUT":
             engine_inputs[binding.binding_key] = sample.value
         else:

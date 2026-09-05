@@ -174,7 +174,7 @@ class DispatchStrategyModelTest(unittest.TestCase):
             StrategyBindingDraft("OUTPUT", "power-target", 0, OUTPUT_ID, "FLOAT", "kW", 10.0),
         )
         contracts = {
-            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None),
+            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None, "bms.soc"),
             OUTPUT_ID: EntityBindingContract(True, "FLOAT", "kW", "RW", 1, 0.0, 200.0),
         }
 
@@ -208,7 +208,7 @@ class DispatchStrategyModelTest(unittest.TestCase):
             bindings[1],
         )
         contracts = {
-            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None),
+            input_id: EntityBindingContract(True, "FLOAT", "%", "R", 0, None, None, "bms.soc"),
             OUTPUT_ID: contract[OUTPUT_ID],
         }
         with self.assertRaisesRegex(StrategyModelError, "OUTPUT_LIMIT_VIOLATION"):

@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from decimal import Decimal
 import json
+import math
 from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -19,6 +20,7 @@ from app.services.dispatch_strategies import (
     StrategyBindingDraft,
     StrategyDraft,
     StrategyInput,
+    StrategyModelError,
     StrategyRevision,
     StrategyRuntimeState,
     StrategySnapshot,
@@ -26,6 +28,7 @@ from app.services.dispatch_strategies import (
     static_jdm_targets,
     strategy_draft_digest,
     validate_publish_bindings,
+    validate_strategy_snapshot,
 )
 from app.services.gorules_adapter import compile_standard_jdm
 from app.services.dispatch_strategy_workers import ControlIntent
@@ -63,6 +66,10 @@ class PostgresStrategyRepository:
         revision_id = uuid4()
         digest = strategy_draft_digest(draft)
         with self._write() as connection, connection.cursor() as cursor:
+            validate_publish_bindings(
+                draft.bindings, self._load_entity_contracts(cursor, draft.bindings),
+                static_targets=(), require_complete=False,
+            )
             cursor.execute(
                 """
                 INSERT INTO t_dispatch_strategies
@@ -94,6 +101,10 @@ class PostgresStrategyRepository:
         digest = strategy_draft_digest(draft)
         with self._write() as connection, connection.cursor() as cursor:
             self._lock_strategy(cursor, strategy_id)
+            validate_publish_bindings(
+                draft.bindings, self._load_entity_contracts(cursor, draft.bindings),
+                static_targets=(), require_complete=False,
+            )
             cursor.execute(
                 f"{_REVISION_SELECT} WHERE strategy_id=%s AND lifecycle='DRAFT' FOR UPDATE",
                 (strategy_id,),
@@ -211,12 +222,18 @@ class PostgresStrategyRepository:
         with self._write() as connection, connection.cursor() as cursor:
             strategy = self._lock_strategy(cursor, strategy_id)
             cursor.execute(
-                "SELECT id FROM t_dispatch_strategy_revisions "
+                f"{_REVISION_SELECT} "
                 "WHERE id=%s AND strategy_id=%s AND lifecycle='PUBLISHED'",
                 (revision_id, strategy_id),
             )
-            if cursor.fetchone() is None:
+            row = cursor.fetchone()
+            if row is None:
                 raise StrategyRepositoryError("STRATEGY_PUBLISHED_REVISION_NOT_FOUND")
+            revision = self._revision_from_row(connection, row)
+            validate_publish_bindings(
+                revision.bindings, self._load_entity_contracts(cursor, revision.bindings),
+                static_targets=static_jdm_targets(revision.jdm_content),
+            )
             active_revision_id = strategy[3]
             if active_revision_id is not None and UUID(str(active_revision_id)) != revision_id:
                 cursor.execute(
@@ -476,10 +493,13 @@ class PostgresStrategyRepository:
                        sample.value_float,sample.value_int,sample.value_numeric,
                        sample.value_bool,sample.value_text,sample.value_codes,
                        sample.quality,sample.value_observed_at,
-                       sample.configuration_revision,sample.frame_sequence
+                       sample.configuration_revision,sample.frame_sequence,
+                       entity.definition_id
                 FROM t_dispatch_strategy_bindings AS binding
                 JOIN t_entity_instances AS entity
                   ON entity.id=binding.entity_instance_id AND entity.active=TRUE
+                JOIN t_nodes AS node
+                  ON node.id=entity.node_id AND node.enabled=TRUE
                 LEFT JOIN LATERAL (
                   SELECT candidate.* FROM (
                     SELECT latest.value_float,latest.value_int,latest.value_numeric,
@@ -504,6 +524,14 @@ class PostgresStrategyRepository:
                   ORDER BY candidate.frame_sequence DESC LIMIT 1
                 ) AS sample ON TRUE
                 WHERE binding.revision_id=%s
+                  AND EXISTS (
+                    SELECT 1
+                    FROM t_point_processing_output_bindings AS output
+                    JOIN t_installed_point_processings AS installed
+                      ON installed.id=output.installed_processing_id
+                     AND installed.current=TRUE
+                    WHERE output.entity_instance_id=entity.id
+                  )
                 ORDER BY binding.direction,binding.ordinal
                 """,
                 (head_sequence, head_sequence, revision.id),
@@ -530,6 +558,7 @@ class PostgresStrategyRepository:
                         observed_at=observed_at,
                         frame_sequence=int(row[14]),
                         configuration_revision=int(row[13]),
+                        definition_id=str(row[15]),
                     )
                 )
         return StrategySnapshot(
@@ -690,13 +719,13 @@ class PostgresStrategyRepository:
                 WHERE configuration.singleton=TRUE
                   AND intent.status IN ('PENDING','IN_FLIGHT')
                   AND intent.next_attempt_at<=%s
-                  AND NOT EXISTS(
+                  AND ((intent.status='IN_FLIGHT' AND intent.control_command_id IS NOT NULL) OR NOT EXISTS(
                     SELECT 1 FROM t_dispatch_control_intents AS previous
                     WHERE previous.revision_id=intent.revision_id
                       AND previous.evaluation_key=intent.evaluation_key
                       AND previous.ordinal<intent.ordinal
                       AND previous.status<>'CONFIRMED'
-                  )
+                  ))
                 ORDER BY intent.created_at,intent.ordinal,intent.id
                 FOR UPDATE OF intent SKIP LOCKED
                 LIMIT 1
@@ -706,26 +735,56 @@ class PostgresStrategyRepository:
             row = cursor.fetchone()
             if row is None:
                 return None
-            evidence = dict(row[12])
+            if str(row[9]) == "IN_FLIGHT" and row[11] is None and int(row[10]) > 0:
+                from app.services.dispatch_strategy_workers import _attempt_key
+
+                cursor.execute(
+                    "SELECT command_id FROM t_control_command_idempotency "
+                    "WHERE actor=%s AND idempotency_key=%s",
+                    (f"strategy:{row[1]}", _attempt_key(UUID(str(row[0])), int(row[10]))),
+                )
+                submitted = cursor.fetchone()
+                if submitted is not None:
+                    cursor.execute(
+                        "UPDATE t_dispatch_control_intents "
+                        "SET control_command_id=%s,updated_at=clock_timestamp() "
+                        "WHERE id=%s AND status='IN_FLIGHT' AND attempt_count=%s "
+                        "AND control_command_id IS NULL",
+                        (submitted[0], row[0], row[10]),
+                    )
+                    row = (*row[:11], submitted[0], *row[12:])
+            evidence = dict(row[12]) if isinstance(row[12], dict) else {}
             configuration_revision = evidence.get("configuration_revision")
+            # A device write already made must finish readback even after disable,
+            # source expiry or a configuration change. Only new writes use this gate.
+            already_sent = str(row[9]) == "IN_FLIGHT" and row[11] is not None
             eligible = (
                 bool(row[14])
                 and row[15] is not None
                 and UUID(str(row[15])) == UUID(str(row[2]))
-                and str(row[16]) != "FAILED"
+                and str(row[16]) == "READY"
                 and bool(row[17])
-                and configuration_revision is not None
-                and int(configuration_revision) == int(row[18])
+                and type(configuration_revision) is int
+                and configuration_revision == int(row[18])
             )
-            if not eligible:
+            rejection = None
+            if not already_sent:
+                if not eligible:
+                    rejection = "STRATEGY_FENCE_CHANGED"
+                else:
+                    try:
+                        self._validate_intent_sources(connection, cursor, row[2], evidence, now)
+                    except StrategyModelError as error:
+                        rejection = error.code
+            if rejection is not None:
                 cursor.execute(
                     """
                     UPDATE t_dispatch_control_intents
-                    SET status='CANCELLED',last_error_code='STRATEGY_FENCE_CHANGED',
+                    SET status='CANCELLED',last_error_code=%s,
                         updated_at=clock_timestamp()
-                    WHERE id=%s
+                    WHERE id=%s OR (revision_id=%s AND evaluation_key=%s AND status='PENDING')
                     """,
-                    (row[0],),
+                    (rejection, row[0], row[2], row[4]),
                 )
                 return None
             if str(row[9]) == "PENDING":
@@ -773,6 +832,81 @@ class PostgresStrategyRepository:
                 snapshot_evidence=evidence,
                 next_attempt_at=row[13],
             )
+
+    def _validate_intent_sources(self, connection, cursor, revision_id, evidence, now):
+        cursor.execute(f"{_REVISION_SELECT} WHERE id=%s", (revision_id,))
+        revision = self._revision_from_row(connection, cursor.fetchone())
+        contracts = self._load_entity_contracts(cursor, revision.bindings)
+        validate_publish_bindings(revision.bindings, contracts,
+                                  static_targets=static_jdm_targets(revision.jdm_content))
+        validate_strategy_snapshot(revision, _intent_snapshot(evidence, contracts, now))
+        validate_strategy_snapshot(revision, self.load_snapshot(revision, None, now))
+
+    @contextmanager
+    def submission_guard(self, intent: ControlIntent, now: datetime):
+        """Keep the final authorization stable through the bounded device submit.
+
+        Configuration, disable and source updates wait until this write finishes;
+        updates that won the race are rechecked before any device call is allowed.
+        No locks are held while waiting for later readback samples.
+        """
+        with self._write() as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout='1s'")
+            cursor.execute("SELECT current_revision FROM t_configuration_state WHERE singleton=TRUE FOR SHARE")
+            configuration = int(cursor.fetchone()[0])
+            self._lock_strategy(cursor, intent.strategy_id)
+            cursor.execute(
+                "SELECT enabled,active_revision_id,runtime_health FROM t_dispatch_strategies WHERE id=%s",
+                (intent.strategy_id,),
+            )
+            enabled, active, health = cursor.fetchone()
+            cursor.execute(
+                "SELECT status,attempt_count,control_command_id FROM t_dispatch_control_intents WHERE id=%s FOR UPDATE",
+                (intent.id,),
+            )
+            state = cursor.fetchone()
+            if state is None or state != ("IN_FLIGHT", intent.attempt_count, None):
+                yield False
+                return
+            cursor.execute(
+                "SELECT 1 FROM t_dispatch_strategy_owners WHERE entity_instance_id=%s AND strategy_id=%s AND revision_id=%s",
+                (intent.entity_instance_id, intent.strategy_id, intent.revision_id),
+            )
+            eligible = (enabled and active == intent.revision_id and health == "READY"
+                        and configuration == intent.snapshot_evidence.get("configuration_revision")
+                        and cursor.fetchone() is not None)
+            rejection = None if eligible else "STRATEGY_FENCE_CHANGED"
+            if eligible:
+                # Row locks complement the configuration and strategy fences. They
+                # cover metadata retirement and L2 quality/value updates as well.
+                cursor.execute(
+                    "SELECT entity.id FROM t_dispatch_strategy_bindings AS binding "
+                    "JOIN t_entity_instances AS entity ON entity.id=binding.entity_instance_id "
+                    "JOIN t_nodes AS node ON node.id=entity.node_id "
+                    "JOIN t_point_processing_output_bindings AS output ON output.entity_instance_id=entity.id "
+                    "JOIN t_installed_point_processings AS installed ON installed.id=output.installed_processing_id "
+                    "WHERE binding.revision_id=%s ORDER BY entity.id,installed.id "
+                    "FOR SHARE OF entity,node,installed,output", (intent.revision_id,),
+                )
+                cursor.fetchall()
+                cursor.execute(
+                    "SELECT latest.entity_instance_id FROM t_l2_latest AS latest "
+                    "JOIN t_dispatch_strategy_bindings AS binding ON binding.entity_instance_id=latest.entity_instance_id "
+                    "WHERE binding.revision_id=%s ORDER BY latest.entity_instance_id FOR SHARE OF latest",
+                    (intent.revision_id,),
+                )
+                cursor.fetchall()
+                try:
+                    self._validate_intent_sources(connection, cursor, intent.revision_id, intent.snapshot_evidence, now)
+                except StrategyModelError as error:
+                    rejection = error.code
+            if rejection is not None:
+                cursor.execute(
+                    "UPDATE t_dispatch_control_intents SET status='CANCELLED',last_error_code=%s,updated_at=clock_timestamp() "
+                    "WHERE id=%s OR (revision_id=%s AND evaluation_key=%s AND status='PENDING')",
+                    (rejection, intent.id, intent.revision_id, intent.evaluation_key),
+                )
+            yield rejection is None
 
     def attach_command(
         self,
@@ -1088,9 +1222,20 @@ class PostgresStrategyRepository:
                    (SELECT count(*) FROM t_l2_control_bindings AS control
                     WHERE control.entity_instance_id=entity.id),
                    entity.control_policy->>'minimum',
-                   entity.control_policy->>'maximum'
+                   entity.control_policy->>'maximum',entity.definition_id
             FROM t_entity_instances AS entity
+            JOIN t_nodes AS node
+              ON node.id=entity.node_id AND node.enabled=TRUE
             WHERE entity.id=ANY(%s::uuid[])
+              AND entity.active=TRUE
+              AND EXISTS (
+                SELECT 1
+                FROM t_point_processing_output_bindings AS output
+                JOIN t_installed_point_processings AS installed
+                  ON installed.id=output.installed_processing_id
+                 AND installed.current=TRUE
+                WHERE output.entity_instance_id=entity.id
+              )
             """,
             ([str(item) for item in entity_ids],),
         )
@@ -1104,6 +1249,7 @@ class PostgresStrategyRepository:
                 confirmed_write_points=int(row[5]),
                 minimum=None if row[6] is None else float(Decimal(str(row[6]))),
                 maximum=None if row[7] is None else float(Decimal(str(row[7]))),
+                definition_id=str(row[8]),
             )
         return contracts
 
@@ -1179,11 +1325,54 @@ def _snapshot_evidence(mutation: StrategyEvaluationMutation) -> dict[str, object
                     "observed_at": item.observed_at,
                     "frame_sequence": item.frame_sequence,
                     "configuration_revision": item.configuration_revision,
+                    "definition_id": item.definition_id,
                 }
                 for item in mutation.snapshot.inputs
             ],
         }
     )
+
+
+def _intent_snapshot(
+    evidence: dict[str, object],
+    contracts: Mapping[UUID, EntityBindingContract],
+    now: datetime,
+) -> StrategySnapshot:
+    """Revalidate durable source facts; an old queue entry is not authority to write."""
+    try:
+        if datetime.fromisoformat(evidence["evaluated_at"]) > now:
+            raise ValueError("future evaluation")
+        for key in ("frame_sequence", "configuration_revision"):
+            if type(evidence[key]) is not int or evidence[key] < 0:
+                raise ValueError("invalid frame identity")
+        if not isinstance(evidence["inputs"], list):
+            raise ValueError("invalid samples")
+        inputs = []
+        seen = set()
+        for item in evidence["inputs"]:
+            entity_id = UUID(item["entity_instance_id"])
+            if entity_id in seen:
+                raise ValueError("duplicate sample")
+            seen.add(entity_id)
+            for key in ("frame_sequence", "configuration_revision"):
+                if type(item[key]) is not int or item[key] < 0:
+                    raise ValueError("invalid sample identity")
+            observed_at = datetime.fromisoformat(item["observed_at"])
+            if observed_at > now:
+                raise ValueError("future observation")
+            contract = contracts.get(entity_id)
+            if contract is None:
+                raise StrategyModelError("L2_BINDING_UNAVAILABLE", "source is no longer confirmed")
+            inputs.append(StrategyInput(
+                entity_instance_id=entity_id, field_key=item["binding_key"],
+                value=item["value"], data_type=item["data_type"], unit=item["unit"],
+                quality=item["quality"], observed_at=observed_at,
+                frame_sequence=item["frame_sequence"], configuration_revision=item["configuration_revision"],
+                definition_id=item.get("definition_id", contract.definition_id),
+            ))
+        return StrategySnapshot(evidence["frame_sequence"], evidence["configuration_revision"], now, tuple(inputs))
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        raise StrategyModelError("STRATEGY_EVIDENCE_INVALID", "control source evidence is incomplete") from error
 
 
 def _intent_summary(intents: tuple[ControlIntentDraft, ...]) -> list[dict[str, object]]:
@@ -1206,7 +1395,9 @@ def _json_safe(value: object) -> Any:
     if isinstance(value, (UUID, datetime)):
         return value.isoformat() if isinstance(value, datetime) else str(value)
     if isinstance(value, Decimal):
-        return float(value)
+        value = float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     return value
 
 

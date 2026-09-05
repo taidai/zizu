@@ -289,6 +289,29 @@ class DispatchStrategyPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()["active_revision"])
         self.assertEqual(str(REVISION_ID), response.json()["published_revision"]["id"])
 
+    async def test_blocked_nonfinite_snapshot_remains_a_readable_api_result(self) -> None:
+        result = self.runtime.simulate(REVISION_ID, {}, NOW)
+        blocked = replace(
+            result,
+            status="BLOCKED",
+            reason_code="SOC_VALUE_INVALID",
+            snapshot=replace(result.snapshot, inputs=(replace(result.snapshot.inputs[0], value=float("nan")),)),
+            engine_inputs={}, evaluation=None, desired=None, intents=(),
+        )
+        class BlockedRuntime:
+            def simulate(self, revision_id, overrides, evaluated_at):
+                return blocked
+        self.app.dependency_overrides[dispatch_strategies.get_dispatch_strategy_runtime] = BlockedRuntime
+        async with AuthenticatedApiClient(self.app) as client:
+            try:
+                response = await client.post(f"/api/v1/dispatch-strategies/{STRATEGY_ID}/simulate", json={})
+            except ValueError as error:
+                self.fail(f"Blocked snapshot failed JSON serialization: {error}")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("SOC_VALUE_INVALID", response.json()["reason_code"])
+        self.assertEqual("nan", response.json()["snapshot"]["soc"]["value"])
+        self.assertEqual([], response.json()["proposed_intents"])
+
 
 if __name__ == "__main__":
     unittest.main()

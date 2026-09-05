@@ -6,6 +6,7 @@ import base64
 from datetime import UTC, datetime
 from decimal import Decimal
 import json
+import math
 from typing import Any, Literal
 from uuid import UUID
 
@@ -419,7 +420,9 @@ def _json(value: object) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return float(value)
+        value = float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     return value
 
 

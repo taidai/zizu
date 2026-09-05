@@ -106,6 +106,8 @@ template only when a second device of the same kind needs it.
 - In **Dispatch Strategies**, create a 2-charge/2-discharge strategy, bind the SOC input L2 and power-control L2, then enter four windows, targets, SOC bounds, and the mandatory safe target for all other times.
 - Simulate first and inspect snapshot evidence, the matched row, and proposed intent. Simulation never writes a device. Publish an immutable revision, enable it separately, inspect event/control readback, and disable it when required.
 - Standard GoRules JDM is the sole internal execution semantics. The easy table and **Open Full Rule Graph** edit the same JDM document; there is no second rule or action model.
+- The starter's SOC input requires a numeric L2 with definition `bms.soc` or `storage.soc`, unit `%`, and a finite value from 0 to 100. Convert vendor 0–1 ratios to percentages in L1 first; temperature, power, and unrelated percentage entities are not SOC. Its power target requires a writable numeric L2 in `kW` with safety bounds. These rules apply only to the reserved `soc` / `power-target` bindings, not to other JDM bindings.
+- Renaming or saving preserves the existing JDM, trigger, timezone, all bindings, and freshness contracts. Graphs that cannot be represented losslessly by the built-in table remain editable in the full graph and are never replaced with default windows. Publication, activation, and execution revalidate bindings; invalid entities are not silently substituted.
 - For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
 - Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
 

@@ -98,6 +98,7 @@ def _sample(
         observed_at=observed_at,
         frame_sequence=frame,
         configuration_revision=revision,
+        definition_id="bms.soc" if entity_id == SOC_ID else "pcs.setpoint",
     )
 
 
@@ -265,7 +266,7 @@ class DispatchStrategyRuntimeTest(unittest.TestCase):
         self.assertEqual(100.0, result.evaluation.intents[0].value)
         self.assertEqual([], self.repository.mutations)
 
-        with self.assertRaisesRegex(ValueError, "SIMULATION_OVERRIDE_TYPE_MISMATCH"):
+        with self.assertRaisesRegex(ValueError, "SOC_VALUE_INVALID"):
             self.runtime.simulate(REVISION_ID, {"soc": "35"}, NOW)
 
     def test_actual_at_target_is_noop_but_drift_reconciles_once(self) -> None:

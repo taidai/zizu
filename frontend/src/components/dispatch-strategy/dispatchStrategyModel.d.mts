@@ -39,10 +39,28 @@ export function makeStrategyBinding(
   unit: string | null
   freshness_seconds: number
 }
+export function isDispatchSocEntity(entity: {
+  confirmed: boolean
+  direction: string
+  definition_id: string
+  data_type: string
+  unit: string | null
+} | null | undefined): boolean
+export function isDispatchPowerTargetEntity(entity: {
+  confirmed: boolean
+  direction: string
+  data_type: string
+  unit: string | null
+} | null | undefined): boolean
 export function buildTwoChargeTwoDischargeJdm(
   windows: readonly DispatchWindow[],
   safeTarget: unknown,
 ): Record<string, any>
+export function readTwoChargeTwoDischargeJdm(graph: Record<string, any>): {
+  rows: DispatchWindow[]
+  safeTarget: number
+} | null
+export function isJdmGraphUnchanged(left: Record<string, any>, right: Record<string, any>): boolean
 export function describeDispatchStrategyError(reason: any): string
 export function projectStrategyStatus(strategy: any): {
   draftRevision: number | null

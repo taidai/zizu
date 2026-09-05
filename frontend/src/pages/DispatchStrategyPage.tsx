@@ -19,7 +19,6 @@ import {
   simulateDispatchStrategy,
   type DispatchStrategy,
   type DispatchStrategyEvent,
-  type DispatchStrategyRevision,
   type DispatchStrategySimulation,
   type EntityInstance,
   type EntityInstanceObservation,
@@ -27,8 +26,12 @@ import {
 import {
   buildTwoChargeTwoDischargeJdm,
   describeDispatchStrategyError,
+  isDispatchSocEntity,
+  isDispatchPowerTargetEntity,
+  isJdmGraphUnchanged,
   makeStrategyBinding,
   projectStrategyStatus,
+  readTwoChargeTwoDischargeJdm,
   validateDispatchWindows,
   type DispatchWindow,
 } from '../components/dispatch-strategy/dispatchStrategyModel.mjs'
@@ -50,39 +53,6 @@ const HEALTH_STYLES: Record<string, string> = {
   IDLE: 'bg-gray-100 text-gray-600',
   BLOCKED: 'bg-amber-100 text-amber-700',
   FAILED: 'bg-red-100 text-red-700',
-}
-
-function numberFrom(expression: unknown, operator: '>=' | '<='): number | null {
-  const match = new RegExp(`${operator}\\s*(-?\\d+(?:\\.\\d+)?)`).exec(String(expression))
-  return match ? Number(match[1]) : null
-}
-
-function readEasyTable(revision: DispatchStrategyRevision | null): { rows: DispatchWindow[]; safeTarget: number } {
-  const table = revision?.jdm_content?.nodes?.find((node: any) => node.type === 'decisionTableNode')?.content
-  if (!Array.isArray(table?.rules)) return { rows: DEFAULT_ROWS, safeTarget: 0 }
-  const rows: DispatchWindow[] = []
-  let safeTarget = 0
-  for (const rule of table.rules) {
-    if (rule?._id === 'other-time') {
-      safeTarget = Number(rule.target ?? 0)
-      continue
-    }
-    const time = String(rule?.site_local_minute || '').match(/>=\s*(\d+)\s*&&\s*site_local_minute\s*<\s*(\d+)/)
-    if (!time) continue
-    const toTime = (minutes: number) => minutes === 1440
-      ? '24:00'
-      : `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
-    rows.push({
-      key: String(rule._id),
-      start: toTime(Number(time[1])),
-      end: toTime(Number(time[2])),
-      action: ['CHARGE', 'DISCHARGE', 'HOLD'].includes(rule._description) ? rule._description : 'HOLD',
-      target: Number(rule.target ?? 0),
-      socMin: numberFrom(rule.soc, '>=') ?? 0,
-      socMax: numberFrom(rule.soc, '<=') ?? 100,
-    })
-  }
-  return { rows: rows.length ? rows : DEFAULT_ROWS, safeTarget }
 }
 
 function valueText(value: unknown): string {
@@ -111,7 +81,6 @@ export default function DispatchStrategyPage() {
   const [outputId, setOutputId] = useState('')
   const [graph, setGraph] = useState<DecisionGraphType>(() => buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0) as DecisionGraphType)
   const [showGraph, setShowGraph] = useState(false)
-  const [graphCustomized, setGraphCustomized] = useState(false)
   const [simulation, setSimulation] = useState<DispatchStrategySimulation | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -119,16 +88,37 @@ export default function DispatchStrategyPage() {
 
   const currentRevision = strategy?.draft || strategy?.published_revision || strategy?.active_revision || null
   const validation = useMemo(() => validateDispatchWindows(rows, safeTarget), [rows, safeTarget])
+  const easyTable = useMemo(() => readTwoChargeTwoDischargeJdm(graph), [graph])
+  const editorGraph = useMemo(() => {
+    const view = structuredClone(graph)
+    view.nodes = view.nodes.map((node, index) => node.position ? node : { ...node, position: { x: index * 320, y: 80 } })
+    return view
+  }, [graph])
+  const bindingReadOnly = !easyTable || !!currentRevision?.bindings.some((binding) => !(
+    (binding.direction === 'INPUT' && binding.binding_key === 'soc' && binding.ordinal === 0)
+    || (binding.direction === 'OUTPUT' && binding.binding_key === 'power-target' && binding.ordinal === 0)
+  ))
   const status = strategy ? projectStrategyStatus(strategy) : null
 
   const inputEntities = useMemo(
-    () => entities.filter((item) => item.confirmed && ['R', 'RW'].includes(item.direction) && ['FLOAT', 'INT'].includes(item.data_type.toUpperCase())),
+    () => entities.filter(isDispatchSocEntity),
     [entities],
   )
   const outputEntities = useMemo(
-    () => entities.filter((item) => item.confirmed && ['W', 'RW'].includes(item.direction) && ['FLOAT', 'INT'].includes(item.data_type.toUpperCase())),
+    () => entities.filter(isDispatchPowerTargetEntity),
     [entities],
   )
+
+  const socEntity = entities.find((item) => item.id === socId)
+  const outputEntity = entities.find((item) => item.id === outputId)
+  const socBinding = currentRevision?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')
+  const outputBinding = currentRevision?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')
+  const socBindingInvalid = !!socId && (!isDispatchSocEntity(socEntity)
+    || (socBinding?.entity_instance_id === socId && (socBinding.expected_data_type !== socEntity?.data_type.toUpperCase() || socBinding.unit !== '%')))
+  const outputBindingInvalid = !!outputId && (!isDispatchPowerTargetEntity(outputEntity)
+    || (outputBinding?.entity_instance_id === outputId && (outputBinding.expected_data_type !== outputEntity?.data_type.toUpperCase() || outputBinding.unit !== 'kW')))
+  const socBindingIssue = '当前 SOC 绑定不符合要求，请明确选择已确认、可读的 bms.soc / storage.soc 数值百分比实体。'
+  const outputBindingIssue = '当前功率控制绑定不符合要求，请明确选择已确认、可写的 kW 数值实体。'
 
   const refreshList = async (preferId?: string) => {
     const next = await fetchDispatchStrategies()
@@ -162,11 +152,12 @@ export default function DispatchStrategyPage() {
         setEvents(eventPage.items)
         setName(next.name)
         const source = next.draft || next.published_revision || next.active_revision
-        const easy = readEasyTable(source)
-        setRows(easy.rows)
-        setSafeTarget(easy.safeTarget)
-        setGraph((source?.jdm_content || buildTwoChargeTwoDischargeJdm(easy.rows, easy.safeTarget)) as DecisionGraphType)
-        setGraphCustomized(false)
+        const nextGraph = (source?.jdm_content || buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0)) as DecisionGraphType
+        const easy = readTwoChargeTwoDischargeJdm(nextGraph)
+        setRows(easy?.rows || [])
+        setSafeTarget(easy?.safeTarget ?? 0)
+        setGraph(nextGraph)
+        setShowGraph(false)
         setSocId(source?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')?.entity_instance_id || '')
         setOutputId(source?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')?.entity_instance_id || '')
         setSimulation(null)
@@ -208,27 +199,36 @@ export default function DispatchStrategyPage() {
 
   const saveDraft = async (): Promise<DispatchStrategy> => {
     if (!strategy || !currentRevision) throw new Error('请先选择策略。')
-    if (!validation.valid) throw new Error(validation.message)
-    const soc = entities.find((item) => item.id === socId)
-    const output = entities.find((item) => item.id === outputId)
-    if (!soc) throw new Error('请选择 SOC 全局实体。')
-    if (!output) throw new Error('请选择功率控制全局实体。')
-    const easyGraph = graphCustomized ? graph : buildTwoChargeTwoDischargeJdm(rows, safeTarget)
+    if (socBindingInvalid) throw new Error(socBindingIssue)
+    if (outputBindingInvalid) throw new Error(outputBindingIssue)
+    if (easyTable && !validation.valid) throw new Error(validation.message)
+    const bindings = [...currentRevision.bindings]
+    if (!bindingReadOnly) {
+      for (const [direction, key, id, label] of [
+        ['INPUT', 'soc', socId, 'SOC'],
+        ['OUTPUT', 'power-target', outputId, '功率控制'],
+      ] as const) {
+        const index = bindings.findIndex((binding) => binding.direction === direction && binding.binding_key === key)
+        if (index >= 0 && bindings[index].entity_instance_id === id) continue
+        const entity = entities.find((item) => item.id === id)
+        if (!entity) throw new Error(`请选择${label}全局实体。`)
+        const binding = makeStrategyBinding(entity, direction, key, 0)
+        if (index >= 0) bindings[index] = binding
+        else bindings.push(binding)
+      }
+    }
     const saved = await saveDispatchStrategyDraft(strategy.id, {
       expected_digest: currentRevision.content_digest,
       name: name.trim(),
       description: strategy.description,
-      trigger_kind: 'FIXED_TICK',
-      site_timezone: currentRevision.site_timezone || 'Asia/Shanghai',
+      trigger_kind: currentRevision.trigger_kind,
+      site_timezone: currentRevision.site_timezone,
       base_configuration_revision: currentRevision.base_configuration_revision,
-      jdm_content: easyGraph,
-      bindings: [
-        makeStrategyBinding(soc, 'INPUT', 'soc', 0),
-        makeStrategyBinding(output, 'OUTPUT', 'power-target', 0),
-      ],
+      jdm_content: graph,
+      bindings,
     })
     setStrategy(saved)
-    setGraph((saved.draft?.jdm_content || easyGraph) as DecisionGraphType)
+    setGraph((saved.draft?.jdm_content || graph) as DecisionGraphType)
     await refreshList(saved.id)
     return saved
   }
@@ -263,7 +263,9 @@ export default function DispatchStrategyPage() {
     const next = await enableDispatchStrategy(strategy.id, strategy.published_revision.id)
     setStrategy(next)
     await refreshList(next.id)
-    setNotice('策略已启用，将从下一个整分钟开始运行。')
+    setNotice(next.active_revision?.trigger_kind === 'DATA_CHANGE'
+      ? '策略已启用，将在绑定的 L2 数据变化后运行。'
+      : '策略已启用，将从下一个整分钟开始运行。')
   })
 
   const disable = () => run('disable', async () => {
@@ -282,8 +284,11 @@ export default function DispatchStrategyPage() {
   })
 
   const patchRow = (index: number, patch: Partial<DispatchWindow>) => {
-    setRows((current) => current.map((row, itemIndex) => itemIndex === index ? { ...row, ...patch } : row))
-    setGraphCustomized(false)
+    const next = rows.map((row, itemIndex) => itemIndex === index ? { ...row, ...patch } : row)
+    setRows(next)
+    if (validateDispatchWindows(next, safeTarget).valid) {
+      setGraph(buildTwoChargeTwoDischargeJdm(next, safeTarget) as DecisionGraphType)
+    }
     setSimulation(null)
   }
 
@@ -291,7 +296,7 @@ export default function DispatchStrategyPage() {
     <div className="flex min-h-[650px] gap-4" data-testid="dispatch-strategy-page">
       <aside className="neu-card w-72 shrink-0 p-4">
         <div className="mb-4 flex items-center justify-between">
-          <div><h2 className="text-sm font-bold text-gray-800">调度策略</h2><p className="mt-1 text-[11px] text-gray-500">定时决策，经统一控制闭环执行</p></div>
+          <div><h2 className="text-sm font-bold text-gray-800">调度策略</h2><p className="mt-1 text-[11px] text-gray-500">基于 L2 决策，经统一控制闭环执行</p></div>
           <button type="button" onClick={createNew} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs font-semibold text-[#287c12]">新建 2充2放</button>
         </div>
         <div className="space-y-2" aria-label="策略列表">
@@ -311,7 +316,7 @@ export default function DispatchStrategyPage() {
         {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">请选择或新建调度策略</div> : <>
           <section className="neu-card p-4" aria-label="策略状态">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => setName(event.target.value)} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">固定整分钟节拍 · Asia/Shanghai · 所有控制先形成意图，再由统一控制回读确认</p></div>
+              <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => setName(event.target.value)} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">{currentRevision?.trigger_kind === 'DATA_CHANGE' ? 'L2 数据变化触发' : '固定整分钟节拍'} · {currentRevision?.site_timezone} · 所有控制先形成意图，再由统一控制回读确认</p></div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="rounded bg-indigo-50 px-2 py-1 text-indigo-700">{status?.lifecycleLabel} {status?.publishedRevision ? `v${status.publishedRevision}` : ''}</span>
                 <span className={`rounded px-2 py-1 ${strategy.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{status?.enableLabel}</span>
@@ -326,29 +331,35 @@ export default function DispatchStrategyPage() {
             <div className="mb-3"><h3 id="binding-heading" className="text-sm font-bold text-gray-800">1. 绑定 L2 全局实体</h3><p className="mt-1 text-xs text-gray-500">策略只认稳定实体，不直接使用品牌点位。这里只显示已确认、类型合适的实体。</p></div>
             <div className="grid gap-3 md:grid-cols-2">
               <label className="text-xs font-semibold text-gray-600">SOC 输入实体
-                <select aria-label="SOC 输入实体" value={socId} onChange={(event) => setSocId(event.target.value)} className="neu-input mt-1 w-full px-3 py-2">
-                  <option value="">请选择</option>{inputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}
+                <select aria-label="SOC 输入实体" value={socId} disabled={bindingReadOnly} onChange={(event) => { setSocId(event.target.value); setSimulation(null) }} className="neu-input mt-1 w-full px-3 py-2">
+                  <option value="">请选择</option>{socId && !inputEntities.some((item) => item.id === socId) && <option value={socId} disabled>当前绑定不符合 SOC 要求：{socEntity?.display_name || socId}</option>}{inputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}
                 </select>
+                {!inputEntities.length && <span className="mt-2 block font-normal text-amber-700">暂无合法候选，请先在 L1 点位加工建立并确认标准 SOC 百分比实体（bms.soc 或 storage.soc，单位 %）。</span>}
+                {socBindingInvalid && <span className="mt-2 block font-normal text-red-600">{socBindingIssue}</span>}
                 {socId && <span className="mt-2 block font-normal text-gray-500">质量：{qualityText(observations[socId])} · 新鲜度 {entities.find((item) => item.id === socId)?.freshness_seconds}s · 当前值 {valueText(observations[socId]?.value)}</span>}
               </label>
               <label className="text-xs font-semibold text-gray-600">功率控制实体
-                <select aria-label="功率控制实体" value={outputId} onChange={(event) => setOutputId(event.target.value)} className="neu-input mt-1 w-full px-3 py-2">
-                  <option value="">请选择</option>{outputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.direction} · {item.data_type} {item.unit || ''}</option>)}
+                <select aria-label="功率控制实体" value={outputId} disabled={bindingReadOnly} onChange={(event) => { setOutputId(event.target.value); setSimulation(null) }} className="neu-input mt-1 w-full px-3 py-2">
+                  <option value="">请选择</option>{outputId && !outputEntities.some((item) => item.id === outputId) && <option value={outputId} disabled>当前绑定不符合功率控制要求：{outputEntity?.display_name || outputId}</option>}{outputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.direction} · {item.data_type} {item.unit || ''}</option>)}
                 </select>
+                {outputBindingInvalid && <span className="mt-2 block font-normal text-red-600">{outputBindingIssue}</span>}
                 {outputId && <span className="mt-2 block font-normal text-gray-500">可控：是 · 质量：{qualityText(observations[outputId])} · 当前回读 {valueText(observations[outputId]?.value)}</span>}
               </label>
             </div>
+            {bindingReadOnly && <div className="mt-3 text-xs text-gray-600"><p>此策略的实体绑定在当前页面只读，保存将原样保留全部输入、输出及其契约。</p><ul className="mt-2 space-y-1">{currentRevision?.bindings.map((binding) => <li key={`${binding.direction}:${binding.binding_key}`}>{binding.direction === 'INPUT' ? '输入' : '输出'} · {binding.binding_key} → {entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id} · {binding.expected_data_type} {binding.unit || ''} · 新鲜度 {binding.freshness_seconds}s · 顺序 {binding.ordinal}</li>)}</ul></div>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="schedule-heading">
-            <div className="mb-3 flex items-start justify-between gap-3"><div><h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 设置 2充2放</h3><p className="mt-1 text-xs text-gray-500">正功率表示放电，负功率表示充电；重叠时间会在保存前拦住。</p></div><button type="button" onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button></div>
-            <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时段</th><th className="p-2">开始</th><th className="p-2">结束</th><th className="p-2">动作</th><th className="p-2">功率目标</th><th className="p-2">SOC 下限</th><th className="p-2">SOC 上限</th></tr></thead><tbody>{rows.map((row, index) => <tr key={row.key} className={`border-b border-white/60 ${validation.overlapKeys.includes(row.key) ? 'bg-red-50' : ''}`}><td className="p-2 font-medium">{index + 1}</td><td className="p-1"><input aria-label={`时段 ${index + 1} 开始`} type="time" value={row.start} onChange={(event) => patchRow(index, { start: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} 结束`} type="time" value={row.end === '24:00' ? '23:59' : row.end} onChange={(event) => patchRow(index, { end: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><select aria-label={`时段 ${index + 1} 动作`} value={row.action} onChange={(event) => patchRow(index, { action: event.target.value as DispatchWindow['action'] })} className="neu-input w-full px-2 py-1.5">{Object.entries(ACTION_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td className="p-1"><input aria-label={`时段 ${index + 1} 功率目标`} type="number" step="0.1" value={row.target} onChange={(event) => patchRow(index, { target: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 下限`} type="number" min="0" max="100" value={row.socMin} onChange={(event) => patchRow(index, { socMin: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 上限`} type="number" min="0" max="100" value={row.socMax} onChange={(event) => patchRow(index, { socMax: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td></tr>)}</tbody></table></div>
-            <div className="mt-3 flex flex-wrap items-center gap-3"><label className="text-xs font-semibold text-gray-600">其他时段安全目标 <input aria-label="其他时段安全目标" type="number" step="0.1" value={safeTarget} onChange={(event) => { setSafeTarget(event.target.value); setGraphCustomized(false) }} className="neu-input ml-2 w-32 px-2 py-1.5" /></label>{!validation.valid && <span className="text-xs text-red-600">{validation.message}</span>}{graphCustomized && <span className="text-xs text-indigo-600">当前将保存完整规则图中的修改。</span>}</div>
-            {showGraph && <div className="mt-4 h-[520px] overflow-hidden rounded-xl border border-white/70"><JdmConfigProvider><DndProvider backend={HTML5Backend}><DecisionGraph value={graph} onChange={(value) => { setGraph(value as DecisionGraphType); setGraphCustomized(true); setSimulation(null) }} mode="dev" /></DndProvider></JdmConfigProvider></div>}
+            <div className="mb-3 flex items-start justify-between gap-3"><div><h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 决策规则</h3><p className="mt-1 text-xs text-gray-500">2充2放：正功率表示放电，负功率表示充电；重叠时间会在保存前拦住。</p></div><button type="button" disabled={!!easyTable && !validation.valid} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button></div>
+            {easyTable ? <>
+            <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时段</th><th className="p-2">开始</th><th className="p-2">结束</th><th className="p-2">动作</th><th className="p-2">功率目标</th><th className="p-2">SOC 下限</th><th className="p-2">SOC 上限</th></tr></thead><tbody>{rows.map((row, index) => <tr key={row.key} className={`border-b border-white/60 ${validation.overlapKeys.includes(row.key) ? 'bg-red-50' : ''}`}><td className="p-2 font-medium">{index + 1}</td><td className="p-1"><input aria-label={`时段 ${index + 1} 开始`} type="time" value={row.start} onChange={(event) => patchRow(index, { start: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} 结束`} type="text" placeholder="HH:mm（可填 24:00）" value={row.end} onChange={(event) => patchRow(index, { end: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><select aria-label={`时段 ${index + 1} 动作`} value={row.action} onChange={(event) => patchRow(index, { action: event.target.value as DispatchWindow['action'] })} className="neu-input w-full px-2 py-1.5">{Object.entries(ACTION_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td className="p-1"><input aria-label={`时段 ${index + 1} 功率目标`} type="number" step="0.1" value={row.target} onChange={(event) => patchRow(index, { target: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 下限`} type="number" min="0" max="100" value={row.socMin} onChange={(event) => patchRow(index, { socMin: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 上限`} type="number" min="0" max="100" value={row.socMax} onChange={(event) => patchRow(index, { socMax: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td></tr>)}</tbody></table></div>
+            <div className="mt-3 flex flex-wrap items-center gap-3"><label className="text-xs font-semibold text-gray-600">其他时段安全目标 <input aria-label="其他时段安全目标" type="number" step="0.1" value={safeTarget} onChange={(event) => { const value = event.target.value; setSafeTarget(value); if (validateDispatchWindows(rows, value).valid) setGraph(buildTwoChargeTwoDischargeJdm(rows, value) as DecisionGraphType); setSimulation(null) }} className="neu-input ml-2 w-32 px-2 py-1.5" /></label>{!validation.valid && <span className="text-xs text-red-600">{validation.message}</span>}</div>
+            </> : <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">当前规则无法由 2充2放表无损表示，请使用完整规则图编辑。保存、试算和发布均使用同一份完整 JDM，不会重建为内置表。</p>}
+            {showGraph && <div className="mt-4 h-[520px] overflow-hidden rounded-xl border border-white/70"><JdmConfigProvider><DndProvider backend={HTML5Backend}><DecisionGraph value={editorGraph} onChange={(value) => { const next = value as DecisionGraphType; if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph(next); const easy = readTwoChargeTwoDischargeJdm(next); if (easy) { setRows(easy.rows); setSafeTarget(easy.safeTarget) } setSimulation(null) }} mode="dev" /></DndProvider></JdmConfigProvider></div>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="verification-heading">
-            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后才会在整分钟产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">试算</button><button type="button" onClick={publish} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-[#287c12]">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || !strategy.published_revision} className="rounded-lg bg-[#52c41a] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">试算</button><button type="button" onClick={publish} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-[#287c12]">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || !strategy.published_revision} className="rounded-lg bg-[#52c41a] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
             {simulation && <div className="mt-4 grid gap-3 md:grid-cols-4" data-testid="strategy-simulation"><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">试算状态</div><div className="mt-1 text-xs font-semibold">{simulation.status}{simulation.reason_code ? ` · ${simulation.reason_code}` : ''}</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">快照证据</div><div className="mt-1 text-xs">帧 {simulation.frame_sequence ?? '—'} · 配置 {simulation.configuration_revision ?? '—'} · {Object.keys(simulation.snapshot).length} 个实体</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">命中行</div><div className="mt-1 text-xs font-semibold">{simulation.matched_rules.join('、') || '未命中'}</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">拟执行意图</div><div className="mt-1 text-xs font-semibold">{simulation.proposed_intents.map((item) => `${item.action_id}=${valueText(item.value)}`).join('、') || '无需控制'}</div></div></div>}
           </section>
 

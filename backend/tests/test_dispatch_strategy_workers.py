@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -73,6 +74,9 @@ class _IntentRepository:
         self.rows = [_IntentState(item) for item in intents]
         self.strategy_health = "READY"
         self.failures = []
+
+    def submission_guard(self, intent, now):
+        return nullcontext(True)
 
     def claim_next(self, now):
         for row in self.rows:

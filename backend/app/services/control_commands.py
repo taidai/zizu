@@ -595,7 +595,12 @@ class PostgresControlCommandRepository:
         now: datetime,
     ) -> bool:
         with self._connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT id FROM t_entity_instances WHERE id = %s FOR UPDATE", (entity_instance_id,))
+            # Serialize same-target cooldown claims without upgrading the metadata
+            # read lock held by dispatch authorization in another connection.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"zizu:control-cooldown:{entity_instance_id}",),
+            )
             cur.execute(
                 "SELECT until_at FROM t_control_command_cooldowns WHERE entity_instance_id = %s FOR UPDATE",
                 (entity_instance_id,),
