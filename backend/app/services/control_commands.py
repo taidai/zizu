@@ -373,7 +373,10 @@ class NeuronControlDispatcher:
             )
         )
         result = client.write_tag(node_name, group_name, neuron_tag_name, request.value)
-        if isinstance(result, dict) and result.get("error") not in (None, 0):
+        # HTTP completion is not a write acknowledgement. Require Neuron's
+        # explicit integer success code; bool/empty replies must fail closed.
+        error = result.get("error") if isinstance(result, dict) else None
+        if type(error) is not int or error != 0:
             raise RuntimeError("Neuron rejected the control command")
 
 

@@ -2,8 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import io
+import json
+import os
 import unittest
+from unittest.mock import patch
 from uuid import UUID
+
+os.environ.setdefault("DB_PASSWORD", "database-secret-value")
+os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
+os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
+os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
 
 
 TARGET_ID = UUID("60000000-0000-0000-0000-000000000001")
@@ -268,6 +277,68 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         command = self.runtime.submit(self._request())
 
         self.assertEqual(("failed", "CONTROL_DISPATCH_FAILED"), (command.status, command.code))
+
+    def _submit_via_neuron(self, response: bytes, *, key: str):
+        from app.core.config import settings
+        from app.services.control_commands import NeuronControlDispatcher
+
+        self.runtime._dispatcher = NeuronControlDispatcher()
+        self._observe(INTERLOCK_ID, True)
+        with (
+            patch("app.services.telemetry_store.get_connection") as connection,
+            patch.object(settings, "neuron_password", "test-neuron-write-secret"),
+            patch("urllib.request.urlopen", side_effect=[
+                io.BytesIO(b'{"token":"test-neuron-token"}'),
+                io.BytesIO(response),
+            ]) as http,
+        ):
+            cursor = connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+            cursor.fetchone.return_value = ("PCS-01", "setpoint", "NEURON", "driver/cmd/setpoint")
+            request = self._request(key=key)
+            command = self.runtime.submit(request)
+            repeated = self.runtime.submit(request)
+
+        self.assertEqual(command.id, repeated.id)
+        self.assertEqual(2, http.call_count)  # One login and one write; no replay write.
+        write = http.call_args_list[1].args[0]
+        self.assertTrue(write.full_url.endswith("/api/v2/write"))
+        self.assertEqual("POST", write.method)
+        self.assertEqual(
+            {"node": "driver", "group": "cmd", "tag": "setpoint", "value": 20.0},
+            json.loads(write.data),
+        )
+        return command
+
+    def test_neuron_requires_explicit_integer_zero_write_ack(self) -> None:
+        responses = (
+            b"", b"null", b"[]", b"true", b"0", b'"accepted"', b"{}",
+            b'{"error":null}', b'{"error":false}', b'{"error":0.0}',
+            b'{"error":"0"}', b'{"error":3004}', b'{"error":',
+        )
+        for index, response in enumerate(responses):
+            with self.subTest(response=response):
+                self.clock.advance(6)
+                command = self._submit_via_neuron(response, key=f"neuron-invalid-ack-{index}")
+                self.assertEqual(("failed", "CONTROL_DISPATCH_FAILED"), (command.status, command.code))
+                self.assertIsNone(command.dispatched_at)
+                self.assertEqual(
+                    ["accepted", "validated", "failed"],
+                    [event.to_status for event in self.repository.events(command.id)],
+                )
+
+    def test_neuron_write_ack_still_requires_new_l2_readback(self) -> None:
+        self._observe(READBACK_ID, 20.0, after_seconds=-1)
+        command = self._submit_via_neuron(b'{"error":0}', key="neuron-valid-ack")
+
+        self.assertEqual(("dispatched", "CONTROL_DISPATCHED"), (command.status, command.code))
+        self.clock.advance(1)
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        confirmed = self.runtime.reconcile(command.id)
+        self.assertEqual("readback_confirmed", confirmed.status)
+        self.assertEqual(
+            ["accepted", "validated", "dispatched", "readback_confirmed"],
+            [event.to_status for event in self.repository.events(command.id)],
+        )
 
     def test_persistent_cooldown_and_reused_key_protect_after_restart(self) -> None:
         self._observe(INTERLOCK_ID, True)
