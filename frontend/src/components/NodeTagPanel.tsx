@@ -138,11 +138,14 @@ export default function NodeTagPanel({
   const refreshRawPoints = async () => {
     if (refreshing) return
     setRefreshing(true)
-    await Promise.all([
+    await Promise.allSettled([
       loadTags(),
-      Promise.resolve(onRefreshHealth?.()),
+      Promise.resolve().then(() => onRefreshHealth?.()),
     ])
     setRealtimeRefresh((value) => value + 1)
+    // Snapshot recovery may retry indefinitely while the link is down. It must
+    // not own the manual button or prevent the next explicit refresh.
+    setRefreshing(false)
   }
 
   useEffect(() => {
@@ -192,8 +195,6 @@ export default function NodeTagPanel({
           && !(reason instanceof DOMException && reason.name === 'AbortError')) {
           setProjection(null)
         }
-      } finally {
-        if (active && currentGeneration === generation) setRefreshing(false)
       }
     }
 

@@ -6,9 +6,13 @@ import unittest
 from uuid import uuid4
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 from app.services.data_trunk_contracts import DataTrunkError, FrameStatus, TrunkQuality
-from app.services.data_trunk_outbox import build_frame_outbox_event
+from app.services.data_trunk_outbox import (
+    PostgresFrameOutboxRepository,
+    build_frame_outbox_event,
+)
 
 
 @unittest.skipUnless(os.environ.get("ZIZU_POSTGRES_TEST") == "1", "requires isolated PostgreSQL")
@@ -59,11 +63,65 @@ class FrameOutboxLatestPostgresTest(unittest.TestCase):
                  quality, str(self.revision_id), "a"*64, str(uuid4())),
             )
 
-    def _build(self, cursor):
+    def _build(self, cursor, *, previous_l0=None, capture_beat=20, status=FrameStatus.COMPLETE):
         return build_frame_outbox_event(
-            cursor, frame_id=self.frame_id, frame_sequence=20, status=FrameStatus.COMPLETE,
-            configuration_revision=1, capture_beat=20, frame_time=self.now, previous_l0={},
+            cursor, frame_id=self.frame_id, frame_sequence=20, status=status,
+            configuration_revision=1, capture_beat=capture_beat, frame_time=self.now,
+            previous_l0={} if previous_l0 is None else previous_l0,
         )
+
+    def _seed_l0(self, count=1, *, beat=1, quality=192, value=0):
+        tags = [(uuid4(), uuid4()) for _ in range(count)]
+        with self.connection.cursor() as cursor:
+            execute_values(cursor,
+                "INSERT INTO t_tags(id,node_id,name,data_type,enabled,timestamp_trusted,source_sequence_trusted) VALUES %s",
+                [(str(tag), str(self.node_id), str(tag), 'INT', True, False, True) for tag, _ in tags],
+            )
+            execute_values(cursor,
+                "INSERT INTO t_telemetry_latest(node_id,tag_id,ts,quality,observation_id,"
+                "source_message_id,source_sequence,source_digest,raw_value_int,event_received_at,"
+                "source_order_key,frame_sequence,accepted_beat,source_order_mode) VALUES %s",
+                [(str(self.node_id), str(tag), self.now, quality, str(observation),
+                  'fixture', beat, 'a'*64, value, self.now, 'fixture', 19, beat, 'sequence')
+                 for tag, observation in tags],
+            )
+        return tags
+
+    def test_publication_does_not_rematerialize_unchanged_stale_points(self):
+        # Adding old, unchanged points must not multiply transaction B's second
+        # L0 materialization. A new sample still publishes even at the same value.
+        self._seed_l0(1800)
+        (tag_id, _), = self._seed_l0(beat=19)
+        new_observation = uuid4()
+        with self.connection.cursor() as cursor:
+            previous = PostgresFrameOutboxRepository._load_l0_latest_state(cursor, 19)
+            cursor.execute(
+                "UPDATE t_telemetry_latest SET observation_id=%s,accepted_beat=20,frame_sequence=20 "
+                "WHERE tag_id=%s", (str(new_observation), str(tag_id)),
+            )
+
+            class RowMeter:
+                def __init__(self, real):
+                    self.real, self.l0_rows = real, 0
+
+                def execute(self, query, parameters=None):
+                    self.real.execute(query, parameters)
+
+                def fetchall(self):
+                    rows = self.real.fetchall()
+                    if self.real.description[0].name == 'tag_id':
+                        self.l0_rows += len(rows)
+                    return rows
+
+            meter = RowMeter(cursor)
+            result = self._build(meter, previous_l0=previous)
+        change, = result.l0_changes
+        self.assertEqual(tag_id, change.tag_id)
+        self.assertEqual(new_observation, change.observation_id)
+        self.assertIs(type(change.value.value), int)
+        self.assertEqual(0, change.value.value)
+        self.assertEqual(TrunkQuality.GOOD, change.effective_quality)
+        self.assertEqual(1, meter.l0_rows, "unchanged stale L0 rows were rebuilt a second time")
 
     def test_bad_frame_preserves_retained_false_after_old_history_is_pruned(self):
         # A history rescan loses this valid retained value; the transaction's
@@ -76,6 +134,42 @@ class FrameOutboxLatestPostgresTest(unittest.TestCase):
         self.assertEqual(TrunkQuality.BAD, change.quality)
         self.assertEqual(self.now, change.observed_at)
         self.assertEqual(self.now-timedelta(seconds=5), change.value_observed_at)
+
+    def test_untouched_point_crosses_stale_boundary_even_in_failed_frame(self):
+        (tag_id, observation_id), = self._seed_l0(beat=17)
+        self._seed_l0(beat=18)  # Two beats old is not stale yet.
+        self._seed_l0(beat=1)   # Already stale is not a new change.
+        with self.connection.cursor() as cursor:
+            previous = PostgresFrameOutboxRepository._load_l0_latest_state(cursor, 19)
+            for status in (FrameStatus.COMPLETE, FrameStatus.FAILED):
+                with self.subTest(status=status):
+                    change, = self._build(cursor, previous_l0=previous, status=status).l0_changes
+                    self.assertEqual(tag_id, change.tag_id)
+                    self.assertEqual(observation_id, change.observation_id)
+                    self.assertEqual(TrunkQuality.STALE, change.effective_quality)
+                    self.assertEqual(0, change.value.value)
+
+    def test_first_publication_includes_retained_points(self):
+        tags = self._seed_l0(3, beat=19)
+        with self.connection.cursor() as cursor:
+            changes = self._build(cursor).l0_changes
+        self.assertEqual({tag for tag, _ in tags}, {change.tag_id for change in changes})
+        self.assertTrue(all(change.effective_quality == TrunkQuality.GOOD for change in changes))
+
+    def test_new_point_and_revived_point_are_published(self):
+        (revived_tag, _), = self._seed_l0(beat=1)
+        with self.connection.cursor() as cursor:
+            previous = PostgresFrameOutboxRepository._load_l0_latest_state(cursor, 19)
+            (new_tag, _), = self._seed_l0(beat=20)
+            cursor.execute(
+                "UPDATE t_telemetry_latest SET frame_sequence=20,accepted_beat=20,"
+                "observation_id=%s WHERE tag_id=%s",
+                (str(uuid4()), str(revived_tag)),
+            )
+            cursor.execute("UPDATE t_telemetry_latest SET frame_sequence=20 WHERE tag_id=%s", (str(new_tag),))
+            changes = self._build(cursor, previous_l0=previous).l0_changes
+        self.assertEqual({revived_tag, new_tag}, {change.tag_id for change in changes})
+        self.assertTrue(all(change.effective_quality == TrunkQuality.GOOD for change in changes))
 
     def test_first_bad_frame_does_not_invent_a_value(self):
         self._seed_current(retained=None)

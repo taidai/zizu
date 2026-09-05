@@ -574,7 +574,19 @@ class PostgresFrameOutboxRepository:
                     cursor, previous_sequence, previous_capture
                 )
         else:
-            current_l0 = cls._load_l0_latest_state(cursor, capture_beat)
+            # Transaction B only changes its own latest rows. Untouched rows can
+            # change the published delta only by crossing the three-beat STALE
+            # boundary; don't rebuild every long-stale point a second time.
+            stale_transition_ids = tuple(
+                tag_id for tag_id, change in previous_l0.items()
+                if change.effective_quality != TrunkQuality.STALE
+                and capture_beat - change.accepted_beat >= 3
+            )
+            current_l0 = cls._load_l0_latest_state(
+                cursor, capture_beat,
+                frame_sequence=frame_sequence if previous_l0 else None,
+                stale_transition_ids=stale_transition_ids,
+            )
         l0_changes = tuple(
             change
             for tag_id, change in sorted(current_l0.items(), key=lambda item: str(item[0]))
@@ -671,9 +683,20 @@ class PostgresFrameOutboxRepository:
         )
 
     @staticmethod
-    def _load_l0_latest_state(cursor, capture_beat: int):
+    def _load_l0_latest_state(
+        cursor, capture_beat: int, *, frame_sequence: int | None = None,
+        stale_transition_ids: tuple[UUID, ...] = (),
+    ):
+        # No baseline means first publication, which must include retained L0
+        # as well. Ordinary full reads (including recovery tests) stay unchanged.
+        predicate = "" if frame_sequence is None else """
+              AND (latest.frame_sequence=%s OR latest.tag_id=ANY(%s::uuid[]))
+        """
+        parameters = None if frame_sequence is None else (
+            frame_sequence, [str(tag_id) for tag_id in stale_transition_ids],
+        )
         cursor.execute(
-            """
+            f"""
             SELECT latest.tag_id,latest.observation_id,tag.data_type,
                    latest.raw_value_float,latest.raw_value_int,
                    latest.raw_value_bool,latest.raw_value_text,
@@ -683,8 +706,10 @@ class PostgresFrameOutboxRepository:
             FROM t_telemetry_latest AS latest
             JOIN t_tags AS tag ON tag.id=latest.tag_id
             WHERE latest.frame_sequence > 0
+            {predicate}
             ORDER BY latest.tag_id
-            """
+            """,
+            parameters,
         )
         return PostgresFrameOutboxRepository._l0_state_from_rows(
             cursor.fetchall(), capture_beat
