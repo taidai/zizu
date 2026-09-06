@@ -6,11 +6,11 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.9.8`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current version: `v0.9.9`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v0.9.8 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.8-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+[v0.9.9 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.9-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
 
-This release is deployed. Database health checks no longer block the ingestion event loop, and frame reads use the existing index over durable observations. Single dispatch, failure latching, and the original readback deadline remain unchanged. Real PCS read-only data-trunk navigation passed. Short-window MQTT-to-first-visible medians decreased from about 3.8 to 2.9 seconds, but a 5.6-second delay remained; four separate current-value samples were all STALE. Control freshness has not passed acceptance. No device writes were made, and no safety limits were relaxed; usable pages do not mean a complete EMS is delivery-ready.
+This release is deployed. It adds a local headless vertical acceptance path for fixed-tick JDM in which the browser, FastAPI, PostgreSQL/TimescaleDB, standard GoRules JDM, frame outbox, unified control, and committed-L2 readback are real; only the device-protocol edge is replaced. Success, same-minute deduplication, failure latching, and no retrigger after disable now have executable evidence. Read-only navigation across the real PCS node tree, L0, L1, L2, alarms, and JDM passed, but the selected L2 was still stale, so real-device control closure remains unaccepted. No device writes were made, no strategy was enabled, and no safety gate was relaxed.
 
 > Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
