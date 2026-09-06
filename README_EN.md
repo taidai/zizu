@@ -6,11 +6,11 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.9.7`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current version: `v0.9.8`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v0.9.7 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.7-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+[v0.9.8 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.8-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
 
-This release is deployed. Readback waits for a valid match within the original deadline instead of failing at the first mismatch. Each strategy intent is dispatched once; failure disables and latches the strategy. Provenance writes are batched. The real PCS read-only data-trunk navigation passed, but the communication-threshold point still showed 5–12.5-second-old data and STALE quality. Real closed-loop control remains unaccepted. No device writes were made in this release check; usable pages do not prove control freshness.
+This release is deployed. Database health checks no longer block the ingestion event loop, and frame reads use the existing index over durable observations. Single dispatch, failure latching, and the original readback deadline remain unchanged. Real PCS read-only data-trunk navigation passed. Short-window MQTT-to-first-visible medians decreased from about 3.8 to 2.9 seconds, but a 5.6-second delay remained; four separate current-value samples were all STALE. Control freshness has not passed acceptance. No device writes were made, and no safety limits were relaxed; usable pages do not mean a complete EMS is delivery-ready.
 
 > Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
@@ -47,7 +47,7 @@ Device → Neuron → NanoMQ → real-time blackboard → committed frame → L1
 ```
 
 - One active ingestion writer runs per site; the in-process blackboard freezes immutable frames on a default one-second tick.
-- A frame is created only when data or quality changes; duplicate, regressive, and late samples are discarded.
+- A frame is created for new observations or quality changes. An unchanged value with a new sample timestamp is still a new observation; duplicate, regressive, and late samples are discarded.
 - Before the database commit, ZiZu does not push UI data, transition alarms, execute JDM, or issue control.
 - Quality is `GOOD`, `UNCERTAIN`, `BAD`, or `STALE`; non-`GOOD` data cannot drive automatic control.
 - Every L2 fact is traceable to L0 observations, an L1 revision, a configuration revision, quality, and time evidence.
