@@ -1,5 +1,12 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { promisify } from 'node:util'
 import { buildTwoChargeTwoDischargeJdm } from '../src/components/dispatch-strategy/dispatchStrategyModel.mjs'
+
+const execFileAsync = promisify(execFile)
+let localFixtureOutput = ''
 
 const now = '2026-09-05T00:00:00+00:00'
 const entities = [
@@ -411,3 +418,256 @@ test('修改后试算使用新草稿，非法输入不能复用旧结果', async
   expect(api.savedDrafts).toHaveLength(1)
   expect(api.calls.filter((call) => call.endsWith('/simulate'))).toHaveLength(requestsBefore)
 })
+
+test.describe.serial('调度策略本机真实纵向验收', () => {
+  test.describe.configure({ timeout: 240_000 })
+  const backendPort = 19026
+  const frontendPort = 4174
+  const databaseName = `zizu_task8_${randomUUID().replaceAll('-', '')}_test`
+  const password = `dispatch-${randomUUID()}`
+  let database: Record<string, string>
+  let backend: ChildProcess | undefined
+  let frontend: ChildProcess | undefined
+
+  test.beforeAll(async () => {
+    database = await createDisposablePostgresDatabase(databaseName)
+    backend = await startLocalDispatchFixture(database, password, backendPort)
+    frontend = await startViteForLocalFixture(backendPort, frontendPort)
+  })
+
+  test.afterAll(async () => {
+    await stopProcess(frontend)
+    await stopProcess(backend)
+    await dropDisposablePostgresDatabase(database)
+  })
+
+  test('浏览器经真实 JDM、提交 L2 与统一控制完成一次策略生命周期', async ({ browser, request }) => {
+    test.setTimeout(180_000)
+    const protocolSoc = 50.5
+    const consoleErrors: string[] = []
+    const context = await browser.newContext({ baseURL: `http://127.0.0.1:${frontendPort}` })
+    const page = await context.newPage()
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
+    page.on('pageerror', (error) => consoleErrors.push(error.message))
+
+    await page.goto('/')
+    await page.getByLabel('用户名').fill('local-e2e')
+    await page.getByLabel('密码').fill(password)
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    consoleErrors.length = 0
+    await page.getByRole('button', { name: '调度策略' }).click()
+    await createStrategyDraft(page)
+    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
+    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
+    await page.getByLabel('时段 1 功率目标').fill('0.5')
+    await page.getByLabel('时段 2 功率目标').fill('0.5')
+    await page.getByLabel('时段 3 功率目标').fill('0.5')
+    await page.getByLabel('时段 4 功率目标').fill('0.5')
+    await page.getByLabel('其他时段安全目标').fill('0.5')
+    const freshSnapshot = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 156.8 } },
+    })
+    if (!freshSnapshot.ok()) {
+      throw new Error(`local protocol snapshot failed ${freshSnapshot.status()}: ${await freshSnapshot.text()}\n${localFixtureOutput.slice(-8000)}`)
+    }
+    await page.getByRole('button', { name: '试算', exact: true }).click()
+    await expect(page.getByTestId('strategy-simulation')).toContainText('快照')
+    await expect(page.getByTestId('strategy-simulation')).toContainText(/命中行|other-time/)
+    await expect(page.getByTestId('strategy-simulation')).toContainText('power-target=0.5')
+    await page.getByRole('button', { name: '发布', exact: true }).click()
+    await expect(page.getByText('已发布为不可变版本；确认后可启用。')).toBeVisible()
+    await page.getByRole('button', { name: '启用', exact: true }).click()
+    await expect(page.getByRole('region', { name: '策略状态' })).toContainText('已启用')
+    await expect(page.getByRole('region', { name: '策略状态' })).toContainText('就绪')
+
+    // This is the test-only protocol boundary. It creates a committed L2 frame;
+    // it never manufactures a strategy event, intent, command, or readback state.
+    const first = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 1.5 } },
+    })
+    expect(first.ok()).toBeTruthy()
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json(), {
+      timeout: 40_000,
+    }).toMatchObject({ strategy_events: 2, intents: 1, commands: 1, dispatched: 1, events: expect.any(Array) })
+    const firstState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    expect(firstState.events).toHaveLength(2)
+    expect(firstState.events.map((event: { event_kind: string }) => event.event_kind).sort()).toEqual(['DECISION_CHANGED', 'INTENT_CREATED'])
+    expect(new Set(firstState.events.map((event: { trigger_key: string }) => event.trigger_key)).size).toBe(1)
+    expect(new Set(firstState.events.map((event: { snapshot_evidence: object }) => JSON.stringify(event.snapshot_evidence))).size).toBe(1)
+
+    const second = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 0.5 } },
+    })
+    expect(second.ok()).toBeTruthy()
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json(), {
+      timeout: 40_000,
+    }).toMatchObject({ strategy_events: 2, intents: 1, commands: 1, readback_confirmed: 1, events: expect.any(Array) })
+    const readbackState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    expect(readbackState.events).toEqual(firstState.events)
+    await page.getByRole('button', { name: '刷新', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '4. 关键事件与控制回读' })).toBeVisible()
+    await expect(page.getByText('INTENT_CREATED', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '停用', exact: true }).click()
+    await expect(page.getByRole('region', { name: '策略状态' })).toContainText('已停用')
+    const disabled = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 0.5 } },
+    })
+    expect(disabled.ok()).toBeTruthy()
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()).toMatchObject({
+      strategy_events: 2, intents: 1, commands: 1, enabled: false,
+    })
+    expect(consoleErrors).toEqual([])
+    await context.close()
+  })
+
+  test('浏览器沿节点树、L0、L1、L2、告警到调度策略核验同一 L2 身份', async ({ browser, request }) => {
+    const consoleErrors: string[] = []
+    const context = await browser.newContext({ baseURL: `http://127.0.0.1:${frontendPort}` })
+    const page = await context.newPage()
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
+    page.on('pageerror', (error) => consoleErrors.push(error.message))
+
+    await page.goto('/')
+    await page.getByLabel('用户名').fill('local-e2e')
+    await page.getByLabel('密码').fill(password)
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    consoleErrors.length = 0
+
+    // The only deterministic boundary stays at the protocol edge.  The fresh
+    // observation is committed through the real L0/L1/L2 outbox path before
+    // the browser examines it.
+    const fresh = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 0.5 } },
+    })
+    expect(fresh.ok()).toBeTruthy()
+
+    await page.getByRole('button', { name: '节点管理', exact: true }).click()
+    await page.getByPlaceholder('搜索节点...').fill('strategy-test')
+    await page.getByTitle('strategy-test').click()
+    await expect(page.getByRole('region', { name: '原始数据' })).toBeVisible()
+    await page.getByPlaceholder('搜索点位名称').fill('soc')
+    await expect(page.getByRole('row').filter({ hasText: 'soc' })).toContainText('50.5')
+    await expect(page.getByRole('row').filter({ hasText: 'soc' })).toContainText('正常')
+
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '标准实体' })).toBeVisible()
+    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    const socEntity = page.getByRole('button', { name: /PCS 品牌 A · bms\.soc/ })
+    await expect(socEntity).toContainText('50.5')
+    await socEntity.click()
+    await expect(page.getByRole('region', { name: '实体来源' })).toContainText('soc')
+    await page.getByRole('region', { name: '实体来源' }).getByText('技术详情', { exact: true }).click()
+    await expect(page.getByRole('region', { name: '实体来源' })).toContainText('definition_id: bms.soc')
+
+    await page.getByRole('button', { name: '调度策略', exact: true }).click()
+    await createStrategyDraft(page)
+    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
+    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
+    await page.getByLabel('时段 1 功率目标').fill('0.5')
+    await page.getByLabel('时段 2 功率目标').fill('0.5')
+    await page.getByLabel('时段 3 功率目标').fill('0.5')
+    await page.getByLabel('时段 4 功率目标').fill('0.5')
+    await page.getByLabel('其他时段安全目标').fill('0.5')
+    await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+    await expect(page.getByRole('status')).toContainText('草稿已保存')
+
+    await page.getByRole('button', { name: '告警中心', exact: true }).click()
+    await page.getByRole('button', { name: '告警规则', exact: true }).click()
+    await page.getByPlaceholder('搜索实体名称、业务标识或节点').fill('bms.soc')
+    const alarmEntity = page.locator('label').filter({ hasText: 'bms.soc' })
+    await expect(alarmEntity).toBeVisible()
+    await alarmEntity.getByRole('checkbox').check()
+    await page.getByLabel('规则名称').fill('Task8 L2 identity')
+    await page.getByLabel('故障名称').fill('Task8 SOC warning')
+    await page.getByLabel('触发值').fill('50')
+    await page.getByLabel('恢复值').fill('49')
+    await page.getByLabel('试算值').fill('50.5')
+    await page.getByRole('button', { name: '试算', exact: true }).click()
+    await expect(page.getByText(/会触发警告告警/)).toBeVisible()
+    await page.getByRole('button', { name: '生成发布预览', exact: true }).click()
+    await expect(page.getByRole('button', { name: '确认发布', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '确认发布', exact: true }).click()
+    await expect(page.getByText(/已发布，统一配置版本/)).toBeVisible()
+
+    const alarmTrigger = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 0.5 } },
+    })
+    expect(alarmTrigger.ok(), `alarm protocol sample failed ${alarmTrigger.status()}: ${await alarmTrigger.text()}\n${localFixtureOutput.slice(-8000)}`).toBeTruthy()
+    await page.getByRole('button', { name: '当前告警', exact: true }).click()
+    await expect(page.getByText('Task8 SOC warning', { exact: true })).toBeVisible()
+
+    const identity = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    expect(identity.alarm_entity_ids).toEqual([identity.strategy_soc_entity_id])
+    expect(consoleErrors).toEqual([])
+    await context.close()
+  })
+})
+
+async function createDisposablePostgresDatabase(name: string): Promise<Record<string, string>> {
+  const { stdout: encodedPgpass } = await execFileAsync('wsl.exe', ['-d', 'Ubuntu', '-u', 'root', '--', 'python3', '-c', "import base64; print(base64.b64encode(open('/mnt/wsl/zizu-dispatch-recovery-20260905-c73f/rootfs/run/zizu-recovery/pgpass', 'rb').read()).decode())"])
+  const pgpass = Buffer.from(encodedPgpass.trim(), 'base64').toString('utf8')
+  const database = { DB_HOST: '127.0.0.1', DB_PORT: '15433', DB_USER: 'postgres', DB_PASSWORD: pgpass.trim(), DB_NAME: name }
+  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("CREATE DATABASE " + os.environ["DB_NAME"]); c.close(); d=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname=os.environ["DB_NAME"]); d.autocommit=True; d.cursor().execute("CREATE EXTENSION timescaledb CASCADE")'], { env: { ...process.env, ...database } })
+  return database
+}
+
+async function dropDisposablePostgresDatabase(database: Record<string, string>): Promise<void> {
+  if (!database?.DB_NAME?.endsWith('_test')) return
+  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=%s AND pid<>pg_backend_pid()", (os.environ["DB_NAME"],)); cur.execute("DROP DATABASE " + os.environ["DB_NAME"])'], { env: { ...process.env, ...database } })
+}
+
+async function startLocalDispatchFixture(database: Record<string, string>, localPassword: string, port: number): Promise<ChildProcess> {
+  const root = path.resolve(process.cwd(), '..')
+  return startUntilReady('C:\\veighna_studio\\python.exe', [path.join(root, 'backend', 'scripts', 'node_management_e2e_fixture.py'), 'local-dispatch-server', '--port', String(port)], {
+    ...process.env, ...database, ZIZU_LOCAL_E2E_PASSWORD: localPassword,
+    NEURON_PASSWORD: localPassword, NANOMQ_API_PASSWORD: localPassword, JWT_SECRET: localPassword,
+    DEPLOYMENT_MODE: 'development', AUTH_REQUIRE_HTTPS: 'false', ALLOW_INSECURE_DEV_SECRETS: 'false',
+    PYTHONPATH: `C:\\Users\\chent\\AppData\\Local\\Temp\\zizu-v087-local-514b7ea4b65748a1b7673a8577fe3ef8\\python-packages;${path.join(root, 'backend')};${root}`,
+  }, 'LOCAL_DISPATCH_FIXTURE')
+}
+
+async function startViteForLocalFixture(backendPort: number, port: number): Promise<ChildProcess> {
+  return startUntilReady('npm.cmd', ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(port)], {
+    ...process.env, ZIZU_DEV_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
+  }, 'Local:')
+}
+
+async function createStrategyDraft(page: Page): Promise<void> {
+  const loaded = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET'
+      && /^\/api\/v1\/dispatch-strategies\/[^/]+$/.test(url.pathname)
+  })
+  await page.getByRole('button', { name: '新建 2充2放' }).click()
+  await loaded
+  await expect(page.getByLabel('SOC 输入实体')).toHaveValue('')
+  await expect(page.getByLabel('功率控制实体')).toHaveValue('')
+}
+
+function startUntilReady(command: string, args: string[], env: NodeJS.ProcessEnv, ready: string): Promise<ChildProcess> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd: process.cwd(), env, windowsHide: true, shell: command.endsWith('.cmd') })
+    let output = ''
+    const timer = setTimeout(() => reject(new Error(`local fixture did not become ready: ${output}`)), 60_000)
+    child.stdout?.on('data', (chunk) => {
+      output += String(chunk)
+      if (command.includes('python.exe')) localFixtureOutput += String(chunk)
+      if (output.includes(ready)) { clearTimeout(timer); resolve(child) }
+    })
+    child.stderr?.on('data', (chunk) => {
+      output += String(chunk)
+      if (command.includes('python.exe')) localFixtureOutput += String(chunk)
+    })
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`local fixture exited ${code}: ${output}`)) })
+  })
+}
+
+async function stopProcess(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.exitCode !== null) return
+  child.kill()
+  await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+}

@@ -1,7 +1,9 @@
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
 from scripts.node_management_e2e_fixture import (
+    pump_local_dispatch_once,
     _mqtt_host,
     _publish_via_ssh,
     _retire_run_templates,
@@ -10,6 +12,7 @@ from scripts.node_management_e2e_fixture import (
     build_telemetry_payload,
     ensure_strategy,
     publish,
+    run_local_dispatch_server,
     setup,
 )
 
@@ -276,6 +279,48 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
         self.assertEqual("ssh", result["transport"])
         mqtt_client.assert_not_called()
         publish_via_ssh.assert_called_once()
+
+
+class LocalDispatchPumpTest(unittest.IsolatedAsyncioTestCase):
+    def test_local_server_registers_the_production_configuration_lifecycle(self) -> None:
+        source = inspect.getsource(run_local_dispatch_server)
+
+        self.assertIn("app_main._pipeline = pipeline", source)
+        self.assertIn(
+            "pipeline.data_trunk.configuration_gate.register_committed_frame_consumer()",
+            source,
+        )
+
+    async def test_single_pump_drains_outbox_then_runs_fixed_tick_and_intent_dispatcher(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        class Outbox:
+            async def run_once(self, *, now):
+                calls.append(("outbox", now))
+                return 1
+
+        class FixedTick:
+            def run_once(self, now):
+                calls.append(("fixed-tick", now))
+                return 1
+
+        class IntentDispatcher:
+            def run_once(self, now):
+                calls.append(("intent-dispatcher", now))
+                return "IN_FLIGHT"
+
+        from datetime import UTC, datetime
+
+        moment = datetime(2026, 9, 6, 13, 0, tzinfo=UTC)
+        result = await pump_local_dispatch_once(
+            Outbox(), FixedTick(), IntentDispatcher(), now=moment,
+        )
+
+        self.assertEqual((1, 1, "IN_FLIGHT"), result)
+        self.assertEqual(
+            [("outbox", moment), ("fixed-tick", moment), ("intent-dispatcher", moment)],
+            calls,
+        )
 
 
 if __name__ == "__main__":

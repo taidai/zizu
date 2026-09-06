@@ -12,6 +12,16 @@ os.environ.setdefault("NEURON_PASSWORD", "neuron-secret-value")
 os.environ.setdefault("NANOMQ_API_PASSWORD", "nanomq-secret-value")
 os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-at-least-32-chars")
 
+FORBIDDEN_STRATEGY_TOKENS = (
+    "ast.parse",
+    'content.get("when")',
+    "NeuronClient",
+    "mqtt.publish",
+    "requests.post",
+    "httpx.post",
+    "t_l0_latest",
+)
+
 
 class DataTrunkStartupGateTest(unittest.TestCase):
     def _connection(self, *, row_count: int = 1):
@@ -228,18 +238,9 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             backend / "app" / "services" / "dispatch_strategy_workers.py",
             backend / "app" / "api" / "dispatch_strategies.py",
         )
-        forbidden = (
-            "ast.parse",
-            'content.get("when")',
-            "NeuronClient",
-            "mqtt.publish",
-            "requests.post",
-            "httpx.post",
-            "t_l0_latest",
-        )
         for target in targets:
             source = target.read_text(encoding="utf-8")
-            for token in forbidden:
+            for token in FORBIDDEN_STRATEGY_TOKENS:
                 self.assertNotIn(token, source, f"{target.name} bypasses strategy boundaries")
 
 

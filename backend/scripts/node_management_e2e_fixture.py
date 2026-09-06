@@ -21,6 +21,16 @@ POINT_PROCESSING_DEVICE_CATEGORY = "E2E_DEVICE"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+async def pump_local_dispatch_once(outbox, fixed_tick_worker, intent_dispatcher, *, now):
+    """Advance one bounded local acceptance turn through production workers."""
+    import asyncio
+
+    published = await outbox.run_once(now=now)
+    ticks = await asyncio.to_thread(fixed_tick_worker.run_once, now)
+    dispatched = await asyncio.to_thread(intent_dispatcher.run_once, now)
+    return published, ticks, dispatched
+
+
 @dataclass(frozen=True)
 class FixtureNames:
     platform_node: str
@@ -608,16 +618,238 @@ def cleanup() -> dict[str, Any]:
     }
 
 
+def run_local_dispatch_server(port: int) -> None:
+    """Run the disposable local browser seam; protocol input is its only fake edge."""
+    if not os.environ.get("DB_NAME", "").endswith("_test"):
+        raise RuntimeError("local dispatch fixture requires a newly created *_test database")
+    password = os.environ.get("ZIZU_LOCAL_E2E_PASSWORD", "")
+    if not password:
+        raise RuntimeError("ZIZU_LOCAL_E2E_PASSWORD is required")
+
+    import asyncio
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime, timedelta
+    from pathlib import Path
+    from dataclasses import dataclass
+
+    from app.api.control_commands import get_automated_control_commands
+    from app.api.health import set_pipeline
+    from app.main import create_app
+    from app.services.automated_control_commands import AutomatedControlCommands
+    from app.services.committed_frame_stream import CommittedFrameStream
+    from app.services.committed_frame_stream_postgres import PostgresCommittedFrameStreamRepository
+    from app.services.committed_l2_alarm_consumer import build_postgres_committed_l2_alarm_consumer
+    from app.services.committed_l2_jdm_consumer import CommittedL2JdmConsumer
+    from app.services.control_commands import ControlCommandRuntime, PostgresControlCommandRepository
+    from app.services.data_trunk_outbox import FrameOutboxDispatcher, PostgresFrameOutboxRepository
+    from app.services.data_trunk_postgres import build_postgres_data_trunk
+    from app.services.dispatch_strategies import StrategyRuntime
+    from app.services.dispatch_strategy_postgres import PostgresStrategyRepository
+    from app.services.dispatch_strategy_workers import ControlIntentDispatcher, FixedMinuteTickWorker
+    from app.services.entity_instance_postgres import PostgresEntityInstanceRepository, PostgresObservationCatalog, PostgresSourceCatalog
+    from app.services.entity_instance_registry import EntityInstanceRegistry
+    from app.services.entity_instance_runtime import EntityInstanceRuntime
+    from app.services.pipeline import DataPipeline
+    from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
+    from app.services.telemetry_store import close_db_pool
+    from scripts.bootstrap_admin import PostgresAdminStore, bootstrap_admin
+    from tests.test_dispatch_strategy_postgres import DispatchStrategyPostgresFixture
+
+    class LocalFixture(DispatchStrategyPostgresFixture, __import__("unittest").TestCase):
+        pass
+
+    class RecordingProtocolDispatcher:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def dispatch(self, request: object) -> None:
+            self.requests.append(request)
+
+    @dataclass(frozen=True)
+    class SimulatedMessage:
+        topic: str
+        payload: bytes
+        qos: int = 1
+
+    LocalFixture.setUpClass()
+    fixture = LocalFixture()
+    fixture.setUp()
+    with fixture._connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "CREATE TABLE t_node_categories("
+            "id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+            "name TEXT NOT NULL UNIQUE,node_type TEXT NOT NULL,"
+            "description TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+        )
+        cursor.execute(
+            "UPDATE t_tags SET source_type='neuron',source_path='strategy-test/group0/soc' WHERE id=%s",
+            (fixture.soc_tag_id,),
+        )
+        cursor.execute(
+            "UPDATE t_tags SET unit_from=unit,unit_to=unit WHERE node_id=%s",
+            (fixture.node_id,),
+        )
+    bootstrap_admin(PostgresAdminStore(), "local-e2e", password)
+
+    registry = EntityInstanceRegistry(
+        PostgresEntityInstanceRepository(),
+        PostgresSourceCatalog(),
+        PostgresConfigurationRevisions().current,
+    )
+    protocol_dispatcher = RecordingProtocolDispatcher()
+    control_runtime = ControlCommandRuntime(
+        registry=registry,
+        policies=PostgresEntityInstanceRepository(),
+        readback=EntityInstanceRuntime(registry, PostgresObservationCatalog()),
+        dispatcher=protocol_dispatcher,
+        repository=PostgresControlCommandRepository(),
+    )
+    import app.api.control_commands as control_api
+    control_api._commands = control_runtime
+    control_api._automated = AutomatedControlCommands(control_runtime)
+
+    repository = PostgresStrategyRepository()
+    strategy_runtime = StrategyRuntime(repository)
+    fixed_tick_worker = FixedMinuteTickWorker(repository, strategy_runtime)
+    stream = CommittedFrameStream(PostgresCommittedFrameStreamRepository())
+    from app.api.committed_frames import set_committed_frame_stream
+    set_committed_frame_stream(stream)
+    outbox = FrameOutboxDispatcher(
+        PostgresFrameOutboxRepository(),
+        __import__("app.main", fromlist=["build_committed_frame_fanout"]).build_committed_frame_fanout(
+            build_postgres_committed_l2_alarm_consumer(),
+            CommittedL2JdmConsumer(strategy_runtime),
+            stream,
+        ),
+    )
+    pipeline = DataPipeline(data_trunk=build_postgres_data_trunk())
+    import app.main as app_main
+    previous_main_pipeline = app_main._pipeline
+    app_main._pipeline = pipeline
+    pipeline.data_trunk.configuration_gate.register_committed_frame_consumer()
+
+    async def seed_committed_l2() -> None:
+        await pipeline.reload_rules_now()
+        await pipeline.on_message(SimulatedMessage(
+            topic="neuron/strategy-test/telemetry",
+            payload=json.dumps({
+                "node": "strategy-test", "group": "group0",
+                "timestamp": round(time.time() * 1000),
+                "values": {"soc": 50.0, "limit": 156.8},
+            }).encode("utf-8"),
+        ))
+        now = datetime.now(UTC)
+        await asyncio.to_thread(pipeline.data_trunk.capture_tick, now)
+        await asyncio.to_thread(pipeline.data_trunk.process_next, now)
+        await pump_local_dispatch_once(
+            outbox,
+            fixed_tick_worker,
+            intent_dispatcher,
+            now=now + timedelta(seconds=1),
+        )
+
+    intent_dispatcher = ControlIntentDispatcher(repository, get_automated_control_commands())
+    asyncio.run(seed_committed_l2())
+    app = create_app()
+
+    @app.post("/protocol-simulator/neuron")
+    async def publish_protocol_observation(payload: dict[str, object]) -> dict[str, int]:
+        values = payload.get("values")
+        if payload.get("node") != "strategy-test" or not isinstance(values, dict):
+            raise ValueError("local fixture accepts only strategy-test protocol samples")
+        await pipeline.reload_rules_now()
+        await pipeline.on_message(SimulatedMessage(
+            topic="neuron/strategy-test/telemetry",
+            payload=json.dumps({
+                "node": "strategy-test", "group": "group0",
+                "timestamp": round(time.time() * 1000), "values": values,
+            }).encode("utf-8"),
+        ))
+        now = datetime.now(UTC)
+        await asyncio.to_thread(pipeline.data_trunk.capture_tick, now)
+        await asyncio.to_thread(pipeline.data_trunk.process_next, now)
+        await pump_local_dispatch_once(
+            outbox,
+            fixed_tick_worker,
+            intent_dispatcher,
+            now=now + timedelta(seconds=1),
+        )
+        return {"protocol_messages": 1, "device_submissions": len(protocol_dispatcher.requests)}
+
+    @app.get("/test-fixture/state")
+    async def fixture_state() -> dict[str, object]:
+        with fixture._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_events")
+            strategy_events = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT event_kind,trigger_kind,trigger_key,frame_sequence,snapshot_evidence "
+                "FROM t_dispatch_strategy_events ORDER BY occurred_at,id"
+            )
+            events = [
+                {
+                    "event_kind": row[0],
+                    "trigger_kind": row[1],
+                    "trigger_key": row[2],
+                    "frame_sequence": row[3],
+                    "snapshot_evidence": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+            cursor.execute("SELECT count(*) FROM t_dispatch_control_intents")
+            intents = cursor.fetchone()[0]
+            cursor.execute("SELECT count(*) FROM t_control_commands")
+            commands = cursor.fetchone()[0]
+            cursor.execute("SELECT count(*) FROM t_control_commands WHERE status='dispatched'")
+            dispatched = cursor.fetchone()[0]
+            cursor.execute("SELECT count(*) FROM t_control_commands WHERE status='readback_confirmed'")
+            readback_confirmed = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT entity_instance_id::text FROM t_dispatch_strategy_bindings "
+                "WHERE direction='INPUT' AND binding_key='soc' ORDER BY revision_id LIMIT 1"
+            )
+            strategy_soc = cursor.fetchone()
+            cursor.execute(
+                "SELECT entity_instance_id::text FROM t_alarm_definition_current ORDER BY asset_id"
+            )
+            alarm_entity_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT enabled FROM t_dispatch_strategies ORDER BY created_at DESC LIMIT 1")
+            row = cursor.fetchone()
+        return {
+            "strategy_events": strategy_events, "events": events,
+            "intents": intents, "commands": commands,
+            "dispatched": dispatched, "readback_confirmed": readback_confirmed,
+            "strategy_soc_entity_id": strategy_soc[0] if strategy_soc else None,
+            "alarm_entity_ids": alarm_entity_ids,
+            "enabled": bool(row and row[0]), "device_submissions": len(protocol_dispatcher.requests),
+        }
+
+    @asynccontextmanager
+    async def local_lifespan(_app):
+        set_pipeline(pipeline)
+        try:
+            yield
+        finally:
+            app_main._pipeline = previous_main_pipeline
+            fixture.doCleanups()
+            close_db_pool()
+
+    app.router.lifespan_context = local_lifespan
+    print(json.dumps({"status": "LOCAL_DISPATCH_FIXTURE", "port": port}, ensure_ascii=False), flush=True)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=port, access_log=False)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("preflight", "setup", "publish", "ensure-strategy", "cleanup"),
+        choices=("preflight", "setup", "publish", "ensure-strategy", "cleanup", "local-dispatch-server"),
     )
+    parser.add_argument("--port", type=int, default=19026)
     parser.add_argument("--point-key", default="e2e_active_power")
     parser.add_argument("--value-json", default="12.5")
     arguments = parser.parse_args()
-    if os.environ.get("ZIZU_E2E_ALLOW_LIVE_WRITES") != "1":
+    if arguments.command != "local-dispatch-server" and os.environ.get("ZIZU_E2E_ALLOW_LIVE_WRITES") != "1":
         raise RuntimeError("ZIZU_E2E_ALLOW_LIVE_WRITES must be 1")
     action = {
         "preflight": preflight,
@@ -625,6 +857,7 @@ def main() -> int:
         "publish": lambda: publish(arguments.point_key, _parse_scalar(arguments.value_json)),
         "ensure-strategy": ensure_strategy,
         "cleanup": cleanup,
+        "local-dispatch-server": lambda: run_local_dispatch_server(arguments.port),
     }[arguments.command]
     print(json.dumps(action(), ensure_ascii=False))
     return 0
