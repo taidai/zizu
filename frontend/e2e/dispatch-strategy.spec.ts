@@ -458,7 +458,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByRole('button', { name: '登录', exact: true }).click()
     consoleErrors.length = 0
     await page.getByRole('button', { name: '调度策略' }).click()
-    await createStrategyDraft(page)
+    const strategyId = await createStrategyDraft(page)
     await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
     await page.getByLabel('功率控制实体').selectOption({ index: 1 })
     await page.getByLabel('时段 1 功率目标').fill('0.5')
@@ -488,10 +488,10 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
       data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 1.5 } },
     })
     expect(first.ok()).toBeTruthy()
-    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json(), {
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json(), {
       timeout: 40_000,
-    }).toMatchObject({ strategy_events: 2, intents: 1, commands: 1, dispatched: 1, events: expect.any(Array) })
-    const firstState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    }).toMatchObject({ strategy_id: strategyId, strategy_events: 2, intents: 1, commands: 1, dispatched: 1, device_submissions: 1, events: expect.any(Array) })
+    const firstState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
     expect(firstState.events).toHaveLength(2)
     expect(firstState.events.map((event: { event_kind: string }) => event.event_kind).sort()).toEqual(['DECISION_CHANGED', 'INTENT_CREATED'])
     expect(new Set(firstState.events.map((event: { trigger_key: string }) => event.trigger_key)).size).toBe(1)
@@ -501,11 +501,17 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
       data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 0.5 } },
     })
     expect(second.ok()).toBeTruthy()
-    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json(), {
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json(), {
       timeout: 40_000,
-    }).toMatchObject({ strategy_events: 2, intents: 1, commands: 1, readback_confirmed: 1, events: expect.any(Array) })
-    const readbackState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    }).toMatchObject({ strategy_id: strategyId, strategy_events: 2, intents: 1, commands: 1, readback_confirmed: 1, device_submissions: 1, events: expect.any(Array) })
+    const readbackState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
     expect(readbackState.events).toEqual(firstState.events)
+    const sameMinute = await request.post(`http://127.0.0.1:${backendPort}/test-fixture/pump`)
+    expect(sameMinute.ok()).toBeTruthy()
+    const repeatedState = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
+    expect(repeatedState.clock).toBe(firstState.clock)
+    expect(repeatedState.events).toEqual(firstState.events)
+    expect(repeatedState).toMatchObject({ intents: 1, commands: 1, device_submissions: 1 })
     await page.getByRole('button', { name: '刷新', exact: true }).click()
     await expect(page.getByRole('heading', { name: '4. 关键事件与控制回读' })).toBeVisible()
     await expect(page.getByText('INTENT_CREATED', { exact: true })).toBeVisible()
@@ -515,10 +521,53 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
       data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 0.5 } },
     })
     expect(disabled.ok()).toBeTruthy()
-    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()).toMatchObject({
-      strategy_events: 2, intents: 1, commands: 1, enabled: false,
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()).toMatchObject({
+      strategy_id: strategyId, strategy_events: 2, intents: 1, commands: 1, enabled: false, device_submissions: 1,
     })
     expect(consoleErrors).toEqual([])
+    await context.close()
+  })
+
+  test('适配器写入失败只提交一次、锁定并停用策略，后续同分钟 pump 不重发', async ({ browser, request }) => {
+    const context = await browser.newContext({ baseURL: `http://127.0.0.1:${frontendPort}` })
+    const page = await context.newPage()
+    await page.goto('/')
+    await page.getByLabel('用户名').fill('local-e2e')
+    await page.getByLabel('密码').fill(password)
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    await page.getByRole('button', { name: '调度策略' }).click()
+    const strategyId = await createStrategyDraft(page)
+    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
+    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
+    await page.getByLabel('时段 1 功率目标').fill('0.5')
+    await page.getByLabel('时段 2 功率目标').fill('0.5')
+    await page.getByLabel('时段 3 功率目标').fill('0.5')
+    await page.getByLabel('时段 4 功率目标').fill('0.5')
+    await page.getByLabel('其他时段安全目标').fill('0.5')
+    const baseline = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 156.8 } },
+    })
+    expect(baseline.ok()).toBeTruthy()
+    await page.getByRole('button', { name: '发布', exact: true }).click()
+    await expect(page.getByText('已发布为不可变版本；确认后可启用。')).toBeVisible()
+    await page.getByRole('button', { name: '启用', exact: true }).click()
+    const armFailure = await request.post(`http://127.0.0.1:${backendPort}/test-fixture/adapter-failure`)
+    expect(armFailure.ok()).toBeTruthy()
+    const failedWrite = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
+      data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 1.5 } },
+    })
+    expect(failedWrite.ok()).toBeTruthy()
+    await expect.poll(async () => (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()).toMatchObject({
+      strategy_id: strategyId, enabled: false, runtime_health: 'FAILED',
+      intents: 1, commands: 1, device_submissions: 1,
+      intent_statuses: ['FAILED'], command_statuses: ['failed'],
+    })
+    const failed = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
+    const repeated = await request.post(`http://127.0.0.1:${backendPort}/test-fixture/pump`)
+    expect(repeated.ok()).toBeTruthy()
+    const afterRepeat = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
+    expect(afterRepeat).toMatchObject({ enabled: false, runtime_health: 'FAILED', device_submissions: 1 })
+    expect(afterRepeat.events).toEqual(failed.events)
     await context.close()
   })
 
@@ -553,6 +602,13 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await expect(page.getByRole('row').filter({ hasText: 'soc' })).toContainText('50.5')
     await expect(page.getByRole('row').filter({ hasText: 'soc' })).toContainText('正常')
 
+    await page.getByRole('checkbox', { name: '选择 soc' }).check()
+    const l1 = page.getByLabel('加工为实体')
+    await expect(l1).toContainText('已选择 1 个原始点位')
+    await l1.getByRole('button', { name: '加工为实体', exact: true }).click()
+    await expect(l1.getByLabel('加工方法')).toHaveValue('passthrough')
+    await expect(l1).toContainText('业务标识')
+
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '标准实体' })).toBeVisible()
     await expect(page.getByText('已生效', { exact: true })).toBeVisible()
@@ -562,9 +618,10 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText('soc')
     await page.getByRole('region', { name: '实体来源' }).getByText('技术详情', { exact: true }).click()
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText('definition_id: bms.soc')
+    await expect(page.getByRole('region', { name: '实体来源' })).toContainText('processing_revision_id:')
 
     await page.getByRole('button', { name: '调度策略', exact: true }).click()
-    await createStrategyDraft(page)
+    const strategyId = await createStrategyDraft(page)
     await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
     await page.getByLabel('功率控制实体').selectOption({ index: 1 })
     await page.getByLabel('时段 1 功率目标').fill('0.5')
@@ -600,7 +657,8 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByRole('button', { name: '当前告警', exact: true }).click()
     await expect(page.getByText('Task8 SOC warning', { exact: true })).toBeVisible()
 
-    const identity = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state`)).json()
+    const identity = await (await request.get(`http://127.0.0.1:${backendPort}/test-fixture/state?strategy_id=${strategyId}`)).json()
+    expect(identity.strategy_id).toBe(strategyId)
     expect(identity.alarm_entity_ids).toEqual([identity.strategy_soc_entity_id])
     expect(consoleErrors).toEqual([])
     await context.close()
@@ -636,16 +694,23 @@ async function startViteForLocalFixture(backendPort: number, port: number): Prom
   }, 'Local:')
 }
 
-async function createStrategyDraft(page: Page): Promise<void> {
+async function createStrategyDraft(page: Page): Promise<string> {
+  const created = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === '/api/v1/dispatch-strategies'
+  })
+  await page.getByRole('button', { name: '新建 2充2放' }).click()
+  const strategyId = (await (await created).json()).id as string
   const loaded = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'GET'
-      && /^\/api\/v1\/dispatch-strategies\/[^/]+$/.test(url.pathname)
+      && url.pathname === `/api/v1/dispatch-strategies/${strategyId}`
   })
-  await page.getByRole('button', { name: '新建 2充2放' }).click()
   await loaded
   await expect(page.getByLabel('SOC 输入实体')).toHaveValue('')
   await expect(page.getByLabel('功率控制实体')).toHaveValue('')
+  return strategyId
 }
 
 function startUntilReady(command: string, args: string[], env: NodeJS.ProcessEnv, ready: string): Promise<ChildProcess> {

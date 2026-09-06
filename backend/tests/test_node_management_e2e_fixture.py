@@ -311,14 +311,15 @@ class LocalDispatchPumpTest(unittest.IsolatedAsyncioTestCase):
 
         from datetime import UTC, datetime
 
-        moment = datetime(2026, 9, 6, 13, 0, tzinfo=UTC)
+        tick_at = datetime(2026, 9, 6, 13, 0, tzinfo=UTC)
+        dispatch_at = datetime(2026, 9, 6, 13, 0, 1, tzinfo=UTC)
         result = await pump_local_dispatch_once(
-            Outbox(), FixedTick(), IntentDispatcher(), now=moment,
+            Outbox(), FixedTick(), IntentDispatcher(), tick_at=tick_at, dispatch_at=dispatch_at,
         )
 
         self.assertEqual((1, 1, "IN_FLIGHT"), result)
         self.assertEqual(
-            [("outbox", moment), ("fixed-tick", moment), ("intent-dispatcher", moment)],
+            [("outbox", dispatch_at), ("fixed-tick", tick_at), ("intent-dispatcher", dispatch_at)],
             calls,
         )
 

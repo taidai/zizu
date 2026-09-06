@@ -21,13 +21,15 @@ POINT_PROCESSING_DEVICE_CATEGORY = "E2E_DEVICE"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-async def pump_local_dispatch_once(outbox, fixed_tick_worker, intent_dispatcher, *, now):
-    """Advance one bounded local acceptance turn through production workers."""
+async def pump_local_dispatch_once(
+    outbox, fixed_tick_worker, intent_dispatcher, *, tick_at, dispatch_at,
+):
+    """Advance one bounded local turn with a stable tick and claimable dispatch time."""
     import asyncio
 
-    published = await outbox.run_once(now=now)
-    ticks = await asyncio.to_thread(fixed_tick_worker.run_once, now)
-    dispatched = await asyncio.to_thread(intent_dispatcher.run_once, now)
+    published = await outbox.run_once(now=dispatch_at)
+    ticks = await asyncio.to_thread(fixed_tick_worker.run_once, tick_at)
+    dispatched = await asyncio.to_thread(intent_dispatcher.run_once, dispatch_at)
     return published, ticks, dispatched
 
 
@@ -661,9 +663,13 @@ def run_local_dispatch_server(port: int) -> None:
     class RecordingProtocolDispatcher:
         def __init__(self) -> None:
             self.requests: list[object] = []
+            self.fail_next = False
 
         def dispatch(self, request: object) -> None:
             self.requests.append(request)
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("local protocol adapter failure")
 
     @dataclass(frozen=True)
     class SimulatedMessage:
@@ -727,6 +733,7 @@ def run_local_dispatch_server(port: int) -> None:
     previous_main_pipeline = app_main._pipeline
     app_main._pipeline = pipeline
     pipeline.data_trunk.configuration_gate.register_committed_frame_consumer()
+    fixed_tick_at = datetime.now(UTC).replace(second=0, microsecond=0)
 
     async def seed_committed_l2() -> None:
         await pipeline.reload_rules_now()
@@ -745,7 +752,8 @@ def run_local_dispatch_server(port: int) -> None:
             outbox,
             fixed_tick_worker,
             intent_dispatcher,
-            now=now + timedelta(seconds=1),
+            tick_at=fixed_tick_at,
+            dispatch_at=now + timedelta(seconds=1),
         )
 
     intent_dispatcher = ControlIntentDispatcher(repository, get_automated_control_commands())
@@ -772,18 +780,48 @@ def run_local_dispatch_server(port: int) -> None:
             outbox,
             fixed_tick_worker,
             intent_dispatcher,
-            now=now + timedelta(seconds=1),
+            tick_at=fixed_tick_at,
+            dispatch_at=now + timedelta(seconds=1),
         )
         return {"protocol_messages": 1, "device_submissions": len(protocol_dispatcher.requests)}
 
+    @app.post("/test-fixture/pump")
+    async def pump_same_minute() -> dict[str, object]:
+        published, ticks, dispatched = await pump_local_dispatch_once(
+            outbox,
+            fixed_tick_worker,
+            intent_dispatcher,
+            tick_at=fixed_tick_at,
+            dispatch_at=datetime.now(UTC) + timedelta(seconds=1),
+        )
+        return {
+            "clock": fixed_tick_at.isoformat(),
+            "published": published,
+            "ticks": ticks,
+            "dispatch": None if dispatched is None else dispatched.status,
+        }
+
+    @app.post("/test-fixture/adapter-failure")
+    async def fail_next_adapter_dispatch() -> dict[str, bool]:
+        protocol_dispatcher.fail_next = True
+        return {"armed": True}
+
     @app.get("/test-fixture/state")
-    async def fixture_state() -> dict[str, object]:
+    async def fixture_state(strategy_id: str) -> dict[str, object]:
         with fixture._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_events")
+            cursor.execute(
+                "SELECT enabled,runtime_health,failure_code FROM t_dispatch_strategies WHERE id=%s",
+                (strategy_id,),
+            )
+            strategy = cursor.fetchone()
+            if strategy is None:
+                raise ValueError("fixture state requires an existing strategy_id")
+            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_events WHERE strategy_id=%s", (strategy_id,))
             strategy_events = cursor.fetchone()[0]
             cursor.execute(
                 "SELECT event_kind,trigger_kind,trigger_key,frame_sequence,snapshot_evidence "
-                "FROM t_dispatch_strategy_events ORDER BY occurred_at,id"
+                "FROM t_dispatch_strategy_events WHERE strategy_id=%s ORDER BY occurred_at,id",
+                (strategy_id,),
             )
             events = [
                 {
@@ -795,32 +833,66 @@ def run_local_dispatch_server(port: int) -> None:
                 }
                 for row in cursor.fetchall()
             ]
-            cursor.execute("SELECT count(*) FROM t_dispatch_control_intents")
+            cursor.execute("SELECT count(*) FROM t_dispatch_control_intents WHERE strategy_id=%s", (strategy_id,))
             intents = cursor.fetchone()[0]
-            cursor.execute("SELECT count(*) FROM t_control_commands")
+            cursor.execute(
+                "SELECT status,control_command_id::text FROM t_dispatch_control_intents "
+                "WHERE strategy_id=%s ORDER BY created_at,id",
+                (strategy_id,),
+            )
+            intent_rows = cursor.fetchall()
+            intent_statuses = [row[0] for row in intent_rows]
+            command_ids = [row[1] for row in intent_rows if row[1] is not None]
+            cursor.execute(
+                "SELECT status FROM t_control_commands WHERE id=ANY(%s::uuid[]) ORDER BY created_at,id",
+                (command_ids,),
+            )
+            command_statuses = [row[0] for row in cursor.fetchall()]
+            cursor.execute(
+                "SELECT count(*) FROM t_control_commands WHERE id=ANY(%s::uuid[])",
+                (command_ids,),
+            )
             commands = cursor.fetchone()[0]
-            cursor.execute("SELECT count(*) FROM t_control_commands WHERE status='dispatched'")
+            cursor.execute(
+                "SELECT count(*) FROM t_control_commands WHERE id=ANY(%s::uuid[]) AND status='dispatched'",
+                (command_ids,),
+            )
             dispatched = cursor.fetchone()[0]
-            cursor.execute("SELECT count(*) FROM t_control_commands WHERE status='readback_confirmed'")
+            cursor.execute(
+                "SELECT count(*) FROM t_control_commands WHERE id=ANY(%s::uuid[]) AND status='readback_confirmed'",
+                (command_ids,),
+            )
             readback_confirmed = cursor.fetchone()[0]
             cursor.execute(
-                "SELECT entity_instance_id::text FROM t_dispatch_strategy_bindings "
-                "WHERE direction='INPUT' AND binding_key='soc' ORDER BY revision_id LIMIT 1"
+                "SELECT binding.entity_instance_id::text "
+                "FROM t_dispatch_strategies AS strategy "
+                "JOIN t_dispatch_strategy_revisions AS revision "
+                "  ON revision.id=COALESCE(strategy.active_revision_id,("
+                "    SELECT draft.id FROM t_dispatch_strategy_revisions AS draft "
+                "    WHERE draft.strategy_id=strategy.id AND draft.lifecycle='DRAFT')) "
+                "JOIN t_dispatch_strategy_bindings AS binding ON binding.revision_id=revision.id "
+                "WHERE strategy.id=%s AND binding.direction='INPUT' AND binding.binding_key='soc'",
+                (strategy_id,),
             )
             strategy_soc = cursor.fetchone()
             cursor.execute(
                 "SELECT entity_instance_id::text FROM t_alarm_definition_current ORDER BY asset_id"
             )
             alarm_entity_ids = [row[0] for row in cursor.fetchall()]
-            cursor.execute("SELECT enabled FROM t_dispatch_strategies ORDER BY created_at DESC LIMIT 1")
-            row = cursor.fetchone()
+        command_ids_set = set(command_ids)
+        device_submissions = sum(
+            str(getattr(item, "command_id", "")) in command_ids_set
+            for item in protocol_dispatcher.requests
+        )
         return {
-            "strategy_events": strategy_events, "events": events,
+            "strategy_id": strategy_id, "strategy_events": strategy_events, "events": events,
             "intents": intents, "commands": commands,
             "dispatched": dispatched, "readback_confirmed": readback_confirmed,
+            "intent_statuses": intent_statuses, "command_statuses": command_statuses,
             "strategy_soc_entity_id": strategy_soc[0] if strategy_soc else None,
             "alarm_entity_ids": alarm_entity_ids,
-            "enabled": bool(row and row[0]), "device_submissions": len(protocol_dispatcher.requests),
+            "enabled": bool(strategy[0]), "runtime_health": strategy[1], "failure_code": strategy[2],
+            "clock": fixed_tick_at.isoformat(), "device_submissions": device_submissions,
         }
 
     @asynccontextmanager
