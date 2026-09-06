@@ -6,11 +6,11 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.9.6`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current version: `v0.9.7`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v0.9.6 deployment and control acceptance record (Chinese)](docs/deploy-1号机-v0.9.6-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+[v0.9.7 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.7-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
 
-This release enforces source freshness immediately before dispatch and the original deadline after slow readback. The read-only data-trunk smoke passed. A new control-point configuration trial stopped at `INPUT_STALE` because committed data was delayed; real closed-loop control is not accepted yet. Existing automatic retries also mean that an external disable script cannot guarantee exactly one physical write.
+This release is deployed. Readback waits for a valid match within the original deadline instead of failing at the first mismatch. Each strategy intent is dispatched once; failure disables and latches the strategy. Provenance writes are batched. The real PCS read-only data-trunk navigation passed, but the communication-threshold point still showed 5–12.5-second-old data and STALE quality. Real closed-loop control remains unaccepted. No device writes were made in this release check; usable pages do not prove control freshness.
 
 > Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
@@ -120,6 +120,7 @@ processing before changing a unit they use.
 - Renaming or saving preserves the existing JDM, trigger, timezone, all bindings, and freshness contracts. Graphs that cannot be represented losslessly by the built-in table remain editable in the full graph and are never replaced with default windows. Publication, activation, and execution revalidate bindings; invalid entities are not silently substituted.
 - After site configuration changes, **Save Draft** revalidates current entities and refreshes the draft configuration baseline. A missing legacy binding unit can be filled from the current entity; changed known units or types remain blocked. Published revisions and activation state remain unchanged: simulate again, then explicitly publish and enable. Expired inputs still block simulation and control; freshness limits are never extended automatically.
 - For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
+- Each strategy intent is dispatched once. After failure, resolve the issue and explicitly re-enable the strategy; clearing the failure does not resume control. Readback retains the original deadline and quality checks. An accepted API request does not prove that the device reached its target.
 - Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
 
 ### 5. Verify and deliver
