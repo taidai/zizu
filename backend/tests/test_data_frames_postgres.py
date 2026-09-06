@@ -1304,6 +1304,28 @@ class DataFramesPostgresTest(unittest.TestCase):
             )
             self.assertEqual((1,), cursor.fetchone())
 
+    def test_frame_snapshot_uses_durable_observation_after_dedup_cache_removal(self) -> None:
+        candidate = self._candidate(capture_beat=106)
+        self.repository.commit_pending(candidate)
+        claim = self.repository.claim_next(datetime.now(UTC))
+        source = candidate.changed_l0[0].observation
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM t_l0_observation_dedup WHERE observation_id=%s",
+                (str(source.observation_id),),
+            )
+
+        snapshot = self.repository.load_processing_snapshot(claim)
+
+        self.assertEqual((self.tag_id,), tuple(snapshot.l0_by_tag))
+        restored = snapshot.l0_by_tag[self.tag_id]
+        self.assertEqual(source.observation_id, restored.observation.observation_id)
+        self.assertEqual(source.value, restored.observation.value)
+        self.assertEqual(source.source_timestamp, restored.observation.source_timestamp)
+        self.assertEqual(source.source_digest, restored.observation.source_digest)
+        self.assertEqual(106, restored.accepted_beat)
+        self.assertIs(TrunkQuality.GOOD, restored.effective_quality)
+
     def test_frame_snapshot_does_not_reload_unused_runtime_configuration(self) -> None:
         pending = self.repository.commit_pending(self._candidate(capture_beat=106))
         claim = self.repository.claim_next(datetime.now(UTC))

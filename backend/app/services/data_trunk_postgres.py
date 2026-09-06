@@ -790,26 +790,10 @@ class PostgresFrameRepository:
                              telemetry.source_order_mode,
                              telemetry.source_receive_ordinal,
                              telemetry.quality_reason
-                      FROM t_l0_observation_dedup AS dedup
-                      JOIN LATERAL (
-                        SELECT item.observation_id,item.node_id,item.tag_id,
-                               item.raw_unit,item.raw_value_float,
-                               item.raw_value_int,item.raw_value_bool,
-                               item.raw_value_text,item.quality,item.ts,
-                               item.event_received_at,item.source_message_id,
-                               item.source_sequence,item.source_digest,
-                               item.event_time_basis,item.accepted_beat,
-                               item.source_order_mode,
-                               item.source_receive_ordinal,item.quality_reason
-                        FROM t_telemetry AS item
-                        WHERE item.observation_id=dedup.observation_id
-                          AND item.ts=dedup.observed_at
-                          AND item.frame_id=%s
-                          AND item.ts >= %s - interval '5 minutes'
-                          AND item.ts <= %s + interval '5 minutes'
-                        LIMIT 1
-                      ) AS telemetry ON TRUE
-                      WHERE dedup.created_at=%s
+                      FROM t_telemetry AS telemetry
+                      WHERE telemetry.frame_id=%s
+                        AND telemetry.ts >= %s - interval '5 minutes'
+                        AND telemetry.ts <= %s + interval '5 minutes'
                     ), relevant_tags AS (
                       SELECT DISTINCT binding.l0_tag_id AS tag_id
                       FROM t_point_processing_input_bindings AS binding
@@ -860,7 +844,6 @@ class PostgresFrameRepository:
                         str(claimed.frame_id),
                         claimed.shot_at,
                         claimed.shot_at,
-                        claimed.created_at,
                         claimed.configuration_revision,
                     ),
                 )

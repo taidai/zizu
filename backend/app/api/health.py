@@ -102,7 +102,7 @@ async def health_check() -> dict:
         }
     """
     # ---- DB 连接状态 ----
-    tsdb_ok = _check_tsdb()
+    tsdb_ok = await asyncio.to_thread(_check_tsdb)
 
     # ---- MQTT 连接状态 ----
     mqtt_ok = False

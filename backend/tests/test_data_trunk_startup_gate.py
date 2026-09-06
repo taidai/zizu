@@ -173,11 +173,17 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertNotIn("latest_frame.capture_beat", postgres_source)
         self.assertIn("WITH current_frame AS MATERIALIZED", postgres_source)
         self.assertIn("SELECT tag_id FROM current_frame", postgres_source)
-        self.assertIn("FROM t_l0_observation_dedup AS dedup", postgres_source)
-        self.assertIn("JOIN LATERAL (", postgres_source)
-        self.assertIn("WHERE dedup.created_at=%s", postgres_source)
+        snapshot_source = inspect.getsource(
+            PostgresFrameRepository.load_processing_snapshot
+        )
+        self.assertNotIn("t_l0_observation_dedup", snapshot_source)
+        self.assertIn("FROM t_telemetry AS telemetry", snapshot_source)
+        self.assertIn("WHERE telemetry.frame_id=%s", snapshot_source)
         self.assertIn(
-            "item.ts >= %s - interval '5 minutes'", postgres_source
+            "telemetry.ts >= %s - interval '5 minutes'", snapshot_source
+        )
+        self.assertIn(
+            "telemetry.ts <= %s + interval '5 minutes'", snapshot_source
         )
         self.assertIn(
             "FROM t_telemetry_latest AS telemetry", postgres_source
