@@ -166,6 +166,29 @@ class DispatchIntentGatePostgresTest(fixtures.DispatchStrategyPostgresFixture, u
         disabled = self.repository.disable(self.revision.strategy_id, "test:after-submit")
         self.assertFalse(disabled.enabled)
 
+    def test_submission_guard_cancels_when_real_snapshot_read_finishes_after_freshness(self):
+        intent_id = self._queue()
+        self.repository._clock = lambda: self.now
+        intent = self.repository.claim_next(self.now)
+        original_load = self.repository.load_snapshot
+
+        def slow_read(*args):
+            snapshot = original_load(*args)
+            self.repository._clock = lambda: self.now + timedelta(seconds=11)
+            return snapshot
+
+        self.repository.load_snapshot = slow_read
+        with self.repository.submission_guard(intent, self.now) as deadline:
+            self.assertIsNone(deadline)
+        self.assertEqual(("CANCELLED", "L2_INPUT_STALE", 1), self._state(intent_id))
+
+    def test_submission_guard_returns_deadline_from_real_committed_sources(self):
+        self._queue()
+        self.repository._clock = lambda: self.now
+        intent = self.repository.claim_next(self.now)
+        with self.repository.submission_guard(intent, self.now) as deadline:
+            self.assertEqual(self.now + timedelta(seconds=10), deadline)
+
     def test_real_control_cooldown_can_submit_under_guard_without_self_deadlock(self):
         from app.services.automated_control_commands import AutomatedControlCommands
         from app.services.control_commands import ControlCommandRuntime, PostgresControlCommandRepository
@@ -196,6 +219,7 @@ class DispatchIntentGatePostgresTest(fixtures.DispatchStrategyPostgresFixture, u
         self.assertEqual("IN_FLIGHT", result.status)
         self.assertEqual(1, len(device.requests))
         self.assertEqual(self.tag_id, device.requests[0].tag_id)
+        self.assertEqual(self.now + timedelta(seconds=10), device.requests[0].source_fresh_until)
 
     def test_same_target_concurrent_cooldown_claims_have_only_one_winner(self):
         from concurrent.futures import ThreadPoolExecutor

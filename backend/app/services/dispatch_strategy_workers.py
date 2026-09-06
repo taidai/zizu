@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Protocol
@@ -50,7 +50,7 @@ class StrategyWorkerRepository(Protocol):
 
     def claim_next(self, now: datetime) -> ControlIntent | None: ...
 
-    def submission_guard(self, intent: ControlIntent, now: datetime) -> AbstractContextManager[bool]: ...
+    def submission_guard(self, intent: ControlIntent, now: datetime) -> AbstractContextManager[datetime | None]: ...
 
     def attach_command(
         self, intent_id: UUID, attempt_number: int, command_id: UUID
@@ -159,10 +159,10 @@ class ControlIntentDispatcher:
                 },
                 attempt_idempotency_key=_attempt_key(intent.id, intent.attempt_count),
             )
-            with self._repository.submission_guard(intent, max(attempted_at, self._clock())) as allowed:
-                if not allowed:
+            with self._repository.submission_guard(intent, max(attempted_at, self._clock())) as source_fresh_until:
+                if source_fresh_until is None:
                     return None
-                command = self._control.submit(request)
+                command = self._control.submit(replace(request, source_fresh_until=source_fresh_until))
             self._repository.attach_command(
                 intent.id, intent.attempt_count, command.id
             )

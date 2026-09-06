@@ -10,7 +10,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from loguru import logger
 
@@ -77,6 +77,7 @@ class NeuronClient:
         """发送 API 请求。"""
         headers = dict(kwargs.pop("headers", {}))
         data = kwargs.pop("json", None)
+        before_send = kwargs.pop("before_send", None)
         url = f"{self.config.url}{path}"
 
         def send(token: str) -> Any:
@@ -84,6 +85,8 @@ class NeuronClient:
                 **headers,
                 "Authorization": f"Bearer {token}",
             }
+            if before_send is not None:
+                before_send()
             return self._http_request(
                 method,
                 url,
@@ -230,7 +233,10 @@ class NeuronClient:
         """删除点位。"""
         return self._request("DELETE", f"/api/v2/tag/{node_name}/{group_name}/{tag_name}")
 
-    def write_tag(self, node_name: str, group_name: str, tag_name: str, value) -> dict:
+    def write_tag(
+        self, node_name: str, group_name: str, tag_name: str, value,
+        *, before_send: Callable[[], None] | None = None,
+    ) -> dict:
         """
         写单个点位。
 
@@ -243,7 +249,7 @@ class NeuronClient:
             "tag": tag_name,
             "value": value,
         }
-        return self._request("POST", "/api/v2/write", json=payload)
+        return self._request("POST", "/api/v2/write", json=payload, before_send=before_send)
 
     # ══════════════════════════════════════════
     # 状态监控

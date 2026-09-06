@@ -21,6 +21,10 @@ from app.services.entity_instance_runtime import EntityInstanceObservation
 TERMINAL_STATUSES = frozenset({"rejected", "timeout", "failed", "mismatch", "readback_confirmed"})
 
 
+class ControlInputExpired(RuntimeError):
+    """Validated strategy inputs expired before the physical write was sent."""
+
+
 @dataclass(frozen=True)
 class ControlInterlock:
     definition_id: str
@@ -53,6 +57,8 @@ class SubmitControlCommand:
     # deliberately not persisted or exposed: request evidence is audit data,
     # never an authority to bypass a high-risk confirmation.
     policy_authorization: str | None = None
+    # Process-local, derived by the strategy submission guard, never HTTP/evidence.
+    source_fresh_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,7 @@ class DispatchControlCommand:
     tag_id: UUID
     value: object
     data_type: str
+    source_fresh_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +351,9 @@ class InMemoryControlTargetResolver:
 class NeuronControlDispatcher:
     """仅执行已验证命令的生产 Neuron Adapter。"""
 
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
     def dispatch(self, request: DispatchControlCommand) -> None:
         from app.core.config import settings
         from app.services.neuron_client import NeuronClient, NeuronConfig
@@ -372,7 +382,13 @@ class NeuronControlDispatcher:
                 allow_insecure_dev_secrets=settings.allow_insecure_dev_secrets,
             )
         )
-        result = client.write_tag(node_name, group_name, neuron_tag_name, request.value)
+        def before_send() -> None:
+            if request.source_fresh_until is not None and self._clock() > request.source_fresh_until:
+                raise ControlInputExpired()
+
+        result = client.write_tag(
+            node_name, group_name, neuron_tag_name, request.value, before_send=before_send
+        )
         # HTTP completion is not a write acknowledgement. Require Neuron's
         # explicit integer success code; bool/empty replies must fail closed.
         error = result.get("error") if isinstance(result, dict) else None
@@ -750,6 +766,9 @@ class ControlCommandRuntime:
             return self._reject(request, digest, now, "IDEMPOTENCY_KEY_REUSED", reserve_key=False)
         if not isinstance(request.idempotency_key, str) or not request.idempotency_key.strip():
             return self._reject(request, digest, now, "CONTROL_IDEMPOTENCY_KEY_INVALID", reserve_key=False)
+        deadline_error = _source_deadline_error(request, now)
+        if deadline_error:
+            return self._reject(request, digest, now, deadline_error, reserve_key=True)
         if request.entity_instance_id is None:
             return self._reject(
                 request,
@@ -831,6 +850,10 @@ class ControlCommandRuntime:
             now,
         ):
             return self._transition(command, "rejected", "CONTROL_COOLDOWN_ACTIVE", at=now)
+        checked_at = self._now()
+        deadline_error = _source_deadline_error(request, checked_at)
+        if deadline_error:
+            return self._transition(command, "rejected", deadline_error, at=checked_at)
         try:
             if source.control_tag_id is None:
                 return self._transition(
@@ -846,8 +869,11 @@ class ControlCommandRuntime:
                     source.control_tag_id,
                     request.value,
                     source.data_type,
+                    request.source_fresh_until,
                 )
             )
+        except ControlInputExpired:
+            return self._transition(command, "rejected", "CONTROL_INPUT_STALE", at=self._now())
         except Exception:
             return self._transition(command, "failed", "CONTROL_DISPATCH_FAILED", at=now)
         # Validation, persistence and the adapter can block while telemetry arrives.
@@ -918,6 +944,13 @@ class ControlCommandRuntime:
         try:
             observation = self._readback.read(readback_id)
         except Exception:
+            observation = None
+        # A slow read must not confirm a command after its original deadline,
+        # or timestamp the decision before the readback was actually available.
+        now = self._now()
+        if command.timeout_at is not None and now >= command.timeout_at:
+            return self._transition(command, "timeout", "CONTROL_READBACK_TIMEOUT", at=now)
+        if observation is None:
             return command
         if command.dispatched_at and observation.observed_at < command.dispatched_at:
             return command
@@ -1129,6 +1162,15 @@ class ControlCommandCompatibility:
                 origin_evidence=origin_evidence or {},
             )
         )
+
+
+def _source_deadline_error(request: SubmitControlCommand, now: datetime) -> str | None:
+    deadline = request.source_fresh_until
+    if deadline is None and request.source_type != "strategy":
+        return None
+    if not isinstance(deadline, datetime) or deadline.tzinfo is None or deadline.utcoffset() is None:
+        return "CONTROL_INPUT_DEADLINE_INVALID"
+    return "CONTROL_INPUT_STALE" if now > deadline else None
 
 
 def _validate_value(value: object, data_type: str, policy: ControlPolicy) -> str | None:

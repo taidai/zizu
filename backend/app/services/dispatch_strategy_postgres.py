@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
 import math
@@ -53,6 +53,7 @@ class PostgresStrategyRepository:
         *,
         connection_factory: ConnectionFactory | None = None,
         compiler: Compiler = compile_standard_jdm,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if connection_factory is None:
             from app.services.telemetry_store import get_connection
@@ -60,6 +61,7 @@ class PostgresStrategyRepository:
             connection_factory = get_connection
         self._connection = connection_factory
         self._compiler = compiler
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def create_strategy(self, draft: StrategyDraft, actor: str) -> StrategyView:
         _validate_draft(draft)
@@ -860,8 +862,22 @@ class PostgresStrategyRepository:
         contracts = self._load_entity_contracts(cursor, revision.bindings)
         validate_publish_bindings(revision.bindings, contracts,
                                   static_targets=static_jdm_targets(revision.jdm_content))
-        validate_strategy_snapshot(revision, _intent_snapshot(evidence, contracts, now))
-        validate_strategy_snapshot(revision, self.load_snapshot(revision, None, now))
+        current = self.load_snapshot(revision, None, now)
+        # Locks preserve values and configuration, not their remaining lifetime.
+        # Recheck after all reads and carry only a server-derived deadline onward.
+        checked_at = max(now, self._clock())
+        persisted = _intent_snapshot(evidence, contracts, checked_at)
+        current = replace(current, evaluated_at=checked_at)
+        validate_strategy_snapshot(revision, persisted)
+        validate_strategy_snapshot(revision, current)
+        samples_by_entity = tuple(
+            {item.entity_instance_id: item for item in snapshot.inputs}
+            for snapshot in (persisted, current)
+        )
+        return min(
+            samples[binding.entity_instance_id].observed_at + timedelta(seconds=binding.freshness_seconds)
+            for samples in samples_by_entity for binding in revision.bindings
+        )
 
     @contextmanager
     def submission_guard(self, intent: ControlIntent, now: datetime):
@@ -887,7 +903,7 @@ class PostgresStrategyRepository:
             )
             state = cursor.fetchone()
             if state is None or state != ("IN_FLIGHT", intent.attempt_count, None):
-                yield False
+                yield None
                 return
             cursor.execute(
                 "SELECT 1 FROM t_dispatch_strategy_owners WHERE entity_instance_id=%s AND strategy_id=%s AND revision_id=%s",
@@ -897,6 +913,7 @@ class PostgresStrategyRepository:
                         and configuration == intent.snapshot_evidence.get("configuration_revision")
                         and cursor.fetchone() is not None)
             rejection = None if eligible else "STRATEGY_FENCE_CHANGED"
+            source_fresh_until = None
             if eligible:
                 # Row locks complement the configuration and strategy fences. They
                 # cover metadata retirement and L2 quality/value updates as well.
@@ -918,7 +935,9 @@ class PostgresStrategyRepository:
                 )
                 cursor.fetchall()
                 try:
-                    self._validate_intent_sources(connection, cursor, intent.revision_id, intent.snapshot_evidence, now)
+                    source_fresh_until = self._validate_intent_sources(
+                        connection, cursor, intent.revision_id, intent.snapshot_evidence, now
+                    )
                 except StrategyModelError as error:
                     rejection = error.code
             if rejection is not None:
@@ -927,7 +946,7 @@ class PostgresStrategyRepository:
                     "WHERE id=%s OR (revision_id=%s AND evaluation_key=%s AND status='PENDING')",
                     (rejection, intent.id, intent.revision_id, intent.evaluation_key),
                 )
-            yield rejection is None
+            yield source_fresh_until if rejection is None else None
 
     def attach_command(
         self,

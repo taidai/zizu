@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 from typing import Literal
@@ -26,6 +27,7 @@ class AutomatedControlCommandRequest:
     trigger_evidence: dict[str, object]
     policy_authorization: str | None = None
     attempt_idempotency_key: str | None = None
+    source_fresh_until: datetime | None = None
 
 
 class AutomatedControlCommands:
@@ -57,6 +59,7 @@ class AutomatedControlCommands:
                 idempotency_key=_idempotency_key(request),
                 origin_evidence=evidence,
                 policy_authorization=request.policy_authorization,
+                source_fresh_until=request.source_fresh_until,
             )
         )
 

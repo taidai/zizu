@@ -76,7 +76,7 @@ class _IntentRepository:
         self.failures = []
 
     def submission_guard(self, intent, now):
-        return nullcontext(True)
+        return nullcontext(now + timedelta(seconds=10))
 
     def claim_next(self, now):
         for row in self.rows:
@@ -243,6 +243,7 @@ class DispatchStrategyWorkersTest(unittest.TestCase):
         dispatcher.recover(NOW)
 
         self.assertEqual(key, control.requests[0].attempt_idempotency_key)
+        self.assertIsInstance(control.requests[0].source_fresh_until, datetime)
         self.assertEqual(1, len(control.requests))
 
     def test_third_failed_attempt_latches_strategy_and_cancels_sequence(self) -> None:

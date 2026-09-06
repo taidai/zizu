@@ -312,6 +312,39 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (timed_out.status, timed_out.code))
         self.assertEqual(1, len(self.dispatcher.requests))
 
+    def _reconcile_after_slow_read(self, *, observed_after_deadline=False, failure=False):
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        self.assertEqual("dispatched", command.status)
+        self.clock.advance(9)
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        original_read = self.readback.read
+
+        def slow_read(entity_id):
+            self.clock.advance(2)
+            if failure:
+                raise RuntimeError("readback unavailable")
+            if observed_after_deadline:
+                self._observe(READBACK_ID, 20.0, after_seconds=0)
+            return original_read(entity_id)
+
+        self.readback.read = slow_read
+        result = self.runtime.reconcile(command.id)
+        self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (result.status, result.code))
+        self.assertEqual(command.timeout_at, result.timeout_at)
+        self.assertEqual(self.clock.now(), self.repository.events(command.id)[-1].at)
+        self.assertEqual("timeout", self.runtime.reconcile(command.id).status)
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_readback_observed_after_deadline_cannot_confirm_during_slow_query(self) -> None:
+        self._reconcile_after_slow_read(observed_after_deadline=True)
+
+    def test_readback_query_finishing_after_deadline_cannot_confirm_earlier_sample(self) -> None:
+        self._reconcile_after_slow_read()
+
+    def test_readback_error_after_deadline_finishes_as_timeout_immediately(self) -> None:
+        self._reconcile_after_slow_read(failure=True)
+
     def test_missing_readback_times_out_after_restart(self) -> None:
         self._observe(INTERLOCK_ID, True)
         dispatched = self.runtime.submit(self._request())
@@ -330,6 +363,86 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.assertEqual("dispatched", dispatched.status)
         self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (timed_out.status, timed_out.code))
 
+    def test_strategy_requires_valid_process_local_source_deadline_before_dispatch(self) -> None:
+        for index, deadline in enumerate((None, True, "2099-01-01T00:00:00Z", self.clock.now().replace(tzinfo=None))):
+            with self.subTest(deadline=deadline):
+                self._observe(INTERLOCK_ID, True)
+                request = replace(
+                    self._request(key=f"invalid-deadline-{index}"), source_type="strategy",
+                    source_fresh_until=deadline,
+                    origin_evidence={"source_fresh_until": "2099-01-01T00:00:00Z"},
+                )
+                result = self.runtime.submit(request)
+                self.assertEqual(("rejected", "CONTROL_INPUT_DEADLINE_INVALID"), (result.status, result.code))
+        self.assertEqual([], self.dispatcher.requests)
+
+    def test_slow_command_persistence_cannot_dispatch_expired_strategy_input(self) -> None:
+        self._observe(INTERLOCK_ID, True)
+        deadline = self.clock.now() + timedelta(seconds=5)
+        original_save = self.repository.save
+
+        def slow_save(command, *, idempotent):
+            saved = original_save(command, idempotent=idempotent)
+            self.clock.advance(6)
+            return saved
+
+        self.repository.save = slow_save
+        request = replace(self._request(), source_type="strategy", source_fresh_until=deadline)
+        result = self.runtime.submit(request)
+        self.assertEqual(("rejected", "CONTROL_INPUT_STALE"), (result.status, result.code))
+        self.assertEqual([], self.dispatcher.requests)
+
+    def test_strategy_deadline_remains_inclusive_without_allowing_later_dispatch(self) -> None:
+        self._observe(INTERLOCK_ID, True)
+        deadline = self.clock.now()
+        request = replace(self._request(), source_type="strategy", source_fresh_until=deadline)
+        result = self.runtime.submit(request)
+        self.assertEqual("dispatched", result.status)
+        self.assertEqual(deadline, self.dispatcher.requests[0].source_fresh_until)
+        self.clock.value += timedelta(microseconds=1)
+        expired = self.runtime.submit(replace(request, idempotency_key="expired-input"))
+        self.assertEqual(("rejected", "CONTROL_INPUT_STALE"), (expired.status, expired.code))
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_slow_neuron_target_lookup_or_login_cannot_send_expired_strategy_write(self) -> None:
+        from app.core.config import settings
+        from app.services.control_commands import NeuronControlDispatcher
+
+        for index, stage in enumerate(("target", "login")):
+            with self.subTest(stage=stage):
+                self.clock.advance(6)
+                self._observe(INTERLOCK_ID, True)
+                deadline = self.clock.now() + timedelta(seconds=5)
+                self.runtime._dispatcher = NeuronControlDispatcher(clock=self.clock.now)
+                requests = []
+
+                def target_row():
+                    if stage == "target":
+                        self.clock.advance(6)
+                    return ("PCS-01", "setpoint", "NEURON", "driver/cmd/setpoint")
+
+                def http_response(request, **kwargs):
+                    requests.append(request)
+                    if request.full_url.endswith("/api/v2/login"):
+                        if stage == "login":
+                            self.clock.advance(6)
+                        return io.BytesIO(b'{"token":"test-neuron-token"}')
+                    return io.BytesIO(b'{"error":0}')
+
+                with (
+                    patch("app.services.telemetry_store.get_connection") as connection,
+                    patch.object(settings, "neuron_password", "test-neuron-write-secret"),
+                    patch("urllib.request.urlopen", side_effect=http_response),
+                ):
+                    cursor = connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+                    cursor.fetchone.side_effect = target_row
+                    result = self.runtime.submit(replace(
+                        self._request(key=f"slow-neuron-{index}"), source_type="strategy",
+                        source_fresh_until=deadline,
+                    ))
+                self.assertEqual(("rejected", "CONTROL_INPUT_STALE"), (result.status, result.code))
+                self.assertFalse(any(request.full_url.endswith("/api/v2/write") for request in requests))
+
     def test_dispatch_failure_is_not_reported_as_success(self) -> None:
         self._observe(INTERLOCK_ID, True)
         self.runtime._dispatcher.failure = RuntimeError("gateway rejected")
@@ -338,11 +451,11 @@ class ControlCommandRuntimeTest(unittest.TestCase):
 
         self.assertEqual(("failed", "CONTROL_DISPATCH_FAILED"), (command.status, command.code))
 
-    def _submit_via_neuron(self, response: bytes, *, key: str):
+    def _submit_via_neuron(self, response: bytes, *, key: str, source_fresh_until=None):
         from app.core.config import settings
         from app.services.control_commands import NeuronControlDispatcher
 
-        self.runtime._dispatcher = NeuronControlDispatcher()
+        self.runtime._dispatcher = NeuronControlDispatcher(clock=self.clock.now)
         self._observe(INTERLOCK_ID, True)
         with (
             patch("app.services.telemetry_store.get_connection") as connection,
@@ -355,6 +468,8 @@ class ControlCommandRuntimeTest(unittest.TestCase):
             cursor = connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
             cursor.fetchone.return_value = ("PCS-01", "setpoint", "NEURON", "driver/cmd/setpoint")
             request = self._request(key=key)
+            if source_fresh_until is not None:
+                request = replace(request, source_type="strategy", source_fresh_until=source_fresh_until)
             command = self.runtime.submit(request)
             repeated = self.runtime.submit(request)
 
@@ -399,6 +514,18 @@ class ControlCommandRuntimeTest(unittest.TestCase):
             ["accepted", "validated", "dispatched", "readback_confirmed"],
             [event.to_status for event in self.repository.events(command.id)],
         )
+
+    def test_valid_strategy_deadline_neuron_ack_still_needs_new_l2_readback(self) -> None:
+        self._observe(READBACK_ID, 20.0, after_seconds=-1)
+        command = self._submit_via_neuron(
+            b'{"error":0}', key="strategy-valid-ack",
+            source_fresh_until=self.clock.now() + timedelta(seconds=5),
+        )
+        self.assertEqual("dispatched", command.status)
+        self.assertNotIn("source_fresh_until", command.public_dict())
+        self.clock.advance(1)
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        self.assertEqual("readback_confirmed", self.runtime.reconcile(command.id).status)
 
     def test_persistent_cooldown_and_reused_key_protect_after_restart(self) -> None:
         self._observe(INTERLOCK_ID, True)
@@ -585,6 +712,7 @@ class ControlCommandRuntimeTest(unittest.TestCase):
             value=20.0,
             trigger_evidence={"frame_sequence": 42},
             attempt_idempotency_key=attempt_key,
+            source_fresh_until=self.clock.now() + timedelta(seconds=10),
         )
 
         commands = AutomatedControlCommands(self.runtime)
