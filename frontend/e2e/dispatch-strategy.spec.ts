@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { buildTwoChargeTwoDischargeJdm } from '../src/components/dispatch-strategy/dispatchStrategyModel.mjs'
+import { stopSpawnedProcess } from './support/localProcess.mjs'
 
 const execFileAsync = promisify(execFile)
 let localFixtureOutput = ''
@@ -596,7 +597,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
 
     await page.getByRole('button', { name: '节点管理', exact: true }).click()
     await page.getByPlaceholder('搜索节点...').fill('strategy-test')
-    await page.getByTitle('strategy-test').click()
+    await page.getByTitle('strategy-test', { exact: true }).click()
     await expect(page.getByRole('region', { name: '原始数据' })).toBeVisible()
     await page.getByPlaceholder('搜索点位名称').fill('soc')
     await expect(page.getByRole('row').filter({ hasText: 'soc' })).toContainText('50.5')
@@ -732,7 +733,5 @@ function startUntilReady(command: string, args: string[], env: NodeJS.ProcessEnv
 }
 
 async function stopProcess(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null) return
-  child.kill()
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  await stopSpawnedProcess(child)
 }
