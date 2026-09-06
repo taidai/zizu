@@ -6,9 +6,11 @@
 实体，再配置告警、调度策略、控制和固定 EMS 工作台，即可交付单站工业控制系统。光储充 EMS 是首个参考
 交付场景。
 
-**当前版本：`v0.9.5`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**当前版本：`v0.9.6`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v0.9.5 发布记录](docs/deploy-1号机-v0.9.5-http.md) · [现网功能完成度评估](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+[v0.9.6 发布与控制验收记录](docs/deploy-1号机-v0.9.6-http.md) · [上轮现网功能评估](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+
+本版补齐控制下发前的来源时效检查，以及慢回读后的原截止时间检查。现场只读主干复验通过；新控制点配置试算仍因数据提交延迟触发 `INPUT_STALE` 而停止，真实控制闭环尚未通过验收。现有自动重试也不能被外部停用脚本当作“严格只写一次”。
 
 > 当前状态：核心数据主干和调度策略基础闭环已经落地，告警正在现场打磨；统一控制和固定 EMS 工作台仍需完成真实
 > 光储充站点的端到端验收。ZiZu 尚不能宣称完整 EMS 已经交付就绪。
