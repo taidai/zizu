@@ -243,14 +243,52 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         )
         self.assertEqual([], self.dispatcher.requests)
 
-    def test_fresh_readback_mismatch_is_terminal(self) -> None:
+    def test_fresh_readback_mismatch_waits_and_later_match_confirms_without_resend(self) -> None:
         self._observe(INTERLOCK_ID, True)
         self._observe(READBACK_ID, 10.0)
 
         command = self.runtime.submit(self._request())
 
-        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (command.status, command.code))
-        self.assertEqual("mismatch", self.runtime.reconcile(command.id).status)
+        self.assertEqual(("dispatched", "CONTROL_READBACK_PENDING_MISMATCH"), (command.status, command.code))
+        self.clock.advance(4)
+        self._observe(READBACK_ID, 20.05, after_seconds=0)
+        confirmed = self.runtime.reconcile(command.id)
+        self.assertEqual("readback_confirmed", confirmed.status)
+        self.assertEqual(command.timeout_at, confirmed.timeout_at)
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_first_mismatch_evidence_survives_restart_until_original_deadline(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        event_id = UUID("70000000-0000-0000-0000-000000000001")
+        self.readback.observations[READBACK_ID] = replace(
+            self.readback.observations[READBACK_ID], event_id=event_id,
+        )
+        command = self.runtime.submit(self._request())
+        first_observed_at = self.clock.now()
+        restarted = type(self.runtime)(
+            registry=self.runtime._registry, policies=self.runtime._policies,
+            readback=self.readback, dispatcher=self.dispatcher,
+            repository=self.repository, clock=self.clock.now,
+        )
+        self.clock.advance(9)
+        self._observe(READBACK_ID, 12.0, after_seconds=0)
+        self.assertEqual("dispatched", restarted.recover()[0].status)
+        pending = [event for event in self.repository.events(command.id)
+                   if event.code == "CONTROL_READBACK_PENDING_MISMATCH"]
+        self.assertEqual(1, len(pending))
+        self.assertEqual({
+            "entity_instance_id": str(READBACK_ID), "value": 10.0,
+            "observed_at": first_observed_at.isoformat(), "quality": 192,
+            "event_id": str(event_id),
+        }, pending[0].readback_evidence)
+        self.clock.advance(1)
+        failed = restarted.recover()[0]
+        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (failed.status, failed.code))
+        self.assertEqual(command.timeout_at, failed.timeout_at)
+        self.assertEqual(command.origin_evidence, failed.origin_evidence)
+        self.assertEqual(command.policy_snapshot, failed.policy_snapshot)
+        self.assertEqual(1, len(self.dispatcher.requests))
 
     def _submit_with_delayed_dispatch(self, old_value: float):
         self._observe(INTERLOCK_ID, True, after_seconds=0)
@@ -296,10 +334,34 @@ class ControlCommandRuntimeTest(unittest.TestCase):
         self.clock.advance(1)
         self._observe(READBACK_ID, 10.0, after_seconds=0)
         mismatch = self.runtime.reconcile(command.id)
-        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (mismatch.status, mismatch.code))
+        self.assertEqual(("dispatched", "CONTROL_READBACK_PENDING_MISMATCH"), (mismatch.status, mismatch.code))
         self.clock.advance(1)
         self._observe(READBACK_ID, 20.0, after_seconds=0)
-        self.assertEqual("mismatch", self.runtime.reconcile(command.id).status)
+        self.assertEqual("readback_confirmed", self.runtime.reconcile(command.id).status)
+
+    def test_invalid_readback_never_counts_as_confirmation_or_mismatch_evidence(self) -> None:
+        for index, changes in enumerate((
+            {"fresh": False},
+            {"quality": 0, "quality_good": False},
+            {"quality": 1, "quality_good": False},
+            {"quality": 0, "quality_good": True},
+            {"observed_at": self.clock.now() - timedelta(seconds=1)},
+        )):
+            for value in (10.0, 20.0):
+                with self.subTest(changes=changes, value=value):
+                    self.setUp()
+                    self._observe(INTERLOCK_ID, True, after_seconds=0)
+                    self._observe(READBACK_ID, value, after_seconds=0)
+                    self.readback.observations[READBACK_ID] = replace(
+                        self.readback.observations[READBACK_ID], **changes,
+                    )
+                    command = self.runtime.submit(self._request(key=f"invalid-readback-{index}-{value}"))
+                    self.assertEqual(("dispatched", "CONTROL_DISPATCHED"), (command.status, command.code))
+                    self.clock.advance(10)
+                    result = self.runtime.reconcile(command.id)
+                    self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (result.status, result.code))
+                    self.assertFalse(any(event.readback_evidence for event in self.repository.events(command.id)))
+                    self.assertEqual(1, len(self.dispatcher.requests))
 
     def test_delayed_dispatch_does_not_extend_original_timeout(self) -> None:
         started_at = self.clock.now()
@@ -344,6 +406,89 @@ class ControlCommandRuntimeTest(unittest.TestCase):
 
     def test_readback_error_after_deadline_finishes_as_timeout_immediately(self) -> None:
         self._reconcile_after_slow_read(failure=True)
+
+    def test_slow_read_after_a_timely_mismatch_expires_as_mismatch_not_success(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        self.clock.advance(9)
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        original_read = self.readback.read
+
+        def slow_read(entity_id):
+            self.clock.advance(2)
+            return original_read(entity_id)
+
+        self.readback.read = slow_read
+        result = self.runtime.reconcile(command.id)
+        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (result.status, result.code))
+        self.assertEqual(command.timeout_at, result.timeout_at)
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_first_different_sample_returned_after_deadline_is_not_timely_evidence(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        self.clock.advance(9)
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        original_read = self.readback.read
+
+        def slow_read(entity_id):
+            self.clock.advance(2)
+            return original_read(entity_id)
+
+        self.readback.read = slow_read
+        result = self.runtime.reconcile(command.id)
+        self.assertEqual(("timeout", "CONTROL_READBACK_TIMEOUT"), (result.status, result.code))
+        self.assertFalse(any(event.readback_evidence for event in self.repository.events(command.id)))
+
+    def test_expiry_uses_mismatch_persisted_by_another_reconcile(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        original_read = self.readback.read
+
+        def overlapping_read(entity_id):
+            self.readback.read = original_read
+            self.runtime.reconcile(command.id)
+            self.clock.advance(10)
+            return original_read(entity_id)
+
+        self.readback.read = overlapping_read
+        result = self.runtime.reconcile(command.id)
+        self.assertEqual(("mismatch", "CONTROL_READBACK_MISMATCH"), (result.status, result.code))
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_inflight_mismatch_cannot_overwrite_concurrent_confirmation(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        self._observe(READBACK_ID, 10.0, after_seconds=0)
+        different = self.readback.observations[READBACK_ID]
+        original_read = self.readback.read
+
+        def overlapping_read(entity_id):
+            self.readback.read = original_read
+            self._observe(READBACK_ID, 20.0, after_seconds=0)
+            self.runtime.reconcile(command.id)
+            return different
+
+        self.readback.read = overlapping_read
+        result = self.runtime.reconcile(command.id)
+        self.assertEqual("readback_confirmed", result.status)
+        self.assertFalse(any(event.readback_evidence for event in self.repository.events(command.id)))
+        self.assertEqual(1, len(self.dispatcher.requests))
+
+    def test_existing_terminal_mismatch_is_not_reopened_by_matching_readback(self) -> None:
+        self._observe(INTERLOCK_ID, True, after_seconds=0)
+        command = self.runtime.submit(self._request())
+        # A pre-upgrade terminal command is an immutable historical fact.
+        self.repository.update(
+            replace(command, status="mismatch", code="CONTROL_READBACK_MISMATCH"),
+            occurred_at=self.clock.now(),
+        )
+        self._observe(READBACK_ID, 20.0, after_seconds=0)
+        self.assertEqual("mismatch", self.runtime.reconcile(command.id).status)
+        self.assertEqual(command.id, self.runtime.submit(self._request()).id)
+        self.assertEqual(1, len(self.dispatcher.requests))
 
     def test_missing_readback_times_out_after_restart(self) -> None:
         self._observe(INTERLOCK_ID, True)

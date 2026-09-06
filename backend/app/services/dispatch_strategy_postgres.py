@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from psycopg2.errors import LockNotAvailable
 from psycopg2.extras import Json
 
 from app.services.dispatch_strategies import (
@@ -742,6 +743,15 @@ class PostgresStrategyRepository:
                 WHERE configuration.singleton=TRUE
                   AND intent.status IN ('PENDING','IN_FLIGHT')
                   AND intent.next_attempt_at<=%s
+                  AND (
+                    (intent.status='PENDING' AND intent.attempt_count>0)
+                    OR (intent.status='IN_FLIGHT' AND intent.control_command_id IS NOT NULL)
+                    OR NOT EXISTS (
+                      SELECT 1 FROM t_dispatch_control_intents AS legacy_retry
+                      WHERE legacy_retry.strategy_id=intent.strategy_id
+                        AND legacy_retry.status='PENDING' AND legacy_retry.attempt_count>0
+                    )
+                  )
                   AND ((intent.status='IN_FLIGHT' AND intent.control_command_id IS NOT NULL) OR NOT EXISTS(
                     SELECT 1 FROM t_dispatch_control_intents AS previous
                     WHERE previous.revision_id=intent.revision_id
@@ -757,6 +767,36 @@ class PostgresStrategyRepository:
             )
             row = cursor.fetchone()
             if row is None:
+                return None
+            if str(row[9]) == "PENDING" and int(row[10]) > 0:
+                # A legacy retry is a prior failed attempt even if its source
+                # has since expired or changed. Stop it before normal gating.
+                try:
+                    cursor.execute(
+                        "SELECT id FROM t_dispatch_strategies WHERE id=%s FOR UPDATE NOWAIT",
+                        (row[1],),
+                    )
+                except LockNotAvailable:
+                    # Normal writers lock strategy before intent. Never wait
+                    # for the reverse order while holding this legacy claim.
+                    connection.rollback()
+                    return None
+                code = "CONTROL_AUTOMATIC_RETRY_DISABLED"
+                self._stop_strategy(cursor, row[1], row[2], code)
+                cursor.execute(
+                    "UPDATE t_dispatch_control_intents SET last_error_code=%s WHERE id=%s",
+                    (code, row[0]),
+                )
+                evidence = dict(row[12]) if isinstance(row[12], dict) else {}
+                cursor.execute(
+                    "INSERT INTO t_dispatch_strategy_events"
+                    "(occurred_at,id,strategy_id,revision_id,event_kind,trigger_kind,"
+                    "trigger_key,configuration_revision,snapshot_evidence,intent_summary,reason_code) "
+                    "VALUES(%s,%s,%s,%s,'FAILED','CONTROL_RESULT',%s,%s,%s,%s,%s)",
+                    (now, uuid4(), row[1], row[2], f"intent:{row[0]}:retry-disabled",
+                     int(row[18]), Json(_json_safe(evidence)),
+                     Json([{"intent_id": str(row[0]), "attempt_count": int(row[10])}]), code),
+                )
                 return None
             if str(row[9]) == "IN_FLIGHT" and row[11] is None and int(row[10]) > 0:
                 from app.services.dispatch_strategy_workers import _attempt_key
@@ -986,27 +1026,6 @@ class PostgresStrategyRepository:
             if cursor.rowcount != 1:
                 raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
 
-    def schedule_retry(
-        self,
-        intent_id: UUID,
-        command_id: UUID,
-        code: str,
-        next_attempt_at: datetime,
-    ) -> None:
-        with self._write() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE t_dispatch_control_intents
-                SET status='PENDING',control_command_id=NULL,next_attempt_at=%s,
-                    last_error_code=%s,updated_at=clock_timestamp()
-                WHERE id=%s AND status='IN_FLIGHT' AND control_command_id=%s
-                  AND attempt_count<3
-                """,
-                (next_attempt_at, code, intent_id, command_id),
-            )
-            if cursor.rowcount != 1:
-                raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
-
     def mark_failed(
         self,
         intent: ControlIntent,
@@ -1015,37 +1034,19 @@ class PostgresStrategyRepository:
         now: datetime,
     ) -> None:
         with self._write() as connection, connection.cursor() as cursor:
+            self._lock_strategy(cursor, intent.strategy_id)
             cursor.execute(
                 """
                 UPDATE t_dispatch_control_intents
                 SET status='FAILED',last_error_code=%s,updated_at=clock_timestamp()
                 WHERE id=%s AND status='IN_FLIGHT' AND control_command_id=%s
-                  AND attempt_count=3
+                  AND attempt_count=%s AND attempt_count>=1
                 """,
-                (code, intent.id, command_id),
+                (code, intent.id, command_id, intent.attempt_count),
             )
             if cursor.rowcount != 1:
                 raise StrategyRepositoryError("CONTROL_INTENT_STATE_CHANGED")
-            cursor.execute(
-                """
-                UPDATE t_dispatch_control_intents
-                SET status='CANCELLED',last_error_code='STRATEGY_FAILED',
-                    updated_at=clock_timestamp()
-                WHERE strategy_id=%s AND status='PENDING'
-                """,
-                (intent.strategy_id,),
-            )
-            cursor.execute(
-                """
-                UPDATE t_dispatch_strategies
-                SET runtime_health='FAILED',failure_code=%s,
-                    updated_by='strategy-runtime',updated_at=clock_timestamp()
-                WHERE id=%s AND active_revision_id=%s
-                """,
-                (code, intent.strategy_id, intent.revision_id),
-            )
-            if cursor.rowcount != 1:
-                raise StrategyRepositoryError("STRATEGY_ACTIVE_REVISION_CHANGED")
+            self._stop_strategy(cursor, intent.strategy_id, intent.revision_id, code)
             evidence = dict(intent.snapshot_evidence)
             cursor.execute(
                 """
@@ -1074,6 +1075,26 @@ class PostgresStrategyRepository:
                     code,
                 ),
             )
+
+    @staticmethod
+    def _stop_strategy(cursor, strategy_id, revision_id, code):
+        """Stop under the strategy row lock; manual clear must not resume writes."""
+        cursor.execute(
+            "UPDATE t_dispatch_strategies "
+            "SET enabled=FALSE,runtime_health='FAILED',failure_code=%s,"
+            "updated_by='strategy-runtime',updated_at=clock_timestamp() "
+            "WHERE id=%s AND active_revision_id=%s",
+            (code, strategy_id, revision_id),
+        )
+        if cursor.rowcount != 1:
+            raise StrategyRepositoryError("STRATEGY_ACTIVE_REVISION_CHANGED")
+        cursor.execute(
+            "UPDATE t_dispatch_control_intents "
+            "SET status='CANCELLED',last_error_code='STRATEGY_FAILED',updated_at=clock_timestamp() "
+            "WHERE strategy_id=%s AND status='PENDING'",
+            (strategy_id,),
+        )
+        cursor.execute("DELETE FROM t_dispatch_strategy_owners WHERE strategy_id=%s", (strategy_id,))
 
     def recoverable_count(self) -> int:
         with self._connection() as connection, connection.cursor() as cursor:

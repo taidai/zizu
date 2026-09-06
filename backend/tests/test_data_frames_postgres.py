@@ -769,6 +769,228 @@ class DataFramesPostgresTest(unittest.TestCase):
             )
             self.assertEqual((str(source.observation_id),), cursor.fetchone())
 
+    def test_l2_source_evidence_is_batched_for_a_whole_frame(self) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=107))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        snapshot = self.repository.load_processing_snapshot(claim)
+        self.repository.complete(claim, snapshot, ())
+        l0_source = snapshot.l0_by_tag[self.tag_id].observation
+
+        def l2_observation(
+            *,
+            event_id: UUID,
+            source_ids: tuple[UUID, ...],
+            digest: str,
+            event_time_basis: str,
+        ) -> L2Observation:
+            return L2Observation(
+                event_id=event_id,
+                entity_instance_id=uuid4(),
+                definition_id="test.batched_sources",
+                value=TypedValue.float(107.0),
+                unit="kW",
+                quality=TrunkQuality.GOOD,
+                reason=None,
+                observed_at=self.now,
+                received_at=self.now,
+                calculated_at=self.now,
+                processing_revision_id=uuid4(),
+                configuration_revision=0,
+                source_observation_ids=source_ids,
+                source_digest=digest,
+                source_order_key=digest,
+                event_time_basis=event_time_basis,
+                frame_id=pending.frame_id,
+                frame_sequence=pending.frame_sequence,
+            )
+
+        l2_source = l2_observation(
+            event_id=uuid4(),
+            source_ids=(),
+            digest="b" * 64,
+            event_time_basis="calculated_at",
+        )
+        older_l2_source = replace(
+            l2_source,
+            observed_at=self.now - timedelta(seconds=1),
+            source_digest="a" * 64,
+        )
+        l2_shadow_of_l0 = replace(
+            l2_source,
+            event_id=l0_source.observation_id,
+            source_digest="f" * 64,
+        )
+        direct = l2_observation(
+            event_id=uuid4(),
+            source_ids=(l0_source.observation_id,),
+            digest="c" * 64,
+            event_time_basis="received_at",
+        )
+        downstream = l2_observation(
+            event_id=uuid4(),
+            source_ids=(l0_source.observation_id, l2_source.event_id),
+            digest="d" * 64,
+            event_time_basis="calculated_at",
+        )
+
+        statements: list[str] = []
+
+        class RecordingCursor(psycopg2.extensions.cursor):
+            def execute(self, query, vars=None):
+                statements.append(" ".join(str(query).lower().split()))
+                return super().execute(query, vars)
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            self.repository._insert_frame_l2(
+                cursor,
+                (
+                    older_l2_source,
+                    l2_source,
+                    l2_shadow_of_l0,
+                    direct,
+                    downstream,
+                ),
+            )
+            cursor.execute("SET session_replication_role=origin")
+        with psycopg2.connect(
+            **self.connection_kwargs,
+            cursor_factory=RecordingCursor,
+        ) as connection, connection.cursor() as cursor:
+            self.repository._insert_sources(cursor, (direct, downstream))
+
+        source_statements = [
+            statement
+            for statement in statements
+            if "t_l2_observation_sources" in statement
+            or "telemetry.observation_id = any" in statement
+            or "from t_l2_observations" in statement
+        ]
+        self.assertLessEqual(
+            len(source_statements),
+            3,
+            "source evidence SQL grew with frame outputs and dependency edges",
+        )
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT l2_event_id,source_kind,l0_observation_id,"
+                "source_l2_event_id,source_l2_observed_at,source_digest,"
+                "source_event_time_basis FROM t_l2_observation_sources "
+                "WHERE l2_event_id=ANY(%s::uuid[]) "
+                "ORDER BY l2_event_id,source_kind",
+                ([str(direct.event_id), str(downstream.event_id)],),
+            )
+            rows = cursor.fetchall()
+        self.assertEqual(3, len(rows))
+        by_target_and_kind = {
+            (UUID(str(row[0])), row[1]): row[2:]
+            for row in rows
+        }
+        self.assertEqual(
+            (
+                str(l0_source.observation_id),
+                None,
+                None,
+                l0_source.source_digest,
+                l0_source.event_time_basis,
+            ),
+            by_target_and_kind[(direct.event_id, "l0")],
+        )
+        self.assertEqual(
+            (
+                None,
+                str(l2_source.event_id),
+                l2_source.observed_at,
+                l2_source.source_digest,
+                l2_source.event_time_basis,
+            ),
+            by_target_and_kind[(downstream.event_id, "l2")],
+        )
+        self.assertEqual(
+            by_target_and_kind[(direct.event_id, "l0")],
+            by_target_and_kind[(downstream.event_id, "l0")],
+        )
+
+    def test_missing_l2_source_rolls_back_the_whole_terminal_transaction(self) -> None:
+        template_id = uuid4()
+        revision_id = uuid4()
+        entity_id = uuid4()
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_point_processing_templates"
+                "(id,asset_id,device_category,brand,model,display_name,status) "
+                "VALUES(%s,%s,'DEVICE','test','missing-source',"
+                "'Missing source','active')",
+                (str(template_id), f"test.missing-source.{template_id}"),
+            )
+            cursor.execute(
+                "INSERT INTO t_point_processing_revisions"
+                "(id,template_id,revision,content_digest,published_at) "
+                "VALUES(%s,%s,1,%s,%s)",
+                (
+                    str(revision_id),
+                    str(template_id),
+                    hashlib.sha256(str(revision_id).encode()).hexdigest(),
+                    self.now,
+                ),
+            )
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO t_entity_instances"
+                "(id,node_id,definition_id,display_name,data_type,direction,"
+                " freshness_seconds,active,source_kind) "
+                "VALUES(%s,%s,'test.missing_source','Missing source','FLOAT',"
+                "'R',30,TRUE,'point_processing')",
+                (str(entity_id), str(self.node_id)),
+            )
+            cursor.execute("SET session_replication_role=origin")
+
+        pending = self.repository.commit_pending(self._candidate(capture_beat=108))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        snapshot = self.repository.load_processing_snapshot(claim)
+        output = L2Observation(
+            event_id=uuid4(),
+            entity_instance_id=entity_id,
+            definition_id="test.missing_source",
+            value=TypedValue.float(108.0),
+            unit="kW",
+            quality=TrunkQuality.GOOD,
+            reason=None,
+            observed_at=self.now,
+            received_at=self.now,
+            calculated_at=self.now,
+            processing_revision_id=revision_id,
+            configuration_revision=0,
+            source_observation_ids=(uuid4(),),
+            source_digest="e" * 64,
+            source_order_key="missing-source",
+            event_time_basis="calculated_at",
+            frame_id=pending.frame_id,
+            frame_sequence=pending.frame_sequence,
+        )
+
+        with self.assertRaises(DataTrunkError) as raised:
+            self.repository.complete(claim, snapshot, (output,))
+        self.assertEqual("POINT_PROCESSING_SOURCE_MISSING", raised.exception.code)
+
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,attempt_count FROM t_data_frames WHERE frame_id=%s",
+                (str(pending.frame_id),),
+            )
+            self.assertEqual(("PROCESSING", 1), cursor.fetchone())
+            cursor.execute(
+                "SELECT (SELECT count(*) FROM t_l2_observations WHERE frame_id=%s),"
+                "(SELECT count(*) FROM t_l2_latest WHERE frame_sequence=%s),"
+                "(SELECT count(*) FROM t_data_frame_outbox WHERE frame_id=%s)",
+                (
+                    str(pending.frame_id),
+                    pending.frame_sequence,
+                    str(pending.frame_id),
+                ),
+            )
+            self.assertEqual((0, 0, 0), cursor.fetchone())
+
     def test_l2_latest_retains_last_good_value_while_current_quality_is_bad(self) -> None:
         entity_id = uuid4()
         template_id = uuid4()
@@ -1081,6 +1303,44 @@ class DataFramesPostgresTest(unittest.TestCase):
                 (str(pending.frame_id),),
             )
             self.assertEqual((1,), cursor.fetchone())
+
+    def test_frame_snapshot_does_not_reload_unused_runtime_configuration(self) -> None:
+        pending = self.repository.commit_pending(self._candidate(capture_beat=106))
+        claim = self.repository.claim_next(datetime.now(UTC))
+        statements: list[str] = []
+
+        class RecordingCursor(psycopg2.extensions.cursor):
+            def execute(self, query, vars=None):
+                statements.append(" ".join(str(query).lower().split()))
+                return super().execute(query, vars)
+
+        kwargs = dict(self.connection_kwargs)
+
+        @contextmanager
+        def recording_connection():
+            connection = psycopg2.connect(
+                **kwargs,
+                cursor_factory=RecordingCursor,
+            )
+            try:
+                yield connection
+            finally:
+                connection.close()
+
+        snapshot = PostgresFrameRepository(
+            connection_factory=recording_connection,
+        ).load_processing_snapshot(claim)
+
+        self.assertEqual((self.tag_id,), tuple(snapshot.l0_by_tag))
+        self.assertFalse(
+            any(
+                statement
+                == "select current_revision from t_configuration_state "
+                "where singleton = true"
+                for statement in statements
+            ),
+            "frame snapshot reloaded runtime configuration that its caller discards",
+        )
 
     def test_old_pending_head_is_terminalized_before_next_frame(self) -> None:
         old_id = uuid4()

@@ -10,7 +10,7 @@ from uuid import uuid4
 import psycopg2
 from psycopg2.extras import Json
 
-from app.services.dispatch_strategy_postgres import _json_safe
+from app.services.dispatch_strategy_postgres import PostgresStrategyRepository, _json_safe
 from app.services.dispatch_strategy_workers import ControlIntentDispatcher
 from tests import test_dispatch_strategy_postgres as fixtures
 
@@ -110,7 +110,16 @@ class DispatchIntentGatePostgresTest(fixtures.DispatchStrategyPostgresFixture, u
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("UPDATE t_entity_instances SET definition_id='room.humidity' WHERE id=%s", (self.input_id,))
         self.assertIsNone(self.repository.claim_next(self.now))
-        self.assertEqual(("CANCELLED", "SOC_BINDING_DEFINITION_INVALID", 1), self._state(intent_id))
+        self.assertEqual(("CANCELLED", "CONTROL_AUTOMATIC_RETRY_DISABLED", 1), self._state(intent_id))
+        self.assertFalse(self.repository.get_strategy(self.revision.strategy_id).enabled)
+
+    def test_old_retry_without_valid_evidence_still_latches_failure(self):
+        intent_id = self._queue({}, attempts=1)
+        self.assertIsNone(self.repository.claim_next(self.now + timedelta(minutes=1)))
+        self.assertEqual(("CANCELLED", "CONTROL_AUTOMATIC_RETRY_DISABLED", 1), self._state(intent_id))
+        strategy = self.repository.get_strategy(self.revision.strategy_id)
+        self.assertFalse(strategy.enabled)
+        self.assertEqual("FAILED", strategy.runtime_health)
 
     def test_unsent_inflight_intent_after_restart_is_revalidated(self):
         intent_id = self._queue({"configuration_revision": self.configuration_revision}, status="IN_FLIGHT", attempts=1)
@@ -271,7 +280,76 @@ class DispatchIntentGatePostgresTest(fixtures.DispatchStrategyPostgresFixture, u
         self.assertIsNotNone(worker.run_once(self.now))
         self.assertEqual([command_id], control.reads)
         self.assertIsNone(worker.run_once(self.now + timedelta(seconds=2)))
-        self.assertEqual(("CANCELLED", "STRATEGY_FENCE_CHANGED", 1), self._state(intent_id))
+        self.assertEqual(("FAILED", "TIMEOUT", 1), self._state(intent_id))
+
+    def test_first_failed_readback_stops_strategy_and_cancels_pending_actions(self):
+        intent_id, command_id = self._sent()
+        pending_id = self._queue()
+        control = _ReadbackOnly(command_id, "mismatch")
+        worker = ControlIntentDispatcher(self.repository, control)
+
+        result = worker.run_once(self.now)
+
+        self.assertEqual("FAILED", result.status)
+        self.assertEqual(("FAILED", "MISMATCH", 1), self._state(intent_id))
+        self.assertEqual(("CANCELLED", "STRATEGY_FAILED", 0), self._state(pending_id))
+        strategy = self.repository.get_strategy(self.revision.strategy_id)
+        self.assertFalse(strategy.enabled)
+        self.assertEqual("FAILED", strategy.runtime_health)
+        self.assertIsNone(worker.run_once(self.now + timedelta(minutes=1)))
+        self.assertEqual([command_id], control.reads)
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_owners WHERE strategy_id=%s", (strategy.id,))
+            self.assertEqual(0, cursor.fetchone()[0])
+            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_events WHERE strategy_id=%s AND event_kind='FAILED'", (strategy.id,))
+            self.assertEqual(1, cursor.fetchone()[0])
+        # Clearing the diagnosis is not permission to restart device control.
+        self.repository.clear_failure(strategy.id, "test:manual")
+        self.assertFalse(self.repository.get_strategy(strategy.id).enabled)
+        self.assertIsNone(worker.run_once(self.now + timedelta(minutes=2)))
+
+    def test_old_pending_retry_never_becomes_a_second_write(self):
+        intent_id = self._queue(attempts=1)
+        pending_id = self._queue()
+        self.assertIsNone(self.repository.claim_next(self.now))
+        self.assertEqual(("CANCELLED", "CONTROL_AUTOMATIC_RETRY_DISABLED", 1), self._state(intent_id))
+        self.assertEqual(("CANCELLED", "STRATEGY_FAILED", 0), self._state(pending_id))
+        strategy = self.repository.get_strategy(self.revision.strategy_id)
+        self.assertFalse(strategy.enabled)
+        self.assertEqual("FAILED", strategy.runtime_health)
+        self.assertNotIn(strategy.id, self.repository.fixed_tick_strategy_ids())
+        self.assertIsNone(self.repository.claim_next(self.now + timedelta(minutes=1)))
+
+    def test_old_retry_does_not_wait_for_reverse_strategy_lock_order(self):
+        intent_id = self._queue(attempts=1)
+
+        def bounded_connection():
+            connection = self._connection()
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout='1500ms'")
+            connection.commit()
+            return connection
+
+        repository = PostgresStrategyRepository(connection_factory=bounded_connection)
+        with self._connection() as blocker, blocker.cursor() as cursor:
+            cursor.execute("SELECT id FROM t_dispatch_strategies WHERE id=%s FOR UPDATE", (self.revision.strategy_id,))
+            self.assertIsNone(repository.claim_next(self.now))
+            self.assertEqual(("PENDING", None, 1), self._state(intent_id))
+        self.assertIsNone(repository.claim_next(self.now))
+        self.assertEqual(("CANCELLED", "CONTROL_AUTOMATIC_RETRY_DISABLED", 1), self._state(intent_id))
+        self.assertFalse(repository.get_strategy(self.revision.strategy_id).enabled)
+
+    def test_locked_old_retry_blocks_other_unsent_work_for_same_strategy(self):
+        old_retry = self._queue(attempts=1)
+        pending = self._queue()
+        unsent = self._queue(status="IN_FLIGHT", attempts=1)
+        with self._connection() as blocker, blocker.cursor() as cursor:
+            cursor.execute("SELECT id FROM t_dispatch_control_intents WHERE id=%s FOR UPDATE", (old_retry,))
+            # SKIP LOCKED must not turn the other actions into a bypass around
+            # the legacy failed attempt while another worker is stopping it.
+            self.assertIsNone(self.repository.claim_next(self.now))
+            self.assertEqual(("PENDING", None, 0), self._state(pending))
+            self.assertEqual(("IN_FLIGHT", None, 1), self._state(unsent))
 
 
 class _ReadbackOnly:

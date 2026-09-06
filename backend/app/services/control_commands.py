@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
+from threading import RLock
 from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
 
@@ -19,6 +20,7 @@ from app.services.entity_instance_runtime import EntityInstanceObservation
 
 
 TERMINAL_STATUSES = frozenset({"rejected", "timeout", "failed", "mismatch", "readback_confirmed"})
+READBACK_PENDING_MISMATCH = "CONTROL_READBACK_PENDING_MISMATCH"
 
 
 class ControlInputExpired(RuntimeError):
@@ -128,6 +130,7 @@ class ControlCommandEvent:
     to_status: str
     code: str
     at: datetime
+    readback_evidence: dict[str, object] | None = None
 
 
 class ControlIdempotencyConflict(RuntimeError):
@@ -137,7 +140,10 @@ class ControlIdempotencyConflict(RuntimeError):
 class ControlCommandRepository(Protocol):
     def idempotent(self, actor: str, key: str) -> ControlCommand | None: ...
     def save(self, command: ControlCommand, *, idempotent: bool) -> ControlCommand: ...
-    def update(self, command: ControlCommand, *, occurred_at: datetime) -> ControlCommand: ...
+    def update(
+        self, command: ControlCommand, *, occurred_at: datetime,
+        readback_evidence: dict[str, object] | None = None,
+    ) -> ControlCommand: ...
     def get(self, command_id: UUID) -> ControlCommand | None: ...
     def events(self, command_id: UUID) -> tuple[ControlCommandEvent, ...]: ...
     def inflight(self) -> tuple[ControlCommand, ...]: ...
@@ -401,6 +407,7 @@ class InMemoryControlCommandRepository:
 
     def __init__(self) -> None:
         self._commands: dict[UUID, ControlCommand] = {}
+        self._transition_lock = RLock()
         self._idempotency: dict[tuple[str, str], UUID] = {}
         self._events: dict[UUID, list[ControlCommandEvent]] = {}
         self._cooldowns: dict[UUID, datetime] = {}
@@ -428,15 +435,20 @@ class InMemoryControlCommandRepository:
         )
         return command
 
-    def update(self, command: ControlCommand, *, occurred_at: datetime) -> ControlCommand:
-        previous = self._commands[command.id]
-        if previous.status in TERMINAL_STATUSES:
-            return previous
-        self._commands[command.id] = command
-        self._events[command.id].append(
-            ControlCommandEvent(command.id, command.status, command.code, occurred_at)
-        )
-        return command
+    def update(
+        self, command: ControlCommand, *, occurred_at: datetime,
+        readback_evidence: dict[str, object] | None = None,
+    ) -> ControlCommand:
+        with self._transition_lock:
+            previous = self._commands[command.id]
+            command = _current_transition(previous, command)
+            if command is previous:
+                return previous
+            self._commands[command.id] = command
+            self._events[command.id].append(
+                ControlCommandEvent(command.id, command.status, command.code, occurred_at, readback_evidence)
+            )
+            return command
 
     def get(self, command_id: UUID) -> ControlCommand | None:
         return self._commands.get(command_id)
@@ -560,17 +572,38 @@ class PostgresControlCommandRepository:
             conn.commit()
         return command
 
-    def update(self, command: ControlCommand, *, occurred_at: datetime) -> ControlCommand:
+    def update(
+        self, command: ControlCommand, *, occurred_at: datetime,
+        readback_evidence: dict[str, object] | None = None,
+    ) -> ControlCommand:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE t_control_commands
-                SET status = %s, code = %s, dispatched_at = %s
-                WHERE id = %s
-                  AND status NOT IN ('readback_confirmed', 'rejected', 'timeout', 'failed', 'mismatch')
-                RETURNING """ + _COMMAND_COLUMNS,
-                (command.status, command.code, command.dispatched_at, command.id),
+                "SELECT " + _COMMAND_COLUMNS + " FROM t_control_commands WHERE id=%s FOR UPDATE",
+                (command.id,),
             )
+            previous = _command_from_row(cur.fetchone())
+            command = _current_transition(previous, command)
+            if command is previous:
+                conn.commit()
+                return previous
+            if command.status == "dispatched" and command.code == READBACK_PENDING_MISMATCH:
+                # This is evidence inside the existing state, not dispatched -> dispatched.
+                # Keep the database's monotonic status-transition trigger unchanged.
+                cur.execute(
+                    "UPDATE t_control_commands SET code=%s WHERE id=%s AND status='dispatched' "
+                    "RETURNING " + _COMMAND_COLUMNS,
+                    (command.code, command.id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE t_control_commands
+                    SET status = %s, code = %s, dispatched_at = %s
+                    WHERE id = %s
+                      AND status NOT IN ('readback_confirmed', 'rejected', 'timeout', 'failed', 'mismatch')
+                    RETURNING """ + _COMMAND_COLUMNS,
+                    (command.status, command.code, command.dispatched_at, command.id),
+                )
             row = cur.fetchone()
             if row is None:
                 cur.execute("SELECT " + _COMMAND_COLUMNS + " FROM t_control_commands WHERE id = %s", (command.id,))
@@ -578,7 +611,7 @@ class PostgresControlCommandRepository:
                 conn.commit()
                 return _command_from_row(row)
             saved = _command_from_row(row)
-            audit_event_id = self._append_audit(cur, saved)
+            audit_event_id = self._append_audit(cur, saved, readback_evidence=readback_evidence)
             self._append_event(cur, saved, occurred_at, audit_event_id)
             conn.commit()
         return saved
@@ -592,7 +625,10 @@ class PostgresControlCommandRepository:
     def events(self, command_id: UUID) -> tuple[ControlCommandEvent, ...]:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT command_id, to_status, code, occurred_at FROM t_control_command_events WHERE command_id = %s ORDER BY occurred_at, id",
+                "SELECT event.command_id,event.to_status,event.code,event.occurred_at,"
+                "audit.details->'readback' FROM t_control_command_events event "
+                "LEFT JOIN t_audit_events audit ON audit.id=event.audit_event_id "
+                "WHERE event.command_id=%s ORDER BY event.occurred_at,event.id",
                 (command_id,),
             )
             return tuple(ControlCommandEvent(*row) for row in cur.fetchall())
@@ -671,8 +707,19 @@ class PostgresControlCommandRepository:
         return consumed
 
     @staticmethod
-    def _append_audit(cur, command: ControlCommand) -> UUID:
+    def _append_audit(
+        cur, command: ControlCommand, *,
+        readback_evidence: dict[str, object] | None = None,
+    ) -> UUID:
         audit_event_id = uuid4()
+        details = {
+            "command_id": str(command.id),
+            "source_type": command.source_type,
+            "capability": command.capability,
+            "origin_evidence": command.origin_evidence,
+        }
+        if readback_evidence is not None:
+            details["readback"] = readback_evidence
         cur.execute(
             """
             INSERT INTO t_audit_events
@@ -689,14 +736,7 @@ class PostgresControlCommandRepository:
                     if command.entity_instance_id
                     else "legacy-control-target:unresolved"
                 ),
-                json.dumps(
-                    {
-                        "command_id": str(command.id),
-                        "source_type": command.source_type,
-                        "capability": command.capability,
-                        "origin_evidence": command.origin_evidence,
-                    }
-                ),
+                json.dumps(details),
             ),
         )
         return audit_event_id
@@ -952,11 +992,24 @@ class ControlCommandRuntime:
             return self._transition(command, "timeout", "CONTROL_READBACK_TIMEOUT", at=now)
         if observation is None:
             return command
+        if not observation.fresh or not observation.quality_good or observation.quality != 192:
+            return command
         if command.dispatched_at and observation.observed_at < command.dispatched_at:
             return command
         if _matches(command.expected_value, observation.value, command.data_type, command.tolerance):
             return self._transition(command, "readback_confirmed", "CONTROL_READBACK_CONFIRMED", at=now)
-        return self._transition(command, "mismatch", "CONTROL_READBACK_MISMATCH", at=now)
+        if command.code == READBACK_PENDING_MISMATCH:
+            return command
+        return self._transition(
+            command, "dispatched", READBACK_PENDING_MISMATCH, at=now,
+            readback_evidence={
+                "entity_instance_id": str(observation.entity_instance_id),
+                "value": observation.value,
+                "observed_at": observation.observed_at.isoformat(),
+                "quality": observation.quality,
+                "event_id": str(observation.event_id) if observation.event_id else None,
+            },
+        )
 
     def get(self, command_id: UUID) -> ControlCommand:
         command = self._repository.get(command_id)
@@ -1030,15 +1083,28 @@ class ControlCommandRuntime:
         *,
         at: datetime,
         dispatched_at: datetime | None = None,
+        readback_evidence: dict[str, object] | None = None,
     ) -> ControlCommand:
         return self._repository.update(
             replace(command, status=status, code=code, dispatched_at=dispatched_at or command.dispatched_at),
             occurred_at=at,
+            readback_evidence=readback_evidence,
         )
 
     def _now(self) -> datetime:
         value = self._clock()
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _current_transition(previous: ControlCommand, requested: ControlCommand) -> ControlCommand:
+    """Choose against the locked current row, never a stale reconcile snapshot."""
+    if previous.status in TERMINAL_STATUSES:
+        return previous
+    if requested.code == READBACK_PENDING_MISMATCH and previous.code == READBACK_PENDING_MISMATCH:
+        return previous
+    if requested.code == "CONTROL_READBACK_TIMEOUT" and previous.code == READBACK_PENDING_MISMATCH:
+        return replace(requested, status="mismatch", code="CONTROL_READBACK_MISMATCH")
+    return requested
 
 
 class ControlCommandCompatibility:

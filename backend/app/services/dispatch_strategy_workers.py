@@ -60,14 +60,6 @@ class StrategyWorkerRepository(Protocol):
         self, intent_id: UUID, command_id: UUID, now: datetime
     ) -> None: ...
 
-    def schedule_retry(
-        self,
-        intent_id: UUID,
-        command_id: UUID,
-        code: str,
-        next_attempt_at: datetime,
-    ) -> None: ...
-
     def mark_failed(
         self,
         intent: ControlIntent,
@@ -174,25 +166,11 @@ class ControlIntentDispatcher:
                 intent.id, "CONFIRMED", intent.attempt_count, command.id, command.code
             )
         if command.status in {"rejected", "timeout", "failed", "mismatch"}:
-            if intent.attempt_count >= 3:
-                self._repository.mark_failed(
-                    intent, command.id, command.code, attempted_at
-                )
-                return DispatchResult(
-                    intent.id, "FAILED", intent.attempt_count, command.id, command.code
-                )
-            cooldown = max(
-                0,
-                int(command.policy_snapshot.get("cooldown_seconds", 0)),
-            )
-            self._repository.schedule_retry(
-                intent.id,
-                command.id,
-                command.code,
-                attempted_at + timedelta(seconds=cooldown),
+            self._repository.mark_failed(
+                intent, command.id, command.code, max(attempted_at, self._clock())
             )
             return DispatchResult(
-                intent.id, "PENDING", intent.attempt_count, command.id, command.code
+                intent.id, "FAILED", intent.attempt_count, command.id, command.code
             )
         return DispatchResult(
             intent.id, "IN_FLIGHT", intent.attempt_count, command.id, command.code

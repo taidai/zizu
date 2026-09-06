@@ -916,14 +916,15 @@ class PostgresFrameRepository:
                         accepted_beat=accepted_beat,
                         effective_quality=effective_quality,
                     )
-                legacy_snapshot = self._load_conversion_snapshot(
+                legacy_installed = self._load_conversion_snapshot(
                     cursor,
                     tuple(cell.observation for cell in cells.values()),
                     calculated_at=claimed.shot_at,
+                    installed_only=True,
                 )
                 installed = {
                     item.entity_instance_id: item
-                    for item in legacy_snapshot.installed
+                    for item in legacy_installed
                 }
                 installed.update(
                     {
@@ -2012,7 +2013,8 @@ class PostgresFrameRepository:
         observations: tuple[RawObservation, ...],
         *,
         calculated_at: datetime,
-    ) -> _ConversionSnapshot:
+        installed_only: bool = False,
+    ) -> _ConversionSnapshot | tuple[InstalledPointProcessing, ...]:
         tag_ids = tuple(sorted({item.tag_id for item in observations}, key=str))
 
         cursor.execute(
@@ -2310,6 +2312,9 @@ class PostgresFrameRepository:
                 )
             )
 
+        if installed_only:
+            return tuple(installed_items)
+
         current_inputs: dict[InputReference, RawObservation] = {}
         if boolean_tag_ids:
             cursor.execute(
@@ -2414,97 +2419,123 @@ class PostgresFrameRepository:
 
     @staticmethod
     def _insert_sources(cursor, observations: tuple[L2Observation, ...]) -> None:
-        for observation in observations:
-            if not observation.source_observation_ids:
-                continue
+        sourced = tuple(
+            observation
+            for observation in observations
+            if observation.source_observation_ids
+        )
+        if not sourced:
+            return
+        source_ids = tuple(
+            sorted(
+                {
+                    source_id
+                    for observation in sourced
+                    for source_id in observation.source_observation_ids
+                },
+                key=str,
+            )
+        )
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (telemetry.observation_id)
+                   telemetry.observation_id, telemetry.source_digest,
+                   telemetry.event_time_basis
+            FROM t_telemetry_latest AS telemetry
+            WHERE telemetry.observation_id = ANY(%s::uuid[])
+            ORDER BY telemetry.observation_id, telemetry.ts DESC
+            """,
+            ([str(item) for item in source_ids],),
+        )
+        l0_sources = {
+            UUID(str(source_id)): (source_digest.strip(), event_time_basis)
+            for source_id, source_digest, event_time_basis in cursor.fetchall()
+        }
+        unresolved = tuple(
+            source_id for source_id in source_ids if source_id not in l0_sources
+        )
+        l2_sources: dict[UUID, tuple[datetime, str, str]] = {}
+        if unresolved:
             cursor.execute(
                 """
-                SELECT DISTINCT ON (telemetry.observation_id)
-                       telemetry.observation_id, telemetry.source_digest,
-                       telemetry.event_time_basis
-                FROM t_telemetry_latest AS telemetry
-                WHERE telemetry.observation_id = ANY(%s::uuid[])
-                ORDER BY telemetry.observation_id, telemetry.ts DESC
+                SELECT event_id, observed_at, source_digest, event_time_basis
+                FROM t_l2_observations
+                WHERE event_id = ANY(%s::uuid[])
+                ORDER BY event_id, observed_at DESC
                 """,
-                ([str(item) for item in observation.source_observation_ids],),
+                ([str(item) for item in unresolved],),
             )
-            l0_sources = {
-                UUID(str(source_id)): (source_digest.strip(), event_time_basis)
-                for source_id, source_digest, event_time_basis in cursor.fetchall()
-            }
-            unresolved = tuple(
-                source_id for source_id in observation.source_observation_ids
-                if source_id not in l0_sources
-            )
-            l2_sources: dict[UUID, tuple[datetime, str, str]] = {}
-            if unresolved:
-                cursor.execute(
-                    """
-                    SELECT event_id, observed_at, source_digest, event_time_basis
-                    FROM t_l2_observations
-                    WHERE event_id = ANY(%s::uuid[])
-                    ORDER BY event_id, observed_at DESC
-                    """,
-                    ([str(item) for item in unresolved],),
+            for (
+                source_id,
+                observed_at,
+                source_digest,
+                event_time_basis,
+            ) in cursor.fetchall():
+                l2_sources.setdefault(
+                    UUID(str(source_id)),
+                    (observed_at, source_digest.strip(), event_time_basis),
                 )
-                for (
-                    source_id,
-                    observed_at,
-                    source_digest,
-                    event_time_basis,
-                ) in cursor.fetchall():
-                    l2_sources.setdefault(
-                        UUID(str(source_id)),
-                        (observed_at, source_digest.strip(), event_time_basis),
-                    )
-            if len(l0_sources) + len(l2_sources) != len(
-                observation.source_observation_ids
-            ):
+
+        rows = []
+        for observation in sourced:
+            resolved = {
+                source_id
+                for source_id in observation.source_observation_ids
+                if source_id in l0_sources or source_id in l2_sources
+            }
+            if len(resolved) != len(observation.source_observation_ids):
                 raise DataTrunkError(
                     "POINT_PROCESSING_SOURCE_MISSING",
                     "L2 source observation is unavailable",
                 )
-            for source_id, (source_digest, source_event_time_basis) in l0_sources.items():
-                cursor.execute(
-                    """
-                INSERT INTO t_l2_observation_sources
-                  (l2_event_id, l2_observed_at, source_kind,
-                       l0_observation_id, source_digest,
-                       source_event_time_basis)
-                    VALUES (%s, %s, 'l0', %s, %s, %s)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (
-                        str(observation.event_id),
-                        observation.observed_at,
-                        str(source_id),
-                        source_digest,
-                        source_event_time_basis,
-                    ),
+            for source_id in observation.source_observation_ids:
+                if source_id in l0_sources:
+                    source_digest, source_event_time_basis = l0_sources[source_id]
+                    rows.append(
+                        (
+                            str(observation.event_id),
+                            observation.observed_at,
+                            "l0",
+                            str(source_id),
+                            None,
+                            None,
+                            source_digest,
+                            source_event_time_basis,
+                        )
+                    )
+                    continue
+                source_observed_at, source_digest, source_event_time_basis = (
+                    l2_sources[source_id]
                 )
-            for source_id, (
-                source_observed_at,
-                source_digest,
-                source_event_time_basis,
-            ) in l2_sources.items():
-                cursor.execute(
-                    """
-                    INSERT INTO t_l2_observation_sources
-                      (l2_event_id, l2_observed_at, source_kind,
-                       source_l2_event_id, source_l2_observed_at,
-                       source_digest, source_event_time_basis)
-                    VALUES (%s, %s, 'l2', %s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
-                    """,
+                rows.append(
                     (
                         str(observation.event_id),
                         observation.observed_at,
+                        "l2",
+                        None,
                         str(source_id),
                         source_observed_at,
                         source_digest,
                         source_event_time_basis,
-                    ),
+                    )
                 )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO t_l2_observation_sources
+              (l2_event_id,l2_observed_at,source_kind,l0_observation_id,
+               source_l2_event_id,source_l2_observed_at,source_digest,
+               source_event_time_basis)
+            VALUES %s
+            ON CONFLICT DO NOTHING
+            """,
+            rows,
+            template=(
+                "(%s::uuid,%s::timestamptz,%s::text,%s::uuid,%s::uuid,"
+                "%s::timestamptz,%s::char(64),%s::text)"
+            ),
+            page_size=len(rows),
+        )
 
 
 def _raw_columns(

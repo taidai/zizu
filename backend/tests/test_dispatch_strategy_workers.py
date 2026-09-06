@@ -109,15 +109,6 @@ class _IntentRepository:
         row = self._row(intent_id)
         row.item = replace(row.item, status="CONFIRMED", control_command_id=command_id)
 
-    def schedule_retry(self, intent_id, command_id, code, next_attempt_at):
-        row = self._row(intent_id)
-        row.item = replace(
-            row.item,
-            status="PENDING",
-            control_command_id=None,
-            next_attempt_at=next_attempt_at,
-        )
-
     def mark_failed(self, intent, command_id, code, now):
         row = self._row(intent.id)
         row.item = replace(row.item, status="FAILED", control_command_id=command_id)
@@ -246,21 +237,42 @@ class DispatchStrategyWorkersTest(unittest.TestCase):
         self.assertIsInstance(control.requests[0].source_fresh_until, datetime)
         self.assertEqual(1, len(control.requests))
 
-    def test_third_failed_attempt_latches_strategy_and_cancels_sequence(self) -> None:
-        first = _intent(0)
-        second = _intent(1)
-        repository = _IntentRepository([first, second])
-        control = _Control(["failed", "failed", "failed"])
+    def test_first_terminal_failure_latches_strategy_without_automatic_resubmit(self) -> None:
+        for status in ("rejected", "failed", "timeout", "mismatch"):
+            with self.subTest(status=status):
+                first = _intent(0)
+                second = _intent(1)
+                repository = _IntentRepository([first, second])
+                control = _Control([status, status, status])
+                dispatcher = ControlIntentDispatcher(repository, control)
+
+                result = dispatcher.run_once(NOW)
+
+                self.assertEqual("FAILED", result.status)
+                self.assertEqual("FAILED", repository.rows[0].item.status)
+                self.assertEqual("CANCELLED", repository.rows[1].item.status)
+                self.assertEqual("FAILED", repository.strategy_health)
+                for offset in (2, 20, 60):
+                    self.assertIsNone(dispatcher.run_once(NOW + timedelta(seconds=offset)))
+                dispatcher.recover(NOW + timedelta(minutes=2))
+                self.assertEqual(1, len(control.requests))
+                self.assertEqual(1, repository.rows[0].item.attempt_count)
+                self.assertEqual(1, len(repository.failures))
+
+    def test_pending_readback_is_only_reconciled_until_it_matches(self) -> None:
+        repository = _IntentRepository([_intent()])
+        control = _Control(["dispatched"])
         dispatcher = ControlIntentDispatcher(repository, control)
-
-        for offset in (0, 2, 4):
-            dispatcher.run_once(NOW + timedelta(seconds=offset))
-
-        self.assertEqual("FAILED", repository.rows[0].item.status)
-        self.assertEqual("CANCELLED", repository.rows[1].item.status)
-        self.assertEqual("FAILED", repository.strategy_health)
-        self.assertEqual(3, len(control.requests))
-        self.assertEqual(1, len(repository.failures))
+        first = dispatcher.run_once(NOW)
+        for offset in (1, 2, 3):
+            result = dispatcher.run_once(NOW + timedelta(seconds=offset))
+            self.assertEqual("IN_FLIGHT", result.status)
+        command = control.commands[first.control_command_id]
+        command.status = "readback_confirmed"
+        restarted = ControlIntentDispatcher(repository, control)
+        result = restarted.run_once(NOW + timedelta(seconds=4))
+        self.assertEqual("CONFIRMED", result.status)
+        self.assertEqual(1, len(control.requests))
 
     def test_confirmed_first_action_releases_next_ordinal(self) -> None:
         first = _intent(0)
