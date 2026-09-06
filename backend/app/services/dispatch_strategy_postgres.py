@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -498,9 +498,13 @@ class PostgresStrategyRepository:
         revision: StrategyRevision,
         frame_sequence: int | None,
         evaluated_at: datetime,
+        connection=None,
     ) -> StrategySnapshot:
-        with self._connection() as connection, connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        owns_connection = connection is None
+        connection_scope = self._connection() if owns_connection else nullcontext(connection)
+        with connection_scope as connection, connection.cursor() as cursor:
+            if owns_connection:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             cursor.execute(
                 """
                 SELECT frame_sequence,configuration_revision
@@ -902,7 +906,7 @@ class PostgresStrategyRepository:
         contracts = self._load_entity_contracts(cursor, revision.bindings)
         validate_publish_bindings(revision.bindings, contracts,
                                   static_targets=static_jdm_targets(revision.jdm_content))
-        current = self.load_snapshot(revision, None, now)
+        current = self.load_snapshot(revision, None, now, connection)
         # Locks preserve values and configuration, not their remaining lifetime.
         # Recheck after all reads and carry only a server-derived deadline onward.
         checked_at = max(now, self._clock())

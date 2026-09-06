@@ -14,6 +14,28 @@ from tests.test_dispatch_strategy_runtime import NOW, OUTPUT_ID, SOC_ID, _revisi
 
 
 class DispatchStrategySubmissionDeadlineTest(unittest.TestCase):
+    def test_snapshot_can_reuse_guard_transaction_without_waiting_for_second_pool_slot(self):
+        revision = _revision()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (321, 7)
+        cursor.fetchall.return_value = []
+        cursor_context = MagicMock()
+        cursor_context.__enter__.return_value = cursor
+        connection = MagicMock()
+        connection.cursor.return_value = cursor_context
+
+        def unexpected_second_connection():
+            raise AssertionError("snapshot requested a second connection pool slot")
+
+        repository = PostgresStrategyRepository(
+            connection_factory=unexpected_second_connection,
+        )
+        snapshot = repository.load_snapshot(revision, None, NOW, connection)
+
+        self.assertEqual(321, snapshot.frame_sequence)
+        self.assertEqual(7, snapshot.configuration_revision)
+        self.assertEqual((), snapshot.inputs)
+
     def _guard(self, *, delay=0, current_age=0, persisted_age=0, duplicate_binding=False, extra_current=False):
         revision = _revision()
         if duplicate_binding:
@@ -53,7 +75,9 @@ class DispatchStrategySubmissionDeadlineTest(unittest.TestCase):
             OUTPUT_ID: EntityBindingContract(True, "FLOAT", "kW", "RW", 1, 0, 200, "pcs.setpoint"),
         }
 
-        def delayed_snapshot(model, frame, now):
+        def delayed_snapshot(model, frame, now, _connection=None):
+            if _connection is not connection:
+                raise AssertionError("submission guard requested another connection")
             self.clock += timedelta(seconds=delay)
             inputs = tuple(
                 replace(item, observed_at=NOW - timedelta(seconds=current_age))
