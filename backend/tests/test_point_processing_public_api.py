@@ -1,7 +1,9 @@
 """Authenticated public HTTP seam for point-processing planning and apply."""
 from __future__ import annotations
 
+import asyncio
 import os
+from threading import Event
 import unittest
 from unittest.mock import Mock, patch
 from uuid import UUID
@@ -19,6 +21,7 @@ from app.api.security import get_identity
 from app.services.identity import (
     Identity,
     InMemoryIdentityRepository,
+    Principal,
     UserIdentity,
     hash_password,
 )
@@ -129,6 +132,56 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, response.status_code, response.text)
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    async def test_node_draft_plan_keeps_realtime_event_loop_responsive(self) -> None:
+        """A slow synchronous plan must not pause MQTT/frame coroutines."""
+        from app.api.point_processings import (
+            PointProcessingDraftPlanRequest,
+            create_point_processing_draft_plan,
+        )
+
+        class SlowPlan:
+            def public_dict(self) -> dict[str, object]:
+                return {"id": "plan-1", "status": "ready"}
+
+        class SlowService:
+            @staticmethod
+            def preview_node_definition(**_kwargs) -> SlowPlan:
+                entered.set()
+                release.wait(timeout=1)
+                return SlowPlan()
+
+            @staticmethod
+            def trial(_plan) -> None:
+                return None
+
+        entered = Event()
+        release = Event()
+        principal = Principal(
+            UUID("00000000-0000-0000-0000-000000000002"),
+            "engineer",
+            "engineer",
+            UUID("00000000-0000-0000-0000-000000000012"),
+        )
+        request = asyncio.create_task(
+            create_point_processing_draft_plan(
+                NODE_ID,
+                PointProcessingDraftPlanRequest(content={}, input_selections={}),
+                principal,
+                SlowService(),
+            )
+        )
+        entered_while_request_pending = await asyncio.to_thread(
+            entered.wait,
+            0.5,
+        )
+        request_still_pending = not request.done()
+        release.set()
+        response = await request
+
+        self.assertTrue(entered_while_request_pending)
+        self.assertTrue(request_still_pending)
+        self.assertEqual("plan-1", response["id"])
 
     async def test_formula_preview_is_read_only_typed_and_engineer_only(self) -> None:
         app, _, repository = self.build_app()

@@ -285,13 +285,17 @@ async def create_point_processing_draft_plan(
     service: PointProcessingService = Depends(get_point_processings),
 ) -> dict:
     try:
-        plan = service.preview_node_definition(
-            node_id=node_id,
-            content=body.content,
-            input_selections=body.input_selections,
-            actor=principal.actor,
+        return await asyncio.to_thread(
+            lambda: _plan_with_trial(
+                service,
+                service.preview_node_definition(
+                    node_id=node_id,
+                    content=body.content,
+                    input_selections=body.input_selections,
+                    actor=principal.actor,
+                ),
+            )
         )
-        return _plan_with_trial(service, plan)
     except PointProcessingTemplateError as exc:
         _raise_template_http(exc)
     except PointProcessingError as exc:
