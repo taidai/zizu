@@ -3,12 +3,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import asyncio
 import os
 import unittest
+
+from fastapi import FastAPI
+
+from app.api import dispatch_strategies as strategy_api
 
 from app.services.dispatch_strategies import StrategyModelError, StrategyRuntime, StrategyTrigger
 from app.services.entity_instance_postgres import PostgresEntityInstanceRepository
 from tests.test_dispatch_strategy_postgres import DispatchStrategyPostgresFixture
+from tests.api_test_client import AuthenticatedApiClient
 
 
 UNAVAILABLE_SOURCES = ("unconfirmed", "non_current", "disabled_node")
@@ -19,6 +25,42 @@ UNAVAILABLE_SOURCES = ("unconfirmed", "non_current", "disabled_node")
     "set ZIZU_POSTGRES_TEST=1 to run confirmed dispatch-source tests",
 )
 class DispatchStrategyConfirmedPostgresTest(DispatchStrategyPostgresFixture, unittest.TestCase):
+    def test_published_trial_uses_real_committed_inputs_and_jdm_without_writes(self):
+        strategy, revision = self._published_strategy()
+        frame, _ = self._commit_samples()
+        before = self.repository.get_strategy(strategy.id)
+        app = FastAPI()
+        app.include_router(strategy_api.router, prefix="/api/v1")
+        app.dependency_overrides[strategy_api.get_dispatch_strategy_repository] = lambda: self.repository
+        app.dependency_overrides[strategy_api.get_dispatch_strategy_runtime] = lambda: StrategyRuntime(self.repository)
+
+        async def trial():
+            async with AuthenticatedApiClient(app) as client:
+                return await client.post(
+                    f"/api/v1/dispatch-strategies/{strategy.id}/simulate",
+                    json={"revision_id": str(revision.id), "expected_digest": revision.content_digest},
+                )
+
+        response = asyncio.run(trial())
+        self.assertEqual(200, response.status_code, response.text)
+        result = response.json()
+        self.assertEqual("EVALUATED", result["status"], result)
+        self.assertEqual(frame, result["frame_sequence"])
+        self.assertEqual(50, result["snapshot"]["soc"]["value"])
+        self.assertEqual("%", result["snapshot"]["soc"]["unit"])
+        self.assertEqual("GOOD", result["snapshot"]["soc"]["quality"])
+        self.assertTrue(result["snapshot"]["soc"]["observed_at"])
+        # Fixture's only charge window is [01:00, 03:00); otherwise target is 0.
+        minute = result["engine_inputs"]["site_local_minute"]
+        expected = 50 if 60 <= minute < 180 else 0
+        self.assertEqual(expected, result["proposed_intents"][0]["value"])
+        self.assertEqual(before, self.repository.get_strategy(strategy.id))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM t_dispatch_control_intents WHERE strategy_id=%s", (strategy.id,))
+            self.assertEqual(0, cursor.fetchone()[0])
+            cursor.execute("SELECT count(*) FROM t_dispatch_strategy_owners WHERE strategy_id=%s", (strategy.id,))
+            self.assertEqual(0, cursor.fetchone()[0])
+
     @contextmanager
     def _unavailable_source(self, state):
         with self._connection() as connection, connection.cursor() as cursor:

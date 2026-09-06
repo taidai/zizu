@@ -146,9 +146,11 @@ class _Repository:
 class _Runtime:
     def __init__(self) -> None:
         self.calls = []
+        self.expected_digests = []
 
-    def simulate(self, revision_id, overrides, evaluated_at):
+    def simulate(self, revision_id, overrides, evaluated_at, *, expected_digest=None):
         self.calls.append((revision_id, overrides, evaluated_at))
+        self.expected_digests.append(expected_digest)
         input_value = overrides.get("soc", 49.0)
         sample = StrategyInput(
             "soc", INPUT_ID, input_value, "FLOAT", "%", "GOOD", NOW, 40, 7
@@ -289,6 +291,43 @@ class DispatchStrategyPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()["active_revision"])
         self.assertEqual(str(REVISION_ID), response.json()["published_revision"]["id"])
 
+    async def test_disabled_published_revision_can_be_simulated_without_creating_draft(self) -> None:
+        self.repository.view = _view(draft=False, enabled=False)
+        before = self.repository.view
+        async with AuthenticatedApiClient(self.app) as client:
+            token = await client._bearer("operator")
+            for body in ({}, {"revision_id": str(REVISION_ID)}):
+                with self.subTest(body=body):
+                    response = await client._client.post(
+                        f"/api/v1/dispatch-strategies/{STRATEGY_ID}/simulate",
+                        json=body, headers={"Authorization": token},
+                    )
+                    self.assertEqual(200, response.status_code, response.text)
+                    self.assertEqual("EVALUATED", response.json()["status"])
+        self.assertEqual(before, self.repository.view)
+        self.assertEqual([], self.repository.calls)
+        self.assertEqual([REVISION_ID, REVISION_ID], [call[0] for call in self.runtime.calls])
+
+    async def test_simulation_cannot_select_an_unrelated_revision(self) -> None:
+        self.repository.view = _view(draft=False, enabled=False)
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.post(
+                f"/api/v1/dispatch-strategies/{STRATEGY_ID}/simulate",
+                json={"revision_id": str(INPUT_ID)},
+            )
+        self.assertGreaterEqual(response.status_code, 400, response.text)
+        self.assertEqual("STRATEGY_REVISION_NOT_FOUND", response.json()["detail"]["code"])
+        self.assertEqual([], self.runtime.calls)
+
+    async def test_trial_carries_the_visible_content_digest_to_runtime(self) -> None:
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.post(
+                f"/api/v1/dispatch-strategies/{STRATEGY_ID}/simulate",
+                json={"revision_id": str(REVISION_ID), "expected_digest": "a" * 64},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(["a" * 64], self.runtime.expected_digests)
+
     async def test_blocked_nonfinite_snapshot_remains_a_readable_api_result(self) -> None:
         result = self.runtime.simulate(REVISION_ID, {}, NOW)
         blocked = replace(
@@ -299,7 +338,7 @@ class DispatchStrategyPublicApiTest(unittest.IsolatedAsyncioTestCase):
             engine_inputs={}, evaluation=None, desired=None, intents=(),
         )
         class BlockedRuntime:
-            def simulate(self, revision_id, overrides, evaluated_at):
+            def simulate(self, revision_id, overrides, evaluated_at, *, expected_digest=None):
                 return blocked
         self.app.dependency_overrides[dispatch_strategies.get_dispatch_strategy_runtime] = BlockedRuntime
         async with AuthenticatedApiClient(self.app) as client:

@@ -269,6 +269,17 @@ class DispatchStrategyRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SOC_VALUE_INVALID"):
             self.runtime.simulate(REVISION_ID, {"soc": "35"}, NOW)
 
+    def test_trial_rejects_concurrently_changed_draft_before_reading_inputs(self) -> None:
+        viewed_digest = self.repository.model.content_digest
+        self.repository.model = replace(self.repository.model, content_digest="b" * 64)
+        try:
+            with self.assertRaisesRegex(ValueError, "STRATEGY_DRAFT_CONFLICT"):
+                self.runtime.simulate(REVISION_ID, {}, NOW, expected_digest=viewed_digest)
+        except TypeError as error:
+            self.fail(f"Trial cannot protect the displayed revision digest: {error}")
+        self.assertEqual([], self.repository.requested_frames)
+        self.assertEqual([], self.repository.mutations)
+
     def test_actual_at_target_is_noop_but_drift_reconciles_once(self) -> None:
         self.repository.snapshot = _snapshot(
             output=_sample("power-target", OUTPUT_ID, 156.7, unit="kW")

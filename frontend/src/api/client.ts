@@ -778,7 +778,16 @@ export interface DispatchStrategySimulation {
   reason_code: string | null
   frame_sequence: number | null
   configuration_revision: number | null
-  snapshot: Record<string, EntityInstanceObservation>
+  snapshot: Record<string, {
+    entity_instance_id: string
+    value: unknown
+    data_type: string
+    unit: string | null
+    quality: string
+    observed_at: string | null
+    frame_sequence: number
+    configuration_revision: number
+  }>
   engine_inputs: Record<string, unknown>
   matched_rules: string[]
   decision: Record<string, unknown> | null
@@ -859,7 +868,7 @@ export function saveDispatchStrategyDraft(strategyId: string, input: DispatchStr
 
 export function simulateDispatchStrategy(
   strategyId: string,
-  input: { revision_id?: string | null; overrides?: Record<string, unknown> } = {},
+  input: { revision_id?: string | null; expected_digest?: string; overrides?: Record<string, unknown> } = {},
 ): Promise<DispatchStrategySimulation> {
   return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/simulate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),

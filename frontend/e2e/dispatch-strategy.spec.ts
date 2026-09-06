@@ -337,3 +337,77 @@ test('2充2放从 L2 绑定到控制回读只走一条策略流程', async ({ pa
   expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/disable')
   expect(consoleErrors, api.calls.join('\n')).toEqual([])
 })
+
+function publishedStrategy() {
+  const original = strategyView()
+  original.draft = null
+  original.published_revision = revision('published-1', 'PUBLISHED', { bindings: [
+    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: '%', freshness_seconds: 10 },
+    { direction: 'OUTPUT', binding_key: 'power-target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: 'kW', freshness_seconds: 10 },
+  ] })
+  return original
+}
+
+test('已发布策略直接试算不保存草稿、不改变发布状态', async ({ page }) => {
+  const api = await installApi(page, publishedStrategy())
+  await page.goto('/')
+  await page.getByRole('button', { name: '调度策略' }).click()
+  await expect(page.getByLabel('策略名称')).toBeVisible()
+  const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  expect((await request).postDataJSON()).toEqual({ revision_id: 'published-1', expected_digest: 'c'.repeat(64) })
+  await expect(page.getByTestId('strategy-simulation')).toContainText('帧 42')
+  expect(api.savedDrafts).toHaveLength(0)
+  await expect(page.getByRole('region', { name: '策略状态' })).not.toContainText('有未发布修改')
+  expect(api.calls.filter((call) => call.startsWith('POST '))).toEqual(['POST /dispatch-strategies/strategy-1/simulate'])
+})
+
+test('试算被数据超时阻断时明确解释原因且不显示无需控制', async ({ page }) => {
+  await installApi(page, publishedStrategy())
+  await page.route('**/dispatch-strategies/strategy-1/simulate', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      status: 'BLOCKED', reason_code: 'L2_INPUT_STALE', frame_sequence: 42, configuration_revision: 7,
+      snapshot: {
+        soc: { entity_instance_id: 'entity-soc', value: 50, data_type: 'FLOAT', unit: '%', quality: 'GOOD', observed_at: now, frame_sequence: 41, configuration_revision: 7 },
+      },
+      engine_inputs: {}, matched_rules: [], decision: null, proposed_intents: [],
+    }),
+  }))
+  await page.goto('/')
+  await page.getByRole('button', { name: '调度策略' }).click()
+  await expect(page.getByLabel('策略名称')).toBeVisible()
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  const result = page.getByTestId('strategy-simulation')
+  await expect(result).toContainText('超时', { timeout: 3000 })
+  await expect(result).toContainText('未执行计算')
+  await expect(result).not.toContainText('无需控制')
+  await expect(result).toContainText('50')
+  await expect(result).toContainText('%')
+  await expect(result).toContainText('2026')
+  await page.screenshot({ path: test.info().outputPath('blocked-simulation.png'), fullPage: true })
+})
+
+test('修改后试算使用新草稿，非法输入不能复用旧结果', async ({ page }) => {
+  const api = await installApi(page, publishedStrategy())
+  await page.goto('/')
+  await page.getByRole('button', { name: '调度策略' }).click()
+  await expect(page.getByLabel('策略名称')).toBeVisible()
+  await page.getByLabel('时段 1 功率目标').fill('-20')
+  const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  expect((await request).postDataJSON()).toEqual({ revision_id: 'draft-1', expected_digest: 'b'.repeat(64) })
+  await expect(page.getByTestId('strategy-simulation')).toBeVisible()
+  expect(api.savedDrafts).toHaveLength(1)
+  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].target).toBe('-20')
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  await expect(page.getByTestId('strategy-simulation')).toBeVisible()
+  expect(api.savedDrafts).toHaveLength(1)
+  const requestsBefore = api.calls.filter((call) => call.endsWith('/simulate')).length
+  await page.getByLabel('其他时段安全目标').fill('')
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('其他时段安全目标')
+  await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
+  expect(api.savedDrafts).toHaveLength(1)
+  expect(api.calls.filter((call) => call.endsWith('/simulate'))).toHaveLength(requestsBefore)
+})

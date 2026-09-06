@@ -220,6 +220,26 @@ class DispatchStrategyPostgresFixture:
     "set ZIZU_POSTGRES_TEST=1 to run dispatch-strategy repository tests",
 )
 class DispatchStrategyPostgresTest(DispatchStrategyPostgresFixture, unittest.TestCase):
+    def test_revision_read_does_not_mix_old_digest_with_concurrent_new_bindings(self) -> None:
+        strategy = self.repository.create_strategy(self._draft(), "test:engineer")
+        before = strategy.draft
+        replacement = replace(self._draft(), bindings=tuple(
+            replace(binding, freshness_seconds=20) for binding in before.bindings
+        ))
+        writer = self.repository
+
+        class InterleavedReader(PostgresStrategyRepository):
+            def _revision_from_row(reader, connection, row):
+                # A different editor commits after the revision row was read,
+                # before this reader loads its bindings on the same connection.
+                writer.save_draft(strategy.id, replacement, before.content_digest, "test:other-editor")
+                return super()._revision_from_row(connection, row)
+
+        observed = InterleavedReader(connection_factory=self._connection).get_revision(before.id)
+        self.assertEqual(before.content_digest, observed.content_digest)
+        self.assertEqual(before.bindings, observed.bindings)
+        self.assertNotEqual(before.content_digest, writer.get_revision(before.id).content_digest)
+
     def _advance_configuration(self) -> int:
         next_revision = self.configuration_revision + 1
         with self._connection() as connection, connection.cursor() as cursor:

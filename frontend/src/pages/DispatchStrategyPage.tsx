@@ -245,10 +245,22 @@ export default function DispatchStrategyPage() {
   })
 
   const simulate = () => run('simulate', async () => {
-    const saved = await saveDraft()
-    const result = await simulateDispatchStrategy(saved.id, { revision_id: saved.draft?.id })
+    setSimulation(null)
+    if (!strategy || !currentRevision) throw new Error('请先选择策略。')
+    if (easyTable && !validation.valid) throw new Error(validation.message)
+    const changed = name.trim() !== strategy.name
+      || !isJdmGraphUnchanged(graph, currentRevision.jdm_content)
+      || socId !== (socBinding?.entity_instance_id || '')
+      || outputId !== (outputBinding?.entity_instance_id || '')
+    const revision = changed ? (await saveDraft()).draft : currentRevision
+    if (!revision) throw new Error('没有可试算的策略版本。')
+    const result = await simulateDispatchStrategy(strategy.id, {
+      revision_id: revision.id,
+      expected_digest: revision.content_digest,
+    })
     setSimulation(result)
-    setNotice('试算完成，没有向设备下发控制。')
+    if (result.status === 'EVALUATED') setNotice('试算完成，没有向设备下发控制。')
+    else setError('试算未通过，未执行计算，也未下发控制。')
   })
 
   const publish = () => run('publish', async () => {
@@ -366,7 +378,26 @@ export default function DispatchStrategyPage() {
 
           <section className="neu-card p-4" aria-labelledby="verification-heading">
             <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">试算</button><button type="button" onClick={publish} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-[#287c12]">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || !strategy.published_revision} className="rounded-lg bg-[#52c41a] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
-            {simulation && <div className="mt-4 grid gap-3 md:grid-cols-4" data-testid="strategy-simulation"><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">试算状态</div><div className="mt-1 text-xs font-semibold">{simulation.status}{simulation.reason_code ? ` · ${simulation.reason_code}` : ''}</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">快照证据</div><div className="mt-1 text-xs">帧 {simulation.frame_sequence ?? '—'} · 配置 {simulation.configuration_revision ?? '—'} · {Object.keys(simulation.snapshot).length} 个实体</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">命中行</div><div className="mt-1 text-xs font-semibold">{simulation.matched_rules.join('、') || '未命中'}</div></div><div className="neu-inset p-3"><div className="text-[10px] text-gray-500">拟执行意图</div><div className="mt-1 text-xs font-semibold">{simulation.proposed_intents.map((item) => `${item.action_id}=${valueText(item.value)}`).join('、') || '无需控制'}</div></div></div>}
+            {simulation && <div className="mt-4 space-y-3" data-testid="strategy-simulation">
+              {simulation.status !== 'EVALUATED' && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                {describeDispatchStrategyError({ code: simulation.reason_code, message: '试算未通过，请检查实体绑定与数据状态。' })}
+                {simulation.reason_code && <span className="ml-2 font-mono text-[10px]">{simulation.reason_code}</span>}
+              </div>}
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="neu-inset p-3"><div className="text-[10px] text-gray-500">试算状态</div><div className="mt-1 text-xs font-semibold">{simulation.status === 'EVALUATED' ? '已完成试算（未下发）' : '未执行计算'}</div></div>
+                <div className="neu-inset p-3"><div className="text-[10px] text-gray-500">快照证据</div><div className="mt-1 text-xs">帧 {simulation.frame_sequence ?? '—'} · 配置 {simulation.configuration_revision ?? '—'} · {Object.keys(simulation.snapshot).length} 个实体</div></div>
+                <div className="neu-inset p-3"><div className="text-[10px] text-gray-500">命中行</div><div className="mt-1 text-xs font-semibold">{simulation.status === 'EVALUATED' ? simulation.matched_rules.join('、') || '未命中' : '未执行计算'}</div></div>
+                <div className="neu-inset p-3"><div className="text-[10px] text-gray-500">拟执行意图</div><div className="mt-1 text-xs font-semibold">{simulation.status === 'EVALUATED' ? simulation.proposed_intents.map((item) => `${item.action_id}=${valueText(item.value)}`).join('、') || '无需控制' : '未生成控制意图'}</div></div>
+              </div>
+              <div className="overflow-x-auto"><table className="w-full text-xs" aria-label="本次试算数据依据">
+                <caption className="py-2 text-left text-gray-500">本次试算数据依据（固定快照，采集质量正常不代表数据未超时）</caption>
+                <thead><tr className="border-b text-left text-gray-500"><th className="p-2">实体 / 绑定</th><th className="p-2">采集值</th><th className="p-2">单位</th><th className="p-2">采集质量</th><th className="p-2">数据时间</th></tr></thead>
+                <tbody>{Object.entries(simulation.snapshot).map(([key, sample]) => <tr key={key} className="border-b border-white/60">
+                  <td className="p-2">{entities.find((item) => item.id === sample.entity_instance_id)?.display_name || key}<span className="ml-1 text-gray-400">{key}</span></td>
+                  <td className="p-2">{valueText(sample.value)}</td><td className="p-2">{sample.unit || '—'}</td><td className="p-2">{sample.quality || '未知'}</td><td className="p-2">{sample.observed_at ? new Date(sample.observed_at).toLocaleString() : '缺少时间'}</td>
+                </tr>)}{!Object.keys(simulation.snapshot).length && <tr><td colSpan={5} className="p-3 text-gray-500">没有可用的已提交数据，请检查实体数据链路。</td></tr>}</tbody>
+              </table></div>
+            </div>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="events-heading"><div className="mb-3 flex items-center justify-between"><div><h3 id="events-heading" className="text-sm font-bold text-gray-800">4. 关键事件与控制回读</h3><p className="mt-1 text-xs text-gray-500">只保留有意义的变化、阻断、恢复和控制结果。</p></div><button type="button" onClick={() => selectedId && fetchDispatchStrategyEvents(selectedId, { limit: 30 }).then((page) => setEvents(page.items)).catch((reason) => setError(describeDispatchStrategyError(reason)))} className="neu-btn px-3 py-1.5 text-xs">刷新</button></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时间</th><th className="p-2">事件</th><th className="p-2">原因/命中</th><th className="p-2">控制命令</th><th className="p-2">回读状态</th></tr></thead><tbody>{events.map((event) => <tr key={event.id} className="border-b border-white/60"><td className="p-2">{new Date(event.occurred_at).toLocaleString()}</td><td className="p-2 font-medium">{event.event_kind}</td><td className="p-2">{event.reason_code || valueText(event.decision?.matched_rule)}</td><td className="p-2 font-mono text-[10px]">{event.control_command_id || '—'}</td><td className="p-2">{event.control_status || '—'}</td></tr>)}{!events.length && <tr><td colSpan={5} className="p-6 text-center text-gray-400">暂无关键事件</td></tr>}</tbody></table></div></section>

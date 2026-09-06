@@ -461,6 +461,8 @@ class PostgresStrategyRepository:
 
     def get_revision(self, revision_id: UUID) -> StrategyRevision | None:
         with self._connection() as connection, connection.cursor() as cursor:
+            # Draft rows and bindings must belong to the same committed edit.
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             cursor.execute(f"{_REVISION_SELECT} WHERE id=%s", (revision_id,))
             row = cursor.fetchone()
             return None if row is None else self._revision_from_row(connection, row)

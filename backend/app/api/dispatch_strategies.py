@@ -75,6 +75,7 @@ class StrategyDraftRequest(BaseModel):
 class SimulateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision_id: UUID | None = None
+    expected_digest: str | None = Field(None, min_length=64, max_length=64)
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -190,11 +191,10 @@ async def simulate_dispatch_strategy(
     try:
         view = await asyncio.to_thread(repository.get_strategy, strategy_id)
         allowed = tuple(
-            item.id for item in (view.draft, view.active_revision) if item is not None
+            item.id for item in (view.draft, view.active_revision, view.published_revision)
+            if item is not None
         )
-        revision_id = request.revision_id or (
-            view.draft.id if view.draft is not None else view.active_revision_id
-        )
+        revision_id = request.revision_id or next(iter(allowed), None)
         if revision_id is None or revision_id not in allowed:
             raise StrategyRepositoryError("STRATEGY_REVISION_NOT_FOUND")
         result = await asyncio.to_thread(
@@ -202,6 +202,7 @@ async def simulate_dispatch_strategy(
             revision_id,
             request.overrides,
             datetime.now(UTC),
+            expected_digest=request.expected_digest,
         )
         return _evaluation_result(result)
     except Exception as error:

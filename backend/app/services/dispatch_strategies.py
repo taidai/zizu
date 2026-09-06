@@ -257,10 +257,14 @@ class StrategyRuntime:
         revision_id: UUID,
         overrides: Mapping[str, object],
         evaluated_at: datetime,
+        *,
+        expected_digest: str | None = None,
     ) -> EvaluationResult:
         revision = self._repository.get_revision(revision_id)
         if revision is None:
             raise StrategyModelError("STRATEGY_REVISION_NOT_FOUND", "revision does not exist")
+        if expected_digest is not None and revision.content_digest != expected_digest:
+            raise StrategyModelError("STRATEGY_DRAFT_CONFLICT", "displayed revision has changed")
         snapshot = self._repository.load_snapshot(revision, None, evaluated_at)
         try:
             engine_inputs, actual = validate_strategy_snapshot(revision, snapshot)
