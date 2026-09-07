@@ -205,8 +205,10 @@ export interface Category {
 
 export async function fetchNodes(): Promise<Node[]> {
   const res = await apiFetch(`${API_BASE}/nodes`)
+  if (!res.ok) throw await authError(res, `读取节点目录失败：${res.status}`)
   const data = await res.json()
-  return data.nodes || []
+  if (!Array.isArray(data.nodes)) throw new Error('节点目录响应不完整，请重试')
+  return data.nodes
 }
 
 // ── Node Tree API (F3) ──
@@ -1873,6 +1875,8 @@ export interface EntityInstance {
   direction: 'R' | 'W' | 'RW'
   freshness_seconds: number
   confirmed: boolean
+  /** Configuration eligibility; never substitutes live command safety checks. */
+  control_eligible?: boolean
 }
 
 export interface ControlCommand {

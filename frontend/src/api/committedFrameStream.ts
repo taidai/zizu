@@ -175,14 +175,17 @@ export function connectCommittedFrameStream(
           requestResnapshot('FRAME_PAYLOAD_INVALID')
         }
       }
-      socket.onerror = () => report(new Error('实时数据连接异常'))
+      socket.onerror = () => {
+        if (!cancelled && currentGeneration === generation && !resnapshotRequested) report(new Error('实时数据连接异常'))
+      }
       socket.onclose = (event) => {
-        if (currentGeneration !== generation) return
+        if (currentGeneration !== generation || cancelled || resnapshotRequested) return
         socket = null
         if (event.code === 4401 || event.code === 4403) {
           report(new Error('实时数据身份已失效'))
           return
         }
+        report(new Error('实时数据连接已断开，正在重连'))
         scheduleReconnect()
       }
     } catch (error) {
