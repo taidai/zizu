@@ -18,6 +18,8 @@ import {
   type AlarmConditionValue,
 } from '../components/alarm-configuration/alarmConfigurationContracts'
 import { describeHttpNotificationError } from '../components/admin/alarmHttpNotificationModel'
+import { readNeuronImportResult } from './neuronImportResult'
+export { NeuronImportApiError, NeuronImportResultUnknownError } from './neuronImportResult'
 
 export { AlarmConfigurationResultUnknownError } from '../components/alarm-configuration/alarmConfigurationContracts'
 export type { AlarmConditionValue } from '../components/alarm-configuration/alarmConfigurationContracts'
@@ -358,11 +360,7 @@ export async function importNeuronTags(input: NeuronImportSelection & { preview_
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail?.message || err.detail || `Import Neuron tags failed: ${res.status}`)
-  }
-  return res.json()
+  return readNeuronImportResult(res)
 }
 
 // ── Neuron Proxy API ──
