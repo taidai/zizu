@@ -44,6 +44,35 @@ class WorkbenchSlotWriteReceipt:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class _PendingWorkbenchSlotRecovery:
+    slot_key: str
+    entity_instance_id: UUID | None
+    base_configuration_revision: int
+    actor: str
+    idempotency_key: str
+    configuration_revision: int
+
+    def matches(
+        self,
+        *,
+        slot_key: str,
+        entity_instance_id: UUID | None,
+        base_configuration_revision: int,
+        actor: str,
+        idempotency_key: str,
+        receipt: WorkbenchSlotWriteReceipt,
+    ) -> bool:
+        return (
+            self.slot_key == slot_key
+            and self.entity_instance_id == entity_instance_id
+            and self.base_configuration_revision == base_configuration_revision
+            and self.actor == actor.strip()
+            and self.idempotency_key == idempotency_key.strip()
+            and self.configuration_revision == receipt.configuration_revision
+        )
+
+
 class WorkbenchSlotRepository(Protocol):
     def list_manual_bindings(self) -> Mapping[str, UUID]: ...
 
@@ -141,6 +170,7 @@ class EmsWorkbenchSlots:
         self._catalog = catalog
         self._repository = repository
         self._publish_lock = Lock()
+        self._pending_recovery: _PendingWorkbenchSlotRecovery | None = None
 
     def resolve(
         self,
@@ -199,9 +229,24 @@ class EmsWorkbenchSlots:
                 return replay
             runtime_state = runtime_gate.state
             if runtime_state is GateState.RUNNING:
+                self._pending_recovery = None
                 return replay
             if runtime_state is GateState.QUIESCED:
+                pending = self._pending_recovery
+                if pending is None or not pending.matches(
+                    slot_key=slot_key,
+                    entity_instance_id=entity_instance_id,
+                    base_configuration_revision=base_configuration_revision,
+                    actor=actor,
+                    idempotency_key=idempotency_key,
+                    receipt=replay,
+                ):
+                    raise DataTrunkError(
+                        "CONFIGURATION_RUNTIME_BUSY",
+                        "CONFIGURATION_RUNTIME_BUSY",
+                    )
                 runtime_gate.reconcile_configuration_runtime()
+                self._pending_recovery = None
                 return replay
             raise DataTrunkError(
                 "CONFIGURATION_RUNTIME_BUSY",
@@ -245,7 +290,19 @@ class EmsWorkbenchSlots:
         except Exception:
             runtime_gate.cancel_configuration_publish()
             raise
-        runtime_gate.reconcile_configuration_runtime()
+        try:
+            runtime_gate.reconcile_configuration_runtime()
+        except Exception:
+            self._pending_recovery = _PendingWorkbenchSlotRecovery(
+                slot_key=slot_key,
+                entity_instance_id=entity_instance_id,
+                base_configuration_revision=base_configuration_revision,
+                actor=actor.strip(),
+                idempotency_key=idempotency_key.strip(),
+                configuration_revision=receipt.configuration_revision,
+            )
+            raise
+        self._pending_recovery = None
         return receipt
 
 

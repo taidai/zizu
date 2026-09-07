@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
 from fastapi import FastAPI
 
 from app.api import ems_workbench as ems_workbench_api
+from app.api import nodes as nodes_api
 from app.services.configuration_revision import (
     ConfigurationRevisionError,
     ConfigurationRuntimeGate,
@@ -356,6 +358,70 @@ class _InterleavingSlotRepository(_SlotRepository):
         )
 
 
+class _CrossPublisherRepository(_SlotRepository):
+    """Shared database truth with a barrier before a real node publish commits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.revision = 8
+        self.node_write_entered = Event()
+        self.allow_node_commit = Event()
+        self.restore_revisions: list[int] = []
+
+    def find_replay(self, **kwargs) -> WorkbenchSlotWriteReceipt | None:
+        if kwargs["idempotency_key"] == "old-a":
+            return WorkbenchSlotWriteReceipt(
+                slot_key="storage-power",
+                entity_instance_id=PCS_POWER_ID,
+                configuration_revision=8,
+                replayed=True,
+            )
+        return None
+
+    def set_binding(self, **kwargs) -> WorkbenchSlotWriteReceipt:
+        raise AssertionError("an old replay must not create a new slot write")
+
+    def current_revision(self) -> int:
+        return self.revision
+
+    def current_configuration_revision(self) -> int:
+        return self.revision
+
+    def unfinished_frame_count(self) -> int:
+        return 0
+
+    def unpublished_frame_outbox_count(self) -> int:
+        return 0
+
+    def apply_node_change(self, base_revision: int) -> dict[str, int]:
+        self.node_write_entered.set()
+        if not self.allow_node_commit.wait(timeout=2):
+            raise AssertionError("test did not release the pending node write")
+        if self.revision != base_revision:
+            raise AssertionError("node change committed over unexpected database truth")
+        self.revision = base_revision + 1
+        return {"configuration_revision": self.revision}
+
+    def restore_blackboard(self) -> BlackboardRecovery:
+        self.restore_revisions.append(self.revision)
+        return BlackboardRecovery(
+            capture_beat=0,
+            configuration_revision=self.revision,
+            active_input_contracts={},
+            required_tag_ids=frozenset(),
+            observations=(),
+        )
+
+
+class _NodeChangeRuntime:
+    def __init__(self, gate: ConfigurationRuntimeGate) -> None:
+        self.data_trunk = SimpleNamespace(configuration_gate=gate)
+        self.reload_count = 0
+
+    async def reload_rules_now(self) -> None:
+        self.reload_count += 1
+
+
 class WorkbenchSlotWriteTest(unittest.TestCase):
     def _subject(
         self,
@@ -634,6 +700,77 @@ class WorkbenchSlotWriteTest(unittest.TestCase):
         self.assertEqual(9, blackboard.revision)
         self.assertEqual([9], repository.restore_revisions)
         self.assertIs(GateState.RUNNING, gate.state)
+
+
+class WorkbenchSlotCrossPublisherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_old_slot_replay_cannot_reconcile_a_pending_node_publish(self) -> None:
+        # Break caught: a slot replay treating another configuration entry
+        # point's QUIESCED state as its own failed post-commit recovery.
+        repository = _CrossPublisherRepository()
+        blackboard = _RevisionBlackboard(revision=8)
+        gate = ConfigurationRuntimeGate(repository, blackboard)
+        gate.register_committed_frame_consumer()
+        runtime = _NodeChangeRuntime(gate)
+        slots = EmsWorkbenchSlots(
+            EntityInstanceCatalog(
+                _CatalogRepository((_entity(PCS_POWER_ID, "custom.power"),))
+            ),
+            repository,
+        )
+        replay_request = {
+            "slot_key": "storage-power",
+            "entity_instance_id": PCS_POWER_ID,
+            "base_configuration_revision": 7,
+            "actor": "user:engineer",
+            "idempotency_key": "old-a",
+            "runtime_gate": gate,
+        }
+
+        pending_node = asyncio.create_task(
+            nodes_api._apply_node_change(
+                repository,
+                runtime,
+                repository.apply_node_change,
+            )
+        )
+        self.assertTrue(
+            await asyncio.to_thread(repository.node_write_entered.wait, 1)
+        )
+        self.assertIs(GateState.QUIESCED, gate.state)
+
+        replay_receipt = None
+        replay_error = None
+        try:
+            replay_receipt = await asyncio.to_thread(slots.bind, **replay_request)
+        except DataTrunkError as error:
+            replay_error = error
+        finally:
+            repository.allow_node_commit.set()
+
+        node_result = None
+        node_error = None
+        try:
+            node_result = await pending_node
+        except DataTrunkError as error:
+            node_error = error
+
+        self.assertEqual(
+            "CONFIGURATION_RUNTIME_BUSY",
+            replay_error.code if replay_error is not None else None,
+            f"old slot replay returned early: {replay_receipt!r}",
+        )
+        self.assertIsNone(node_error)
+        self.assertEqual({"configuration_revision": 9}, node_result)
+        self.assertEqual(9, repository.revision)
+        self.assertEqual(9, blackboard.revision)
+        self.assertEqual([9], repository.restore_revisions)
+        self.assertIs(GateState.RUNNING, gate.state)
+        self.assertEqual(1, runtime.reload_count)
+
+        replayed = await asyncio.to_thread(slots.bind, **replay_request)
+        self.assertTrue(replayed.replayed)
+        self.assertEqual([], repository.calls)
+        self.assertEqual([9], repository.restore_revisions)
 
 
 class _Runtime:
