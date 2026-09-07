@@ -25,6 +25,9 @@ class EntityInstanceDescriptor:
     direction: str
     freshness_seconds: float
     confirmed: bool = False
+    # Configuration eligibility only; live quality, ownership and permissions
+    # are always revalidated by the existing control command service.
+    control_eligible: bool = False
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)

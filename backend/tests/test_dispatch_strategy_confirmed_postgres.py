@@ -25,6 +25,23 @@ UNAVAILABLE_SOURCES = ("unconfirmed", "non_current", "disabled_node")
     "set ZIZU_POSTGRES_TEST=1 to run confirmed dispatch-source tests",
 )
 class DispatchStrategyConfirmedPostgresTest(DispatchStrategyPostgresFixture, unittest.TestCase):
+    def test_catalog_control_eligibility_requires_policy_and_usable_write_binding(self):
+        def eligible(entity_id):
+            return {item.id: item for item in PostgresEntityInstanceRepository().list_instances()}[entity_id].control_eligible
+
+        self.assertTrue(eligible(self.output_id))
+        self.assertFalse(eligible(self.input_id))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE t_tags SET enabled=FALSE WHERE id=%s", (self.tag_id,))
+        self.assertFalse(eligible(self.output_id))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE t_tags SET enabled=TRUE,read_only=TRUE WHERE id=%s", (self.tag_id,))
+        self.assertFalse(eligible(self.output_id))
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE t_tags SET read_only=FALSE WHERE id=%s", (self.tag_id,))
+            cursor.execute("UPDATE t_entity_instances SET control_policy=NULL WHERE id=%s", (self.output_id,))
+        self.assertFalse(eligible(self.output_id))
+
     def test_published_trial_uses_real_committed_inputs_and_jdm_without_writes(self):
         strategy, revision = self._published_strategy()
         frame, _ = self._commit_samples()

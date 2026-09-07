@@ -448,7 +448,18 @@ class PostgresEntityInstanceRepository:
                     SELECT ei.id, node.id, node.node_type, node.name,
                            ei.definition_id,
                            ei.display_name, ei.data_type, ei.unit, ei.direction,
-                           ei.freshness_seconds, TRUE
+                           ei.freshness_seconds, TRUE,
+                           COALESCE(ei.direction IN ('W', 'RW')
+                             AND jsonb_typeof(ei.control_policy) = 'object'
+                             AND EXISTS (
+                               SELECT 1 FROM t_l2_control_bindings control
+                               JOIN t_tags tag ON tag.id = control.l0_tag_id
+                               WHERE control.entity_instance_id = ei.id
+                                 AND tag.node_id = ei.node_id
+                                 AND tag.enabled = TRUE
+                                 AND tag.read_only = FALSE
+                                 AND tag.read_write IN ('W', 'RW')
+                             ), FALSE)
                     FROM t_entity_instances ei
                     JOIN t_nodes node ON node.id = ei.node_id
                     WHERE ei.active = TRUE AND node.enabled = TRUE
