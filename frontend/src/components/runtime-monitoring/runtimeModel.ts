@@ -1,4 +1,4 @@
-import type { EntityInstance, EntityInstanceObservation } from '../../api/client'
+import type { EntityInstance, EntityInstanceObservation, Node } from '../../api/client'
 import type { CommittedFrameSnapshot, L2FrameItem } from '../../api/committedFrameStream'
 import type { CommittedFrameProjection } from '../data-trunk/committedFrameProjection'
 
@@ -122,5 +122,88 @@ export function entityHistoryModel(
     unit: descriptor.unit,
     points: scoped,
     numericSegments: numericHistorySegments(scoped),
+  }
+}
+
+export interface DeviceMonitorItem {
+  node: Node
+  category: string
+  entities: EntityInstance[]
+  alarmCount: number | null
+}
+
+export function buildDeviceMonitorPage({
+  nodes,
+  descriptors,
+  alarmCounts,
+  query,
+  category,
+  onlyAlarms,
+  page,
+}: {
+  nodes: Node[]
+  descriptors: EntityInstance[]
+  alarmCounts: Readonly<Record<string, number>> | null
+  query: string
+  category: string
+  onlyAlarms: boolean
+  page: number
+}): {
+  page: number
+  total: number
+  totalPages: number
+  pageItems: DeviceMonitorItem[]
+  activeNodeIds: string[]
+  alarmFilterBlocked: boolean
+} {
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const alarmFilterBlocked = onlyAlarms && alarmCounts === null
+  const entitiesByNode = new Map<string, EntityInstance[]>()
+  for (const descriptor of descriptors) {
+    const current = entitiesByNode.get(descriptor.node_id) || []
+    current.push(descriptor)
+    entitiesByNode.set(descriptor.node_id, current)
+  }
+  const filteredNodes = alarmFilterBlocked ? [] : nodes
+    .filter((node) => {
+      const nodeCategory = node.node_type.trim() || '其他'
+      if (category && nodeCategory !== category) return false
+      if (normalizedQuery && !node.name.toLocaleLowerCase().includes(normalizedQuery) && !node.id.toLocaleLowerCase().includes(normalizedQuery)) return false
+      if (onlyAlarms && (alarmCounts?.[node.id] ?? 0) <= 0) return false
+      return true
+    })
+    .sort((left, right) => left.sort_order - right.sort_order || left.name.localeCompare(right.name, 'zh-CN') || left.id.localeCompare(right.id))
+  const totalPages = Math.max(1, Math.ceil(filteredNodes.length / 6))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const pageItems = filteredNodes.slice((safePage - 1) * 6, safePage * 6).map((node) => ({
+    node,
+    category: node.node_type.trim() || '其他',
+    entities: entitiesByNode.get(node.id) || [],
+    alarmCount: alarmCounts === null ? null : alarmCounts[node.id] ?? 0,
+  }))
+  const activeNodeIds = pageItems.map((item) => item.node.id)
+  return {
+    page: safePage,
+    total: filteredNodes.length,
+    totalPages,
+    pageItems,
+    activeNodeIds,
+    alarmFilterBlocked,
+  }
+}
+
+export function paginateEntityDetails(
+  entities: EntityInstance[],
+  page: number,
+  requestedPageSize: 10 | 20,
+): { page: number; pageSize: 10 | 20; totalPages: number; items: EntityInstance[] } {
+  const pageSize = requestedPageSize === 20 ? 20 : 10
+  const totalPages = Math.max(1, Math.ceil(entities.length / pageSize))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  return {
+    page: safePage,
+    pageSize,
+    totalPages,
+    items: entities.slice((safePage - 1) * pageSize, safePage * pageSize),
   }
 }

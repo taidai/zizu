@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  buildDeviceMonitorPage,
   buildRuntimeNodes,
   entityHistoryModel,
   numericHistorySegments,
+  paginateEntityDetails,
   runtimeEntityReading,
 } from './runtimeModel.ts'
 
@@ -143,4 +145,61 @@ test('numericHistorySegments rejects invalid time/value and does not bridge non-
     [{ time: Date.parse('2026-09-07T01:00:00.000Z'), value: 0 }],
     [{ time: Date.parse('2026-09-07T01:04:00.000Z'), value: 4 }],
   ])
+})
+
+test('device monitor pages six real nodes and keeps same-name identities and unconfigured nodes separate', () => {
+  const nodes = Array.from({ length: 8 }, (_, index) => ({
+    id: `device-${index + 1}`,
+    name: index < 2 ? '同名 PCS' : `${index + 1}# 设备`,
+    parent_id: 'site-1',
+    layer: 4,
+    node_type: index === 7 ? '' : 'PCS',
+    sort_order: index,
+    enabled: true,
+    tag_count: 0,
+  }))
+  const entity = { ...descriptors[0], id: 'entity-only-device-2', node_id: 'device-2', node_display_name: '同名 PCS' }
+
+  const first = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: { 'device-1': 3 }, query: '', category: '', onlyAlarms: false, page: 1 })
+  const second = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: { 'device-1': 3 }, query: '', category: '', onlyAlarms: false, page: 2 })
+
+  assert.equal(first.pageItems.length, 6)
+  assert.deepEqual(first.activeNodeIds, ['device-1', 'device-2', 'device-3', 'device-4', 'device-5', 'device-6'])
+  assert.deepEqual(second.activeNodeIds, ['device-7', 'device-8'])
+  assert.equal(first.pageItems[0].entities.length, 0)
+  assert.equal(first.pageItems[1].entities[0].id, 'entity-only-device-2')
+  assert.equal(second.pageItems[1].category, '其他')
+})
+
+test('device alarm filtering preserves unresolved counts and blocks filtering when count evidence failed', () => {
+  const nodes = [
+    { id: 'device-a', name: '设备 A', parent_id: null, layer: 4, node_type: 'PCS', sort_order: 0, enabled: true, tag_count: 0 },
+    { id: 'device-b', name: '设备 B', parent_id: null, layer: 4, node_type: 'PCS', sort_order: 1, enabled: true, tag_count: 0 },
+  ]
+  const counted = buildDeviceMonitorPage({ nodes, descriptors: [], alarmCounts: { 'device-a': 2 }, query: '', category: '', onlyAlarms: true, page: 1 })
+  assert.deepEqual(counted.activeNodeIds, ['device-a'])
+  assert.equal(counted.pageItems[0].alarmCount, 2)
+
+  const failed = buildDeviceMonitorPage({ nodes, descriptors: [], alarmCounts: null, query: '', category: '', onlyAlarms: true, page: 1 })
+  assert.equal(failed.alarmFilterBlocked, true)
+  assert.deepEqual(failed.activeNodeIds, [])
+  assert.equal(buildDeviceMonitorPage({ nodes, descriptors: [], alarmCounts: null, query: '', category: '', onlyAlarms: false, page: 1 }).pageItems[0].alarmCount, null)
+})
+
+test('device entity detail paginates 10 or 20 items and status histories stay non-numeric', () => {
+  const entities = Array.from({ length: 23 }, (_, index) => ({ ...descriptors[0], id: `entity-${index + 1}` }))
+  assert.deepEqual(paginateEntityDetails(entities, 2, 10).items.map((item) => item.id), [
+    'entity-11', 'entity-12', 'entity-13', 'entity-14', 'entity-15',
+    'entity-16', 'entity-17', 'entity-18', 'entity-19', 'entity-20',
+  ])
+  assert.equal(paginateEntityDetails(entities, 2, 20).items.length, 3)
+
+  const status = { ...descriptors[0], id: 'entity-status', definition_id: 'pcs.running_state', data_type: 'bool', unit: null }
+  const statusHistory = entityHistoryModel(status, [{
+    event_id: 'status-1', entity_instance_id: 'entity-status', definition_id: 'pcs.running_state', value: false,
+    data_type: 'bool', unit: null, quality: 192, reason: null, observed_at: '2026-09-07T01:00:00.000Z',
+    age_ms: 0, processing_revision_id: 'pr-1', configuration_revision: 88,
+  }])
+  assert.deepEqual(statusHistory.points.map((point) => point.value), [false])
+  assert.deepEqual(statusHistory.numericSegments, [])
 })

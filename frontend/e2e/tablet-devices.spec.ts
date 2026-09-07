@@ -1,0 +1,158 @@
+import { expect, test, type Page, type Route } from '@playwright/test'
+
+const nodes = Array.from({ length: 8 }, (_, index) => ({
+  id: `device-${index + 1}`,
+  name: index < 2 ? '同名 PCS' : `${index + 1}# 设备`,
+  parent_id: 'site-1',
+  layer: 4,
+  node_type: index === 7 ? '' : 'PCS',
+  sort_order: index,
+  enabled: true,
+  tag_count: 0,
+}))
+
+const entities = Array.from({ length: 23 }, (_, index) => ({
+  id: `entity-${index + 1}`,
+  node_id: index < 22 ? 'device-1' : 'device-2',
+  node_type: 'PCS',
+  node_display_name: '同名 PCS',
+  definition_id: index === 0 ? 'pcs.running_state' : `pcs.metric_${index + 1}`,
+  display_name: index === 0 ? '运行状态' : `指标 ${index + 1}`,
+  data_type: index === 0 ? 'bool' : 'float',
+  unit: index === 0 ? null : 'kW',
+  direction: 'R',
+  freshness_seconds: 60,
+  confirmed: true,
+}))
+
+function frame(nodeId: string) {
+  const selected = entities.filter((entity) => entity.node_id === nodeId)
+  return {
+    type: 'frame_snapshot', node_id: nodeId, cursor: `cursor-${nodeId}`, frame_sequence: 7,
+    frame_time: '2026-09-07T02:00:00.000Z', configuration_revision: 12,
+    frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [],
+    l2: selected.map((entity, index) => ({
+      entity_instance_id: entity.id, node_id: nodeId, definition_id: entity.definition_id,
+      display_name: entity.display_name, data_type: entity.data_type,
+      value: entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality: 192,
+      reason: null, observed_at: '2026-09-07T02:00:00.000Z', value_observed_at: '2026-09-07T02:00:00.000Z',
+      received_at: '2026-09-07T02:00:00.000Z', calculated_at: '2026-09-07T02:00:00.000Z',
+      processing_revision_id: 'pr-1', configuration_revision: 12,
+      source_digest: `sha256:${entity.id}`, frame_sequence: 7,
+    })),
+  }
+}
+
+async function fulfillJson(route: Route, body: unknown, status = 200) {
+  await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+}
+
+async function installFixture(page: Page, failCounts = false) {
+  const writes: string[] = []
+  await page.addInitScript(() => {
+    class FixtureWebSocket {
+      readyState = 1
+      onopen: ((event: Event) => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onerror: ((event: Event) => void) | null = null
+      onclose: ((event: CloseEvent) => void) | null = null
+      constructor() { setTimeout(() => this.onopen?.(new Event('open')), 0) }
+      send(value: string) {
+        const payload = JSON.parse(value)
+        if (payload.authenticate) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'authenticated' }) })), 0)
+        if (payload.subscribe) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'subscribed' }) })), 0)
+      }
+      close() { this.readyState = 3 }
+    }
+    Object.defineProperty(window, 'WebSocket', { value: FixtureWebSocket })
+  })
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (request.method() !== 'GET' && !url.pathname.endsWith('/auth/ws-ticket')) writes.push(`${request.method()} ${url.pathname}`)
+    if (url.pathname.endsWith('/nodes')) return fulfillJson(route, { nodes })
+    if (url.pathname.endsWith('/entity-instances')) return fulfillJson(route, { items: entities, total: entities.length })
+    if (url.pathname.endsWith('/alarms/counts')) return failCounts ? fulfillJson(route, { detail: 'count unavailable' }, 503) : fulfillJson(route, { counts: { 'device-1': 2, 'device-2': 1 } })
+    if (url.pathname.endsWith('/runtime/frame-snapshot')) return fulfillJson(route, frame(url.searchParams.get('node_id')!))
+    if (url.pathname.endsWith('/auth/ws-ticket')) return fulfillJson(route, { ticket: 'fixture-ticket' })
+    const historyMatch = url.pathname.match(/\/entity-instances\/([^/]+)\/history$/)
+    if (historyMatch) return fulfillJson(route, { items: [{
+      type: 'entity_observation', event_id: 'status-history-1', entity_instance_id: historyMatch[1],
+      definition_id: 'pcs.running_state', value: false, data_type: 'bool', unit: null, quality: 192,
+      reason: null, observed_at: '2026-09-07T01:59:00.000Z', age_ms: 0,
+      processing_revision_id: 'pr-1', configuration_revision: 12, source_digest: 'sha256:status',
+    }] })
+    const realtimeMatch = url.pathname.match(/\/entity-instances\/([^/]+)\/realtime$/)
+    if (realtimeMatch) return fulfillJson(route, {
+      type: 'entity_observation', event_id: 'status-current', entity_instance_id: realtimeMatch[1],
+      definition_id: 'pcs.running_state', value: false, data_type: 'bool', unit: null, quality: 192,
+      reason: null, observed_at: '2026-09-07T02:00:00.000Z', age_ms: 0,
+      processing_revision_id: 'pr-1', configuration_revision: 12, source_digest: 'sha256:status',
+    })
+    return fulfillJson(route, {})
+  })
+  return writes
+}
+
+async function mountDeviceMonitor(page: Page) {
+  await page.goto('/src/pages/DeviceMonitorPage.tsx', { waitUntil: 'domcontentloaded' })
+  await page.evaluate(async () => {
+    document.head.innerHTML = '<meta charset="UTF-8"><title>Device monitor fixture</title>'
+    document.body.innerHTML = '<div id="root"></div>'
+    const RefreshRuntime = (await import('/@react-refresh')).default
+    RefreshRuntime.injectIntoGlobalHook(window)
+    Object.assign(window, {
+      $RefreshReg$: () => {},
+      $RefreshSig$: () => (type: unknown) => type,
+      __vite_plugin_react_preamble_installed__: true,
+    })
+    const React = (await import('/node_modules/.vite/deps/react.js')).default
+    const ReactDOM = (await import('/node_modules/.vite/deps/react-dom_client.js')).default
+    const DeviceMonitorPage = (await import('/src/pages/DeviceMonitorPage.tsx')).default
+    ReactDOM.createRoot(document.getElementById('root')!).render(React.createElement(DeviceMonitorPage, {}))
+  })
+}
+
+test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10 or 20 entity rows', async ({ page }) => {
+  test.setTimeout(180_000)
+  const writes = await installFixture(page)
+  await mountDeviceMonitor(page)
+
+  await expect(page.getByRole('article')).toHaveCount(6)
+  const sameName = page.getByRole('article', { name: /同名 PCS 设备卡片/ })
+  await expect(sameName).toHaveCount(2)
+  await expect(sameName.nth(0)).toContainText('device-1')
+  await expect(sameName.nth(0)).toContainText('未恢复 2')
+  await expect(sameName.nth(1)).toContainText('device-2')
+  await expect(sameName.nth(1)).toContainText('未恢复 1')
+
+  await sameName.nth(0).getByRole('button', { name: '查看详情' }).click()
+  const deviceDialog = page.getByRole('dialog', { name: '同名 PCS' })
+  await expect(deviceDialog.locator('.runtime-device-detail__entities > button')).toHaveCount(10)
+  await deviceDialog.getByRole('button', { name: '运行状态' }).click()
+  const history = page.getByRole('region', { name: '实体历史' })
+  await expect(history).toContainText('false')
+  await expect(history.getByRole('img')).toHaveCount(0)
+  await deviceDialog.getByRole('button', { name: '下一页' }).evaluate((button: HTMLButtonElement) => button.click())
+  await expect(page.getByRole('dialog', { name: '运行状态' })).toHaveCount(0)
+  await expect(deviceDialog.getByRole('button', { name: '指标 11' })).toBeVisible()
+  await deviceDialog.locator('select').selectOption('20')
+  await expect(deviceDialog.locator('.runtime-device-detail__entities > button')).toHaveCount(20)
+  await deviceDialog.getByRole('button', { name: '关闭' }).click()
+
+  await page.getByRole('button', { name: '下一页' }).click()
+  await expect(page.getByRole('article')).toHaveCount(2)
+  await expect(page.getByRole('article', { name: '8# 设备 设备卡片' })).toContainText('L2 未配置')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(writes).toEqual([])
+})
+
+test('failed alarm counts stay unknown and cannot masquerade as zero or a valid alarm filter', async ({ page }) => {
+  test.setTimeout(180_000)
+  await installFixture(page, true)
+  await mountDeviceMonitor(page)
+
+  await expect(page.getByRole('alert')).toContainText('计数显示未知')
+  await expect(page.getByText('未恢复 —').first()).toBeVisible()
+  await expect(page.getByRole('checkbox', { name: '仅有未恢复告警' })).toBeDisabled()
+})
