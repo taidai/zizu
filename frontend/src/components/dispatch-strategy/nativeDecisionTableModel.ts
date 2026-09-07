@@ -33,7 +33,16 @@ export function buildGenericDecisionTableJdm(): NativeDecisionGraph {
         id: 'decision-table',
         type: 'decisionTableNode',
         name: '通用决策表',
-        content: { hitPolicy: 'first', inputs: [], outputs: [], rules: [] },
+        content: {
+          hitPolicy: 'collect',
+          outputPath: 'intents',
+          inputs: [],
+          outputs: [
+            { id: 'action_id', field: 'action_id', name: '输出别名（action_id）' },
+            { id: 'target', field: 'target', name: '目标值（target）' },
+          ],
+          rules: [],
+        },
       },
       { id: 'output', type: 'outputNode', name: 'Output' },
     ],

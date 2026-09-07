@@ -1,5 +1,12 @@
 ---
 
+## Session 2026-09-08 — final-i 原生 JDM 运行契约修复（未部署）
+
+- 新通用表直接声明 `action_id`、`target`，使用原生 `collect` / `outputPath=intents`，输出别名通过 `action_id` 选择；多命中按规则顺序产生意图，试算不写设备。
+- 发布静态校验按原生输出列 ID→field→每行 action_id 找到对应 L2，逐目标检查类型、单位与上下限；未知别名和动态输出仍拒绝。
+- 真实 GoRules 额外揭示旧 2充2放生成器的 `&&` 单元格未命中；新生成器改为原生区间 `[开始..结束)` 和 `[SOC下限..SOC上限]`。历史已存图不会暗改或迁移，旧模板需在原生表/完整图中显式改写条件并重存发布。
+- 本轮只改局部模型、编辑说明和回归；最终真实 PostgreSQL/Browser 合并验收由 D0 执行。未部署、推送、启用策略、发送通知或设备写入；完整证据见工作包旁 `jdm-runtime-contract-fix-report.md`。
+
 ## Session 2026-09-03 — v0.7.7 告警 HTTP 通知修复、部署与主干验收完成
 
 - v0.7.7 已部署到 1 号机：Schema 060、healthy、restart 0、host 网络、`/dev/mqueue` tmpfs；

@@ -135,6 +135,12 @@ class OutputBinding:
 
 
 @dataclass(frozen=True)
+class StaticJdmTarget:
+    action_id: str
+    value: object
+
+
+@dataclass(frozen=True)
 class ControlIntentDraft:
     action_id: str
     entity_instance_id: UUID
@@ -409,6 +415,8 @@ class StrategyRuntime:
         }
         intents = extract_control_intents(outputs, bindings)
         decision = outputs.get("result", outputs)
+        if isinstance(decision, list):
+            decision = {"intents": decision}
         if not isinstance(decision, Mapping):
             raise StrategyModelError("JDM_RESULT_INVALID", "decision result must be an object")
         raw_rule = decision.get("matched_rule")
@@ -532,15 +540,22 @@ def validate_publish_bindings(
                     "OUTPUT_WRITE_POINT_UNCONFIRMED",
                     "output needs exactly one confirmed write point",
                 )
-    if len(outputs) != 1 and static_targets:
-        raise StrategyModelError(
-            "OUTPUT_TARGET_AMBIGUOUS",
-            "static targets require one output binding",
-        )
-    if static_targets:
-        output_contract = contracts[outputs[0].entity_instance_id]
-        for raw_target in static_targets:
-            target = _finite_decimal(raw_target, "OUTPUT_TARGET_INVALID")
+    outputs_by_key = {item.binding_key: item for item in outputs}
+    for static_target in static_targets:
+        if isinstance(static_target, StaticJdmTarget):
+            binding = outputs_by_key.get(static_target.action_id)
+            if binding is None:
+                raise StrategyModelError("OUTPUT_BINDING_MISSING", "action output has no static binding")
+            raw_target = static_target.value
+        else:
+            # Legacy internal callers supply unlabelled targets for one output.
+            if len(outputs) != 1:
+                raise StrategyModelError("OUTPUT_TARGET_AMBIGUOUS", "unlabelled targets require one output binding")
+            binding, raw_target = outputs[0], static_target
+        output_contract = contracts[binding.entity_instance_id]
+        target = _typed_value(raw_target, output_contract.data_type)
+        if output_contract.data_type in {"INT", "FLOAT"}:
+            target = _finite_decimal(target, "OUTPUT_TARGET_INVALID")
             if output_contract.minimum is not None and target < Decimal(str(output_contract.minimum)):
                 raise StrategyModelError("OUTPUT_LIMIT_VIOLATION", "target is below the configured minimum")
             if output_contract.maximum is not None and target > Decimal(str(output_contract.maximum)):
@@ -583,9 +598,9 @@ def validate_strategy_binding_role(
         raise StrategyModelError(code, "SOC value must be within 0..100 percent")
 
 
-def static_jdm_targets(content: Mapping[str, object]) -> tuple[Decimal, ...]:
-    """Read literal targets from decision tables for publish-time limit checks."""
-    targets: list[Decimal] = []
+def static_jdm_targets(content: Mapping[str, object]) -> tuple[StaticJdmTarget, ...]:
+    """Associate native table cells with their output fields before validation."""
+    targets: list[StaticJdmTarget] = []
     nodes = content.get("nodes")
     if not isinstance(nodes, list):
         return ()
@@ -596,17 +611,38 @@ def static_jdm_targets(content: Mapping[str, object]) -> tuple[Decimal, ...]:
         rules = table.get("rules") if isinstance(table, Mapping) else None
         if not isinstance(rules, list):
             continue
+        columns = table.get("outputs", [])
+        fields = {
+            field: [column.get("id") for column in columns
+                    if isinstance(column, Mapping) and column.get("field") == field]
+            for field in ("action_id", "target")
+        }
+        if not fields["target"]:
+            continue
+        if len(fields["target"]) != 1 or len(fields["action_id"]) != 1:
+            raise StrategyModelError("OUTPUT_ACTION_NOT_STATIC", "target needs one explicit action_id column")
         for rule in rules:
-            if not isinstance(rule, Mapping) or "target" not in rule:
+            if not isinstance(rule, Mapping):
                 continue
-            raw = rule["target"]
-            if not isinstance(raw, (str, int, float, Decimal)) or isinstance(raw, bool):
-                raise StrategyModelError(
-                    "OUTPUT_TARGET_NOT_STATIC",
-                    "dispatch targets must be literal numbers",
-                )
-            targets.append(_finite_decimal(raw, "OUTPUT_TARGET_INVALID"))
+            action_id = _static_jdm_literal(rule.get(fields["action_id"][0]), "OUTPUT_ACTION_NOT_STATIC")
+            if not isinstance(action_id, str) or not action_id:
+                raise StrategyModelError("OUTPUT_ACTION_NOT_STATIC", "action_id must be a literal output alias")
+            value = _static_jdm_literal(rule.get(fields["target"][0]), "OUTPUT_TARGET_NOT_STATIC")
+            targets.append(StaticJdmTarget(action_id, value))
     return tuple(targets)
+
+
+def _static_jdm_literal(raw: object, code: str) -> object:
+    """Read JSON literals only; never interpret a dynamic JDM expression."""
+    if not isinstance(raw, str):
+        raise StrategyModelError(code, "output cells must contain literal expressions")
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError) as error:
+        raise StrategyModelError(code, "output must be a static JSON literal") from error
+    if isinstance(value, dict) or value is None:
+        raise StrategyModelError(code, "output must be a static typed value")
+    return value
 
 
 def split_cross_midnight(window: DispatchWindow) -> tuple[DispatchWindow, ...]:
@@ -666,10 +702,8 @@ def build_two_charge_two_discharge_jdm(
     table_rules = [
         {
             "_id": row.key,
-            "site_local_minute": (
-                f"site_local_minute >= {start} && site_local_minute < {end}"
-            ),
-            "soc": f"soc >= {_decimal(row.soc_min)} && soc <= {_decimal(row.soc_max)}",
+            "site_local_minute": f"[{start}..{end})",
+            "soc": f"[{_decimal(row.soc_min)}..{_decimal(row.soc_max)}]",
             "action_id": json.dumps("power-target"),
             "target": _decimal(row.target),
             "matched_rule": json.dumps(row.key),

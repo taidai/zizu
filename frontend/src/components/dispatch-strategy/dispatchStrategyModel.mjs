@@ -152,8 +152,8 @@ export function buildTwoChargeTwoDischargeJdm(windows, safeTarget) {
   if (!validation.valid) throw new Error(validation.message)
   const rules = validation.rows.map((row) => ({
     _id: row.key,
-    site_local_minute: `site_local_minute >= ${minute(row.start)} && site_local_minute < ${minute(row.end, true)}`,
-    soc: `soc >= ${decimal(row.socMin)} && soc <= ${decimal(row.socMax)}`,
+    site_local_minute: `[${minute(row.start)}..${minute(row.end, true)})`,
+    soc: `[${decimal(row.socMin)}..${decimal(row.socMax)}]`,
     action_id: JSON.stringify('power-target'),
     target: decimal(row.target),
     matched_rule: JSON.stringify(row.key),
@@ -211,8 +211,8 @@ export function readTwoChargeTwoDischargeJdm(graph) {
   const toTime = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
   const rows = []
   for (const rule of rules.slice(0, -1)) {
-    const time = /^site_local_minute >= (\d+) && site_local_minute < (\d+)$/.exec(rule?.site_local_minute)
-    const soc = /^soc >= (\S+) && soc <= (\S+)$/.exec(rule?.soc)
+    const time = /^\[(\d+)\.\.(\d+)\)$/.exec(rule?.site_local_minute)
+    const soc = /^\[(\S+)\.\.(\S+)\]$/.exec(rule?.soc)
     if (!time || !soc) return null
     rows.push({
       key: rule._id,

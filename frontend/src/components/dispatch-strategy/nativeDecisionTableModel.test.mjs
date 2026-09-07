@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 const model = await import('./nativeDecisionTableModel.ts')
+const schedule = await import('./dispatchStrategyModel.mjs')
 
 const singleTableGraph = () => ({
   nodes: [
@@ -24,14 +25,32 @@ test('generic strategy starter is a native table without fixed SOC schedule sema
   assert.deepEqual(model.inspectNativeDecisionTable(graph), {
     nodeId: 'decision-table',
     content: {
-      hitPolicy: 'first',
+      hitPolicy: 'collect',
+      outputPath: 'intents',
       inputs: [],
-      outputs: [],
+      outputs: [
+        { id: 'action_id', field: 'action_id', name: '输出别名（action_id）' },
+        { id: 'target', field: 'target', name: '目标值（target）' },
+      ],
       rules: [],
     },
   })
   assert.equal(JSON.stringify(graph).includes('soc'), false)
   assert.equal(JSON.stringify(graph).includes('power-target'), false)
+})
+
+test('stored legacy schedule cells are not silently converted to the corrected template', () => {
+  const graph = schedule.buildTwoChargeTwoDischargeJdm([
+    { key: 'discharge', start: '10:00', end: '12:00', action: 'DISCHARGE', target: 20, socMin: 40, socMax: 90 },
+  ], 0)
+  const content = graph.nodes[1].content
+  content.rules[0].site_local_minute = 'site_local_minute >= 600 && site_local_minute < 720'
+  content.rules[0].soc = 'soc >= 40 && soc <= 90'
+  const before = structuredClone(graph)
+  assert.equal(schedule.readTwoChargeTwoDischargeJdm(graph), null)
+  assert.equal(model.inspectNativeDecisionTable(graph).nodeId, 'schedule')
+  assert.deepEqual(model.replaceDecisionTableContent(graph, 'schedule', content), before)
+  assert.deepEqual(graph, before)
 })
 
 test('a unique decision table is inspected without changing the graph', () => {
