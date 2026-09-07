@@ -3,7 +3,9 @@ import test from 'node:test'
 
 import {
   buildTwoChargeTwoDischargeJdm,
+  createDispatchLoadGate,
   dispatchStrategyFailureState,
+  retainDispatchReloadLock,
   describeDispatchStrategyError,
   isDispatchSocEntity,
   isDispatchPowerTargetEntity,
@@ -101,6 +103,24 @@ test('stale strategy rejections require reload and invalidate an old simulation'
     requiresReload: false,
     keepSimulation: true,
   })
+})
+
+test('a stale reload lock remains after an unrelated ordinary failure', () => {
+  assert.equal(retainDispatchReloadLock(false, { detail: { code: 'STRATEGY_DRAFT_STALE' } }), true)
+  assert.equal(retainDispatchReloadLock(true, { detail: { code: 'OUTPUT_LIMIT_VIOLATION' } }), true)
+  assert.equal(retainDispatchReloadLock(false, { detail: { code: 'OUTPUT_LIMIT_VIOLATION' } }), false)
+})
+
+test('a slower strategy response cannot replace the newer selection', () => {
+  const gate = createDispatchLoadGate()
+  const slowA = gate.begin()
+  const fastB = gate.begin()
+  assert.equal(slowA.isCurrent(), false)
+  assert.equal(fastB.isCurrent(), true)
+  slowA.cancel()
+  assert.equal(fastB.isCurrent(), true)
+  fastB.cancel()
+  assert.equal(fastB.isCurrent(), false)
 })
 
 test('strategy status keeps revision, enable state and runtime health separate', () => {

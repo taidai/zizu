@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { DecisionGraph, JdmConfigProvider, ensureWasmLoaded } from '@gorules/jdm-editor'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
@@ -26,6 +26,7 @@ import {
 } from '../api/client'
 import {
   buildTwoChargeTwoDischargeJdm,
+  createDispatchLoadGate,
   describeDispatchStrategyError,
   dispatchStrategyFailureState,
   isDispatchSocEntity,
@@ -34,6 +35,7 @@ import {
   makeStrategyBinding,
   projectStrategyStatus,
   readTwoChargeTwoDischargeJdm,
+  retainDispatchReloadLock,
   validateDispatchWindows,
   type DispatchWindow,
 } from '../components/dispatch-strategy/dispatchStrategyModel.mjs'
@@ -89,6 +91,7 @@ export default function DispatchStrategyPage() {
   const [notice, setNotice] = useState('')
   const [requiresReload, setRequiresReload] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
+  const loadGate = useRef(createDispatchLoadGate())
 
   const currentRevision = strategy?.draft || strategy?.published_revision || strategy?.active_revision || null
   const validation = useMemo(() => validateDispatchWindows(rows, safeTarget), [rows, safeTarget])
@@ -158,6 +161,7 @@ export default function DispatchStrategyPage() {
       setStrategy(null)
       return
     }
+    const request = loadGate.current.begin()
     setBusy('load')
     Promise.all([
       fetchDispatchStrategy(selectedId),
@@ -165,6 +169,7 @@ export default function DispatchStrategyPage() {
       fetchEntityInstances(),
     ])
       .then(([next, eventPage, entityRows]) => {
+        if (!request.isCurrent()) return
         setStrategy(next)
         setEvents(eventPage.items)
         setEntities(entityRows.items)
@@ -182,8 +187,9 @@ export default function DispatchStrategyPage() {
         setRequiresReload(false)
         setError('')
       })
-      .catch((reason) => setError(describeDispatchStrategyError(reason)))
-      .finally(() => setBusy(''))
+      .catch((reason) => { if (request.isCurrent()) setError(describeDispatchStrategyError(reason)) })
+      .finally(() => { if (request.isCurrent()) setBusy('') })
+    return request.cancel
   }, [selectedId, reloadNonce])
 
   useEffect(() => {
@@ -209,7 +215,7 @@ export default function DispatchStrategyPage() {
       const failure = dispatchStrategyFailureState(reason)
       setError(failure.message)
       if (!failure.keepSimulation) setSimulation(null)
-      setRequiresReload(failure.requiresReload)
+      setRequiresReload((current) => retainDispatchReloadLock(current, reason))
     }
     finally { setBusy('') }
   }

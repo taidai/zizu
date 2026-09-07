@@ -262,6 +262,23 @@ export function dispatchStrategyFailureState(reason) {
   }
 }
 
+export function retainDispatchReloadLock(current, reason) {
+  return current || dispatchStrategyFailureState(reason).requiresReload
+}
+
+export function createDispatchLoadGate() {
+  let generation = 0
+  return {
+    begin() {
+      const requestGeneration = ++generation
+      return {
+        isCurrent: () => requestGeneration === generation,
+        cancel: () => { if (requestGeneration === generation) generation += 1 },
+      }
+    },
+  }
+}
+
 export function projectStrategyStatus(strategy) {
   const draftRevision = strategy.draft?.revision ?? null
   const publishedRevision = strategy.published_revision?.revision ?? null
