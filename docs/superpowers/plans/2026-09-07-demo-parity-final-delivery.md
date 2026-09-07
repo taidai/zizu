@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan. Each lane works in its own worktree, produces a focused commit, and never deploys independently.
 
-> 执行状态（2026-09-08）：Tasks 1–4 已实现、复审并集成；Task 5 的最终 JDM 安全修复、独立复审、release-head 聚合门禁和本机正式浏览器验收均已完成。Task 6 的固定制品、GitHub 对齐、1号机一次替换和部署后复验尚未完成。最终事实入口：`docs/reviews/2026-09-07-tablet-production-acceptance.md`。
+> 执行状态（2026-09-08）：Tasks 1–6 均已完成；v1.0.4 已由固定 ARM64 制品一次部署到1号机，部署后健康、只读 Headless 主干与可见 Browser 抽查通过，DB／NanoMQ 未重启。最终事实入口：`docs/reviews/2026-09-07-tablet-production-acceptance.md`。
 
 **Goal:** 以 `http://127.0.0.1:19100/` 本机 Demo 为交互验收样板，将正式 ZiZu 补齐为简洁可用的运行首页、设备监控、工程主干、告警与通用 JDM；全部本地合并验收后，仅一次部署到 1 号机。
 
@@ -74,11 +74,11 @@
 
 ### Task 6：固定产物、GitHub 与 1 号机一次发布
 
-- [ ] 从通过门禁的同一 commit 构建唯一 ARM64 镜像，记录 git SHA、镜像摘要、版本、Schema 和测试报告；先完成可恢复备份与隔离恢复验证。
-- [ ] 将最终分支快进／合入 `main` 并推送 GitHub；确认远端 commit 与制品标签完全一致。
-- [ ] 只执行一次 1 号机容器替换；固定镜像摘要，沿用旧容器 host network 和 `/dev/mqueue` 配置，不申请 TLS，不清理非目标数据。
-- [ ] 部署后先读 health、版本、容器重启数和 DB／NanoMQ 启动时间，再用无头浏览器重复 Task 5 主干验收；最后用可见 Browser 抽查关键路径。
-- [ ] 若任何门禁失败，停止发布并保留旧容器回退能力；不得现场热改后声称通过。
+- [x] 从通过门禁的同一 commit 构建唯一 ARM64 镜像，记录 git SHA、镜像摘要、版本、Schema 和测试报告；先完成可恢复备份与隔离恢复验证。
+- [x] 将最终分支快进／合入 `main` 并推送 GitHub；确认远端 commit 与制品标签完全一致。
+- [x] 只执行一次 1 号机容器替换；固定镜像摘要，沿用旧容器 host network 和 `/dev/mqueue` 配置，不申请 TLS，不清理非目标数据。
+- [x] 部署后先读 health、版本、容器重启数和 DB／NanoMQ 启动时间，再按现场安全边界用无头浏览器复验只读主干；最后用可见 Browser 抽查关键路径。
+- [x] 发布门禁未失败；旧固定镜像和运行参数仍保留为回退依据，未现场热改后冒充通过。
 
 ## 完成定义
 

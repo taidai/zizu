@@ -8,9 +8,11 @@ SQL. A solar-storage-charging EMS is the first reference delivery.
 
 **Current code version: `v1.0.4`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v1.0.4 local integration and release acceptance record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [Historical v0.9.9 field record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
+[v1.0.4 integration, release, and field verification record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [Historical v0.9.9 field record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
 The v1.0.4 codebase integrates the red-gold-bright-silver production UI, a committed-L2 runtime home page, device monitoring, the Node→L0→L1→L2 engineering path, 10/20-row alarm tables, and generic native JDM editing. Code capability, artifact release, and field acceptance are separate; see the v1.0.4 acceptance record for the tested SHA, evidence, and remaining boundaries.
+
+v1.0.4 has been deployed once to Host 1 from the pinned ARM64 artifact. Post-deployment health, the read-only headless trunk, and the visible-browser spot check passed; TimescaleDB and NanoMQ were not restarted. This covers only the agreed v1.0.4 release scope, not live `GOOD` L2, real-device control, or complete EMS field delivery.
 
 > ZiZu has the core data trunk plus alarm and dispatch/control foundations, but it is not yet a complete delivery-ready solar-storage-charging EMS. Real-device control and full EMS field acceptance still require separate evidence.
 
@@ -240,7 +242,7 @@ Before a commit or release, follow the [acceptance checklist](docs/acceptance-ch
 - [Domain language](CONTEXT.md)
 - [Architecture decision records](docs/adr/)
 - [Acceptance checklist](docs/acceptance-checklist.md)
-- [v1.0.4 local integration and release acceptance record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md)
+- [v1.0.4 integration, release, and field verification record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md)
 - [Historical v0.9.9 field deployment record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
 If documents disagree, read them in this order: core architecture specification, latest accepted ADR, current subsystem

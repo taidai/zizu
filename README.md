@@ -8,9 +8,11 @@
 
 **当前代码版本：`v1.0.4`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v1.0.4 本机集成与发布验收记录](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [v0.9.9 历史现场记录](docs/deploy-1号机-v0.9.9-http.md)
+[v1.0.4 集成、发布与现场复验记录](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [v0.9.9 历史现场记录](docs/deploy-1号机-v0.9.9-http.md)
 
 v1.0.4 正式代码已合入红金亮银界面、真实 L2 运行首页、设备监控、节点→L0→L1→L2 工程主干、告警 10/20 表格和通用原生 JDM 编辑。代码能力、制品发布与现场验收是三件事；每项实际状态、测试 SHA 和未完成边界以本版验收记录为准。
+
+v1.0.4 已以固定 ARM64 制品一次部署到1号机；部署后健康检查、只读无头主干和可见 Browser 抽查均通过，数据库与 NanoMQ 未重启。该结论只覆盖本版约定范围，不代表实时 `GOOD` L2、真实设备控制或完整 EMS 现场交付完成。
 
 > ZiZu 已具备核心数据主干、告警和调度控制底座，但尚不能宣称完整光储充 EMS 已经交付就绪。真实设备控制和完整 EMS 现场验收仍需单独取得证据。
 
@@ -229,7 +231,7 @@ npm run test:e2e:dispatch-strategy
 - [领域术语](CONTEXT.md)
 - [架构决策记录](docs/adr/)
 - [验收清单](docs/acceptance-checklist.md)
-- [v1.0.4 本机集成与发布验收记录](docs/reviews/2026-09-07-tablet-production-acceptance.md)
+- [v1.0.4 集成、发布与现场复验记录](docs/reviews/2026-09-07-tablet-production-acceptance.md)
 - [v0.9.9 历史现场部署记录](docs/deploy-1号机-v0.9.9-http.md)
 
 文档冲突时，解释顺序为：核心架构总纲 → 最新 accepted ADR → 当前专项规格 → 历史记录。

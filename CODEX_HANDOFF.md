@@ -1,5 +1,13 @@
 ---
 
+## Session 2026-09-08 — v1.0.4 一次发布与现场只读复验完成
+
+- 最终发布 commit、`origin/main` 与 tag `v1.0.4` 在发布时同指 `a4475ca640d21c006357ff3fe2cf70168001eafe`；Actions `34149235562` 成功。固定 ARM64 制品为 `ghcr.io/taidai/zizu@sha256:3438b70327f62a9ddbc6cfc68d81b897ed73060ee07319bc730ae96682fac113`，现场离线加载 image ID 为 `sha256:3c36153fb9fb02423c32ed3a30a2e595609e89b39055e5c87c0032a244e2fbbe`。
+- 发布前备份位于 `/opt/zizu-release-test-0.5.0/backups/v1.0.4-pre-20260907T180111Z`，Schema 062、配置修订 777；配置表与有界控制／调度关键数据隔离恢复 `PASSED_CRITICAL_DATA_RESTORE`，证据已归档。它不是全库或遥测历史恢复证明；本轮本地专用恢复测试库在归档后已精确删除并确认不存在。
+- 仅一次替换 ZiZu 应用容器；最终 `FINAL_VERIFIED`，版本 1.0.4、restart 0、host network、`/dev/mqueue` 保持不变。TimescaleDB／NanoMQ 的容器 ID、启动时间与 restart 0 在替换前后相同，未重启。
+- 部署后只读 Headless 主干和可见 Browser 抽查通过；健康接口显示采集消息计数继续前进，产品写入、页面错误、API 错误均为 0。未发送 HTTP 通知、未启用策略、未发布现场加工、未下发真实设备控制。现场 E2E 样本与所选 L2 当时超时，因此不宣称实时 `GOOD` L2、真实告警／JDM／控制回读或完整 EMS 现场交付已通过。
+- 下方 final-i “未部署”记录是发布前历史状态，当前状态以本条及 `docs/reviews/2026-09-07-tablet-production-acceptance.md` 为准。
+
 ## Session 2026-09-08 — final-i 原生 JDM 运行契约修复（未部署）
 
 - Fix round 3：静态有限数值字面用 Decimal 规范化，INT 接受数学整数 `1/1.0/1e0/+1/01`，类型/上下限/动态表达式仍 fail closed；单次真实结果按 action_id 与实体双重拒绝重复，simulate 无 mutation，evaluate 仅保留 FAILED 审计/故障锁、零控制意图。真实 zen focused 后端65/65、前端模型29/29；未操作 dist、PG 或设备。

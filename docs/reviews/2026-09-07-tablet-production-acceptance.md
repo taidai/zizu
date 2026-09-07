@@ -15,7 +15,7 @@
 
 | 项目 | 结果 |
 |---|---|
-| 产品代码基线 | `6f21c9416041f2cb19f97234aeedb9efe31374e1`；发布 tag 与镜像须指向包含本记录的最终后继提交 |
+| 发布 commit / tag / GitHub | 发布构建及部署时，`origin/main` 与 tag `v1.0.4` 同指 `a4475ca640d21c006357ff3fe2cf70168001eafe`。产品代码基线为 `6f21c9416041f2cb19f97234aeedb9efe31374e1`；部署后的后继提交仅更新验收证据，不改变已部署制品 |
 | VERSION / backend VERSION | `1.0.4 / 1.0.4` |
 | Schema | `062` |
 | JDM 最终安全修复限定复审 | I-1／I-2 均 ADDRESSED；本限定范围 Critical 0 / Important 0 / Minor 0 |
@@ -25,7 +25,7 @@
 
 | 检查 | fresh 结果与边界 |
 |---|---|
-| release-head 聚合门禁 | 后端 731 项：455 通过、276 条件跳过；scripts 56/56；前端模型 159/159；生产构建 8206 modules，全部 exit 0。因未传现场地址，聚合总状态按设计为 INCOMPLETE，而非现场通过。 |
+| release-head 聚合门禁 | 后端 731 项：455 通过、276 条件跳过；scripts 56/56；前端模型 159/159；生产构建 8206 modules，全部 exit 0。因未传现场地址，聚合总状态按设计为 INCOMPLETE，而非现场通过。该单次本机聚合任务的状态保持 INCOMPLETE；现场放行由下列独立部署后证据补齐。 |
 | 实际 PostgreSQL 主门禁 | 数据主干、告警、调度与控制意图共 149/149；最终 JDM 修复提交的 fresh 调度／控制意图专项 45/45，失败 0、跳过 0。随机 `*_test` 库已精确删除并复核不存在，15434 服务保持运行。 |
 | 正式浏览器主干 | 实际 FastAPI、PostgreSQL、GoRules 和协议 fixture：节点 CRUD、L0 导入／实时／历史、L1 加工、模板、L2 实时／历史／来源、BIT 与告警试算 7/7；跨节点 L2、完整告警、双输出通用 JDM 和两种视口 4/4；合计 11/11。无 API mock、无 Demo 数据。 |
 | 平板测试 | 正式生产 dist 24/24；DeviceMonitor 组件挂载 6/6。两组按测试声明的 preview/dev 边界分开运行。 |
@@ -43,10 +43,13 @@
 
 ## 1号机发布状态
 
-发布前：1号机仍为 v1.0.3。旧应用镜像和运行参数必须保留为回退依据；磁盘余量、DB／NanoMQ 启动时间以及启用策略、控制所有权、活动意图、活动命令计数须在切换前重新读取，不能复制历史数字作为新证据。
-
-发布顺序固定为：同一 Git SHA 的 CI 固定 ARM64 制品 → 新鲜备份与隔离恢复验证 → 仅替换 ZiZu 应用容器 → 保留 host network、`/dev/mqueue`、数据库和 NanoMQ → 部署后 health／版本／重启数 → 无头主干 → 可见 Browser 抽查。任一步缺失为 INCOMPLETE，失败为 FAILED。
+- 固定 ARM64 制品：`ghcr.io/taidai/zizu@sha256:3438b70327f62a9ddbc6cfc68d81b897ed73060ee07319bc730ae96682fac113`；经离线校验加载的现场 image ID 为 `sha256:3c36153fb9fb02423c32ed3a30a2e595609e89b39055e5c87c0032a244e2fbbe`。
+- 发布前新鲜备份：`/opt/zizu-release-test-0.5.0/backups/v1.0.4-pre-20260907T180111Z`；Schema 062、配置修订 777。配置表与有界控制／调度关键数据隔离恢复状态为 `PASSED_CRITICAL_DATA_RESTORE`，恢复证据已归档；这不是完整数据库或遥测历史恢复验证。
+- 仅一次替换 ZiZu 应用容器；最终状态 `FINAL_VERIFIED`，版本 1.0.4、Schema 062、restart 0，保留 host network 与 `/dev/mqueue`。旧固定镜像与运行参数仍保留为回退依据。
+- TimescaleDB 与 NanoMQ 的容器 ID、启动时间在替换前后保持一致且 restart 0，二者未重启。
+- 部署后只读 Headless 主干通过；可见 Browser 抽查通过，健康接口显示采集消息计数继续前进，产品写入 0、页面错误 0、API 错误 0。未发送 HTTP 通知、未启用策略、未下发真实设备控制；L1 只打开后取消，未在现场发布配置。
+- 现场样本中的 E2E 点位与所选 L2 当时为超时／当前不可用，因此本次只读回执不证明实时 `GOOD` L2、真实告警闭环、JDM 或设备回读闭环。
 
 ## 当前结论
 
-**INCOMPLETE：已列出的本机代码、PostgreSQL、浏览器与平板门禁均已通过；CI 固定制品、GitHub 对齐、1号机一次替换及部署后无头／可见 Browser 复验尚未执行。** 即使最终发布通过，也只表示 v1.0.4 约定范围通过，不表示真实设备控制或完整 EMS 现场交付已经完成。
+**PASSED（v1.0.4 本次约定发布范围）：固定制品、发布时 GitHub 源 commit／tag 对齐、新鲜备份与关键数据隔离恢复、1号机一次替换、健康检查、部署后只读 Headless 主干和可见 Browser 抽查均已完成。** 本结论不表示实时 `GOOD` L2、真实告警／HTTP 通知、JDM／设备控制回读或完整 EMS 现场交付已经完成。
