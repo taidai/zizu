@@ -251,6 +251,64 @@ test('numericHistorySegments rejects invalid time/value and does not bridge non-
   ])
 })
 
+test('device category comes only from the explicit node type and unknown types stay in other', () => {
+  assert.equal(typeof runtimeModel.deviceMonitorCategory, 'function')
+  assert.deepEqual([
+    ['PV', '光伏'],
+    ['INVERTER', '光伏'],
+    ['PCS', '储能'],
+    ['BMS', '储能'],
+    ['EVSE', '充电'],
+    ['CHARGER', '充电'],
+    ['METER', '电表'],
+    ['GRID', '电表'],
+    ['CUSTOM_DEVICE', '其他'],
+    ['', '其他'],
+  ].map(([nodeType]) => runtimeModel.deviceMonitorCategory(nodeType)), [
+    '光伏', '光伏', '储能', '储能', '充电', '充电', '电表', '电表', '其他', '其他',
+  ])
+  assert.equal(runtimeModel.deviceMonitorCategory('名为PCS的自定义类型'), '其他')
+})
+
+test('device card metrics use exact definition ids for stable primary and secondary order', () => {
+  assert.equal(typeof runtimeModel.orderDeviceMonitorEntities, 'function')
+  const shuffled = [
+    { ...descriptors[0], id: 'entity-z', definition_id: 'custom.power', display_name: 'PCS 有功功率（仅名称相似）' },
+    { ...descriptors[0], id: 'entity-temp', definition_id: 'pcs.temp', display_name: '内部温度' },
+    { ...descriptors[0], id: 'entity-status', definition_id: 'pcs.status', display_name: '运行状态' },
+    { ...descriptors[0], id: 'entity-power', definition_id: 'pcs.activePower', display_name: '有功功率' },
+    { ...descriptors[0], id: 'entity-limit', definition_id: 'pcs.dischargePowerLimit', display_name: '放电功率限值' },
+  ]
+  assert.deepEqual(
+    runtimeModel.orderDeviceMonitorEntities('PCS', shuffled).map((entity) => entity.id),
+    ['entity-power', 'entity-limit', 'entity-temp', 'entity-status', 'entity-z'],
+  )
+  assert.deepEqual(
+    runtimeModel.orderDeviceMonitorEntities('UNLISTED', shuffled).map((entity) => entity.id),
+    ['entity-z', 'entity-power', 'entity-limit', 'entity-status', 'entity-temp'],
+  )
+})
+
+test('device quality summary distinguishes current, last evidence, unconfigured and unknown', () => {
+  assert.equal(typeof runtimeModel.deviceMonitorDataState, 'function')
+  assert.equal(typeof runtimeModel.summarizeDeviceMonitorDataStates, 'function')
+  const observation = completeFrame('node-pcs-a', descriptors[0]).l2[0]
+  const current = [{ descriptor: descriptors[0], observation }]
+  const last = [{ descriptor: descriptors[0], observation: { ...observation, quality: 64, reason: 'ENTITY_DATA_STALE' } }]
+  const missingObservation = [{ descriptor: descriptors[0], observation: null }]
+
+  assert.equal(runtimeModel.deviceMonitorDataState(current, true), 'current')
+  assert.equal(runtimeModel.deviceMonitorDataState(current, false), 'last')
+  assert.equal(runtimeModel.deviceMonitorDataState(last, true), 'last')
+  assert.equal(runtimeModel.deviceMonitorDataState([], true), 'unconfigured')
+  assert.equal(runtimeModel.deviceMonitorDataState(null, true), 'unknown')
+  assert.equal(runtimeModel.deviceMonitorDataState(missingObservation, true), 'unknown')
+  assert.deepEqual(
+    runtimeModel.summarizeDeviceMonitorDataStates(['current', 'last', 'unconfigured', 'unknown', 'last']),
+    { current: 1, last: 2, unconfigured: 1, unknown: 1 },
+  )
+})
+
 test('device monitor pages six real nodes and keeps same-name identities and unconfigured nodes separate', () => {
   const nodes = Array.from({ length: 8 }, (_, index) => ({
     id: `device-${index + 1}`,
@@ -272,12 +330,14 @@ test('device monitor pages six real nodes and keeps same-name identities and unc
   assert.deepEqual(second.activeNodeIds, ['device-7', 'device-8'])
   assert.equal(first.pageItems[0].entities.length, 0)
   assert.equal(first.pageItems[1].entities[0].id, 'entity-only-device-2')
+  assert.equal(first.pageItems[0].category, '储能')
   assert.equal(second.pageItems[1].category, '其他')
 
   const byName = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: {}, query: 'DEVICE-2', category: '', onlyAlarms: false, page: 1 })
-  const byType = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: {}, query: '', category: '其他', onlyAlarms: false, page: 1 })
+  const byType = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: {}, query: '', category: '储能', onlyAlarms: false, page: 1 })
   assert.deepEqual(byName.activeNodeIds, ['device-2'])
-  assert.deepEqual(byType.activeNodeIds, ['device-8'])
+  assert.deepEqual(byType.activeNodeIds, ['device-1', 'device-2', 'device-3', 'device-4', 'device-5', 'device-6'])
+  assert.deepEqual(byType.pageItems[0].entities.map((item) => item.id), [])
 })
 
 test('device alarm filtering preserves unresolved counts and blocks filtering when count evidence failed', () => {

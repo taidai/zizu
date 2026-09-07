@@ -180,9 +180,90 @@ export function entityHistoryModel(
 
 export interface DeviceMonitorItem {
   node: Node
-  category: string
+  category: DeviceMonitorCategory
   entities: EntityInstance[]
   alarmCount: number | null
+}
+
+export type DeviceMonitorCategory = '光伏' | '储能' | '充电' | '电表' | '其他'
+export type DeviceMonitorDataState = 'current' | 'last' | 'unconfigured' | 'unknown'
+
+const DEVICE_CATEGORY_BY_NODE_TYPE: Readonly<Record<string, DeviceMonitorCategory>> = {
+  PV: '光伏',
+  INVERTER: '光伏',
+  PV_INVERTER: '光伏',
+  SOLAR: '光伏',
+  ESS: '储能',
+  STORAGE: '储能',
+  PCS: '储能',
+  BMS: '储能',
+  BATTERY: '储能',
+  EVSE: '充电',
+  CHARGER: '充电',
+  CHARGING: '充电',
+  METER: '电表',
+  GRID: '电表',
+  LOAD: '电表',
+}
+
+const DEVICE_METRIC_PRIORITY: Readonly<Record<string, readonly string[]>> = {
+  PV: ['pv.activePower', 'pv.active_power', 'pv.dailyEnergy', 'pv.daily_energy', 'pv.inverterTemp', 'pv.inverter_temp', 'pv.status'],
+  INVERTER: ['pv.activePower', 'pv.active_power', 'pv.dailyEnergy', 'pv.daily_energy', 'pv.inverterTemp', 'pv.inverter_temp', 'pv.status'],
+  PV_INVERTER: ['pv.activePower', 'pv.active_power', 'pv.dailyEnergy', 'pv.daily_energy', 'pv.inverterTemp', 'pv.inverter_temp', 'pv.status'],
+  SOLAR: ['pv.activePower', 'pv.active_power', 'pv.dailyEnergy', 'pv.daily_energy', 'pv.inverterTemp', 'pv.inverter_temp', 'pv.status'],
+  ESS: ['ess.activePower', 'ess.active_power', 'ess.soc', 'ess.soh', 'ess.status'],
+  STORAGE: ['ess.activePower', 'ess.active_power', 'ess.soc', 'ess.soh', 'ess.status'],
+  PCS: ['pcs.activePower', 'pcs.active_power', 'pcs.dischargePowerLimit', 'pcs.discharge_power_limit', 'pcs.temp', 'pcs.temperature', 'pcs.status', 'pcs.running_state'],
+  BMS: ['ess.soc', 'bms.soc', 'ess.soh', 'bms.soh', 'ess.voltage', 'ess.current', 'ess.status'],
+  BATTERY: ['ess.soc', 'bms.soc', 'ess.soh', 'bms.soh', 'ess.voltage', 'ess.current', 'ess.status'],
+  EVSE: ['charger.chargingPower', 'charger.active_power', 'charger.soc', 'charger.chargedEnergy', 'charger.status'],
+  CHARGER: ['charger.chargingPower', 'charger.active_power', 'charger.soc', 'charger.chargedEnergy', 'charger.status'],
+  CHARGING: ['charger.chargingPower', 'charger.active_power', 'charger.soc', 'charger.chargedEnergy', 'charger.status'],
+  METER: ['grid.activePower', 'grid.active_power', 'ems.loadPowerTotal', 'ems.load_power_total', 'grid.frequency', 'grid.powerFactor'],
+  GRID: ['grid.activePower', 'grid.active_power', 'grid.frequency', 'grid.powerFactor'],
+  LOAD: ['ems.loadPowerTotal', 'ems.load_power_total', 'grid.activePower', 'grid.active_power', 'grid.frequency'],
+}
+
+function normalizedNodeType(nodeType: string | null | undefined): string {
+  return (nodeType || '').trim().toUpperCase()
+}
+
+export function deviceMonitorCategory(nodeType: string | null | undefined): DeviceMonitorCategory {
+  return DEVICE_CATEGORY_BY_NODE_TYPE[normalizedNodeType(nodeType)] || '其他'
+}
+
+export function orderDeviceMonitorEntities(
+  nodeType: string | null | undefined,
+  entities: readonly EntityInstance[],
+): EntityInstance[] {
+  const priorities = DEVICE_METRIC_PRIORITY[normalizedNodeType(nodeType)] || []
+  const ranks = new Map(priorities.map((definitionId, index) => [definitionId, index]))
+  return [...entities].sort((left, right) => {
+    const leftRank = ranks.get(left.definition_id) ?? Number.MAX_SAFE_INTEGER
+    const rightRank = ranks.get(right.definition_id) ?? Number.MAX_SAFE_INTEGER
+    return leftRank - rightRank
+      || left.definition_id.localeCompare(right.definition_id, 'en')
+      || left.id.localeCompare(right.id, 'en')
+  })
+}
+
+export function deviceMonitorDataState(
+  entities: readonly RuntimeEntity[] | null,
+  nodeCurrent: boolean,
+): DeviceMonitorDataState {
+  if (entities === null) return 'unknown'
+  if (entities.length === 0) return 'unconfigured'
+  const readings = entities.map((entity) => runtimeEntityReading(entity.observation, nodeCurrent))
+  if (readings.some((reading) => reading.kind === 'unknown')) return 'unknown'
+  return readings.every((reading) => reading.kind === 'current') ? 'current' : 'last'
+}
+
+export function summarizeDeviceMonitorDataStates(
+  states: readonly DeviceMonitorDataState[],
+): Record<DeviceMonitorDataState, number> {
+  const result: Record<DeviceMonitorDataState, number> = { current: 0, last: 0, unconfigured: 0, unknown: 0 }
+  for (const state of states) result[state] += 1
+  return result
 }
 
 export function buildDeviceMonitorPage({
@@ -219,7 +300,7 @@ export function buildDeviceMonitorPage({
   }
   const filteredNodes = alarmFilterBlocked ? [] : nodes
     .filter((node) => {
-      const nodeCategory = node.node_type.trim() || '其他'
+      const nodeCategory = deviceMonitorCategory(node.node_type)
       if (category && nodeCategory !== category) return false
       if (normalizedQuery && !node.name.toLocaleLowerCase().includes(normalizedQuery) && !node.id.toLocaleLowerCase().includes(normalizedQuery)) return false
       if (onlyAlarms && (alarmCounts?.[node.id] ?? 0) <= 0) return false
@@ -230,8 +311,8 @@ export function buildDeviceMonitorPage({
   const safePage = Math.min(Math.max(1, page), totalPages)
   const pageItems = filteredNodes.slice((safePage - 1) * 6, safePage * 6).map((node) => ({
     node,
-    category: node.node_type.trim() || '其他',
-    entities: entitiesByNode.get(node.id) || [],
+    category: deviceMonitorCategory(node.node_type),
+    entities: orderDeviceMonitorEntities(node.node_type, entitiesByNode.get(node.id) || []),
     alarmCount: alarmCounts === null ? null : alarmCounts[node.id] ?? 0,
   }))
   const activeNodeIds = pageItems.map((item) => item.node.id)

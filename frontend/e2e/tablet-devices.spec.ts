@@ -5,7 +5,7 @@ const nodes = Array.from({ length: 8 }, (_, index) => ({
   name: index < 2 ? '同名 PCS' : `${index + 1}# 设备`,
   parent_id: 'site-1',
   layer: 4,
-  node_type: index === 7 ? '' : 'PCS',
+  node_type: ['PCS', 'PCS', 'INVERTER', 'BMS', 'EVSE', 'METER', 'CUSTOM_DEVICE', ''][index],
   sort_order: index,
   enabled: true,
   tag_count: 0,
@@ -16,8 +16,8 @@ const entities = Array.from({ length: 23 }, (_, index) => ({
   node_id: index < 22 ? 'device-1' : 'device-2',
   node_type: 'PCS',
   node_display_name: '同名 PCS',
-  definition_id: index === 0 ? 'pcs.running_state' : `pcs.metric_${index + 1}`,
-  display_name: index === 0 ? '运行状态' : `指标 ${index + 1}`,
+  definition_id: index === 0 ? 'pcs.running_state' : index === 1 ? 'pcs.activePower' : index === 2 ? 'pcs.temp' : `pcs.metric_${index + 1}`,
+  display_name: index === 0 ? '运行状态' : index === 1 ? '有功功率' : index === 2 ? '内部温度' : `指标 ${index + 1}`,
   data_type: index === 0 ? 'bool' : 'float',
   unit: index === 0 ? null : 'kW',
   direction: 'R',
@@ -144,9 +144,9 @@ async function installFixture(page: Page, options: {
   return writes
 }
 
-async function mountDeviceMonitor(page: Page) {
+async function mountDeviceMonitor(page: Page, options: { engineering?: boolean } = {}) {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
-  await page.evaluate(async () => {
+  await page.evaluate(async ({ engineering }) => {
     document.head.innerHTML = '<meta charset="UTF-8"><title>Device monitor fixture</title>'
     document.body.innerHTML = '<div id="root"></div>'
     const RefreshRuntime = (await import('/@react-refresh')).default
@@ -159,8 +159,9 @@ async function mountDeviceMonitor(page: Page) {
     const React = (await import('/@id/react')).default
     const ReactDOM = (await import('/@id/react-dom/client')).default
     const DeviceMonitorPage = (await import('/src/pages/DeviceMonitorPage.tsx')).default
-    ReactDOM.createRoot(document.getElementById('root')!).render(React.createElement(DeviceMonitorPage, {}))
-  })
+    const props = engineering ? { onOpenEngineering: (nodeId: string) => Object.assign(window, { __engineeringNodeId: nodeId }) } : {}
+    ReactDOM.createRoot(document.getElementById('root')!).render(React.createElement(DeviceMonitorPage, props))
+  }, options)
 }
 
 test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10 or 20 entity rows', async ({ page }) => {
@@ -168,16 +169,22 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   const writes = await installFixture(page)
   await mountDeviceMonitor(page)
 
+  const summary = page.getByRole('region', { name: '设备监控摘要' })
+  await expect(summary).toContainText('总设备8')
+  await expect(summary).toContainText('有活动告警2')
+  await expect(page.getByRole('group', { name: '设备分类' }).getByRole('button', { name: '储能', exact: true })).toBeVisible()
   await expect(page.getByRole('article')).toHaveCount(6)
   const sameName = page.getByRole('article', { name: /同名 PCS 设备卡片/ })
   await expect(sameName).toHaveCount(2)
   await expect(sameName.nth(0)).toContainText('device-1')
-  await expect(sameName.nth(0)).toContainText('未恢复 2')
+  await expect(sameName.nth(0)).toContainText('活动告警 2')
   await expect(sameName.nth(1)).toContainText('device-2')
-  await expect(sameName.nth(1)).toContainText('未恢复 1')
+  await expect(sameName.nth(1)).toContainText('活动告警 1')
   await expect(sameName.nth(0)).toContainText('超时 · 最后值（非当前）')
   await expect(sameName.nth(0)).toContainText('异常 · 最后值（非当前）')
   await expect(sameName.nth(1)).toContainText('正常 · 当前值')
+  await expect(sameName.nth(0).locator('.runtime-device-card__primary')).toContainText('有功功率')
+  await expect(sameName.nth(0).locator('.runtime-device-card__secondary')).toContainText('内部温度')
 
   await page.evaluate(() => (window as Window & { __disconnectDeviceNode: (nodeId: string) => void }).__disconnectDeviceNode('device-1'))
   await expect(sameName.nth(0)).toContainText('正常 · 最后值（非当前）')
@@ -187,25 +194,40 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   await expect(page.getByRole('article')).toHaveCount(1)
   await expect(page.getByRole('article')).toContainText('device-2')
   await search.fill('')
-  const category = page.getByRole('combobox', { name: '节点类别' })
-  await category.selectOption('其他')
-  await expect(page.getByRole('article')).toHaveCount(1)
-  await expect(page.getByRole('article')).toContainText('device-8')
-  await category.selectOption('')
+  const categories = page.getByRole('group', { name: '设备分类' })
+  await categories.getByRole('button', { name: '其他', exact: true }).click()
+  await expect(page.getByRole('article')).toHaveCount(2)
+  await expect(page.getByRole('article').first()).toContainText('device-7')
+  await categories.getByRole('button', { name: '全部', exact: true }).click()
   await expect(page.getByRole('article')).toHaveCount(6)
+
+  await search.fill('不存在的设备')
+  await expect(page.getByText('没有符合条件的设备')).toBeVisible()
+  await page.getByRole('button', { name: '清除筛选', exact: true }).click()
+  await expect(page.getByRole('article')).toHaveCount(6)
+
+  await page.getByRole('checkbox', { name: '仅有未恢复告警' }).check()
+  await expect(page.getByRole('article')).toHaveCount(2)
+  await expect(page.getByRole('article', { name: /同名 PCS 设备卡片/ })).toHaveCount(2)
+  await page.getByRole('checkbox', { name: '仅有未恢复告警' }).uncheck()
 
   await sameName.nth(0).getByRole('button', { name: '查看详情' }).click()
   const deviceDialog = page.getByRole('dialog', { name: '同名 PCS' })
-  await expect(deviceDialog.locator('.runtime-device-detail__entities > button')).toHaveCount(10)
+  await expect(deviceDialog).toContainText('下表显示实时实体；点击实体打开正式历史趋势与来源证据。')
+  await expect(deviceDialog.locator('.runtime-device-detail__table tbody tr')).toHaveCount(10)
   await deviceDialog.getByRole('button', { name: '运行状态' }).click()
   const history = page.getByRole('region', { name: '实体历史' })
   await expect(history).toContainText('false')
   await expect(history.getByRole('img')).toHaveCount(0)
   await deviceDialog.getByRole('button', { name: '下一页' }).evaluate((button: HTMLButtonElement) => button.click())
   await expect(page.getByRole('dialog', { name: '运行状态' })).toHaveCount(0)
-  await expect(deviceDialog.getByRole('button', { name: '指标 11' })).toBeVisible()
+  await expect(deviceDialog.getByRole('button', { name: '指标 17' })).toBeVisible()
   await deviceDialog.locator('select').selectOption('20')
-  await expect(deviceDialog.locator('.runtime-device-detail__entities > button')).toHaveCount(20)
+  await expect(deviceDialog.locator('.runtime-device-detail__table tbody tr')).toHaveCount(20)
+  await deviceDialog.getByRole('button', { name: '关闭' }).click()
+  await sameName.nth(0).getByRole('button', { name: '查看详情' }).click()
+  await expect(deviceDialog.getByRole('combobox', { name: '实体每页条数' })).toHaveValue('10')
+  await expect(deviceDialog.locator('.runtime-device-detail__table tbody tr')).toHaveCount(10)
   await deviceDialog.getByRole('button', { name: '关闭' }).click()
 
   await page.getByRole('button', { name: '下一页' }).click()
@@ -215,13 +237,29 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   expect(writes).toEqual([])
 })
 
+for (const viewport of [{ width: 1024, height: 768 }, { width: 1280, height: 800 }]) {
+  test(`six real device cards form a two-by-three tablet grid at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await installFixture(page)
+    await mountDeviceMonitor(page)
+    await expect(page.getByRole('article')).toHaveCount(6)
+    const geometry = await page.getByRole('article').evaluateAll((cards) => {
+      const lefts = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().left)))
+      const tops = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top)))
+      return { columns: lefts.size, rows: tops.size, overflow: document.documentElement.scrollWidth > innerWidth }
+    })
+    expect(geometry).toEqual({ columns: 3, rows: 2, overflow: false })
+    await page.screenshot({ path: testInfo.outputPath(`device-monitor-${viewport.width}x${viewport.height}.png`), fullPage: true })
+  })
+}
+
 test('failed alarm counts stay unknown and cannot masquerade as zero or a valid alarm filter', async ({ page }) => {
   test.setTimeout(180_000)
   await installFixture(page, { countSequence: ['fail'] })
   await mountDeviceMonitor(page)
 
   await expect(page.getByRole('alert')).toContainText('计数显示未知')
-  await expect(page.getByText('未恢复 —').first()).toBeVisible()
+  await expect(page.getByText('活动告警 —').first()).toBeVisible()
   await expect(page.getByRole('checkbox', { name: '仅有未恢复告警' })).toBeDisabled()
 })
 
@@ -252,7 +290,7 @@ test('entity provenance shows committed raw evidence, retries trunk failure and 
   expect(requests.filter((url) => /entity-instances\/[^/]+\/realtime/.test(url))).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('l0-provenance.png'), fullPage: true })
   await detail.getByRole('button', { name: '关闭', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: /^指标 2 pcs/ }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '有功功率', exact: true }).click()
   const crossSource = page.getByRole('region', { name: '实体来源证据' })
   await expect(crossSource).toContainText('跨节点 L2 pcs.active_power')
   await expect(crossSource).toContainText('需另行打开来源节点证据')
@@ -297,4 +335,19 @@ test('alarm retry remains disabled while counts are unknown and pending', async 
   await expect(filter).toBeDisabled()
   await expect(page.getByRole('article')).toHaveCount(6)
   await expect(filter).toBeEnabled()
+})
+
+test('configuration jump stays hidden when the shell does not grant engineering access', async ({ page }) => {
+  await installFixture(page)
+  await mountDeviceMonitor(page)
+  await page.getByRole('article', { name: /同名 PCS 设备卡片/ }).first().getByRole('button', { name: '查看详情' }).click()
+  await expect(page.getByRole('dialog', { name: '同名 PCS' }).getByRole('button', { name: '配置此设备' })).toHaveCount(0)
+})
+
+test('configuration jump targets the selected device when the shell grants engineering access', async ({ page }) => {
+  await installFixture(page)
+  await mountDeviceMonitor(page, { engineering: true })
+  await page.getByRole('article', { name: /同名 PCS 设备卡片/ }).first().getByRole('button', { name: '查看详情' }).click()
+  await page.getByRole('dialog', { name: '同名 PCS' }).getByRole('button', { name: '配置此设备' }).click()
+  await expect.poll(() => page.evaluate(() => (window as Window & { __engineeringNodeId?: string }).__engineeringNodeId)).toBe('device-1')
 })
