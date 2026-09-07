@@ -67,6 +67,13 @@ export function dispatchStrategyFailureState(reason: any): {
   requiresReload: boolean
   keepSimulation: boolean
 }
+export function retainDispatchReloadLock(current: boolean, reason: any): boolean
+export function createDispatchLoadGate(): {
+  begin(): {
+    isCurrent(): boolean
+    cancel(): void
+  }
+}
 export function projectStrategyStatus(strategy: any): {
   draftRevision: number | null
   publishedRevision: number | null
