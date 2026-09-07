@@ -37,13 +37,44 @@ export function encodeFixtureScalar(value: FixtureScalar): string {
   return JSON.stringify(value)
 }
 
+export function resolveFixtureScript(
+  repositoryRoot: string,
+  environment: { baseUrl: string },
+  source: NodeJS.ProcessEnv = process.env,
+): string {
+  const defaultScript = path.join(
+    repositoryRoot,
+    'backend',
+    'scripts',
+    'node_management_e2e_fixture.py',
+  )
+  const localScript = String(source.ZIZU_E2E_LOCAL_FIXTURE_SCRIPT ?? '').trim()
+  if (!localScript) return defaultScript
+
+  const site = new URL(environment.baseUrl)
+  if (site.protocol !== 'http:' || site.hostname !== '127.0.0.1') {
+    throw new Error('Local E2E fixture override requires an HTTP loopback site')
+  }
+  const remoteOption = Object.entries(source).find(([key, value]) => (
+    (key.startsWith('ZIZU_E2E_SSH_') || key === 'ZIZU_E2E_SUDO_PASSWORD')
+    && String(value ?? '').trim() !== ''
+  ))
+  if (remoteOption) {
+    throw new Error('Local E2E fixture override refuses SSH and sudo options')
+  }
+  if (!path.isAbsolute(localScript) || path.extname(localScript).toLowerCase() !== '.py') {
+    throw new Error('ZIZU_E2E_LOCAL_FIXTURE_SCRIPT must be an absolute Python script path')
+  }
+  return path.normalize(localScript)
+}
+
 async function executeFixture(
   command: FixtureCommand | 'publish',
   extraArguments: string[],
   environment = buildAcceptanceEnvironment(process.env),
 ) {
   const repositoryRoot = path.resolve(process.cwd(), '..')
-  const script = path.join(repositoryRoot, 'backend', 'scripts', 'node_management_e2e_fixture.py')
+  const script = resolveFixtureScript(repositoryRoot, environment)
   const commandArguments = [script, command, ...extraArguments]
   try {
     const { stdout } = await execFileAsync('python', commandArguments, {

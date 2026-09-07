@@ -29,6 +29,8 @@ npm run test:e2e:node
 npm run test:e2e:dispatch-strategy
 ```
 
+节点管理也可在私有本机纵向环境中显式设置 `ZIZU_E2E_LOCAL_FIXTURE_SCRIPT`，以复用同一套 Playwright 用例连接实际 FastAPI、隔离 PostgreSQL 与 loopback Neuron/MQTT。未设置时仍执行仓库默认现场夹具；设置后只接受绝对 `.py` 路径和 `http://127.0.0.1:<port>` 基址，任何非 loopback 基址或 `ZIZU_E2E_SSH_*` / `ZIZU_E2E_SUDO_PASSWORD` 选项都会在启动夹具前被拒绝。私有脚本、运行配置和凭据不得提交。
+
 站点地址、登录凭据、本次运行 ID 和写入确认只通过 `ZIZU_E2E_*` 环境变量传入，不得写入命令、仓库或报告。测试只能在 `E2E验证` 根节点下创建带运行 ID 的临时资源，不启用规则、不执行控制，结束后必须完成清理。失败证据保存在 `frontend/test-results/`。
 
 ## 人工业务闭环
