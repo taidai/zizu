@@ -25,6 +25,25 @@ type DecisionTableContent = Record<string, unknown>
 
 const NATIVE_TYPES = new Set(['BOOL', 'BOOLEAN', 'INT', 'FLOAT', 'NUMBER', 'NUMERIC', 'DOUBLE', 'DECIMAL', 'STRING', 'STATE', 'ENUM'])
 
+export function buildGenericDecisionTableJdm(): NativeDecisionGraph {
+  return {
+    nodes: [
+      { id: 'input', type: 'inputNode', name: 'Input' },
+      {
+        id: 'decision-table',
+        type: 'decisionTableNode',
+        name: '通用决策表',
+        content: { hitPolicy: 'first', inputs: [], outputs: [], rules: [] },
+      },
+      { id: 'output', type: 'outputNode', name: 'Output' },
+    ],
+    edges: [
+      { id: 'input-decision-table', sourceId: 'input', targetId: 'decision-table', type: 'edge' },
+      { id: 'decision-table-output', sourceId: 'decision-table', targetId: 'output', type: 'edge' },
+    ],
+  }
+}
+
 export function inspectNativeDecisionTable(graph: NativeDecisionGraph | null | undefined): { nodeId: string; content: unknown } | null {
   if (!Array.isArray(graph?.nodes)) return null
   const candidates = graph.nodes.filter((node) => node.type === 'decisionTableNode')

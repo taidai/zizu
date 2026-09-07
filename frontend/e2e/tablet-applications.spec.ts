@@ -98,10 +98,28 @@ function applicationStrategy(multipleTables = false) {
   }
 }
 
-async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'native' | 'multiple') {
+function creationStarterStrategy() {
+  const source = applicationStrategy(false)
+  return {
+    ...source,
+    id: 'strategy-created',
+    name: '2充2放调度策略',
+    draft: {
+      ...source.draft,
+      id: 'draft-created',
+      strategy_id: 'strategy-created',
+      trigger_kind: 'FIXED_TICK',
+      jdm_content: staleStrategyView().draft.jdm_content,
+      bindings: [],
+    },
+  }
+}
+
+async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'native' | 'multiple' | 'create' | 'delayed') {
   const writes: string[] = []
   const staleStrategy = staleCode ? staleStrategyView() : null
-  let fixtureStrategy = fixture === 'native' || fixture === 'multiple' ? applicationStrategy(fixture === 'multiple') : null
+  let fixtureStrategy = fixture === 'native' || fixture === 'multiple' || fixture === 'delayed' ? applicationStrategy(fixture === 'multiple') : null
+  let createdStrategy: ReturnType<typeof creationStarterStrategy> | null = null
   await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
     socket.onMessage((message) => {
       const body = JSON.parse(String(message))
@@ -142,15 +160,34 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
     }
     if (path.startsWith('/alarm-events')) return json({ items: [], total: 0, page: 1, page_size: 50, total_pages: 1, summary: { active: 0, unacknowledged: 0, critical: 0 } })
     if (path === '/alarms/entities') return json({ items: [] })
-    if (path === '/dispatch-strategies') return json({ strategies: fixtureStrategy ? [fixtureStrategy] : staleStrategy ? [staleStrategy] : [] })
+    if (path === '/dispatch-strategies' && method === 'GET') return json({ strategies: createdStrategy ? [createdStrategy] : fixtureStrategy ? [fixtureStrategy] : staleStrategy ? [staleStrategy] : [] })
+    if (path === '/dispatch-strategies' && method === 'POST' && fixture === 'create') {
+      createdStrategy = creationStarterStrategy()
+      return json(createdStrategy, 201)
+    }
+    if (path === '/dispatch-strategies/strategy-created/draft' && method === 'PUT' && createdStrategy) {
+      const body = request.postDataJSON()
+      const tables = body.jdm_content?.nodes?.filter((node: { type?: string }) => node.type === 'decisionTableNode') || []
+      const valid = body.trigger_kind === 'DATA_CHANGE'
+        && body.bindings?.length === 0
+        && tables.length === 1
+        && tables[0].content?.inputs?.length === 0
+        && tables[0].content?.outputs?.length === 0
+        && !JSON.stringify(body.jdm_content).includes('soc')
+      if (!valid) return json({ detail: { code: 'GENERIC_STARTER_INVALID' } }, 409)
+      createdStrategy = { ...createdStrategy, name: body.name, draft: { ...createdStrategy.draft, ...body, content_digest: 'd'.repeat(64) } }
+      return json(createdStrategy)
+    }
     if (path === '/dispatch-strategies/strategy-native/draft' && method === 'PUT' && fixtureStrategy) {
+      if (fixture === 'delayed') await new Promise((resolve) => setTimeout(resolve, 750))
       const body = request.postDataJSON()
       const nodes = body.jdm_content?.nodes || []
       const preserved = body.jdm_content?.metadata?.owner === 'fixture'
         && nodes.some((node: { id: string; content?: { preserve?: string } }) => node.id === 'vendor' && node.content?.preserve === 'always')
         && nodes.some((node: { id: string; content?: { metadata?: { owner?: string }; inputs?: { metadata?: { source?: string } }[] } }) => node.id === 'rules' && node.content?.metadata?.owner === 'plant-a' && node.content?.inputs?.[0]?.metadata?.source === 'fixture')
         && body.jdm_content?.edges?.[0]?.metadata?.keep === true
-        && body.bindings?.length === 2
+        && body.bindings?.some((binding: { direction?: string; entity_instance_id?: string }) => binding.direction === 'INPUT' && binding.entity_instance_id === 'temperature-1')
+        && body.bindings?.some((binding: { direction?: string; entity_instance_id?: string }) => binding.direction === 'OUTPUT' && binding.entity_instance_id === 'fan-1')
       if (!preserved) return json({ detail: { code: 'ROUND_TRIP_LOSS', message: 'fixture graph or bindings lost' } }, 409)
       fixtureStrategy = {
         ...fixtureStrategy,
@@ -159,9 +196,14 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       }
       return json(fixtureStrategy)
     }
+    if (path === '/dispatch-strategies/strategy-created') return json(createdStrategy)
+    if (path === '/dispatch-strategies/strategy-created/events') return json({ items: [], next_cursor: null })
     if (path === '/dispatch-strategies/strategy-native') return json(fixtureStrategy)
     if (path === '/dispatch-strategies/strategy-native/events') return json({ items: [], next_cursor: null })
-    if (path === '/dispatch-strategies/strategy-native/simulate' && method === 'POST') return json({ status: 'EVALUATED', reason_code: null, frame_sequence: 18, configuration_revision: 7, snapshot: {}, engine_inputs: {}, matched_rules: ['hot'], decision: { fan_enable: true }, proposed_intents: [] })
+    if (path === '/dispatch-strategies/strategy-native/simulate' && method === 'POST') {
+      if (fixture === 'delayed') await new Promise((resolve) => setTimeout(resolve, 750))
+      return json({ status: 'EVALUATED', reason_code: null, frame_sequence: 18, configuration_revision: 7, snapshot: {}, engine_inputs: {}, matched_rules: ['hot'], decision: { fan_enable: true }, proposed_intents: [] })
+    }
     if (path === '/dispatch-strategies/strategy-1') return json(staleStrategy)
     if (path === '/dispatch-strategies/strategy-1/events') return json({ items: [], next_cursor: null })
     if (path === '/dispatch-strategies/strategy-1/simulate' && method === 'POST') return json({
@@ -175,8 +217,9 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       { id: 'temperature-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'room.temperature', display_name: '柜内温度', data_type: 'FLOAT', unit: 'C', direction: 'R', freshness_seconds: 10, confirmed: true, control_eligible: false },
       { id: 'mode-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'site.mode', display_name: '运行模式', data_type: 'STRING', unit: null, direction: 'R', freshness_seconds: 10, confirmed: true, control_eligible: false },
       { id: 'fan-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'fan.enable', display_name: '风机启停', data_type: 'BOOL', unit: null, direction: 'RW', freshness_seconds: 10, confirmed: true, control_eligible: true },
+      { id: 'valve-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'valve.target', display_name: '阀门目标', data_type: 'FLOAT', unit: '%', direction: 'W', freshness_seconds: 10, confirmed: true, control_eligible: true },
       { id: 'unsafe-output', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'unsafe.target', display_name: '无控制合同目标', data_type: 'FLOAT', unit: 'kW', direction: 'W', freshness_seconds: 10, confirmed: true, control_eligible: false },
-    ] : [], total: fixtureStrategy ? 4 : 0 })
+    ] : [], total: fixtureStrategy ? 5 : 0 })
     if (path === '/pipeline/config') return json({ batch_size: 50, flush_interval_sec: 1 })
     if (path === '/mqtt-config') return json({ mqtt_telemetry_topic: '/neuron/#', persisted: null, effective_topics: [] })
     if (path === '/admin/alarm-http-notifications') return json([])
@@ -260,6 +303,12 @@ test('唯一通用表使用原生编辑器和泛型L2绑定，任一绑定变化
   await expect(page.getByLabel('输入 1 实体')).toContainText('运行模式')
   await expect(page.getByLabel('输出 1 实体')).toContainText('风机启停')
   await expect(page.getByLabel('输出 1 实体')).not.toContainText('无控制合同目标')
+  await page.getByRole('button', { name: '添加输入' }).click()
+  await page.getByRole('button', { name: '添加输出' }).click()
+  await expect(page.getByLabel('输入 2 别名')).toHaveValue('input_2')
+  await expect(page.getByLabel('输入 2 实体')).toHaveValue('mode-1')
+  await expect(page.getByLabel('输出 2 别名')).toHaveValue('output_2')
+  await expect(page.getByLabel('输出 2 实体')).toHaveValue('valve-1')
 
   await page.getByRole('button', { name: '试算', exact: true }).click()
   await expect(page.getByTestId('strategy-simulation')).toBeVisible()
@@ -270,6 +319,8 @@ test('唯一通用表使用原生编辑器和泛型L2绑定，任一绑定变化
   await page.reload({ waitUntil: 'domcontentloaded' })
   await openNavigation(page, '调度策略')
   await expect(page.getByLabel('输入 1 别名')).toHaveValue('ambient_temperature')
+  await expect(page.getByLabel('输入 2 实体')).toHaveValue('mode-1')
+  await expect(page.getByLabel('输出 2 实体')).toHaveValue('valve-1')
 })
 
 test('多决策表不进入简化表，完整图仍是唯一正式编辑入口', async ({ page }) => {
@@ -277,8 +328,55 @@ test('多决策表不进入简化表，完整图仍是唯一正式编辑入口',
   await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
   await openNavigation(page, '调度策略')
   await expect(page.getByTestId('native-decision-table')).not.toBeVisible()
+  await expect(page.getByTestId('generic-l2-bindings')).toBeVisible()
+  await page.getByLabel('输入 1 别名').fill('complex_temperature')
+  await page.getByRole('button', { name: '添加输入' }).click()
+  await page.getByRole('button', { name: '添加输出' }).click()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '调度策略')
+  await expect(page.getByLabel('输入 1 别名')).toHaveValue('complex_temperature')
+  await expect(page.getByLabel('输入 2 实体')).toHaveValue('mode-1')
+  await expect(page.getByLabel('输出 2 实体')).toHaveValue('valve-1')
   await expect(page.getByText(/不是可无损往返的唯一决策表/)).toBeVisible()
   await expect(page.getByRole('button', { name: '打开完整规则图' })).toBeVisible()
+})
+
+test('通用新建立即保存原生空表草稿而不是固定SOC时段策略', async ({ page }) => {
+  const writes = await installReadOnlyApi(page, undefined, 'create')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '调度策略')
+  await page.getByRole('button', { name: '新建通用策略' }).click()
+  await expect(page.getByTestId('native-decision-table')).toBeVisible()
+  await expect(page.getByTestId('generic-l2-bindings')).toBeVisible()
+  await expect(page.getByText('不限制为 SOC 或固定时段。')).toBeVisible()
+  expect(writes).toContain('POST /dispatch-strategies')
+  expect(writes).toContain('PUT /dispatch-strategies/strategy-created/draft')
+})
+
+test('慢保存保留请求后的本地草稿且慢试算不会复活旧结果', async ({ page }) => {
+  const writes = await installReadOnlyApi(page, undefined, 'delayed')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '调度策略')
+  const alias = page.getByLabel('输入 1 别名')
+
+  await alias.fill('request_alias')
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled()
+  await alias.fill('local_after_save_request')
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeEnabled()
+  await expect(alias).toHaveValue('local_after_save_request')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('保存期间草稿已继续编辑')
+
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  await expect.poll(() => writes.filter((item) => item === 'POST /dispatch-strategies/strategy-native/simulate').length).toBe(1)
+  await alias.fill('local_after_trial_request')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('试算期间草稿已继续编辑')
+  await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
+  await expect(alias).toHaveValue('local_after_trial_request')
 })
 
 async function expectTouchTargets(page: Page, names: string[]) {

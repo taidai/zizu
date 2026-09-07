@@ -19,6 +19,21 @@ const singleTableGraph = () => ({
   metadata: { owner: 'site-a', nested: { revision: 7 } },
 })
 
+test('generic strategy starter is a native table without fixed SOC schedule semantics', () => {
+  const graph = model.buildGenericDecisionTableJdm()
+  assert.deepEqual(model.inspectNativeDecisionTable(graph), {
+    nodeId: 'decision-table',
+    content: {
+      hitPolicy: 'first',
+      inputs: [],
+      outputs: [],
+      rules: [],
+    },
+  })
+  assert.equal(JSON.stringify(graph).includes('soc'), false)
+  assert.equal(JSON.stringify(graph).includes('power-target'), false)
+})
+
 test('a unique decision table is inspected without changing the graph', () => {
   const graph = singleTableGraph()
   const before = structuredClone(graph)
