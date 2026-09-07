@@ -3,9 +3,17 @@
 @tailwind utilities;
 
 /* ── Neumorphism 基础 ── */
+:root {
+  --zizu-red: #bb0814;
+  --zizu-gold: #b88a34;
+  --zizu-silver: linear-gradient(135deg, #fff 0%, #f0f2f4 35%, #e0e4e8 100%);
+  --zizu-font: 'Noto Sans SC', 'Noto Sans CJK SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+html, body, #root { min-height: 100%; margin: 0; }
 body {
-  background-color: #e8e8e8;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: #e4e7eb;
+  font-family: var(--zizu-font);
   font-size: 13px;
   color: #333;
   -webkit-font-smoothing: antialiased;
@@ -13,46 +21,49 @@ body {
 
 /* ── 拟物化组件类 ── */
 .neu-card {
-  background: #f0f0f0;
-  border-radius: 16px;
-  box-shadow: 6px 6px 12px #c8c8c8, -6px -6px 12px #ffffff;
-  border: 1px solid rgba(255,255,255,0.5);
+  background: var(--zizu-silver);
+  border-radius: 12px;
+  box-shadow: 0 3px 8px #34435418, inset 0 1px 0 #ffffff;
+  border: 1px solid #cbd1d8;
 }
 
 .neu-inset {
-  background: #f0f0f0;
+  background: #edf0f3;
   border-radius: 12px;
-  box-shadow: inset 4px 4px 8px #c8c8c8, inset -4px -4px 8px #ffffff;
+  box-shadow: inset 2px 2px 4px #9aa5b52b, inset -2px -2px 4px #ffffff;
   border: 1px solid rgba(255,255,255,0.3);
 }
 
 .neu-btn {
-  background: #f0f0f0;
-  border-radius: 10px;
-  box-shadow: 3px 3px 6px #c8c8c8, -3px -3px 6px #ffffff;
-  border: 1px solid rgba(255,255,255,0.5);
+  background: linear-gradient(#fff, #e8ecf0);
+  border-radius: 8px;
+  box-shadow: 0 2px 3px #4453681c, inset 0 1px 0 #fff;
+  border: 1px solid #bfc7cf;
+  min-height: 44px;
   transition: all 0.15s ease;
 }
 
 .neu-btn:hover {
-  box-shadow: 2px 2px 4px #c8c8c8, -2px -2px 4px #ffffff;
+  border-color: #aeb8c3;
+  box-shadow: 0 2px 5px #44536825, inset 0 1px 0 #fff;
 }
 
 .neu-btn:active {
-  box-shadow: inset 3px 3px 6px #c8c8c8, inset -3px -3px 6px #ffffff;
+  box-shadow: inset 1px 2px 4px #68778d30;
 }
 
 .neu-input {
-  background: #f0f0f0;
-  border-radius: 8px;
-  box-shadow: inset 2px 2px 4px #c8c8c8, inset -2px -2px 4px #ffffff;
-  border: 1px solid rgba(255,255,255,0.3);
+  background: #f8fafb;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 3px #6c7c9320;
+  border: 1px solid #c1c9d2;
   outline: none;
   transition: border-color 0.2s;
 }
 
 .neu-input:focus {
-  border-color: #52c41a;
+  border-color: var(--zizu-gold);
+  box-shadow: 0 0 0 2px #b88a3426;
 }
 
 /* ── 行内编辑样式 ── */
@@ -64,12 +75,12 @@ body {
 }
 
 .editable-cell:hover {
-  background-color: rgba(82, 196, 26, 0.08);
+  background-color: #b88a3414;
 }
 
 .editable-cell.editing {
   background-color: #fff;
-  box-shadow: 0 0 0 2px #52c41a;
+  box-shadow: 0 0 0 2px var(--zizu-gold);
 }
 
 /* ── 表格滚动条美化 ── */
@@ -111,6 +122,69 @@ body {
 
 /* ── 数字字体 ── */
 .font-mono-value {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-family: Consolas, 'SFMono-Regular', 'Noto Sans SC', 'Microsoft YaHei UI', monospace;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── 自足IOT：红金亮银平板外壳 ── */
+.zizu-shell { height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.zizu-header {
+  display: flex; align-items: center; gap: 24px; flex-shrink: 0; min-height: 76px; padding: 10px 22px;
+  color: #fff5e4; border-bottom: 2px solid #b88a34;
+  background: radial-gradient(ellipse at 32% 0%, #ff4a4a88, transparent 55%), linear-gradient(#d20612, #a3000b 75%, #83030c);
+  box-shadow: inset 0 1px 0 #ffb4a95c, 0 3px 8px #5a091525;
+}
+.zizu-brand { margin: 0; color: #f3d88b; font-size: 36px; font-weight: 750; letter-spacing: 2px; white-space: nowrap; text-shadow: 0 2px 1px #5f0915; }
+.zizu-brand span { font-size: .58em; letter-spacing: 1px; margin-left: 4px; }
+.zizu-header-title { display: flex; flex-direction: column; gap: 3px; }
+.zizu-header-title strong { font-size: 21px; font-weight: 650; }
+.zizu-header-title > span { font-size: 11px; color: #f3c5be; }
+.zizu-account { margin-left: auto; text-align: right; display: flex; flex-direction: column; gap: 3px; font-size: 12px; max-width: 145px; }
+.zizu-account > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zizu-account small { color: #f3c5be; font-size: 10px; }
+.zizu-header-action { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #e9c271; border-radius: 8px; padding: 8px 15px; background: linear-gradient(#faeaca, #e4c284); color: #623d13; box-shadow: inset 0 1px 0 #fff9e5, 0 2px 4px #4600074a; font-size: 14px; font-weight: 650; white-space: nowrap; }
+.zizu-logout { min-height: 44px; border: 1px solid #efbab254; border-radius: 7px; padding: 8px 10px; color: #f8dfd9; white-space: nowrap; font-size: 12px; }
+.zizu-header-action:active, .zizu-logout:active { transform: translateY(1px); }
+.zizu-pipeline { min-height: 34px; padding: 6px 20px; display: flex; flex-shrink: 0; align-items: center; gap: 20px; border-bottom: 1px solid #c9cfd7; background: linear-gradient(#fff, #edf0f3); color: #6b7581; font-size: 11px; }
+.zizu-main { flex: 1; min-height: 0; min-width: 0; padding: 12px 16px; overflow: auto; }
+.zizu-page { min-width: 0; }
+.zizu-engineering-main { overflow: auto; }
+.zizu-runtime-nav, .zizu-engineering-nav { display: flex; flex-shrink: 0; gap: 12px; padding: 10px 16px; }
+.zizu-runtime-nav { border-top: 1px solid #c2cad2; background: linear-gradient(#f3f5f7, #dce1e7); box-shadow: 0 -2px 8px #37485e0d; }
+.zizu-nav-button { flex: 1; display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 48px; padding: 8px 14px; font-size: 16px; font-weight: 600; color: #56616d; }
+.zizu-engineering-nav { padding-bottom: 0; }
+.zizu-engineering-nav .zizu-nav-button { min-height: 44px; font-size: 14px; }
+.zizu-primary { min-height: 44px; background: linear-gradient(#d3222c, #a70d19); color: white; border: 1px solid #9a0a15; box-shadow: inset 0 1px 0 #ff7b8059, 0 2px 4px #5b0c161f; }
+.zizu-primary:hover { background: linear-gradient(#da2c37, #b10e1b); }
+.zizu-primary:active { box-shadow: inset 0 2px 3px #64071150; }
+.zizu-tab-active, .neu-btn.zizu-tab-active { color: #981320; background: linear-gradient(#f7eedc, #eaddbf); border-color: #d5ba85; box-shadow: inset 0 1px 0 #fff9eb, 0 2px 3px #8f722c18; }
+.zizu-auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: radial-gradient(ellipse at 50% 0, #f5f7fa, #d5dce3); }
+.zizu-login { border-top: 5px solid var(--zizu-red); }
+.zizu-login h1 { color: var(--zizu-red); }
+.zizu-skip-link { position: fixed; top: -100px; left: 16px; z-index: 100; background: white; color: #92111e; padding: 12px 16px; border: 2px solid #b88a34; border-radius: 6px; }
+.zizu-skip-link:focus { top: 10px; }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #9c7022; outline-offset: 3px; }
+button:disabled { cursor: not-allowed; }
+@media (max-width: 1100px) {
+  .zizu-header { gap: 16px; padding-inline: 16px; }
+  .zizu-brand { font-size: 31px; }
+  .zizu-header-title strong { font-size: 19px; }
+  .zizu-pipeline { gap: 12px; padding-inline: 16px; }
+  .zizu-main { padding: 10px 12px; }
+}
+@media (max-width: 760px) {
+  .zizu-header { gap: 10px; flex-wrap: wrap; padding: 10px 12px; }
+  .zizu-brand { font-size: 26px; }
+  .zizu-header-title strong { font-size: 16px; }
+  .zizu-header-title > span, .zizu-account { display: none; }
+  .zizu-header-action { margin-left: auto; padding-inline: 10px; }
+  .zizu-pipeline { gap: 8px; flex-wrap: wrap; }
+  .zizu-pipeline > div:nth-of-type(2), .zizu-pipeline > div:nth-of-type(3) { display: none; }
+  .zizu-runtime-nav, .zizu-engineering-nav { gap: 6px; padding: 8px; }
+  .zizu-nav-button { gap: 5px; font-size: 12px; padding: 7px 5px; }
+  .zizu-nav-button svg { width: 17px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .value-flash { animation: none; }
+  .neu-btn { transition: none; }
 }

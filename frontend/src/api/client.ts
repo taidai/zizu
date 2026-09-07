@@ -544,6 +544,7 @@ export async function updateTag(tagId: string, updates: Partial<Pick<Tag, 'scale
 
 export async function fetchHealth(): Promise<HealthStatus> {
   const res = await apiFetch(`${API_BASE}/health`)
+  if (!res.ok) throw await authError(res, `Fetch health failed: ${res.status}`)
   return res.json()
 }
 

@@ -10,6 +10,7 @@ import {
 import AdminPanel from './components/AdminPanel'
 import { clearDataTrunkApplyRetry } from './components/data-trunk/dataTrunkRetryState'
 import { Network, Scale, Bell, Settings, LayoutDashboard } from 'lucide-react'
+import { pagesForArea, resolveTabletPage, type TabletArea, type TabletPage } from './appNavigationModel'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
 const DispatchStrategyPage = lazy(() => import('./pages/DispatchStrategyPage'))
@@ -25,15 +26,15 @@ function PageLoader() {
 }
 
 function PipelineBar({ health }: { health: HealthStatus | null }) {
-  if (!health) return null
+  if (!health) return <div role="status" aria-label="数据链路状态" className="zizu-pipeline"><span className="status-dot warn" /><span>连接未知 · 暂未取得平台状态</span><span className="ml-auto">FE {__APP_VERSION__}</span></div>
   const p = health.pipeline
   const isOk = p.status.toLowerCase() === 'running' && health.components.mqtt.status === 'connected'
 
   return (
-    <div className="neu-card px-4 py-2 flex items-center gap-6 text-xs">
+    <div role="status" aria-label="数据链路状态" className="zizu-pipeline">
       <div className="flex items-center">
         <span className={`status-dot ${isOk ? 'ok' : 'error'}`} />
-        <span className="font-medium">{isOk ? 'Pipeline 运行中' : 'Pipeline 异常'}</span>
+        <span className="font-medium">{isOk ? '采集运行中' : '采集异常'}</span>
       </div>
       <div className="text-gray-500">
         消息: <span className="font-mono-value">{p.messages_received.toLocaleString()}</span>
@@ -47,12 +48,10 @@ function PipelineBar({ health }: { health: HealthStatus | null }) {
       <div className="text-gray-500">
         最后消息: {p.last_message_at ? new Date(p.last_message_at).toLocaleTimeString() : '—'}
       </div>
-      <div className="ml-auto text-gray-400">v{health.version}</div>
+      <div className="ml-auto text-gray-400">FE {__APP_VERSION__} · API {health.version}</div>
     </div>
   )
 }
-
-type PageKey = 'workbench' | 'tree' | 'strategies' | 'alarms' | 'admin'
 
 const ROLE_LABELS: Record<AuthRole, string> = {
   admin: '平台管理员',
@@ -60,25 +59,16 @@ const ROLE_LABELS: Record<AuthRole, string> = {
   operator: '业主操作员',
 }
 
-interface NavigationItem {
-  key: PageKey
-  label: string
-  operatorLabel?: string
-  icon: React.ReactNode
-  roles: AuthRole[]
-}
-
-const ALL_ROLES: AuthRole[] = ['admin', 'engineer', 'operator']
 const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
-
-const NAV_ITEMS: NavigationItem[] = [
-  { key: 'workbench', label: 'EMS 工作台', icon: <LayoutDashboard size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'tree', label: '节点管理', operatorLabel: '运行监控', icon: <Network size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'alarms', label: '告警中心', icon: <Bell size={18} strokeWidth={1.8} />, roles: ALL_ROLES },
-  { key: 'strategies', label: '调度策略', icon: <Scale size={18} strokeWidth={1.8} />, roles: CONFIG_ROLES },
-  // Server-side protection for system/control APIs is intentionally Ticket #4.
-  { key: 'admin', label: '系统工具', icon: <Settings size={18} strokeWidth={1.8} />, roles: ['admin'] },
-]
+const NAV_ITEMS: Record<TabletPage, { label: string; icon: React.ReactNode }> = {
+  workbench: { label: '光储充现场', icon: <LayoutDashboard size={20} strokeWidth={1.8} /> },
+  monitor: { label: '运行监控', icon: <Network size={20} strokeWidth={1.8} /> },
+  tree: { label: '节点管理', icon: <Network size={20} strokeWidth={1.8} /> },
+  alarms: { label: '告警中心', icon: <Bell size={20} strokeWidth={1.8} /> },
+  strategies: { label: '调度策略', icon: <Scale size={20} strokeWidth={1.8} /> },
+  controls: { label: '授权控制', icon: <Scale size={20} strokeWidth={1.8} /> },
+  admin: { label: '系统工具', icon: <Settings size={20} strokeWidth={1.8} /> },
+}
 
 function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession) => void }) {
   const [username, setUsername] = useState('')
@@ -102,11 +92,11 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession
   }
 
   return (
-    <div className="min-h-screen bg-[#e8e8e8] flex items-center justify-center p-6">
-      <form onSubmit={handleSubmit} className="neu-card w-full max-w-sm p-8 space-y-5">
+    <div className="zizu-auth-screen">
+      <form onSubmit={handleSubmit} className="neu-card zizu-login w-full max-w-sm p-8 space-y-5">
         <div>
-          <h1 className="text-2xl font-bold text-gray-800">ZiZu</h1>
-          <p className="mt-1 text-xs text-gray-500">工业控制系统交付与运行平台</p>
+          <h1 className="text-2xl font-bold">自足IOT</h1>
+          <p className="mt-1 text-xs text-gray-500">简单配置，交付光储充 EMS</p>
         </div>
         <div className="space-y-3">
           <label className="block text-xs font-medium text-gray-600">
@@ -139,7 +129,7 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession
         <button
           type="submit"
           disabled={submitting || !username.trim() || !password}
-          className="w-full rounded-lg bg-[#52c41a] px-4 py-2.5 text-sm font-medium text-white shadow disabled:cursor-not-allowed disabled:opacity-50"
+          className="zizu-primary w-full rounded-lg px-4 py-2.5 text-sm font-medium shadow disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? '正在登录...' : '登录'}
         </button>
@@ -150,21 +140,25 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: (session: AuthSession
 }
 
 function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLoggedOut: () => void }) {
-  const [activePage, setActivePage] = useState<PageKey>('workbench')
+  const [activePage, setActivePage] = useState<TabletPage>('workbench')
+  const [area, setArea] = useState<TabletArea>('runtime')
+  const [targetNodeId, setTargetNodeId] = useState<string | undefined>()
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const healthRequestGenerationRef = useRef(0)
-  const [collapsed, setCollapsed] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
-  const navigation = useMemo(
-    () => NAV_ITEMS.filter((item) => item.roles.includes(session.user.role)),
-    [session.user.role],
-  )
-
-  useEffect(() => {
-    if (!navigation.some((item) => item.key === activePage)) {
-      setActivePage(navigation[0]?.key || 'alarms')
-    }
-  }, [activePage, navigation])
+  const canConfigure = CONFIG_ROLES.includes(session.user.role)
+  const safeArea = canConfigure ? area : 'runtime'
+  const safePage = resolveTabletPage(session.user.role, activePage)
+  const navigation = useMemo(() => pagesForArea(session.user.role, safeArea), [session.user.role, safeArea])
+  const navigate = (page: TabletPage, nextArea: TabletArea = safeArea) => {
+    setActivePage(resolveTabletPage(session.user.role, page))
+    setArea(canConfigure ? nextArea : 'runtime')
+  }
+  const openEngineering = (nodeId?: string) => {
+    if (!canConfigure) return
+    setTargetNodeId(nodeId)
+    navigate('tree', 'engineering')
+  }
 
   const loadHealth = useCallback(async () => {
     const generation = ++healthRequestGenerationRef.current
@@ -172,14 +166,14 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
       const nextHealth = await fetchHealth()
       if (generation === healthRequestGenerationRef.current) setHealth(nextHealth)
     } catch {
-      // Keep the last known state; the next poll or manual refresh retries.
+      if (generation === healthRequestGenerationRef.current) setHealth(null)
     }
   }, [])
 
   useEffect(() => {
     void loadHealth()
     const id = setInterval(() => { void loadHealth() }, 5000)
-    return () => clearInterval(id)
+    return () => { clearInterval(id); healthRequestGenerationRef.current += 1 }
   }, [loadHealth])
 
   const handleLogout = async () => {
@@ -194,105 +188,58 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
     }
   }
 
-  return (
-    <div className="min-h-screen bg-[#e8e8e8] flex">
-      {/* 侧边栏 */}
-      <aside
-        className={`neu-card m-4 mr-0 p-3 flex flex-col transition-all duration-300 ${
-          collapsed ? 'w-16 items-center' : 'w-56'
-        }`}
-      >
-        <div className={`flex items-center ${collapsed ? 'mb-4 justify-center' : 'mb-6 px-2 pt-1 justify-between'}`}>
-          {!collapsed && (
-            <div>
-              <h1 className="text-lg font-bold text-gray-800">ZiZu</h1>
-              <p className="text-[10px] text-gray-400">工业 IoT 平台</p>
-            </div>
-          )}
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            title={collapsed ? '展开' : '收起'}
-            className="neu-btn w-7 h-7 flex items-center justify-center text-xs text-gray-500 hover:text-gray-700"
-          >
-            {collapsed ? '▶' : '◀'}
-          </button>
-        </div>
-        <nav className={`space-y-2 w-full ${collapsed ? 'flex flex-col items-center' : ''}`}>
-          {navigation.map((item) => {
-            const label = session.user.role === 'operator' && item.operatorLabel ? item.operatorLabel : item.label
-            return (
-            <button
-              key={item.key}
-              onClick={() => setActivePage(item.key)}
-              title={collapsed ? label : undefined}
-              className={`flex items-center rounded-xl text-sm font-medium transition-colors ${
-                collapsed ? 'w-10 h-10 justify-center px-0' : 'w-full gap-3 px-3 py-2.5'
-              } ${
-                activePage === item.key
-                  ? 'bg-[#52c41a] text-white shadow'
-                  : 'text-gray-600 hover:bg-white/40'
-              }`}
-            >
-              <span className="shrink-0">{item.icon}</span>
-              {!collapsed && <span className="truncate">{label}</span>}
-            </button>
-            )
-          })}
-        </nav>
-        <div className={`mt-auto ${collapsed ? 'text-center' : 'px-1 pb-1'}`}>
-          {!collapsed && (
-            <div className="mb-3 rounded-xl border border-white/60 bg-white/30 px-3 py-2">
-              <div className="truncate text-xs font-medium text-gray-700" title={session.user.username}>{session.user.username}</div>
-              <div className="mt-0.5 text-[10px] text-gray-500">{ROLE_LABELS[session.user.role]}</div>
-              <button
-                onClick={handleLogout}
-                disabled={loggingOut}
-                className="mt-2 text-[11px] text-gray-500 hover:text-red-600 disabled:opacity-50"
-              >
-                {loggingOut ? '正在退出...' : '退出登录'}
-              </button>
-            </div>
-          )}
-          {collapsed && (
-            <button
-              onClick={handleLogout}
-              disabled={loggingOut}
-              title={`${session.user.username} · ${ROLE_LABELS[session.user.role]} · 退出登录`}
-              className="neu-btn mb-3 h-8 w-8 text-xs font-medium text-gray-600 disabled:opacity-50"
-            >
-              {session.user.username.slice(0, 1).toUpperCase()}
-            </button>
-          )}
-          <div className="text-[10px] text-gray-400">FE {__APP_VERSION__}</div>
-        </div>
-      </aside>
+  const runtimeProps = {
+    onOpenAlarms: () => navigate('alarms', 'runtime'),
+    onOpenEngineering: canConfigure ? openEngineering : undefined,
+    onOpenDevices: () => navigate('monitor', 'runtime'),
+    initialTab: safePage === 'controls' ? 'controls' as const : 'overview' as const,
+  }
+  const nodeProps = { initialNodeId: targetNodeId }
+  const navigationButtons = navigation.map((page) => (
+    <button key={page} type="button" aria-current={safePage === page ? 'page' : undefined}
+      onClick={() => navigate(page)} className={`neu-btn zizu-nav-button ${safePage === page ? 'zizu-tab-active' : ''}`}>
+      {NAV_ITEMS[page].icon}<span>{NAV_ITEMS[page].label}</span>
+    </button>
+  ))
 
-      {/* 主内容 */}
-      <main className="flex-1 p-6 overflow-auto min-w-0">
+  return (
+    <div className="zizu-shell">
+      <a className="zizu-skip-link" href="#zizu-main">跳转到主要内容</a>
+      <header className="zizu-header">
+        <h1 className="zizu-brand">自足<span>IOT</span></h1>
+        <div className="zizu-header-title"><strong>{safeArea === 'engineering' ? '工程配置' : '光储充现场'}</strong><span>简单配置，交付光储充 EMS</span></div>
+        <div className="zizu-account"><span title={session.user.username}>{session.user.username}</span><small>{ROLE_LABELS[session.user.role]}</small></div>
+        {canConfigure && <button type="button" className="zizu-header-action" onClick={() => safeArea === 'engineering' ? navigate('workbench', 'runtime') : openEngineering()}><Settings size={19} />{safeArea === 'engineering' ? '返回现场' : '工程配置'}</button>}
+        <button type="button" onClick={handleLogout} disabled={loggingOut} className="zizu-logout">{loggingOut ? '正在退出...' : '退出登录'}</button>
+      </header>
+      <PipelineBar health={health} />
+      {safeArea === 'engineering' && <nav aria-label="工程配置导航" className="zizu-engineering-nav">{navigationButtons}</nav>}
+      <main id="zizu-main" tabIndex={-1} className={`zizu-main ${safeArea === 'engineering' ? 'zizu-engineering-main' : ''}`}>
         {!session.accessToken && (
           <div role="alert" className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-semibold text-red-800">
             不安全开发模式：当前会话未认证。不得将此实例暴露到生产网络。
           </div>
         )}
-        <PipelineBar health={health} />
-        <div className="mt-4">
+        <div className="zizu-page">
           <Suspense fallback={<PageLoader />}>
-            {activePage === 'workbench' && <EMSWorkbenchPage onOpenAlarms={() => setActivePage('alarms')} />}
-            {activePage === 'tree' && (
+            {(safePage === 'workbench' || safePage === 'controls') && <EMSWorkbenchPage key={safePage} {...runtimeProps} />}
+            {(safePage === 'tree' || safePage === 'monitor') && (
               <NodeTreePage
+                {...nodeProps}
                 actorId={session.user.id}
-                readOnly={session.user.role === 'operator'}
-                canManageTemplates={session.user.role === 'admin'}
+                readOnly={safePage === 'monitor' || session.user.role === 'operator'}
+                canManageTemplates={safePage === 'tree' && session.user.role === 'admin'}
                 health={health}
                 onRefreshHealth={loadHealth}
               />
             )}
-            {activePage === 'strategies' && <DispatchStrategyPage />}
-            {activePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={CONFIG_ROLES.includes(session.user.role)} />}
+            {safePage === 'strategies' && <DispatchStrategyPage />}
+            {safePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={canConfigure} />}
           </Suspense>
-          {activePage === 'admin' && <AdminPanel />}
+          {safePage === 'admin' && <AdminPanel />}
         </div>
       </main>
+      {safeArea === 'runtime' && <nav aria-label="日常运行" className="zizu-runtime-nav">{navigationButtons}</nav>}
     </div>
   )
 }
@@ -352,7 +299,7 @@ export default function App() {
         <div className="neu-card w-full max-w-sm p-8 text-center">
           <h1 className="text-base font-bold text-gray-800">平台连接不可用</h1>
           <p className="mt-2 text-xs leading-5 text-gray-500">{restoreError}</p>
-          <button onClick={() => void restoreSession()} className="mt-5 rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white">重试</button>
+          <button onClick={() => void restoreSession()} className="zizu-primary mt-5 rounded-lg px-4 py-2 text-xs font-medium text-white">重试</button>
           <button
             onClick={() => {
               clearDataTrunkApplyRetry(sessionStorage)
