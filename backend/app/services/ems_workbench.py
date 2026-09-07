@@ -7,6 +7,7 @@ from typing import Any
 from app.services.entity_instance_catalog import EntityInstanceCatalog, EntityInstanceDescriptor
 from app.services.entity_instance_registry import EntityInstanceError
 from app.services.entity_instance_runtime import EntityInstanceRuntime
+from app.services.ems_workbench_slots import EmsWorkbenchSlots
 
 
 class EmsWorkbenchError(ValueError):
@@ -21,20 +22,18 @@ _GROUPS = (
     ("charging", "充电", ("charger.", "evse.")),
     ("grid", "电网与负荷", ("grid.", "meter.", "load.", "site.")),
 )
-_KPI_DEFINITIONS = (
-    ("site-power", "站点功率", ("site.activePower", "grid.activePower")),
-    ("pv-power", "光伏功率", ("pv.activePower", "inverter.activePower")),
-    ("storage-power", "储能功率", ("storage.activePower", "pcs.activePower")),
-    ("storage-soc", "储能 SOC", ("storage.soc", "bms.soc")),
-    ("charging-power", "充电功率", ("charger.activePower", "evse.activePower")),
-)
-
-
 class EmsWorkbench:
-    def __init__(self, catalog: EntityInstanceCatalog, runtime: EntityInstanceRuntime, configuration_revision: Callable[[], int]) -> None:
+    def __init__(
+        self,
+        catalog: EntityInstanceCatalog,
+        runtime: EntityInstanceRuntime,
+        configuration_revision: Callable[[], int],
+        slots: EmsWorkbenchSlots,
+    ) -> None:
         self._catalog = catalog
         self._runtime = runtime
         self._configuration_revision = configuration_revision
+        self._slots = slots
 
     def read(self) -> dict[str, Any]:
         descriptors = self._catalog.list()
@@ -49,10 +48,20 @@ class EmsWorkbench:
             groups.append({"id": "other", "label": "其他设备", "entities": self._live_entities(remaining)})
 
         kpis = []
-        for key, label, definitions in _KPI_DEFINITIONS:
-            matched = next((item for definition in definitions for item in descriptors if item.definition_id == definition), None)
-            if matched:
-                kpis.append({"id": key, "label": label, "entities": self._live_entities((matched,))})
+        for slot in self._slots.resolve(descriptors):
+            live = self._live_entities((slot.entity,)) if slot.entity is not None else []
+            kpis.append(
+                {
+                    "id": slot.key,
+                    "label": slot.label,
+                    "binding_mode": slot.binding_mode,
+                    "binding_status": slot.binding_status,
+                    "binding_source": slot.binding_source,
+                    "reason": slot.reason,
+                    "candidate_count": slot.candidate_count,
+                    "entity": live[0] if live else None,
+                }
+            )
         numeric = tuple(item for item in descriptors if item.data_type.upper() in {"FLOAT", "INT"})
         trends = [{"id": "energy-flow", "label": "功率与能量趋势", "default_range": "24h", "entities": [self._descriptor(item) for item in numeric[:8]]}]
         controls = [self._descriptor(item) for item in descriptors if item.direction in {"W", "RW"}]
