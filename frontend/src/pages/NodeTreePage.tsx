@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  fetchNodes, updateNode, createNode, deleteNode, fetchAlarmCounts,
+  fetchNodes, fetchTags, updateNode, createNode, deleteNode, fetchAlarmCounts,
   fetchCategories, fetchNeuronNodes, fetchNeuronGroups, previewNeuronTags, importNeuronTags,
+  NeuronImportApiError, NeuronImportResultUnknownError,
   type Node, type Category, type NeuronNode, type NeuronGroup,
   type HealthStatus, type NeuronImportPreview,
 } from '../api/client'
@@ -10,9 +11,13 @@ import { nodeDataTabs, type NodeDataTabKey } from '../components/data-trunk/data
 import {
   importPreviewRows,
   importPreviewSummary,
+  captureNeuronSelection,
   initialNodeSelection,
+  neuronImportReconciliation,
+  neuronPreviewBelongsToSelection,
   normalizedGroups,
   parentCandidates,
+  type NeuronSelectionSnapshot,
 } from '../components/node/nodeUsabilityModel'
 import '../components/node/tabletEngineering.css'
 
@@ -298,10 +303,19 @@ function ImportNeuronModal({
   const [selectedNode, setSelectedNode] = useState('')
   const [selectedGroups, setSelectedGroups] = useState<string[]>([])
   const [preview, setPreview] = useState<NeuronImportPreview | null>(null)
+  const [previewSelection, setPreviewSelection] = useState<NeuronSelectionSnapshot | null>(null)
+  const [resultUnknown, setResultUnknown] = useState(false)
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [dirty, setDirty] = useState(false)
   const firstFieldRef = useRef<HTMLHeadingElement>(null)
+  const selectionGenerationRef = useRef(0)
+  const currentSelectionRef = useRef(captureNeuronSelection(0, '', []))
+  currentSelectionRef.current = captureNeuronSelection(
+    selectionGenerationRef.current,
+    selectedNode,
+    selectedGroups,
+  )
   const requestClose = () => {
     if (!importing && (!dirty || window.confirm('放弃尚未导入的点位选择？'))) onClose()
   }
@@ -322,6 +336,7 @@ function ImportNeuronModal({
   }, [])
 
   useEffect(() => {
+    selectionGenerationRef.current += 1
     if (!selectedNode) {
       setGroups([])
       return
@@ -330,9 +345,12 @@ function ImportNeuronModal({
     setGroups([])
     setSelectedGroups([])
     setPreview(null)
+    setPreviewSelection(null)
+    setResultUnknown(false)
     fetchNeuronGroups(selectedNode)
       .then((gs) => {
         if (!active) return
+        selectionGenerationRef.current += 1
         setGroups(gs)
         setSelectedGroups(gs.map((group) => group.name))
       })
@@ -345,15 +363,23 @@ function ImportNeuronModal({
   }, [selectedNode])
 
   const handlePreview = async () => {
-    const neuronGroups = normalizedGroups(selectedGroups)
-    if (!selectedNode || neuronGroups.length === 0) return
+    const selection = captureNeuronSelection(
+      selectionGenerationRef.current,
+      selectedNode,
+      selectedGroups,
+    )
+    if (!selection.neuronNode || selection.groups.length === 0) return
     setImporting(true)
     try {
-      setPreview(await previewNeuronTags({
+      const nextPreview = await previewNeuronTags({
         node_id: node.id,
-        neuron_node: selectedNode,
-        neuron_groups: neuronGroups,
-      }))
+        neuron_node: selection.neuronNode,
+        neuron_groups: selection.groups,
+      })
+      if (!neuronPreviewBelongsToSelection(nextPreview, selection, currentSelectionRef.current)) return
+      setPreview(nextPreview)
+      setPreviewSelection(selection)
+      setResultUnknown(false)
     } catch (e: any) {
       alert('预览失败：' + (e.message || e))
     } finally {
@@ -362,13 +388,19 @@ function ImportNeuronModal({
   }
 
   const handleImport = async () => {
-    if (!preview) return
+    if (!preview || !previewSelection) return
+    if (!neuronPreviewBelongsToSelection(preview, previewSelection, currentSelectionRef.current)) {
+      setPreview(null)
+      setPreviewSelection(null)
+      alert('点位选择已变化，请重新预览。')
+      return
+    }
     setImporting(true)
     try {
       const res = await importNeuronTags({
         node_id: node.id,
-        neuron_node: selectedNode,
-        neuron_groups: preview.selected_groups,
+        neuron_node: previewSelection.neuronNode,
+        neuron_groups: previewSelection.groups,
         preview_digest: preview.preview_digest,
       })
       const counts = res.counts || {}
@@ -376,8 +408,59 @@ function ImportNeuronModal({
       onSaved()
       onClose()
     } catch (e: any) {
-      setPreview(null)
-      alert('导入失败：' + (e.message || e) + '。请重新预览后再确认。')
+      const unknown = e instanceof NeuronImportResultUnknownError
+        || e instanceof TypeError
+        || (e instanceof NeuronImportApiError && e.status >= 500)
+        || !(e instanceof NeuronImportApiError)
+      if (unknown) {
+        setResultUnknown(true)
+        alert('导入响应中断，结果暂不明确。已保留本次选择，请先核对节点、点位和配置修订，核对前不会重复写入。')
+      } else {
+        setPreview(null)
+        setPreviewSelection(null)
+        alert('导入被拒绝：' + (e.message || e) + '。请重新预览后再确认。')
+      }
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleReconcile = async () => {
+    if (!preview || !previewSelection) return
+    setImporting(true)
+    try {
+      const checks = await Promise.all([
+        fetchNodes(),
+        fetchTags(node.id, 1, 1),
+        previewNeuronTags({
+          node_id: node.id,
+          neuron_node: previewSelection.neuronNode,
+          neuron_groups: previewSelection.groups,
+        }),
+      ])
+      if (!checks[0].some((candidate) => candidate.id === node.id)) {
+        throw new Error('目标节点已不存在')
+      }
+      const refreshedPreview = checks[2]
+      if (!neuronPreviewBelongsToSelection(
+        refreshedPreview,
+        previewSelection,
+        currentSelectionRef.current,
+      )) {
+        throw new Error('核对期间点位选择已变化')
+      }
+      if (neuronImportReconciliation(refreshedPreview) === 'applied') {
+        alert(`核对完成：目标点位已是最新状态，当前配置修订 ${refreshedPreview.base_configuration_revision}。`)
+        onSaved()
+        onClose()
+        return
+      }
+      setPreview(refreshedPreview)
+      setResultUnknown(false)
+      alert(`核对完成：当前配置修订 ${refreshedPreview.base_configuration_revision}，已生成新的导入预览，请再次确认。`)
+    } catch (e: any) {
+      setResultUnknown(true)
+      alert('核对失败：' + (e.message || e) + '。导入结果仍未知，不会开放重复写入。')
     } finally {
       setImporting(false)
     }
@@ -393,8 +476,12 @@ function ImportNeuronModal({
             <label className="block text-xs text-gray-600 mb-1">Neuron 节点</label>
             <select
               value={selectedNode}
-              onChange={(e) => { setSelectedNode(e.target.value); setDirty(true) }}
-              disabled={loading}
+              onChange={(e) => {
+                selectionGenerationRef.current += 1
+                setSelectedNode(e.target.value)
+                setDirty(true)
+              }}
+              disabled={loading || importing || resultUnknown}
               className="neu-input w-full px-3 py-1.5 text-xs bg-transparent"
             >
               {neuronNodes.map((n) => (
@@ -410,11 +497,15 @@ function ImportNeuronModal({
                   <input
                     type="checkbox"
                     checked={selectedGroups.includes(group.name)}
+                    disabled={importing || resultUnknown}
                     onChange={(event) => {
+                      selectionGenerationRef.current += 1
                       setSelectedGroups((current) => event.target.checked
                         ? normalizedGroups([...current, group.name])
                         : current.filter((name) => name !== group.name))
                       setPreview(null)
+                      setPreviewSelection(null)
+                      setResultUnknown(false)
                       setDirty(true)
                     }}
                     className="accent-[#52c41a]"
@@ -448,18 +539,31 @@ function ImportNeuronModal({
               </div>
             )
           })()}
+          {resultUnknown && (
+            <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+              <div className="font-semibold">上次导入结果未知，当前已禁止重复写入。</div>
+              <div className="mt-1">请重新读取节点、点位与配置修订，确认结果后再继续。</div>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <button onClick={requestClose} className="neu-btn engineering-touch px-4 text-xs text-gray-600">取消</button>
+            {resultUnknown && <button
+              onClick={() => void handleReconcile()}
+              disabled={importing}
+              className="neu-btn engineering-touch px-4 text-xs font-medium text-amber-800 disabled:opacity-50"
+            >
+              {importing ? '核对中...' : '核对导入结果'}
+            </button>}
             <button
               onClick={handlePreview}
-              disabled={!selectedNode || selectedGroups.length === 0 || importing}
+              disabled={!selectedNode || selectedGroups.length === 0 || importing || resultUnknown}
               className="neu-btn engineering-touch px-4 text-xs font-medium text-[#7d1b23] disabled:opacity-50"
             >
               {importing && !preview ? '检查中...' : '预览导入'}
             </button>
             <button
               onClick={handleImport}
-              disabled={!preview || !importPreviewSummary(preview).canApply || importing}
+              disabled={!preview || !importPreviewSummary(preview).canApply || importing || resultUnknown}
               className="neu-btn zizu-primary engineering-touch px-4 text-xs font-medium disabled:opacity-50"
             >
               {importing && preview ? '导入中...' : '确认导入'}

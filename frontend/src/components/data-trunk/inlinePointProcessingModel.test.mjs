@@ -534,3 +534,23 @@ test('unavailable trial is explicit in Chinese and never looks like zero', async
     message: '当前还没有可用于试算的已提交数据帧。',
   })
 })
+
+test('plan restore clears retry evidence only for explicit terminal HTTP responses', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  assert.equal(model.pointPlanRestoreFailureDisposition({ status: 404 }), 'clear')
+  assert.equal(model.pointPlanRestoreFailureDisposition({ status: 410 }), 'clear')
+  assert.equal(model.pointPlanRestoreFailureDisposition({ status: 500 }), 'retry')
+  assert.equal(model.pointPlanRestoreFailureDisposition({ status: 401 }), 'retry')
+  assert.equal(model.pointPlanRestoreFailureDisposition(new TypeError('network')), 'retry')
+  assert.equal(model.pointPlanRestoreFailureDisposition(new SyntaxError('json')), 'retry')
+})
+
+test('inline restore validates persisted digest and offers retry without clearing transient evidence', async () => {
+  const source = await readFile(new URL('./InlinePointProcessingPanel.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /readDataTrunkApplyRetry\(sessionStorage/)
+  assert.match(source, /planDigest: restoredPlan\.digest/)
+  assert.match(source, /计划与幂等键已保留/)
+  assert.match(source, /重试恢复/)
+})

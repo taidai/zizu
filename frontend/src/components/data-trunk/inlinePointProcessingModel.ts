@@ -65,6 +65,13 @@ export interface InlinePointProcessingTrialView {
   message: string
 }
 
+export function pointPlanRestoreFailureDisposition(reason: unknown): 'clear' | 'retry' {
+  const status = reason && typeof reason === 'object' && 'status' in reason
+    ? (reason as { status?: unknown }).status
+    : undefined
+  return status === 404 || status === 410 ? 'clear' : 'retry'
+}
+
 export function canCreateEntityDefinition(
   catalog: readonly { node_id: string; definition_id: string }[],
   nodeId: string,

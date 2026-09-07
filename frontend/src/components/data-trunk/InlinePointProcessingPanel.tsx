@@ -12,6 +12,7 @@ import {
 import {
   clearDataTrunkApplyRetry,
   findDataTrunkApplyRetry,
+  readDataTrunkApplyRetry,
   saveDataTrunkApplyRetry,
 } from './dataTrunkRetryState'
 import { buildDataTrunkViewModel } from './dataTrunkViewModel'
@@ -20,6 +21,7 @@ import {
   canCreateEntityDefinition,
   canDeclareInlinePassthroughUnit,
   isNewOutputPlan,
+  pointPlanRestoreFailureDisposition,
   projectInlinePointProcessingTrial,
   suggestInlinePointProcessingDefaults,
   type InlinePointProcessingMode,
@@ -62,6 +64,10 @@ export default function InlinePointProcessingPanel({
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [resultUnknown, setResultUnknown] = useState(false)
+  const [restoreError, setRestoreError] = useState('')
+  const [restoreBusy, setRestoreBusy] = useState(false)
+  const [restoreCanRetry, setRestoreCanRetry] = useState(false)
+  const [restoreAttempt, setRestoreAttempt] = useState(0)
   const [dirty, setDirty] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const firstFieldRef = useRef<HTMLInputElement | null>(null)
@@ -80,26 +86,66 @@ export default function InlinePointProcessingPanel({
     setError('')
     setSuccess('')
     setResultUnknown(false)
+    setRestoreError('')
+    setRestoreBusy(false)
+    setRestoreCanRetry(false)
     setExpanded(false)
   }, [nodeId, pointIdentity])
 
   useEffect(() => {
     let active = true
     const retry = findDataTrunkApplyRetry(sessionStorage, actorId, nodeId)
-    if (!retry) return () => { active = false }
+    if (!retry) {
+      setRestoreError('')
+      setRestoreCanRetry(false)
+      return () => { active = false }
+    }
+    setRestoreBusy(true)
+    setRestoreError('')
+    setRestoreCanRetry(false)
     fetchPointProcessingPlan(retry.planId).then((restoredPlan) => {
-      if (!active || restoredPlan.node_id !== nodeId) return
+      if (!active) return
+      if (restoredPlan.node_id !== nodeId || restoredPlan.status !== 'ready') {
+        clearDataTrunkApplyRetry(sessionStorage)
+        setRestoreError('上次发布计划已结束或身份不一致，请重新检查。')
+        return
+      }
+      const persisted = readDataTrunkApplyRetry(sessionStorage, {
+        actorId,
+        nodeId,
+        planId: restoredPlan.id,
+        planDigest: restoredPlan.digest,
+      })
+      if (!persisted) {
+        setRestoreError('上次发布计划摘要已变化，已停止恢复，请重新检查。')
+        return
+      }
       const target = restoredPlan.items.find((item) => item.kind === 'output_binding' && item.action === 'add')
-      if (!target?.entity_definition_id || !isNewOutputPlan(restoredPlan, target.entity_definition_id)) return
+      if (!target?.entity_definition_id || !isNewOutputPlan(restoredPlan, target.entity_definition_id)) {
+        clearDataTrunkApplyRetry(sessionStorage)
+        setRestoreError('上次发布计划已不再是新增实体计划，请重新检查。')
+        return
+      }
       setDefinitionKey(target.entity_definition_id)
       setPlan(restoredPlan)
-      setIdempotencyKey(retry.idempotencyKey)
+      setIdempotencyKey(persisted.idempotencyKey)
       setResultUnknown(true)
       setDirty(true)
       setExpanded(true)
-    }).catch(() => clearDataTrunkApplyRetry(sessionStorage))
+    }).catch((reason: unknown) => {
+      if (!active) return
+      if (pointPlanRestoreFailureDisposition(reason) === 'clear') {
+        clearDataTrunkApplyRetry(sessionStorage)
+        setRestoreError('上次发布计划已不存在，请重新检查。')
+      } else {
+        setRestoreError('上次发布计划暂时无法恢复，计划与幂等键已保留。')
+        setRestoreCanRetry(true)
+      }
+    }).finally(() => {
+      if (active) setRestoreBusy(false)
+    })
     return () => { active = false }
-  }, [actorId, nodeId, pointIdentity])
+  }, [actorId, nodeId, pointIdentity, restoreAttempt])
 
   const invalidatePlan = () => {
     setPlan(null)
@@ -151,15 +197,22 @@ export default function InlinePointProcessingPanel({
     requestAnimationFrame(() => triggerRef.current?.focus())
   }
 
+  const closeEditorRef = useRef(closeEditor)
+  closeEditorRef.current = closeEditor
+
   useEffect(() => {
     if (!expanded) return
     firstFieldRef.current?.focus()
+  }, [expanded])
+
+  useEffect(() => {
+    if (!expanded) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeEditor()
+      if (event.key === 'Escape') closeEditorRef.current()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [expanded, busy, dirty])
+  }, [expanded])
 
   const handlePlan = async () => {
     setBusy('plan')
@@ -273,6 +326,20 @@ export default function InlinePointProcessingPanel({
           {resultUnknown ? '继续上次发布' : '加工为实体'}
         </button>
       </div>
+
+      {restoreError && (
+        <div role="alert" className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span>{restoreError}</span>
+          {restoreCanRetry && <button
+            type="button"
+            disabled={restoreBusy}
+            onClick={() => setRestoreAttempt((current) => current + 1)}
+            className="neu-btn engineering-touch px-3 text-[11px] disabled:opacity-50"
+          >
+            {restoreBusy ? '恢复中…' : '重试恢复'}
+          </button>}
+        </div>
+      )}
 
       {expanded && (
         <div className="engineering-modal-backdrop" role="presentation">

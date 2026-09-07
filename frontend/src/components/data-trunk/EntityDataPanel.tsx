@@ -68,6 +68,8 @@ export default function EntityDataPanel({
     setPromotionDirty(false)
     requestAnimationFrame(() => promotionTriggerRef.current?.focus())
   }
+  const closePromotionRef = useRef(closePromotion)
+  closePromotionRef.current = closePromotion
 
   useEffect(() => {
     setPage(1)
@@ -77,12 +79,16 @@ export default function EntityDataPanel({
   useEffect(() => {
     if (!showPromotion) return
     promotionNameRef.current?.focus()
+  }, [showPromotion])
+
+  useEffect(() => {
+    if (!showPromotion) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closePromotion()
+      if (event.key === 'Escape') closePromotionRef.current()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [showPromotion, promotionBusy, promotionDirty])
+  }, [showPromotion])
 
   const clearEntitySelection = () => {
     if (selectedEntityId) onSelectEntity(selectedEntityId)

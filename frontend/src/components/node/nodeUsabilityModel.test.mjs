@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 test('parent candidates exclude the edited node and its descendants', async () => {
@@ -130,4 +131,40 @@ test('initial node is selected only after the fetched catalog contains it', asyn
   assert.equal(model.initialNodeSelection(nodes, '', 'missing'), 'root')
   assert.equal(model.initialNodeSelection([], '', 'pcs'), '')
   assert.equal(model.initialNodeSelection(nodes, 'root', 'pcs'), 'root')
+})
+
+test('neuron preview belongs only to the captured generation node and sorted groups', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+  const captured = model.captureNeuronSelection(4, 'neuron-a', ['status', 'data'])
+  const response = {
+    node_id: 'zizu-node',
+    neuron_node: 'neuron-a',
+    selected_groups: ['data', 'status'],
+  }
+
+  assert.deepEqual(captured, { generation: 4, neuronNode: 'neuron-a', groups: ['data', 'status'] })
+  assert.equal(model.neuronPreviewBelongsToSelection(response, captured, captured), true)
+  assert.equal(model.neuronPreviewBelongsToSelection(response, captured, { ...captured, generation: 5 }), false)
+  assert.equal(model.neuronPreviewBelongsToSelection(response, captured, { ...captured, neuronNode: 'neuron-b' }), false)
+  assert.equal(model.neuronPreviewBelongsToSelection(response, captured, { ...captured, groups: ['data'] }), false)
+  assert.equal(model.neuronPreviewBelongsToSelection({ ...response, selected_groups: ['data'] }, captured, captured), false)
+})
+
+test('unknown neuron import is considered reconciled only when fresh preview has no writes', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+
+  assert.equal(model.neuronImportReconciliation({ counts: { unchanged: 3 }, has_conflicts: false }), 'applied')
+  assert.equal(model.neuronImportReconciliation({ counts: { create: 1 }, has_conflicts: false }), 'fresh-preview')
+  assert.equal(model.neuronImportReconciliation({ counts: { update: 1 }, has_conflicts: false }), 'fresh-preview')
+  assert.equal(model.neuronImportReconciliation({ counts: { conflict: 1 }, has_conflicts: true }), 'fresh-preview')
+})
+
+test('neuron import UI wires selection generations and unknown-result reconciliation reads', async () => {
+  const source = await readFile(new URL('../../pages/NodeTreePage.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /selectionGenerationRef/)
+  assert.match(source, /neuronPreviewBelongsToSelection/)
+  assert.match(source, /NeuronImportResultUnknownError/)
+  assert.match(source, /Promise\.all\(\[\s*fetchNodes\(\),\s*fetchTags\(node\.id, 1, 1\),\s*previewNeuronTags/s)
+  assert.match(source, /当前已禁止重复写入/)
 })

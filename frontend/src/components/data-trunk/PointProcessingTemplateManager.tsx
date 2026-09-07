@@ -296,16 +296,22 @@ export default function PointProcessingTemplateManager({
     setDraftDirty(false)
     requestAnimationFrame(() => draftTriggerRef.current?.focus())
   }
+  const closeDraftRef = useRef(closeDraft)
+  closeDraftRef.current = closeDraft
 
   useEffect(() => {
     if (!draft) return
     firstDraftFieldRef.current?.focus()
+  }, [draft !== null])
+
+  useEffect(() => {
+    if (!draft) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeDraft()
+      if (event.key === 'Escape') closeDraftRef.current()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [draft !== null, draftDirty, busy, currentApplyBusy])
+  }, [draft !== null])
 
   return (
     <section className="rounded-xl border border-[#d5ba85] bg-white/55">

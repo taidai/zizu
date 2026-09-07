@@ -56,6 +56,49 @@ export function normalizedGroups(groups: string[]): string[] {
   return Array.from(new Set(groups.map((group) => group.trim()).filter(Boolean))).sort()
 }
 
+export interface NeuronSelectionSnapshot {
+  generation: number
+  neuronNode: string
+  groups: string[]
+}
+
+export function captureNeuronSelection(
+  generation: number,
+  neuronNode: string,
+  groups: string[],
+): NeuronSelectionSnapshot {
+  return {
+    generation,
+    neuronNode,
+    groups: normalizedGroups(groups),
+  }
+}
+
+export function neuronPreviewBelongsToSelection(
+  preview: { neuron_node: string; selected_groups: string[] },
+  requested: NeuronSelectionSnapshot,
+  current: NeuronSelectionSnapshot,
+): boolean {
+  const sameGroups = (left: string[], right: string[]) => (
+    left.length === right.length && left.every((group, index) => group === right[index])
+  )
+  return requested.generation === current.generation
+    && requested.neuronNode === current.neuronNode
+    && sameGroups(requested.groups, current.groups)
+    && preview.neuron_node === requested.neuronNode
+    && sameGroups(normalizedGroups(preview.selected_groups), requested.groups)
+}
+
+export function neuronImportReconciliation(preview: {
+  counts?: Partial<Record<'create' | 'update' | 'unchanged' | 'conflict', number>>
+  has_conflicts?: boolean
+}): 'applied' | 'fresh-preview' {
+  const summary = importPreviewSummary(preview)
+  return summary.create === 0 && summary.update === 0 && summary.conflict === 0 && !preview.has_conflicts
+    ? 'applied'
+    : 'fresh-preview'
+}
+
 export function importPreviewSummary(preview: {
   counts?: Partial<Record<'create' | 'update' | 'unchanged' | 'conflict', number>>
   has_conflicts?: boolean
