@@ -55,20 +55,30 @@ async function installFixture(page: Page, options: {
   let nodeCalls = 0
   let countCalls = 0
   await page.addInitScript(() => {
+    const sockets: FixtureWebSocket[] = []
     class FixtureWebSocket {
       readyState = 1
       onopen: ((event: Event) => void) | null = null
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: ((event: Event) => void) | null = null
       onclose: ((event: CloseEvent) => void) | null = null
-      constructor() { setTimeout(() => this.onopen?.(new Event('open')), 0) }
+      nodeId = ''
+      constructor() {
+        sockets.push(this)
+        setTimeout(() => this.onopen?.(new Event('open')), 0)
+      }
       send(value: string) {
         const payload = JSON.parse(value)
         if (payload.authenticate) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'authenticated' }) })), 0)
-        if (payload.subscribe) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'subscribed' }) })), 0)
+        if (payload.subscribe) {
+          this.nodeId = payload.subscribe.node_id
+          setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'subscribed' }) })), 0)
+        }
       }
       close() { this.readyState = 3 }
+      disconnect() { this.readyState = 3; this.onclose?.(new CloseEvent('close', { code: 1006 })) }
     }
+    Object.assign(window, { __disconnectDeviceNode: (nodeId: string) => sockets.findLast((socket) => socket.nodeId === nodeId)?.disconnect() })
     Object.defineProperty(window, 'WebSocket', { value: FixtureWebSocket })
   })
   await page.route('**/api/v1/**', async (route) => {
@@ -78,7 +88,7 @@ async function installFixture(page: Page, options: {
     if (url.pathname.endsWith('/nodes')) {
       nodeCalls += 1
       return nodeCalls <= (options.nodeFailures || 0)
-        ? fulfillJson(route, { detail: 'node directory unavailable' }, 503)
+        ? fulfillJson(route, { nodes: [], error: 'node directory unavailable' })
         : fulfillJson(route, { nodes })
     }
     if (url.pathname.endsWith('/entity-instances')) return fulfillJson(route, { items: entities, total: entities.length })
@@ -141,6 +151,21 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   await expect(sameName.nth(0)).toContainText('未恢复 2')
   await expect(sameName.nth(1)).toContainText('device-2')
   await expect(sameName.nth(1)).toContainText('未恢复 1')
+
+  await page.evaluate(() => (window as Window & { __disconnectDeviceNode: (nodeId: string) => void }).__disconnectDeviceNode('device-1'))
+  await expect(sameName.nth(0)).toContainText('最后值（非当前）')
+
+  const search = page.getByRole('searchbox', { name: '名称或 ID' })
+  await search.fill('DEVICE-2')
+  await expect(page.getByRole('article')).toHaveCount(1)
+  await expect(page.getByRole('article')).toContainText('device-2')
+  await search.fill('')
+  const category = page.getByRole('combobox', { name: '节点类别' })
+  await category.selectOption('其他')
+  await expect(page.getByRole('article')).toHaveCount(1)
+  await expect(page.getByRole('article')).toContainText('device-8')
+  await category.selectOption('')
+  await expect(page.getByRole('article')).toHaveCount(6)
 
   await sameName.nth(0).getByRole('button', { name: '查看详情' }).click()
   const deviceDialog = page.getByRole('dialog', { name: '同名 PCS' })

@@ -207,6 +207,9 @@ export async function fetchNodes(): Promise<Node[]> {
   const res = await apiFetch(`${API_BASE}/nodes`)
   if (!res.ok) throw await authError(res, `读取节点目录失败：${res.status}`)
   const data = await res.json()
+  if (data?.error) {
+    throw new Error(typeof data.error === 'string' ? data.error : '节点目录查询失败，请重试')
+  }
   if (!Array.isArray(data.nodes)) throw new Error('节点目录响应不完整，请重试')
   return data.nodes
 }

@@ -40,11 +40,12 @@ function DeviceEntityRow({ entity, nodeCurrent, onOpen }: {
   onOpen: () => void
 }) {
   const reading = runtimeEntityReading(entity.observation, nodeCurrent)
+  const readingLabel = reading.kind === 'last' ? '最后值（非当前）' : qualityLabel(reading.quality)
   return (
     <button type="button" onClick={onOpen} className="runtime-device-entity neu-inset">
       <span><strong>{entity.descriptor.display_name}</strong><small>{entity.descriptor.definition_id}</small></span>
       <span className="font-mono-value">{formatValue(reading.value)}{entity.descriptor.unit ? <small> {entity.descriptor.unit}</small> : null}</span>
-      <span className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{qualityLabel(reading.quality)}</span>
+      <span className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{readingLabel}</span>
     </button>
   )
 }

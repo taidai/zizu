@@ -169,6 +169,11 @@ test('device monitor pages six real nodes and keeps same-name identities and unc
   assert.equal(first.pageItems[0].entities.length, 0)
   assert.equal(first.pageItems[1].entities[0].id, 'entity-only-device-2')
   assert.equal(second.pageItems[1].category, '其他')
+
+  const byName = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: {}, query: 'DEVICE-2', category: '', onlyAlarms: false, page: 1 })
+  const byType = buildDeviceMonitorPage({ nodes, descriptors: [entity], alarmCounts: {}, query: '', category: '其他', onlyAlarms: false, page: 1 })
+  assert.deepEqual(byName.activeNodeIds, ['device-2'])
+  assert.deepEqual(byType.activeNodeIds, ['device-8'])
 })
 
 test('device alarm filtering preserves unresolved counts and blocks filtering when count evidence failed', () => {
