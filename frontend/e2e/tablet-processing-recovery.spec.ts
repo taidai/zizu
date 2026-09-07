@@ -89,7 +89,7 @@ async function installFixture(page: Page, options: {
 
 async function openRawPoints(page: Page) {
   await page.goto('/')
-  await openEngineeringPage(page, '节点管理')
+  await openEngineeringPage(page, '节点与数据')
   // The sole node is selected on entry; its pending plan may already open a modal.
   await expect(page.getByTitle('恢复测试节点', { exact: true })).toBeVisible()
   await expect(page.getByLabel('选择 Power', { exact: true })).toBeVisible()

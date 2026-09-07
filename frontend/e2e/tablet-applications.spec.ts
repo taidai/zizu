@@ -313,7 +313,7 @@ for (const [code, message] of [
 test('告警事件按10/20条展示、当前页确认逐项报错并读取真实详情流转', async ({ page }) => {
   await installReadOnlyApi(page, undefined, 'alarms')
   await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
-  await openNavigation(page, '告警中心')
+  await openNavigation(page, '告警')
 
   await expect(page.getByLabel('每页条数')).toHaveValue('10')
   await expect(page.getByTestId('alarm-event-table').locator('tbody tr')).toHaveCount(10)
@@ -343,7 +343,7 @@ test('告警事件按10/20条展示、当前页确认逐项报错并读取真实
 test('迟到的批量确认不会用旧页加载覆盖正在加载的当前页', async ({ page }) => {
   const race = await installReadOnlyApi(page, undefined, 'alarmAckRace')
   await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
-  await openNavigation(page, '告警中心')
+  await openNavigation(page, '告警')
   await expect(page.getByText('scope-a-page-1', { exact: true })).toBeVisible()
 
   await page.getByLabel('选择告警 scope-a-page-1', { exact: true }).check()
@@ -368,7 +368,7 @@ test('迟到的批量确认不会用旧页加载覆盖正在加载的当前页',
 test('迟到的批量确认不会恢复旧实体或状态筛选及其完成提示', async ({ page }) => {
   const race = await installReadOnlyApi(page, undefined, 'alarmAckRace')
   await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
-  await openNavigation(page, '告警中心')
+  await openNavigation(page, '告警')
   await expect(page.getByText('scope-a-page-1', { exact: true })).toBeVisible()
 
   await page.getByLabel('选择告警 scope-a-page-1', { exact: true }).check()
@@ -496,7 +496,7 @@ async function expectTouchTargets(page: Page, names: string[]) {
   }
 }
 
-async function openNavigation(page: Page, name: '告警中心' | '调度策略' | '系统工具') {
+async function openNavigation(page: Page, name: '告警' | '调度策略' | '系统工具') {
   await openEngineeringPage(page, name)
 }
 
@@ -514,7 +514,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768
     await page.waitForTimeout(1_000)
     expect(runtimeErrors).toEqual([])
 
-    await openNavigation(page, '告警中心')
+    await openNavigation(page, '告警')
     await expect(page.getByTestId('tablet-alarm-applications')).toBeVisible()
     await expectTouchTargets(page, ['当前告警', '通知记录', '告警规则'])
     await expect(page.getByRole('button', { name: '当前告警', exact: true })).toHaveCSS('background-color', 'rgb(238, 228, 206)')

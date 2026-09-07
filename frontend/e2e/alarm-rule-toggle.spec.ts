@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { openEngineeringPage } from './support/tabletNavigation'
+
 test.use({ actionTimeout: 4000 })
 test.setTimeout(15000)
 
@@ -47,14 +49,14 @@ async function fixture(page: Page, enabled: boolean, published: number | null = 
   })
   await page.goto('/')
   const login = page.getByRole('button', { name: '登录', exact: true })
-  const navigation = page.getByRole('button', { name: '告警中心', exact: true })
-  await Promise.race([login.waitFor({ state: 'visible' }), navigation.waitFor({ state: 'visible' })])
+  const engineeringEntry = page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true })
+  await Promise.race([login.waitFor({ state: 'visible' }), engineeringEntry.waitFor({ state: 'visible' })])
   if (await login.isVisible()) {
     await page.getByLabel('用户名', { exact: true }).fill('toggle-test')
     await page.getByLabel('密码', { exact: true }).fill('local-only')
     await login.click()
   }
-  await navigation.click()
+  await openEngineeringPage(page, '告警')
   await page.getByRole('button', { name: '告警规则', exact: true }).click()
   return writes
 }
@@ -76,7 +78,7 @@ test('disable then reenable across a reload preserves formal conditions and leav
   await page.getByRole('button', { name: '停用', exact: true }).click()
   await expect(page.getByRole('button', { name: '启用', exact: true })).toBeVisible()
   await page.reload()
-  await page.getByRole('button', { name: '告警中心', exact: true }).click()
+  await openEngineeringPage(page, '告警')
   await page.getByRole('button', { name: '告警规则', exact: true }).click()
   await page.getByRole('button', { name: '启用', exact: true }).click()
   await expect(page.getByRole('button', { name: '停用', exact: true })).toBeVisible()

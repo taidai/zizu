@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 
+import { openEngineeringPage } from './support/tabletNavigation'
+
 test('实时快照故障持续重试时，原始点位刷新仍可再次使用', async ({ page }) => {
   let tagReads = 0
   let snapshotReads = 0
@@ -25,7 +27,7 @@ test('实时快照故障持续重试时，原始点位刷新仍可再次使用',
     return reply({ detail: { code: 'UNMOCKED', message: path } }, 500)
   })
   await page.goto('/')
-  await page.getByRole('button', { name: '节点管理', exact: true }).click()
+  await openEngineeringPage(page, '节点与数据')
   const refresh = page.getByRole('button', { name: '刷新原始点位', exact: true })
   await expect(refresh).toBeEnabled()
   await expect.poll(() => tagReads).toBeGreaterThan(0)

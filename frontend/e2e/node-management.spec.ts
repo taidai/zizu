@@ -60,7 +60,8 @@ test.describe.serial('节点管理主干', () => {
   test('登录并确认测试边界', async () => {
     await page.goto('/')
     const loginButton = page.getByRole('button', { name: '登录', exact: true })
-    const nodeNavigation = page.getByRole('button', { name: '节点管理' })
+    const nodeNavigation = page.getByRole('navigation', { name: '工程配置导航' })
+      .getByRole('button', { name: '节点与数据', exact: true })
     const engineeringEntry = page.getByRole('banner').getByRole('button', { name: /^(工程配置|返回现场)$/ })
     await Promise.race([
       loginButton.waitFor({ state: 'visible' }),
@@ -71,14 +72,14 @@ test.describe.serial('节点管理主干', () => {
       await page.getByLabel('密码').fill(environment.password)
       await loginButton.click()
     }
-    await openEngineeringPage(page, '节点管理')
+    await openEngineeringPage(page, '节点与数据')
     await expect(nodeNavigation).toBeVisible()
     await expect(page.getByText(environment.username, { exact: true })).toBeVisible()
   })
 
   test('节点可创建、编辑、搜索、刷新和选择', async () => {
     test.setTimeout(120_000)
-    await page.getByRole('button', { name: '节点管理' }).click()
+    await openEngineeringPage(page, '节点与数据')
     await expect(page.getByRole('heading', { name: '节点管理' })).toBeVisible()
     const tree = nodeTree(page)
     const search = page.getByPlaceholder('搜索节点...')
@@ -480,7 +481,7 @@ test.describe.serial('节点管理主干', () => {
       '设备返回的 BIT 值不是 0 或 1',
     )
 
-    await page.getByRole('button', { name: '告警中心' }).click()
+    await openEngineeringPage(page, '告警')
     await page.getByRole('button', { name: '告警规则', exact: true }).click()
     await page.getByRole('button', { name: '状态', exact: true }).click()
     const alarmEntity = page.locator('label').filter({ hasText: bitEntityDisplayName })
@@ -511,7 +512,7 @@ test.describe.serial('节点管理主干', () => {
     )
     await expect(page.getByRole('button', { name: '生成发布预览', exact: true })).toBeEnabled()
 
-    await page.getByRole('button', { name: '节点管理' }).click()
+    await openEngineeringPage(page, '节点与数据')
     await page.getByPlaceholder('搜索节点...').fill(editedPlatformNode)
     await nodeTree(page).getByTitle(editedPlatformNode).click()
   })

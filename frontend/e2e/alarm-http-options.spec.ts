@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { openEngineeringPage } from './support/tabletNavigation'
+
 const optionsPath = '**/api/v1/alarm-http-notification-options'
 test.use({ actionTimeout: 5000 })
 test.setTimeout(15000)
@@ -32,14 +34,14 @@ test.beforeEach(async ({ page, baseURL }) => {
 async function openRules(page: Page) {
   await page.goto('/')
   const login = page.getByRole('button', { name: '登录', exact: true })
-  const navigation = page.getByRole('button', { name: '告警中心', exact: true })
-  await Promise.race([login.waitFor({ state: 'visible' }), navigation.waitFor({ state: 'visible' })])
+  const engineeringEntry = page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true })
+  await Promise.race([login.waitFor({ state: 'visible' }), engineeringEntry.waitFor({ state: 'visible' })])
   if (await login.isVisible()) {
     await page.getByLabel('用户名', { exact: true }).fill('options-test')
     await page.getByLabel('密码', { exact: true }).fill('local-only')
     await login.click()
   }
-  await page.getByRole('button', { name: '告警中心', exact: true }).click()
+  await openEngineeringPage(page, '告警')
   await page.getByRole('button', { name: '告警规则', exact: true }).click()
 }
 

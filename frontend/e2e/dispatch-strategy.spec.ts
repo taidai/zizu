@@ -641,7 +641,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     })
     expect(fresh.ok()).toBeTruthy()
 
-    await openEngineeringPage(page, '节点管理')
+    await openEngineeringPage(page, '节点与数据')
     await page.getByPlaceholder('搜索节点...').fill('strategy-test')
     await page.getByTitle('strategy-test', { exact: true }).click()
     await expect(page.getByRole('region', { name: '原始数据' })).toBeVisible()
@@ -682,7 +682,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByRole('button', { name: '保存草稿', exact: true }).click()
     await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
 
-    await page.getByRole('button', { name: '告警中心', exact: true }).click()
+    await openEngineeringPage(page, '告警')
     await page.getByRole('button', { name: '告警规则', exact: true }).click()
     await page.getByPlaceholder('搜索实体名称、业务标识或节点').fill('bms.soc')
     const alarmEntity = page.locator('label').filter({ hasText: 'bms.soc' })

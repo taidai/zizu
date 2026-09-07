@@ -14,6 +14,7 @@ import {
   type AlarmHttpFixtureSetup,
 } from './support/alarmHttpNotificationFixture'
 import { publishRawPoint } from './support/e2eFixture'
+import { openEngineeringPage } from './support/tabletNavigation'
 
 type ApiSession = { token: string }
 type Delivery = {
@@ -51,7 +52,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
 
   test('界面可创建、测试并启用 HTTP 请求', async () => {
     test.setTimeout(180_000)
-    await page.getByRole('button', { name: '系统工具' }).click()
+    await openEngineeringPage(page, '系统工具')
     const panel = page.getByRole('region', { name: 'HTTP 通知' })
     await expect(panel).toBeVisible()
     await panel.getByRole('button', { name: '新增通知' }).click()
@@ -94,7 +95,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     expect(notificationConfigId).not.toBe('')
     await applyAlarmRule(page.request, apiSession)
 
-    await page.getByRole('button', { name: '告警中心' }).click()
+    await openEngineeringPage(page, '告警')
     await page.getByRole('button', { name: '告警规则', exact: true }).click()
     const configuredGroup = page.locator('section').filter({ hasText: '已配置规则' })
       .getByText(fixture.alarm_name, { exact: true })
@@ -135,7 +136,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
   })
 
   test('界面通知记录可看见发生和恢复结果', async () => {
-    await page.getByRole('button', { name: '告警中心' }).click()
+    await openEngineeringPage(page, '告警')
     await page.getByRole('button', { name: '通知记录', exact: true }).click()
     await page.getByRole('button', { name: '刷新', exact: true }).click()
     const matching = page.locator('article').filter({ hasText: fixture.alarm_name })
@@ -156,17 +157,17 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
   async function loginPage(target: Page) {
     await target.goto('/')
     const loginButton = target.getByRole('button', { name: '登录', exact: true })
-    const navigation = target.getByRole('button', { name: '节点管理' })
+    const engineeringEntry = target.getByRole('banner').getByRole('button', { name: '工程配置', exact: true })
     await Promise.race([
       loginButton.waitFor({ state: 'visible' }),
-      navigation.waitFor({ state: 'visible' }),
+      engineeringEntry.waitFor({ state: 'visible' }),
     ])
     if (await loginButton.isVisible().catch(() => false)) {
       await target.getByLabel('用户名').fill(environment.username)
       await target.getByLabel('密码').fill(environment.password)
       await loginButton.click()
     }
-    await expect(navigation).toBeVisible()
+    await expect(engineeringEntry).toBeVisible()
   }
 
   async function applyAlarmRule(request: APIRequestContext, session: ApiSession) {

@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { openEngineeringPage } from './support/tabletNavigation'
+
 // Synthetic HTTP data only; this test never touches station data or sends alarms.
 test.beforeEach(async ({ page, baseURL }) => {
   test.skip(!baseURL || !['localhost', '127.0.0.1'].includes(new URL(baseURL).hostname), 'Local frontend test only')
@@ -40,14 +42,14 @@ const alarmResponse = (name: string, state = 'active_unacknowledged') => ({
 async function openAlarms(page: Page) {
   await page.goto('/')
   const login = page.getByRole('button', { name: '登录', exact: true })
-  const navigation = page.getByRole('button', { name: '告警中心', exact: true })
-  await Promise.race([login.waitFor({ state: 'visible' }), navigation.waitFor({ state: 'visible' })])
+  const engineeringEntry = page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true })
+  await Promise.race([login.waitFor({ state: 'visible' }), engineeringEntry.waitFor({ state: 'visible' })])
   if (await login.isVisible()) {
     await page.getByLabel('用户名', { exact: true }).fill('loading-test')
     await page.getByLabel('密码', { exact: true }).fill('local-only')
     await login.click()
   }
-  await page.getByRole('button', { name: '告警中心', exact: true }).click()
+  await openEngineeringPage(page, '告警')
 }
 
 test('background refresh keeps the loaded alarm visible while the response is pending', async ({ page }) => {
