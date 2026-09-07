@@ -43,7 +43,7 @@ export const ENTITY_HISTORY_RANGES = [
   ['7d', '7天'],
 ] as const
 
-export type NodeDataTabKey = 'raw-points' | 'entities'
+export type NodeDataTabKey = 'raw-points' | 'processing' | 'entities'
 
 export function paginateEntityRows<T>(
   rows: readonly T[],
@@ -63,14 +63,44 @@ export function paginateEntityRows<T>(
 
 export interface NodeDataTab {
   key: NodeDataTabKey
+  layer: 'L0' | 'L1' | 'L2'
   label: string
+  description: string
 }
 
-export function nodeDataTabs(_readOnly: boolean): readonly NodeDataTab[] {
+export function nodeDataTabs(readOnly: boolean): readonly NodeDataTab[] {
   return [
-    { key: 'raw-points', label: '原始数据' },
-    { key: 'entities', label: '标准实体' },
+    {
+      key: 'raw-points',
+      layer: 'L0',
+      label: '原始数据',
+      description: '看设备实际上传的值、质量与历史',
+    },
+    {
+      key: 'processing',
+      layer: 'L1',
+      label: '点位加工',
+      description: readOnly
+        ? '查看已发布的数据来源与加工方法'
+        : '选输入、定义计算、检查后发布',
+    },
+    {
+      key: 'entities',
+      layer: 'L2',
+      label: '标准实体',
+      description: '看上层使用的实时值、历史与来源',
+    },
   ]
+}
+
+export function pointProcessingSourceLabel(source: {
+  source_kind: 'l0' | 'l2'
+  source_key: string
+}): string {
+  const scope = source.source_kind === 'l2'
+    ? '跨节点标准实体（L2）'
+    : '本节点原始点位（L0）'
+  return `${scope} · ${source.source_key}`
 }
 
 interface TemplateCandidate {

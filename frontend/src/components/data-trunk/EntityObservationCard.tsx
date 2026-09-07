@@ -10,6 +10,7 @@ import {
   entityReasonLabel,
   ENTITY_HISTORY_RANGES,
   entityFrameEvidence,
+  pointProcessingSourceLabel,
   processingKindLabel,
   projectEntityValue,
   qualityLabel,
@@ -70,6 +71,7 @@ export default function EntityObservationCard({
     observation?.frame_sequence,
     projectionFrameSequence,
   )
+  const sourceLabel = sourceSummary.map(pointProcessingSourceLabel).join('、') || '等待来源'
 
   return (
     <article className="rounded-lg border border-gray-200 bg-white">
@@ -77,10 +79,11 @@ export default function EntityObservationCard({
         type="button"
         onClick={onToggle}
         aria-expanded={expanded}
-        className="grid w-full items-center gap-2 px-3 py-3 text-left text-xs hover:bg-gray-50 md:grid-cols-[minmax(10rem,2fr)_minmax(5rem,1fr)_5rem_6rem_minmax(9rem,1.2fr)_5rem]"
+        className="grid w-full items-center gap-2 px-3 py-3 text-left text-xs hover:bg-gray-50 md:grid-cols-[minmax(10rem,2fr)_minmax(5rem,1fr)_4rem_5rem_minmax(8rem,1.2fr)_minmax(9rem,1.3fr)]"
       >
         <span className="min-w-0 font-semibold text-gray-900">
           <span className="block truncate">{descriptor.display_name}</span>
+          <span className="mt-0.5 block truncate font-mono text-[10px] font-normal text-gray-500">{descriptor.definition_id}</span>
         </span>
         <span className={`font-mono-value text-base font-semibold ${quality === 192 ? 'text-gray-900' : 'text-gray-500'}`}>
           {projected.currentValue}
@@ -90,7 +93,10 @@ export default function EntityObservationCard({
           {qualityLabel(quality)}
         </span>
         <span className="text-gray-500">{formatTime(observation?.observed_at)}</span>
-        <span className="text-gray-600">{processingKindLabel(processingKind)}</span>
+        <span className="min-w-0 text-gray-600" title={`${sourceLabel} / ${processingKindLabel(processingKind)}`}>
+          <span className="block truncate">{sourceLabel}</span>
+          <span className="mt-0.5 block truncate text-[10px] text-gray-400">{processingKindLabel(processingKind)}</span>
+        </span>
       </button>
 
       {expanded && (
@@ -170,7 +176,7 @@ export default function EntityObservationCard({
             <section className="text-xs" aria-label="实体来源">
               <h5 className="font-semibold text-gray-800">来源</h5>
               <p className="mt-2 leading-5 text-gray-600">
-                来源：{sourceSummary.map((item) => item.source_key).join('、') || '等待来源'}
+                来源：{sourceSummary.map(pointProcessingSourceLabel).join('、') || '等待来源'}
               </p>
               <p className="leading-5 text-gray-600">加工：{processingKindLabel(processingKind)}</p>
 

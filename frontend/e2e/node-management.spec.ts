@@ -136,6 +136,13 @@ test.describe.serial('节点管理主干', () => {
     await expect(tree.getByTitle(editedPlatformNode)).toBeVisible()
     await tree.getByTitle(editedPlatformNode).click()
     await expect(page.getByRole('heading', { name: editedPlatformNode, exact: true })).toBeVisible()
+
+    const views = page.getByRole('navigation', { name: '节点数据视图' })
+    await expect(views.getByRole('button', { name: '原始数据', exact: true })).toBeVisible()
+    await expect(views.getByRole('button', { name: '点位加工', exact: true })).toBeVisible()
+    await expect(views.getByRole('button', { name: '标准实体', exact: true })).toBeVisible()
+    await expect(tree.getByText('点位加工', { exact: true })).toHaveCount(0)
+    await expect(tree.getByText('标准实体', { exact: true })).toHaveCount(0)
   })
 
   test('Neuron 点位可预览导入且 L0 实时、历史、筛选和分页可用', async () => {
@@ -287,6 +294,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已保存为共享模板；当前节点运行配置没有改变。', { exact: true })).toBeVisible()
     await page.getByRole('dialog', { name: '保存为共享模板', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await expect(page.getByLabel('从哪个模板开始').locator('option:checked')).toContainText(
       `E2E模板-${environment.runId}`,
@@ -304,6 +312,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await publishUntilShows(
       names.neuronTag,
       14.5,
@@ -311,6 +320,7 @@ test.describe.serial('节点管理主干', () => {
       '14.5',
     )
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
     await page.getByLabel('模板名称').fill(`${entityDisplayName}-加工`)
@@ -322,6 +332,7 @@ test.describe.serial('节点管理主干', () => {
     })
     await page.getByRole('dialog', { name: '编辑当前加工', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await publishUntilShows(
       names.neuronTag,
       15.5,
@@ -329,6 +340,7 @@ test.describe.serial('节点管理主干', () => {
       '15.5',
     )
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
     await page.getByRole('button', { name: '准备停用', exact: true }).click()
     await expect(page.getByText('停用预览', { exact: true })).toBeVisible()
     await expect(page.getByText(/历史值、来源证据和实体身份全部保留/)).toBeVisible()
@@ -336,6 +348,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('已停用点位加工', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByText('当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。', { exact: true })).toBeVisible()
     await publish(names.neuronTag, 16.5)
     await page.getByRole('button', { name: '原始数据', exact: true }).click()
@@ -344,13 +357,14 @@ test.describe.serial('节点管理主干', () => {
       '16.5',
       { timeout: CONFIGURATION_CHANGE_TIMEOUT_MS },
     )
-    await page.getByRole('button', { name: '标准实体', exact: true }).click()
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
 
     await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
     await page.getByRole('button', { name: '检查并发布', exact: true }).click()
     await expect(page.getByText('已生效', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await publishUntilShows(
       names.neuronTag,
       17.5,
@@ -383,6 +397,7 @@ test.describe.serial('节点管理主干', () => {
     const entityBeforeUnitDeclaration = await readEntityInstance()
     expect(entityBeforeUnitDeclaration.unit).toBeNull()
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
     const outputUnit = page.getByLabel('输出单位')
@@ -404,6 +419,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('dialog', { name: '编辑当前加工', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
 
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
+    await page.getByRole('button', { name: '标准实体', exact: true }).click()
     const entityAfterUnitDeclaration = page.getByRole('button', { name: new RegExp(entityDisplayName) })
     await publishUntilShows(names.neuronTag, 17.5, entityAfterUnitDeclaration, '17.5')
     await expect(entityAfterUnitDeclaration).toContainText('kW')
@@ -411,6 +427,7 @@ test.describe.serial('节点管理主干', () => {
     expect(entityAfterUnitDeclarationRead.id).toBe(entityBeforeUnitDeclaration.id)
     expect(entityAfterUnitDeclarationRead.unit).toBe('kW')
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await page.getByRole('button', { name: '编辑当前加工', exact: true }).click()
     const knownOutputUnit = page.getByLabel('输出单位')

@@ -42,10 +42,19 @@ async function installFixture(page: Page, options: {
     }))
     if (stored && !sessionStorage.getItem(retryStorageKey)) sessionStorage.setItem(retryStorageKey, JSON.stringify(retry))
   }, { user, retry, stored: options.stored, retryStorageKey })
-  await page.route('**/api/**', async (route) => {
+  await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
+    socket.onMessage((message) => {
+      const payload = JSON.parse(String(message)) as { authenticate?: unknown; subscribe?: unknown }
+      if (payload.authenticate) socket.send(JSON.stringify({ type: 'authenticated' }))
+      if (payload.subscribe) socket.send(JSON.stringify({ type: 'subscribed' }))
+    })
+  })
+  // Keep Vite source modules such as /src/api/client.ts outside the mocked API boundary.
+  await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
     if (path === '/api/v1/auth/me') return route.fulfill({ json: { user } })
+    if (path === '/api/v1/auth/ws-ticket') return route.fulfill({ json: { ticket: 'isolated-stream-ticket' } })
     if (path === '/api/v1/health') return route.fulfill({ json: {
       status: 'healthy', version: 'test', uptime_seconds: 1,
       components: { timescaledb: { status: 'connected' }, mqtt: { status: 'connected' }, neuron: { status: 'connected' } },
@@ -62,6 +71,11 @@ async function installFixture(page: Page, options: {
     if (path === '/api/v1/categories') return route.fulfill({ json: { categories: [] } })
     if (path === '/api/v1/alarms/counts') return route.fulfill({ json: { counts: {} } })
     if (path === '/api/v1/entity-instances' || path === '/api/v1/point-processing-templates') return route.fulfill({ json: { items: [], total: 0 } })
+    if (path === '/api/v1/runtime/frame-snapshot') return route.fulfill({ json: {
+      type: 'frame_snapshot', node_id: nodeId, cursor: 'fixture:1', frame_sequence: 1,
+      frame_time: '2026-09-07T01:00:00Z', configuration_revision: 1,
+      frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [], l2: [],
+    } })
     if (path.endsWith('/data-trunk')) return route.fulfill({ json: {
       node_id: nodeId, l0: [], l1_summary: { installed: false, revision_id: null, output_count: 0, source_summary: [] }, l2: [],
     } })
@@ -99,6 +113,47 @@ async function storedRetry(page: Page) {
   return page.evaluate((key) => JSON.parse(sessionStorage.getItem(key) || 'null'), retryStorageKey)
 }
 
+test('engineering keeps nodes physical and exposes L0 L1 L2 as three data views', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await installFixture(page)
+  await openRawPoints(page)
+
+  const views = page.getByRole('navigation', { name: '节点数据视图' })
+  await expect(views.getByRole('button', { name: '原始数据', exact: true })).toBeVisible()
+  await expect(views.getByRole('button', { name: '点位加工', exact: true })).toBeVisible()
+  await expect(views.getByRole('button', { name: '标准实体', exact: true })).toBeVisible()
+  await views.getByRole('button', { name: '点位加工', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '点位加工', exact: true })).toBeVisible()
+  await expect(page.getByText('2 检查并生成计划', { exact: true })).toBeVisible()
+  await expect(page.getByText('跨节点计算只能使用其他节点已发布的标准实体（L2）。', { exact: true })).toBeVisible()
+  await views.getByRole('button', { name: '标准实体', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '标准实体', exact: true })).toBeVisible()
+  const entityTable = page.getByRole('table', { name: '标准实体实时数据' })
+  await expect(entityTable).toBeVisible()
+  await expect(entityTable.getByRole('columnheader', { name: '实体名称' })).toBeVisible()
+  await expect(entityTable.getByRole('columnheader', { name: '当前值' })).toBeVisible()
+  await expect(entityTable.getByRole('columnheader', { name: '质量' })).toBeVisible()
+  await expect(entityTable.getByRole('columnheader', { name: '数据时间' })).toBeVisible()
+  await expect(entityTable.getByRole('columnheader', { name: '来源 / 加工' })).toBeVisible()
+
+  const tree = page.getByRole('region', { name: '真实节点树' })
+  await expect(tree.getByText('点位加工', { exact: true })).toHaveCount(0)
+  await expect(tree.getByText('标准实体', { exact: true })).toHaveCount(0)
+
+  await testInfo.attach('engineering-l2-1280x800', {
+    body: await page.screenshot(),
+    contentType: 'image/png',
+  })
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await expect(views.getByRole('button', { name: '原始数据', exact: true })).toBeVisible()
+  await expect(views.getByRole('button', { name: '点位加工', exact: true })).toBeVisible()
+  await expect(views.getByRole('button', { name: '标准实体', exact: true })).toBeVisible()
+  await testInfo.attach('engineering-l2-1024x768', {
+    body: await page.screenshot(),
+    contentType: 'image/png',
+  })
+})
+
 for (const action of ['update', 'delete_candidate'] as const) {
   test(`${action} recovery belongs to the existing lifecycle entry and cannot be replaced by a new inline plan`, async ({ page }) => {
     const { requests } = await installFixture(page, { stored: true, action })
@@ -113,20 +168,20 @@ for (const action of ['update', 'delete_candidate'] as const) {
   })
 }
 
-test('switching to the lifecycle tab during a failed recovery retains the original key and offers a safe reread', async ({ page }) => {
+test('switching to point processing during a failed recovery retains the original key and offers a safe reread', async ({ page }) => {
   const { requests, state } = await installFixture(page, { stored: true })
   await openRawPoints(page)
   await page.getByRole('dialog', { name: '新建标准实体' }).getByRole('button', { name: '取消', exact: true }).click()
   state.restore = 'unavailable'
-  await page.getByRole('button', { name: '标准实体', exact: true }).click()
-  await expect(page.getByText('标准实体不可用', { exact: true })).toBeVisible({ timeout: 5000 })
+  await page.getByRole('button', { name: '点位加工', exact: true }).click()
+  await expect(page.getByText('点位加工不可用', { exact: true })).toBeVisible({ timeout: 5000 })
   expect(await storedRetry(page)).toEqual(retry)
   await expect(page.getByRole('button', { name: '重新读取', exact: true })).toBeVisible()
   expect(requests.drafts).toEqual([])
   expect(requests.applies).toEqual([])
   state.restore = 'ready'
   await page.getByRole('button', { name: '重新读取', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '标准实体', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '点位加工', exact: true })).toBeVisible()
   await page.getByRole('button', { name: '原始数据', exact: true }).click()
   const editor = page.getByRole('dialog', { name: '新建标准实体' })
   await expect(editor).toBeVisible()

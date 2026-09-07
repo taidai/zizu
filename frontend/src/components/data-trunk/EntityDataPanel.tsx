@@ -164,31 +164,44 @@ export default function EntityDataPanel({
         </div>
       )}
 
-      <div className="mt-4 space-y-2">
-        {pagedRows.items.map((item) => {
-          const expanded = selectedEntityId === item.entity_instance_id
-          return (
-            <EntityObservationCard
-              key={item.entity_instance_id}
-              descriptor={item.descriptor}
-              observation={projection?.l2.get(item.entity_instance_id) || null}
-              processingKind={item.processing_kind}
-              sourceSummary={item.source_summary}
-              projectionFrameSequence={projection?.frameSequence ?? null}
-              expanded={expanded}
-              selectedRange={selectedRange}
-              history={expanded ? history : []}
-              historyLoading={expanded && historyLoading}
-              onToggle={() => onSelectEntity(item.entity_instance_id)}
-              onRangeChange={onRangeChange}
-            />
-          )
-        })}
-        {entityRows.length === 0 && (
-          <div className="rounded border border-dashed border-gray-300 px-4 py-10 text-center text-xs text-gray-500">
-            当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。
-          </div>
-        )}
+      <div className="mt-4" role="table" aria-label="标准实体实时数据">
+        <div
+          role="row"
+          className="hidden items-center gap-2 border-b border-gray-200 px-3 pb-2 text-[10px] font-semibold text-gray-500 md:grid md:grid-cols-[minmax(10rem,2fr)_minmax(5rem,1fr)_4rem_5rem_minmax(8rem,1.2fr)_minmax(9rem,1.3fr)]"
+        >
+          <span role="columnheader">实体名称</span>
+          <span role="columnheader">当前值</span>
+          <span role="columnheader">单位</span>
+          <span role="columnheader">质量</span>
+          <span role="columnheader">数据时间</span>
+          <span role="columnheader">来源 / 加工</span>
+        </div>
+        <div role="rowgroup" className="mt-2 space-y-2">
+          {pagedRows.items.map((item) => {
+            const expanded = selectedEntityId === item.entity_instance_id
+            return (
+              <EntityObservationCard
+                key={item.entity_instance_id}
+                descriptor={item.descriptor}
+                observation={projection?.l2.get(item.entity_instance_id) || null}
+                processingKind={item.processing_kind}
+                sourceSummary={item.source_summary}
+                projectionFrameSequence={projection?.frameSequence ?? null}
+                expanded={expanded}
+                selectedRange={selectedRange}
+                history={expanded ? history : []}
+                historyLoading={expanded && historyLoading}
+                onToggle={() => onSelectEntity(item.entity_instance_id)}
+                onRangeChange={onRangeChange}
+              />
+            )
+          })}
+          {entityRows.length === 0 && (
+            <div className="rounded border border-dashed border-gray-300 px-4 py-10 text-center text-xs text-gray-500">
+              当前节点还没有标准实体。请到“原始数据”勾选点位并定义数据来源与计算。
+            </div>
+          )}
+        </div>
       </div>
       {entityRows.length > 0 && (
         <div className="mt-4 flex items-center justify-end gap-2 text-xs text-gray-500">

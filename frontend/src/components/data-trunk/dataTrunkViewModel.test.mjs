@@ -195,22 +195,36 @@ test('visual formula builder and text parser share one canonical expression', as
   )
 })
 
-test('node data tabs expose only raw points and entities', async () => {
+test('node data tabs expose the explicit L0, L1 and L2 user workflow', async () => {
   const model = await import('./dataTrunkViewModel.ts')
   assert.deepEqual(
-    model.nodeDataTabs(false).map((item) => [item.key, item.label]),
+    model.nodeDataTabs(false).map((item) => [item.key, item.layer, item.label]),
     [
-      ['raw-points', '原始数据'],
-      ['entities', '标准实体'],
+      ['raw-points', 'L0', '原始数据'],
+      ['processing', 'L1', '点位加工'],
+      ['entities', 'L2', '标准实体'],
     ],
   )
   assert.deepEqual(
     model.nodeDataTabs(true).map((item) => item.key),
-    ['raw-points', 'entities'],
+    ['raw-points', 'processing', 'entities'],
   )
   assert.deepEqual(model.RAW_POINT_COLUMNS, [
     '点位名称', '协议类型', '当前值', '单位', '质量', '原因', '数据时间', '来源',
   ])
+})
+
+test('point processing source labels keep local L0 and cross-node L2 distinct', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+
+  assert.equal(
+    model.pointProcessingSourceLabel({ source_kind: 'l0', source_key: '有功功率' }),
+    '本节点原始点位（L0） · 有功功率',
+  )
+  assert.equal(
+    model.pointProcessingSourceLabel({ source_kind: 'l2', source_key: 'site.total_power' }),
+    '跨节点标准实体（L2） · site.total_power',
+  )
 })
 
 test('template recommendation keeps installed revision then prefers exact coverage', async () => {

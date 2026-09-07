@@ -38,6 +38,7 @@ import {
   initialPointProcessingSelections,
   isCurrentNodeResult,
   pointProcessingDeactivationSummary,
+  pointProcessingSourceLabel,
   recommendPointProcessingTemplate,
   selectedInputBindings,
 } from './dataTrunkViewModel'
@@ -57,11 +58,13 @@ function isDeactivationPlan(plan: PointProcessingPlan): boolean {
 
 export default function DataTrunkWorkspace({
   node,
+  view,
   readOnly,
   actorId,
   canManageTemplates,
 }: {
   node: Node
+  view: 'processing' | 'entities'
   readOnly: boolean
   actorId: string
   canManageTemplates: boolean
@@ -449,12 +452,12 @@ export default function DataTrunkWorkspace({
   }
 
   if (loading) {
-    return <div className="neu-card p-6 text-sm text-gray-500">正在读取标准实体...</div>
+    return <div className="neu-card p-6 text-sm text-gray-500">正在读取{view === 'processing' ? '点位加工' : '标准实体'}...</div>
   }
   if (!trunk) {
     return (
       <div className="neu-card p-6">
-        <p className="text-sm font-semibold text-gray-800">标准实体不可用</p>
+        <p className="text-sm font-semibold text-gray-800">{view === 'processing' ? '点位加工不可用' : '标准实体不可用'}</p>
         <p className="mt-1 text-xs text-red-600">{error || '请检查节点和平台连接。'}</p>
         <button type="button" onClick={() => void loadWorkspace()} className="neu-btn engineering-touch mt-4 px-3 text-xs text-[#7d1b23]">重新读取</button>
       </div>
@@ -471,8 +474,13 @@ export default function DataTrunkWorkspace({
       <header className="engineering-panel rounded-xl p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">标准实体</h2>
-            <p className="mt-1 text-xs text-gray-500">先说明数据从哪里来、怎样计算，再把稳定实体交给告警、JDM、控制和 EMS 工作台。</p>
+            <div className="text-[10px] font-semibold tracking-[0.16em] text-[#8f0610]">{view === 'processing' ? 'L1' : 'L2'}</div>
+            <h2 className="text-base font-semibold text-gray-900">{view === 'processing' ? '点位加工' : '标准实体'}</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              {view === 'processing'
+                ? '把品牌点位映射、换算或组合成稳定实体；检查通过后才能发布。'
+                : '只展示已发布的稳定业务数据，供告警、调度、控制和 EMS 工作台使用。'}
+            </p>
           </div>
           <div className="text-[10px] text-gray-500">
             配置修订 {application?.configuration_revision ?? projection?.configurationRevision ?? '等待数据'}
@@ -482,7 +490,7 @@ export default function DataTrunkWorkspace({
 
       {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">{error}</div>}
 
-      <section className="engineering-panel rounded-xl" aria-label="数据来源与计算">
+      {view === 'processing' && <section className="engineering-panel rounded-xl" aria-label="数据来源与计算">
         <button
           type="button"
           onClick={() => setLifecycleOpen((current) => !current)}
@@ -501,6 +509,13 @@ export default function DataTrunkWorkspace({
 
         {lifecycleOpen && (
           <div className="space-y-4 border-t border-gray-200 p-4">
+            <div className="engineering-processing-flow" aria-label="点位加工步骤">
+              <span>1 选择输入</span><b aria-hidden="true">→</b><span>2 检查并生成计划</span><b aria-hidden="true">→</b><span>3 复核后发布</span>
+            </div>
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+              <span>同节点可使用本节点原始点位（L0）。</span>
+              <span className="mt-1 block">跨节点计算只能使用其他节点已发布的标准实体（L2）。</span>
+            </p>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="rounded-lg border border-gray-200 bg-white p-3">
                 <div className="text-[10px] text-gray-500">当前状态</div>
@@ -522,7 +537,7 @@ export default function DataTrunkWorkspace({
 
             {trunk.l1_summary.source_summary.length > 0 && (
               <div className="rounded-lg bg-gray-50 px-3 py-2 text-[11px] text-gray-600">
-                当前来源：{trunk.l1_summary.source_summary.map((item) => item.source_key).join('、')}
+                当前来源：{trunk.l1_summary.source_summary.map(pointProcessingSourceLabel).join('、')}
               </div>
             )}
 
@@ -629,9 +644,9 @@ export default function DataTrunkWorkspace({
             )}
           </div>
         )}
-      </section>
+      </section>}
 
-      <EntityDataPanel
+      {view === 'entities' && <EntityDataPanel
         nodeId={node.id}
         canManageTemplates={canManageTemplates}
         trunk={trunk}
@@ -651,7 +666,7 @@ export default function DataTrunkWorkspace({
           setSelectedEntityId((current) => current === entityId ? null : entityId)
         }}
         onRangeChange={setEntityRange}
-      />
+      />}
     </div>
   )
 }

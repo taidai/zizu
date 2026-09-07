@@ -736,8 +736,8 @@ export default function NodeTreePage({
 
   return (
     <div className="engineering-shell flex h-full min-h-0 gap-4">
-        {/* 左侧节点管理 */}
-       <div className="neu-card engineering-panel w-80 flex flex-col p-3 overflow-hidden">
+        {/* 左侧只表达真实现场层级；L0/L1/L2 是右侧数据视图。 */}
+       <section className="neu-card engineering-panel w-80 flex flex-col p-3 overflow-hidden" aria-label="真实节点树">
          <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-bold text-gray-800">{readOnly ? '运行监控' : '节点管理'}</h2>
           <div className="flex items-center gap-1">
@@ -795,7 +795,7 @@ export default function NodeTreePage({
             </div>
           )}
         </div>
-      </div>
+      </section>
 
       {/* 右侧详情 */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -839,20 +839,23 @@ export default function NodeTreePage({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 mb-3">
+            <nav className="engineering-view-tabs mb-3 grid grid-cols-3 gap-2" aria-label="节点数据视图">
               {nodeDataTabs(readOnly).map((tab) => (
                 <button
                   key={tab.key}
                   type="button"
+                  aria-label={tab.label}
                   onClick={() => setActiveTab(tab.key)}
-                  className={`engineering-touch px-4 text-xs font-medium rounded-lg transition-colors ${
-                    activeTab === tab.key ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  className={`engineering-view-tab engineering-touch rounded-lg px-3 py-2 text-left transition-colors ${
+                    activeTab === tab.key ? 'zizu-tab-active is-active' : ''
                   }`}
                 >
-                  {tab.label}
+                  <span className="engineering-view-layer">{tab.layer}</span>
+                  <span className="engineering-view-label">{tab.label}</span>
+                  <span className="engineering-view-description">{tab.description}</span>
                 </button>
               ))}
-            </div>
+            </nav>
 
             <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === 'raw-points' && (
@@ -866,11 +869,12 @@ export default function NodeTreePage({
                   onPointCountChanged={() => { void loadNodes() }}
                 />
               )}
-              {activeTab === 'entities' && (
+              {(activeTab === 'processing' || activeTab === 'entities') && (
                 <Suspense fallback={<div className="neu-card p-8 text-center text-xs text-gray-400">实体数据加载中...</div>}>
                   <DataTrunkWorkspace
-                    key={`${selectedNode.id}:entities`}
+                    key={`${selectedNode.id}:data-trunk`}
                     node={selectedNode}
+                    view={activeTab}
                     readOnly={readOnly}
                     actorId={actorId}
                     canManageTemplates={canManageTemplates}
