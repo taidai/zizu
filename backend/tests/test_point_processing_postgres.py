@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg2
@@ -962,6 +962,7 @@ class PointProcessingPostgresTest(unittest.TestCase):
         self.assertEqual("BIT_FORMULA_REQUIRES_REVIEW", report.blockers[0].code)
 
     def test_apply_publishes_one_revision_and_attaches_l2_directly_to_node(self) -> None:
+        from app.services.configuration_revision_postgres import PostgresConfigurationRevisions
         from app.services.point_processing import ApplyPointProcessingPlan
         from app.services.telemetry_store import get_connection
 
@@ -974,6 +975,17 @@ class PointProcessingPostgresTest(unittest.TestCase):
         self.assertEqual(0, plan.base_configuration_revision)
         self.assertEqual(1, application.configuration_revision)
         self.assertEqual(1, repository.configuration_revision())
+        self.assertEqual(1, service.inspect(NODE_ID, include_engineering=False).l1_summary.get("configuration_revision"))
+        with get_connection() as connection:
+            PostgresConfigurationRevisions().publish(
+                transaction=connection, base_revision=1, actor="test:engineer",
+                action="test.unrelated.publish", resource_kind="site", resource_id="unrelated",
+                before_digest=None, after_digest="f" * 64, details={},
+            )
+            connection.commit()
+        self.assertEqual(2, repository.configuration_revision())
+        self.assertEqual(1, repository.current_context(NODE_ID).configuration_revision)
+        self.assertEqual(1, service.inspect(NODE_ID, include_engineering=True).l1_summary["configuration_revision"])
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -1911,6 +1923,31 @@ class PointProcessingPostgresTest(unittest.TestCase):
             (str(event_id),),
             trial.outputs[0]["source_ids"],
         )
+
+
+class CurrentContextQueryTest(unittest.TestCase):
+    def test_current_context_reads_the_installation_configuration_revision(self) -> None:
+        from app.services.point_processing_postgres import PostgresPointProcessingRepository
+
+        installed_id, revision_id, source_id, entity_id = uuid4(), uuid4(), uuid4(), uuid4()
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = (installed_id, revision_id, 17)
+        cursor.fetchall.side_effect = [[("power", source_id)], [], [("power", entity_id)]]
+        with patch.object(PostgresPointProcessingRepository, "_connection") as connect, patch(
+            "app.services.point_processing_postgres._supports_processing_scope", return_value=True,
+        ):
+            connect.return_value.__enter__.return_value = connection
+            context = PostgresPointProcessingRepository().current_context(NODE_ID)
+
+        self.assertEqual(17, getattr(context, "configuration_revision", None))
+        self.assertEqual(revision_id, context.revision_id)
+        self.assertEqual({"power": source_id}, context.input_source_ids)
+        self.assertEqual({"power": entity_id}, context.output_entity_ids)
+        query, params = cursor.execute.call_args_list[0].args
+        self.assertIn("installed.configuration_revision", query)
+        self.assertEqual((NODE_ID,), params)
+        self.assertEqual(4, cursor.execute.call_count)
 
 
 if __name__ == "__main__":

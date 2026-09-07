@@ -27,6 +27,11 @@ export function entityProvenanceModel({ descriptor, observation, trunk, l0 }: {
   if (!trunk.l1_summary?.installed || !revisionId || revisionId !== observation.processing_revision_id) {
     return unavailable('当前 L1 加工修订与 L2 提交观测不匹配。')
   }
+  const installedRevision = trunk.l1_summary.configuration_revision
+  if (!Number.isInteger(installedRevision) || installedRevision == null || installedRevision <= 0
+    || installedRevision !== observation.configuration_revision) {
+    return unavailable('所选观测来源证据不可用：L1 安装配置修订缺失或与 L2 观测配置修订不匹配；当前主干仅可作为当前配置参考。')
+  }
   const outputs = trunk.l2?.filter((item) => item.entity_instance_id === descriptor.id) || []
   if (outputs.length !== 1) return unavailable('所选 L2 的 L1 输出映射缺失或存在歧义。')
   const output = outputs[0]

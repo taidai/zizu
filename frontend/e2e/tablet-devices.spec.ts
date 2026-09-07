@@ -60,6 +60,7 @@ async function installFixture(page: Page, options: {
   nodeFailures?: number
   countSequence?: Array<'success' | 'fail' | 'pending-success'>
   trunkFailures?: number
+  installedRevision?: number | null
 } = {}) {
   const writes: string[] = []
   let nodeCalls = 0
@@ -117,7 +118,7 @@ async function installFixture(page: Page, options: {
       if (trunkCalls <= (options.trunkFailures || 0)) return fulfillJson(route, { detail: 'trunk unavailable' }, 503)
       return fulfillJson(route, {
         node_id: 'device-1', l0: [],
-        l1_summary: { installed: true, revision_id: 'pr-1', output_count: 2, source_summary: [] },
+        l1_summary: { installed: true, revision_id: 'pr-1', configuration_revision: options.installedRevision === undefined ? 12 : options.installedRevision, output_count: 2, source_summary: [] },
         l2: [
           { entity_instance_id: 'entity-1', output_key: 'state', processing_kind: 'boolean_map', source_summary: [{ input_id: 'raw-state', source_kind: 'l0', source_key: 'StatusWord' }] },
           { entity_instance_id: 'entity-2', output_key: 'power', processing_kind: 'passthrough', source_summary: [{ input_id: 'power', source_kind: 'l2', source_key: 'pcs.active_power' }] },
@@ -269,6 +270,17 @@ test('a failed node directory is retryable and never rendered as an empty site',
   await expect(page.getByText('当前没有可监控节点')).toHaveCount(0)
   await failure.getByRole('button', { name: '重试节点' }).click()
   await expect(page.getByRole('article')).toHaveCount(6)
+})
+
+test('same-template configuration rebinding cannot certify the old L2 source', async ({ page }) => {
+  await installFixture(page, { installedRevision: 13 })
+  await mountDeviceMonitor(page)
+  await page.getByRole('article', { name: /同名 PCS 设备卡片/ }).first().getByRole('button', { name: '运行状态' }).click()
+  const evidence = page.getByRole('region', { name: '实体来源证据' })
+  await expect(evidence).toContainText('来源证据不可用')
+  await expect(evidence).toContainText('安装配置修订')
+  await expect(evidence).not.toContainText('L0 原始状态字')
+  await expect(evidence).not.toContainText('gateway/group/StatusWord')
 })
 
 test('alarm retry remains disabled while counts are unknown and pending', async ({ page }) => {

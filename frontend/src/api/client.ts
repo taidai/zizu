@@ -1159,6 +1159,8 @@ export interface NodeDataTrunk {
   l1_summary: {
     installed: boolean
     revision_id: string | null
+    /** Revision that installed these bindings, not the site's latest revision. */
+    configuration_revision?: number | null
     output_count: number
     source_summary: Array<{
       input_id: string

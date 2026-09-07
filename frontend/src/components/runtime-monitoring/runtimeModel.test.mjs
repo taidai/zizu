@@ -46,7 +46,7 @@ function provenanceFixture() {
     observation: completeFrame('node-pcs-a', descriptors[0]).l2[0],
     trunk: {
       node_id: 'node-pcs-a', l0: [{ source_id: 'tag-power', source_key: 'ActivePower', data_type: 'float', unit: 'W' }],
-      l1_summary: { installed: true, revision_id: 'processing-revision-1', output_count: 1, source_summary: [] },
+      l1_summary: { installed: true, revision_id: 'processing-revision-1', configuration_revision: 88, output_count: 1, source_summary: [] },
       l2: [{ output_key: 'power', entity_instance_id: descriptors[0].id, processing_kind: 'scale', source_summary: [
         { input_id: 'raw-power', source_kind: 'l0', source_key: 'ActivePower' },
       ] }],
@@ -91,6 +91,30 @@ test('cross-node L2 retains its source kind and key without borrowing a similarl
   const result = runtimeModel.entityProvenanceModel(fixture)
   assert.equal(result.error, null)
   assert.deepEqual(result.sources, [{ kind: 'l2', inputId: 'other-power', sourceKey: 'pcs.active_power' }])
+})
+
+test('same-template rebinding cannot attribute the new source to an older committed observation', () => {
+  const fixture = provenanceFixture()
+  fixture.trunk.l1_summary.configuration_revision = 89
+  fixture.trunk.l2[0].source_summary[0].source_key = 'ReboundPower'
+  fixture.trunk.l0[0].source_key = 'ReboundPower'
+  fixture.l0[0].name = 'ReboundPower'
+  const result = runtimeModel.entityProvenanceModel(fixture)
+  assert.match(result.error, /配置.*修订/)
+  assert.deepEqual(result.sources, [])
+  fixture.observation.configuration_revision = 89
+  assert.equal(runtimeModel.entityProvenanceModel(fixture).sources[0].sourceKey, 'ReboundPower')
+})
+
+test('missing installed or observed configuration evidence fails closed even for the same template', () => {
+  for (const revision of [undefined, null, 0, -1, NaN]) {
+    const fixture = provenanceFixture()
+    fixture.trunk.l1_summary.configuration_revision = revision
+    assert.match(runtimeModel.entityProvenanceModel(fixture).error, /配置.*修订/)
+  }
+  const fixture = provenanceFixture()
+  delete fixture.observation.configuration_revision
+  assert.match(runtimeModel.entityProvenanceModel(fixture).error, /配置.*修订/)
 })
 
 test('missing trunk, identity, revision, output, processing and source mapping fail with concrete reasons', () => {

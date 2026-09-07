@@ -81,6 +81,7 @@ class CurrentPointProcessingContext:
     input_source_ids: Mapping[str, UUID]
     output_entity_ids: Mapping[str, UUID]
     selector_source_ids: Mapping[str, tuple[UUID, ...]] = field(default_factory=dict)
+    configuration_revision: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -808,6 +809,7 @@ class PointProcessingService:
         l1_summary = {
             "installed": current is not None,
             "revision_id": str(current.revision_id) if current is not None else None,
+            "configuration_revision": current.configuration_revision if current is not None else None,
             "output_count": len(current.output_entity_ids) if current is not None else 0,
             "source_summary": source_summary,
             **(
@@ -1485,6 +1487,7 @@ class InMemoryPointProcessingRepository:
                 input_source_ids=input_ids,
                 output_entity_ids=output_ids,
                 selector_source_ids=selector_ids,
+                configuration_revision=next_version,
             )
             catalog.record_dependencies(planned_edges)
             self._installed_ids[plan.node_id] = installed_id

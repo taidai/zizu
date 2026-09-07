@@ -197,6 +197,46 @@ def _assets():
 
 
 class PointProcessingTest(unittest.TestCase):
+    def test_inspect_freezes_installation_revision_across_rebinding_and_other_node_apply(self) -> None:
+        from app.services.point_processing import (
+            ApplyPointProcessingPlan, InMemoryPointProcessingCatalog,
+            InMemoryPointProcessingRepository, PointProcessingService, PreviewPointProcessing,
+        )
+
+        other_node = uuid4()
+        repository = InMemoryPointProcessingRepository()
+        catalog = InMemoryPointProcessingCatalog(
+            templates={SITE_FORMULA_REVISION_ID: _site_formula_asset()},
+            selector_members={
+                (NODE_ID, "PCS", "pcs.active_power"): (PCS_POWER_1,),
+                (other_node, "PCS", "pcs.active_power"): (PCS_POWER_1,),
+            },
+        )
+        service = PointProcessingService(repository, catalog)
+
+        def apply(node_id, key):
+            plan = service.preview(PreviewPointProcessing(
+                node_id=node_id, template_revision_id=SITE_FORMULA_REVISION_ID,
+                input_selections={}, actor="test:engineer",
+            ))
+            return service.apply(ApplyPointProcessingPlan(plan.id, plan.digest, key, "test:engineer"))
+
+        apply(NODE_ID, "first")
+        first = service.inspect(NODE_ID, include_engineering=False)
+        self.assertEqual(1, first.l1_summary.get("configuration_revision"))
+        catalog.replace_selector_members({
+            (NODE_ID, "PCS", "pcs.active_power"): (PCS_POWER_2,),
+            (other_node, "PCS", "pcs.active_power"): (PCS_POWER_1,),
+        })
+        apply(NODE_ID, "rebind")
+        second = service.inspect(NODE_ID, include_engineering=False)
+        self.assertEqual(first.l1_summary["revision_id"], second.l1_summary["revision_id"])
+        self.assertEqual(2, second.l1_summary["configuration_revision"])
+        apply(other_node, "unrelated")
+        self.assertEqual(3, repository.configuration_revision())
+        self.assertEqual(2, service.inspect(NODE_ID, include_engineering=True).l1_summary["configuration_revision"])
+        self.assertEqual(2, repository.current_context(NODE_ID).configuration_revision)
+
     def test_trial_reference_collection_includes_direct_and_boolean_map_inputs(self) -> None:
         direct = InputReference.l0(uuid4())
         mapped = InputReference.l0(uuid4())

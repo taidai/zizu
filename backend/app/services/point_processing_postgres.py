@@ -1152,7 +1152,8 @@ class PostgresPointProcessingRepository:
                 )
                 cursor.execute(
                     f"""
-                    SELECT installed.id, installed.revision_id
+                    SELECT installed.id, installed.revision_id,
+                           installed.configuration_revision
                     FROM t_installed_point_processings AS installed
                     WHERE installed.node_id = %s
                       AND installed.current = TRUE
@@ -1204,6 +1205,7 @@ class PostgresPointProcessingRepository:
                 output_ids = dict(cursor.fetchall())
                 return CurrentPointProcessingContext(
                     revision_id=installed[1],
+                    configuration_revision=int(installed[2]),
                     input_source_ids=input_ids,
                     output_entity_ids=output_ids,
                     selector_source_ids={

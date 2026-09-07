@@ -502,6 +502,8 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied.json(), replayed.json())
         self.assertEqual(2, repository.application_count())
         self.assertEqual(False, trunk.json()["l1_summary"]["installed"])
+        self.assertIn("configuration_revision", trunk.json()["l1_summary"])
+        self.assertIsNone(trunk.json()["l1_summary"]["configuration_revision"])
         self.assertEqual([], trunk.json()["l2"])
 
     async def test_public_role_matrix_plan_apply_and_operator_projection(self) -> None:
@@ -579,6 +581,8 @@ class PointProcessingPublicApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(200, operator_trunk.status_code, operator_trunk.text)
         self.assertTrue(operator_trunk.json()["l2"])
         self.assertEqual([], operator_trunk.json()["l0"])
+        self.assertEqual(2, operator_trunk.json()["l1_summary"].get("configuration_revision"))
+        self.assertEqual(2, engineer_trunk.json()["l1_summary"].get("configuration_revision"))
         self.assertNotIn("input_bindings", operator_trunk.json()["l1_summary"])
         self.assertTrue(engineer_trunk.json()["l0"])
         self.assertIn("input_bindings", engineer_trunk.json()["l1_summary"])
