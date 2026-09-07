@@ -113,6 +113,12 @@ export default function DispatchStrategyPage() {
   const outputEntity = entities.find((item) => item.id === outputId)
   const socBinding = currentRevision?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')
   const outputBinding = currentRevision?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')
+  const selectedSummaryOutputId = useMemo(() => {
+    const revision = strategy?.active_revision || strategy?.published_revision || strategy?.draft
+    return revision?.bindings
+      .filter((item) => item.direction === 'OUTPUT')
+      .sort((left, right) => left.ordinal - right.ordinal)[0]?.entity_instance_id || ''
+  }, [strategy])
   const socBindingInvalid = !!socId && (!isDispatchSocEntity(socEntity)
     || (socBinding?.entity_instance_id === socId && (
       socBinding.expected_data_type !== socEntity?.data_type.toUpperCase()
@@ -174,7 +180,7 @@ export default function DispatchStrategyPage() {
   }, [selectedId])
 
   useEffect(() => {
-    const ids = [...new Set([socId, outputId].filter(Boolean))]
+    const ids = [...new Set([socId, outputId, selectedSummaryOutputId].filter(Boolean))]
     if (!ids.length) return
     Promise.allSettled(ids.map(async (id) => [id, await fetchEntityInstanceRealtime(id)] as const))
       .then((results) => setObservations((current) => {
@@ -185,7 +191,7 @@ export default function DispatchStrategyPage() {
         })
         return next
       }))
-  }, [socId, outputId])
+  }, [socId, outputId, selectedSummaryOutputId])
 
   const run = async (label: string, operation: () => Promise<void>) => {
     setBusy(label)
@@ -320,10 +326,13 @@ export default function DispatchStrategyPage() {
         <div className="space-y-2" aria-label="策略列表">
           {strategies.map((item) => {
             const itemStatus = projectStrategyStatus(item)
+            const currentOutput = item.id === selectedId && selectedSummaryOutputId
+              ? observations[selectedSummaryOutputId]
+              : null
             return <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'border-[#52c41a] bg-[#52c41a]/10' : 'border-white/60 bg-white/30'}`}>
               <div className="truncate text-xs font-semibold text-gray-800">{item.name}</div>
               <div className="mt-2 flex flex-wrap gap-1 text-[10px]"><span>{itemStatus.enableLabel}</span><span>·</span><span>{itemStatus.lifecycleLabel}</span><span>·</span><span>{itemStatus.healthLabel}</span></div>
-              <div className="mt-1 text-[10px] text-gray-400">目标 {valueText(item.last_desired)} / 回读 {valueText(item.last_actual)}</div>
+              <div className="mt-1 text-[10px] text-gray-400">目标 {valueText(item.last_desired)} / {currentOutput ? '当前 L2' : '决策时值'} {valueText(currentOutput?.value ?? item.last_actual)}</div>
             </button>
           })}
           {!strategies.length && <p className="py-8 text-center text-xs text-gray-400">尚无策略，点击“新建 2充2放”。</p>}

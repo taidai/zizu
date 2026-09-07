@@ -356,6 +356,21 @@ function publishedStrategy() {
   return original
 }
 
+test('策略卡片用当前 committed L2 代替上次决策快照冒充回读', async ({ page }) => {
+  const original = publishedStrategy()
+  original.last_desired = { 'power-target': 120 }
+  original.last_actual = { 'power-target': 121 }
+  await installApi(page, original)
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '调度策略' }).click()
+
+  const card = page.getByRole('button', { name: /2充2放调度策略/ })
+  await expect(card).toContainText('当前 L2 156.8')
+  await expect(card).not.toContainText('回读')
+  await expect(card).not.toContainText('121')
+})
+
 test('已发布策略直接试算不保存草稿、不改变发布状态', async ({ page }) => {
   const api = await installApi(page, publishedStrategy())
   await page.goto('/')
