@@ -285,8 +285,14 @@ export default function PointProcessingTemplateManager({
     }))
   }
 
+  // The parent keeps apply busy while refreshing runtime data after success.
+  // A confirmed publication no longer has draft work that closing could lose.
+  const canCloseDraft = busy === null && (!currentApplyBusy || (
+    draftMode === 'node-edit' && currentPlan?.status === 'applied' && !currentResultUnknown
+  ))
+
   const closeDraft = () => {
-    if (busy !== null || currentApplyBusy) return
+    if (!canCloseDraft) return
     if (draftDirty && !window.confirm('放弃尚未发布的加工修改？')) return
     setDraft(null)
     setCheckedContent(null)
@@ -377,7 +383,7 @@ export default function PointProcessingTemplateManager({
             <div className="neu-card engineering-modal w-[1100px] max-w-[97vw] p-5" role="dialog" aria-modal="true" aria-labelledby="template-editor-title">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div><h3 id="template-editor-title" className="text-sm font-bold text-gray-900">{draftMode === 'node-edit' ? '编辑当前加工' : '模板与版本'}</h3><p className="mt-1 text-xs text-gray-500">先检查，再发布；关闭不会写入。</p></div>
-              <button type="button" onClick={closeDraft} className="neu-btn engineering-touch px-4 text-xs">取消</button>
+              <button type="button" disabled={!canCloseDraft} onClick={closeDraft} className="neu-btn engineering-touch px-4 text-xs disabled:opacity-50">取消</button>
             </div>
             <fieldset disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} className="space-y-4 disabled:opacity-70">
               <div className="rounded-lg border border-gray-200 bg-white/60 p-3">
