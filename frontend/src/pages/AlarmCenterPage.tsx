@@ -70,6 +70,13 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
   const [detail, setDetail] = useState<AlarmEventDetail | null>(null)
   const [transitions, setTransitions] = useState<AlarmTransition[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
+  const scopeGenerationRef = useRef(0)
+  const scopeIdentityRef = useRef<string | null>(null)
+  const scopeIdentity = [page, pageSize, levelFilter, entityFilter, statusFilter].join('\u0001')
+  if (scopeIdentityRef.current !== scopeIdentity) {
+    scopeIdentityRef.current = scopeIdentity
+    scopeGenerationRef.current += 1
+  }
 
   const load = useCallback(async (background = false) => {
     // A slow refresh must not pile up more requests or erase the last result.
@@ -138,8 +145,10 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
 
   const handleAckIds = async (ids: string[]) => {
     if (!ids.length) return
+    const acknowledgementScopeGeneration = scopeGenerationRef.current
     setBatchMessage('')
     const result = await acknowledgeAlarmBatch(ids, acknowledgeAlarm)
+    if (acknowledgementScopeGeneration !== scopeGenerationRef.current) return
     setSelectedIds([])
     setBatchMessage(result.failures.length
       ? `部分确认未完成：${result.failures.map((item) => `${item.id}（${item.message}）`).join('；')}`

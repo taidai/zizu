@@ -115,11 +115,22 @@ function creationStarterStrategy() {
   }
 }
 
-async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'native' | 'multiple' | 'create' | 'delayed') {
-  const writes: string[] = []
+async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'alarmAckRace' | 'native' | 'multiple' | 'create' | 'delayed') {
+  const writes: string[] & {
+    ackPending?: boolean
+    releaseAck?: () => void
+    releasePageTwoLoad?: () => void
+    alarmListScopes?: string[]
+  } = []
   const staleStrategy = staleCode ? staleStrategyView() : null
   let fixtureStrategy = fixture === 'native' || fixture === 'multiple' || fixture === 'delayed' ? applicationStrategy(fixture === 'multiple') : null
   let createdStrategy: ReturnType<typeof creationStarterStrategy> | null = null
+  let resolvePageTwoLoad: (() => void) | undefined
+  const pageTwoResponse = new Promise<void>((resolve) => { resolvePageTwoLoad = resolve })
+  if (fixture === 'alarmAckRace') {
+    writes.releasePageTwoLoad = () => resolvePageTwoLoad?.()
+    writes.alarmListScopes = []
+  }
   await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
     socket.onMessage((message) => {
       const body = JSON.parse(String(message))
@@ -145,7 +156,18 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
     if (path === '/categories') return json({ categories: [] })
     if (path === '/alarms/counts') return json({ counts: {} })
     if (fixture === 'alarms' && /^\/alarm-events\/alarm-2\/acknowledgements$/.test(path) && method === 'POST') return json({ detail: { code: 'ALARM_STATE_CONFLICT' } }, 409)
-    if (fixture === 'alarms' && /^\/alarm-events\/alarm-\d+\/acknowledgements$/.test(path) && method === 'POST') return json({ state: 'active_acknowledged' })
+    if ((fixture === 'alarms' || fixture === 'alarmAckRace') && /^\/alarm-events\/[^/]+\/acknowledgements$/.test(path) && method === 'POST') {
+      if (fixture === 'alarmAckRace') {
+        writes.ackPending = true
+        await new Promise<void>((resolve) => {
+          writes.releaseAck = () => {
+            void route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ state: 'active_acknowledged' }) }).then(resolve)
+          }
+        })
+        return
+      }
+      return json({ state: 'active_acknowledged' })
+    }
     if (fixture === 'alarms' && /^\/alarm-events\/alarm-\d+\/transitions$/.test(path)) return json({ items: [{ id: 'transition-1', event_id: path.split('/')[2], from_state: 'pending', to_state: 'active_unacknowledged', occurred_at: now, code: 'ALARM_ACTIVATED', evidence: { source_ref: 'frame-88', value: 42, quality: 192 }, actor: null, note: null }], total: 1 })
     if (fixture === 'alarms' && /^\/alarm-events\/alarm-\d+$/.test(path)) {
       const id = path.split('/')[2]
@@ -158,8 +180,33 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       const items = Array.from({ length: 11 }, (_, index) => ({ id: `alarm-${index + 1}`, definition_id: 'temperature.high', entity_instance_id: 'temperature-1', state: 'active_unacknowledged', severity: index === 0 ? 'CRITICAL' : 'MAJOR', pending_at: now, active_at: now, acknowledged_at: null, acknowledged_by: null, recovered_at: null, node_name: '储能柜 1', entity_name: '柜内温度', alarm_name: `高温告警 ${index + 1}`, duration_seconds: 120, archived_at: null, archived_by: null }))
       return json({ items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), total: 11, page: pageNumber, page_size: pageSize, total_pages: Math.ceil(11 / pageSize), summary: { active: 11, unacknowledged: 11, critical: 1 } })
     }
+    if (fixture === 'alarmAckRace' && path === '/alarm-events') {
+      const url = new URL(request.url())
+      const pageNumber = Number(url.searchParams.get('page') || 1)
+      const entityId = url.searchParams.get('entity_instance_id') || ''
+      const state = url.searchParams.get('state') || 'open'
+      const scope = `page:${pageNumber};entity:${entityId || 'all'};state:${state}`
+      writes.alarmListScopes?.push(scope)
+      if (pageNumber === 2 && !entityId && state === 'open') {
+        await pageTwoResponse
+      }
+      const id = pageNumber === 2
+        ? 'scope-b-page-2'
+        : entityId === 'entity-b' && state === 'active_acknowledged'
+          ? 'scope-b-entity-status'
+          : entityId === 'entity-b'
+            ? 'scope-b-entity'
+            : 'scope-a-page-1'
+      return json({
+        items: [{ id, definition_id: 'temperature.high', entity_instance_id: entityId || 'entity-a', state: 'active_unacknowledged', severity: 'MAJOR', pending_at: now, active_at: now, acknowledged_at: null, acknowledged_by: null, recovered_at: null, node_name: '储能柜 1', entity_name: entityId === 'entity-b' ? '实体 B' : '实体 A', alarm_name: id, duration_seconds: 120, archived_at: null, archived_by: null }],
+        total: 11, page: pageNumber, page_size: 10, total_pages: 2, summary: { active: 11, unacknowledged: 11, critical: 0 },
+      })
+    }
     if (path.startsWith('/alarm-events')) return json({ items: [], total: 0, page: 1, page_size: 50, total_pages: 1, summary: { active: 0, unacknowledged: 0, critical: 0 } })
-    if (path === '/alarms/entities') return json({ items: [] })
+    if (path === '/alarms/entities') return json({ items: fixture === 'alarmAckRace' ? [
+      { id: 'entity-a', name: 'entity-a', display_name: '实体 A' },
+      { id: 'entity-b', name: 'entity-b', display_name: '实体 B' },
+    ] : [] })
     if (path === '/dispatch-strategies' && method === 'GET') return json({ strategies: createdStrategy ? [createdStrategy] : fixtureStrategy ? [fixtureStrategy] : staleStrategy ? [staleStrategy] : [] })
     if (path === '/dispatch-strategies' && method === 'POST' && fixture === 'create') {
       createdStrategy = creationStarterStrategy()
@@ -288,6 +335,55 @@ test('告警事件按10/20条展示、当前页确认逐项报错并读取真实
   await page.getByLabel('选择告警 alarm-1', { exact: true }).check()
   await page.getByRole('button', { name: '已确认', exact: true }).click()
   await expect(page.getByRole('button', { name: '确认所选（0）' })).toBeDisabled()
+})
+
+test('迟到的批量确认不会用旧页加载覆盖正在加载的当前页', async ({ page }) => {
+  const race = await installReadOnlyApi(page, undefined, 'alarmAckRace')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '告警中心')
+  await expect(page.getByText('scope-a-page-1', { exact: true })).toBeVisible()
+
+  await page.getByLabel('选择告警 scope-a-page-1', { exact: true }).check()
+  await page.getByRole('button', { name: '确认所选（1）' }).click()
+  await expect.poll(() => race.ackPending).toBe(true)
+  await page.getByRole('button', { name: '›' }).click()
+  await expect.poll(() => race.alarmListScopes?.includes('page:2;entity:all;state:open')).toBe(true)
+
+  const acknowledgement = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes('/alarm-events/scope-a-page-1/acknowledgements'))
+  race.releaseAck!()
+  race.releasePageTwoLoad!()
+  await acknowledgement
+  await expect(page.getByText('scope-b-page-2', { exact: true })).toBeVisible({ timeout: 3_000 })
+  await page.waitForTimeout(1_000)
+  await expect(page.getByTestId('tablet-alarm-applications').getByRole('status')).toHaveCount(0)
+  const currentPageLoad = 'page:2;entity:all;state:open'
+  const currentPageLoadIndex = race.alarmListScopes?.lastIndexOf(currentPageLoad) ?? -1
+  expect(currentPageLoadIndex).toBeGreaterThanOrEqual(0)
+  expect(race.alarmListScopes?.slice(currentPageLoadIndex).every((scope) => scope === currentPageLoad)).toBe(true)
+})
+
+test('迟到的批量确认不会恢复旧实体或状态筛选及其完成提示', async ({ page }) => {
+  const race = await installReadOnlyApi(page, undefined, 'alarmAckRace')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '告警中心')
+  await expect(page.getByText('scope-a-page-1', { exact: true })).toBeVisible()
+
+  await page.getByLabel('选择告警 scope-a-page-1', { exact: true }).check()
+  await page.getByRole('button', { name: '确认所选（1）' }).click()
+  await expect.poll(() => race.ackPending).toBe(true)
+  await page.locator('select').filter({ has: page.getByRole('option', { name: '实体 B' }) }).selectOption('entity-b')
+  await expect(page.getByText('scope-b-entity', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '已确认', exact: true }).click()
+  await expect(page.getByText('scope-b-entity-status', { exact: true })).toBeVisible()
+
+  const scopesBeforeAckCompletes = [...(race.alarmListScopes || [])]
+  const acknowledgement = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes('/alarm-events/scope-a-page-1/acknowledgements'))
+  race.releaseAck!()
+  await acknowledgement
+  await page.waitForTimeout(1_000)
+  await expect(page.getByText('scope-b-entity-status', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('tablet-alarm-applications').getByRole('status')).toHaveCount(0)
+  expect(race.alarmListScopes).toEqual(scopesBeforeAckCompletes)
 })
 
 test('唯一通用表使用原生编辑器和泛型L2绑定，任一绑定变化使试算失效', async ({ page }) => {
