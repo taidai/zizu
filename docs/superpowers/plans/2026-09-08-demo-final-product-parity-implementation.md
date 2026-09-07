@@ -65,7 +65,7 @@ Change only the formal `App.tsx`, navigation model and shared tokens. Retain `Lo
 
 Run the two targeted commands plus `npm run build`; commit `feat(ui): freeze final tablet shell`.
 
-### Task 2A: Runtime overview, fixed slots and manual control
+### Task 2: Runtime overview, fixed slots and manual control
 
 **Files:**
 - Create: `init-db/migration_063_ems_workbench_slots.sql`
@@ -118,7 +118,7 @@ Recompose `EMSWorkbenchPage` with Demo sections, use slot model/API values, reus
 
 Run focused backend tests, all runtime model tests, the two runtime/control Playwright specs and `npm run build`; commit `feat(workbench): deliver real demo overview and control`.
 
-### Task 2B: Device monitor parity
+### Task 3: Device monitor parity
 
 **Files:**
 - Modify: `frontend/src/pages/DeviceMonitorPage.tsx`
@@ -151,7 +151,7 @@ At both target viewports assert two rows of three cards where space permits, six
 
 Run the focused model test, `npx playwright test e2e/tablet-devices.spec.ts`, and `npm run build`; commit `feat(devices): match final monitor experience`.
 
-### Task 2C: Node, L0, L1 and L2 engineering core
+### Task 4: Node, L0, L1 and L2 engineering core
 
 **Files:**
 - Modify: `frontend/src/pages/NodeTreePage.tsx`
@@ -185,17 +185,17 @@ Move existing actions into the confirmed Demo tables/dialogs. Preserve node CRUD
 
 Run all data-trunk/node model tests, the two Playwright specs against formal APIs, and `npm run build`; commit `feat(engineering): unify node l0 l1 l2 workflow`.
 
-### Task 3: Integrate and accept Wave 1
+### Task 5: Integrate and accept Wave 1
 
 **Files:**
 - Modify only to resolve integration: `frontend/src/App.tsx`, `frontend/src/index.css`, lane-owned files where a real conflict exists
 - Update: `docs/reviews/2026-09-08-demo-parity-matrix.md`
 
 **Interfaces:**
-- Consumes: reviewed commits from Tasks 2A, 2B and 2C based on the same Task 1 commit.
+- Consumes: reviewed commits from Tasks 2, 3 and 4 based on the same Task 1 commit.
 - Produces: one integration branch with runtime overview/control, devices and engineering core.
 
-- [ ] **Step 1: Cherry-pick reviewed lane commits in order 2A, 2B, 2C**
+- [ ] **Step 1: Cherry-pick reviewed lane commits in order 2, 3, 4**
 
 Resolve only actual textual conflicts; never choose a lane's global CSS or navigation wholesale over Task 1.
 
@@ -211,7 +211,7 @@ Capture overview, devices, control and engineering at both viewports; compare st
 
 Commit `fix(ui): integrate first demo parity wave` only if integration changes were required.
 
-### Task 4A: Alarm center parity
+### Task 6: Alarm center parity
 
 **Files:**
 - Modify: `frontend/src/pages/AlarmCenterPage.tsx`
@@ -240,7 +240,7 @@ Run alarm model tests, implement only layout/action wiring, then run alarm model
 
 Run `npm run build`; commit `feat(alarms): match final table and dialog flow`.
 
-### Task 4B: Generic JDM dispatch strategy parity
+### Task 7: Generic JDM dispatch strategy parity
 
 **Files:**
 - Modify: `frontend/src/pages/DispatchStrategyPage.tsx`
@@ -265,7 +265,7 @@ Do not create a second schedule data model and do not rewrite unknown JDM graph 
 
 Run dispatch model tests, `npx playwright test e2e/dispatch-strategy.spec.ts`, and `npm run build`; commit `feat(strategies): deliver generic native jdm workflow`.
 
-### Task 4C: System tools parity
+### Task 8: System tools parity
 
 **Files:**
 - Modify: `frontend/src/components/AdminPanel.tsx`
@@ -291,7 +291,7 @@ Recompose existing managers; do not add a generic plugin/action framework.
 
 Run focused tests and `npm run build`; commit `feat(tools): organize formal system tools`.
 
-### Task 5: Integrate Wave 2 and run full local acceptance
+### Task 9: Integrate Wave 2 and run full local acceptance
 
 **Files:**
 - Modify for integration only: `frontend/src/App.tsx`, `frontend/src/index.css`, local page CSS
@@ -299,7 +299,7 @@ Run focused tests and `npm run build`; commit `feat(tools): organize formal syst
 - Create: `docs/reviews/2026-09-08-v1.0.5-local-acceptance.md`
 
 **Interfaces:**
-- Consumes: reviewed Tasks 4A/4B/4C and integrated Wave 1.
+- Consumes: reviewed Tasks 6/7/8 and integrated Wave 1.
 - Produces: one complete formal v1.0.5 candidate and evidence report.
 
 - [ ] **Step 1: Cherry-pick reviewed Wave 2 commits and resolve only integration conflicts**
@@ -320,7 +320,7 @@ Fail if production output contains Demo-only UI text or imports from `demo-table
 
 Any failed, skipped without an accepted environmental reason, overlapping or unreachable row keeps the result `INCOMPLETE`.
 
-### Task 6: Version, documentation, immutable release and one deployment
+### Task 10: Version, documentation, immutable release and one deployment
 
 **Files:**
 - Modify: `VERSION`
@@ -332,7 +332,7 @@ Any failed, skipped without an accepted environmental reason, overlapping or unr
 - Create: `docs/deploy-1号机-v1.0.5-http.md`
 
 **Interfaces:**
-- Consumes: Task 5 complete local candidate.
+- Consumes: Task 9 complete local candidate.
 - Produces: v1.0.5 source commit/tag, fixed ARM64 digest, verified rollback anchor, one 1号机 ZiZu container replacement and read-only field result.
 
 - [ ] **Step 1: Write failing version/release tests and bump every public version to 1.0.5**
@@ -352,4 +352,3 @@ Record actual version, digest, Schema, configuration revision, container health/
 - [ ] **Step 7: Push the reviewed branch/tag and update handoff**
 
 Do not claim full EMS field delivery unless the report contains the separately authorized real control, alarm delivery and live data evidence.
-
