@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import hashlib
 import os
+import time
 from pathlib import Path
 from types import MappingProxyType
 import unittest
@@ -416,7 +417,13 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
                     cursor
                 )
                 cursor.execute(
+                    frame_migration.MIGRATION_053.read_text(encoding="utf-8")
+                )
+                cursor.execute(
                     frame_migration.MIGRATION_054.read_text(encoding="utf-8")
+                )
+                cursor.execute(
+                    frame_migration.MIGRATION_055.read_text(encoding="utf-8")
                 )
                 cursor.execute(MIGRATION_059.read_text(encoding="utf-8"))
             connection.commit()
@@ -560,6 +567,127 @@ class CommittedFrameStreamPostgresTest(unittest.TestCase):
         self.assertTrue(
             all(item["frame_sequence"] <= before.frame_sequence for item in snapshot.l0)
         )
+
+    def test_snapshot_prunes_unrelated_compressed_history(self) -> None:
+        """An idle point must not decompress newer history for every snapshot."""
+        self._commit_frame(1, 1.0, 10.0)
+        compressed_chunks = []
+        try:
+            with self._connection() as connection, connection.cursor() as cursor:
+                cursor.execute("SET session_replication_role=replica")
+                cursor.execute(
+                    """
+                    INSERT INTO t_telemetry
+                      (ts,node_id,tag_id,value_float,observation_id,quality)
+                    SELECT %s + interval '14 days' + n * interval '1 second',
+                           %s,%s,n,gen_random_uuid(),192
+                    FROM generate_series(1,142000) AS n
+                    """,
+                    (NOW, str(self.node_b), str(self.tag_b)),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO t_data_frames
+                      (frame_id,candidate_digest,capture_beat,shot_at,
+                       configuration_revision,status,finished_at)
+                    SELECT gen_random_uuid(),repeat('a',64),n+1,%s,0,
+                           'COMPLETE',%s
+                    FROM generate_series(1,142000) AS n
+                    """,
+                    (NOW, NOW),
+                )
+                cursor.execute("SET session_replication_role=origin")
+                cursor.execute(
+                    "SELECT chunk_schema || '.' || chunk_name "
+                    "FROM timescaledb_information.chunks "
+                    "WHERE hypertable_name='t_telemetry' AND range_start > %s",
+                    (NOW + timedelta(days=1),),
+                )
+                for (chunk,) in cursor.fetchall():
+                    cursor.execute("SELECT compress_chunk(%s::regclass)", (chunk,))
+                    compressed_chunks.append(chunk)
+                cursor.execute("ANALYZE t_data_frames")
+                cursor.execute("ANALYZE t_telemetry")
+            self.assertTrue(compressed_chunks, "fixture must include compressed history")
+
+            queries = []
+
+            class TimedCursor(psycopg2.extensions.cursor):
+                def execute(self, sql, parameters=None):
+                    started = time.perf_counter()
+                    result = super().execute(sql, parameters)
+                    queries.append((sql, parameters, time.perf_counter() - started))
+                    return result
+
+            @contextmanager
+            def timed_connection():
+                connection = psycopg2.connect(
+                    **self.connection_kwargs, cursor_factory=TimedCursor
+                )
+                try:
+                    yield connection
+                finally:
+                    connection.close()
+
+            snapshot = PostgresCommittedFrameStreamRepository(
+                connection_factory=timed_connection
+            ).read_snapshot(FrameScope.for_node(self.node_a))
+            self.assertEqual(1.0, snapshot.l0[0]["value"])
+            self.assertEqual(192, snapshot.l0[0]["source_quality"])
+            self.assertEqual(1, snapshot.l0[0]["accepted_beat"])
+            self.assertEqual(0, snapshot.backlog_frames)
+
+            l0_plan = None
+            with self._connection() as connection, connection.cursor() as cursor:
+                for sql, parameters, elapsed in queries:
+                    print(f"snapshot query {elapsed * 1000:.3f} ms: {' '.join(sql.split())}")
+                    if not sql.lstrip().startswith("SELECT"):
+                        continue
+                    cursor.execute(
+                        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, parameters
+                    )
+                    plan = cursor.fetchone()[0][0]
+                    print(
+                        "snapshot EXPLAIN: "
+                        f"planning={plan['Planning Time']} ms, "
+                        f"execution={plan['Execution Time']} ms, "
+                        f"shared_hit_blocks={plan['Plan']['Shared Hit Blocks']}"
+                    )
+                    if "FROM t_tags AS tag" in sql:
+                        l0_plan = plan["Plan"]
+            self.assertIsNotNone(l0_plan)
+            pending = [l0_plan]
+            discarded = 0
+            active_compressed_chunks = 0
+            while pending:
+                plan_node = pending.pop()
+                discarded += (
+                    plan_node.get("Rows Removed by Filter", 0)
+                    * plan_node.get("Actual Loops", 0)
+                )
+                if (
+                    plan_node.get("Custom Plan Provider")
+                    in {"ColumnarScan", "DecompressChunk"}
+                    and plan_node.get("Actual Loops", 0) > 0
+                ):
+                    active_compressed_chunks += 1
+                pending.extend(plan_node.get("Plans", ()))
+            print(
+                f"L0 discarded rows={discarded}, "
+                f"active compressed chunks={active_compressed_chunks}"
+            )
+            self.assertEqual(
+                0, active_compressed_chunks,
+                "snapshot must prune every unrelated compressed chunk",
+            )
+            self.assertLess(
+                discarded, 1000,
+                "snapshot must not scan/decompress unrelated telemetry history",
+            )
+        finally:
+            with self._connection() as connection, connection.cursor() as cursor:
+                for chunk in compressed_chunks:
+                    cursor.execute("SELECT decompress_chunk(%s::regclass)", (chunk,))
 
     def test_empty_active_item_is_visible_as_waiting_stale(self) -> None:
         repository = PostgresCommittedFrameStreamRepository(

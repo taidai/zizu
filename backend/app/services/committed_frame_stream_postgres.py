@@ -300,6 +300,9 @@ class PostgresCommittedFrameStreamRepository:
               SELECT telemetry.quality,telemetry.accepted_beat
               FROM t_telemetry AS telemetry
               WHERE telemetry.observation_id=latest.observation_id
+                AND telemetry.node_id=latest.node_id
+                AND telemetry.tag_id=latest.tag_id
+                AND telemetry.ts=latest.ts
               ORDER BY telemetry.ts DESC LIMIT 1
             ) AS history ON TRUE
             WHERE tag.node_id=%s AND tag.enabled=TRUE
