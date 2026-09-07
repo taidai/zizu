@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
-import { acknowledgeAlarmBatch, canArchiveAlarmEvent, pruneCurrentAlarmSelection, updateCurrentAlarmSelection } from '../components/alarm-center/alarmCenterModel'
+import { acknowledgeAlarmBatch, canArchiveAlarmEvent, currentAlarmBatchIds, pruneCurrentAlarmSelection, updateCurrentAlarmSelection } from '../components/alarm-center/alarmCenterModel'
 import '../components/alarm-center/tabletApplications.css'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
@@ -53,6 +53,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [listError, setListError] = useState(false)
   const pendingRequest = useRef<AbortController | null>(null)
   const detailRequest = useRef<AbortController | null>(null)
   const [page, setPage] = useState(1)
@@ -78,7 +79,11 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
     pendingRequest.current = request
     setLoading(true)
     setError('')
-    if (!background) setAlarms([])
+    setListError(false)
+    if (!background) {
+      setAlarms([])
+      setSelectedIds([])
+    }
     try {
       const level = levelFilter || undefined
       const entityId = entityFilter || undefined
@@ -91,6 +96,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       if (request.signal.aborted || pendingRequest.current !== request) return
       setAlarms(data.alarms)
       setSelectedIds((current) => pruneCurrentAlarmSelection(current, data.alarms))
+      setListError(false)
       setTotalPages(data.total_pages || 1)
       setStats({
         active: data.summary.active,
@@ -99,6 +105,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       })
     } catch {
       if (!request.signal.aborted && pendingRequest.current === request) {
+        setListError(true)
         setError(background ? '刷新失败，当前保留上次结果。' : '告警加载失败，请重试。')
       }
     } finally {
@@ -138,6 +145,14 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       ? `部分确认未完成：${result.failures.map((item) => `${item.id}（${item.message}）`).join('；')}`
       : `已确认 ${result.succeededIds.length} 条告警。`)
     await load()
+  }
+
+  const handleSelectedAck = () => {
+    const ids = currentAlarmBatchIds(selectedIds, alarms, {
+      loading: loading || pendingRequest.current !== null,
+      error: listError,
+    })
+    if (ids.length) void handleAckIds(ids)
   }
 
   const clearAnd = (operation: () => void) => {
@@ -183,6 +198,8 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       alert('归档失败，请确认该告警已经现场恢复。')
     }
   }
+
+  const selectedBatchIds = currentAlarmBatchIds(selectedIds, alarms, { loading, error: listError })
 
   return (
     <div className="space-y-4">
@@ -265,7 +282,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       <div className="neu-card overflow-hidden" data-testid="alarm-event-table">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/70 p-3">
           <div className="flex items-center gap-2 text-xs text-gray-600">
-            <button type="button" disabled={!selectedIds.length} onClick={() => void handleAckIds(selectedIds)} className="neu-btn zizu-primary px-3 py-2 font-semibold disabled:opacity-40">确认所选（{selectedIds.length}）</button>
+            <button type="button" disabled={!selectedBatchIds.length} onClick={handleSelectedAck} className="neu-btn zizu-primary px-3 py-2 font-semibold disabled:opacity-40">确认所选（{selectedBatchIds.length}）</button>
             {loading && <span>{alarms.length ? '更新中…' : '加载中…'}</span>}
           </div>
           <label className="text-xs text-gray-600">每页

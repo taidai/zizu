@@ -101,6 +101,15 @@ export function pruneCurrentAlarmSelection(
   return selectedIds.filter((id) => eligible.has(id))
 }
 
+export function currentAlarmBatchIds(
+  selectedIds: string[],
+  pageItems: { id: string; state?: string }[],
+  availability: { loading: boolean; error: boolean },
+): string[] {
+  if (availability.loading || availability.error) return []
+  return pruneCurrentAlarmSelection(selectedIds, pageItems)
+}
+
 export async function acknowledgeAlarmBatch(
   ids: string[],
   acknowledge: (id: string) => Promise<void>,

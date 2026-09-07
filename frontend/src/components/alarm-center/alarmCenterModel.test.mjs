@@ -227,6 +227,17 @@ test('current alarm selection contains only confirmable rows from the visible pa
   assert.deepEqual(pruneCurrentAlarmSelection(['open-1', 'old-page-id', 'acked'], rows), ['open-1'])
 })
 
+test('loading or failed alarm pages cannot produce a batch acknowledgement', async () => {
+  const { currentAlarmBatchIds } = await import('./alarmCenterModel.ts')
+  const rows = [
+    { id: 'open-1', state: 'active_unacknowledged' },
+    { id: 'acked', state: 'active_acknowledged' },
+  ]
+  assert.deepEqual(currentAlarmBatchIds(['open-1'], rows, { loading: true, error: false }), [])
+  assert.deepEqual(currentAlarmBatchIds(['open-1'], rows, { loading: false, error: true }), [])
+  assert.deepEqual(currentAlarmBatchIds(['old-page-id', 'open-1', 'acked'], rows, { loading: false, error: false }), ['open-1'])
+})
+
 test('batch acknowledgement reports each failed alarm without hiding successes', async () => {
   const { acknowledgeAlarmBatch } = await import('./alarmCenterModel.ts')
   const called = []
