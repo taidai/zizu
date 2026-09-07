@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
+import re
 from typing import Callable, Literal, Mapping, Protocol, Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -637,15 +638,23 @@ def static_jdm_targets(content: Mapping[str, object]) -> tuple[object, ...]:
 
 
 def _static_jdm_literal(raw: object, code: str) -> object:
-    """Read JSON literals only; never interpret a dynamic JDM expression."""
+    """Read typed literals only; never interpret a dynamic JDM expression."""
     if not isinstance(raw, str):
         raise StrategyModelError(code, "output cells must contain literal expressions")
+    if re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", raw.strip()):
+        number = _finite_decimal(raw.strip(), code)
+        if not math.isfinite(float(number)):
+            raise StrategyModelError(code, "numeric output must be finite")
+        # GoRules emits integral decimal/exponent literals as integers too.
+        return int(number) if number == number.to_integral_value() else number
     try:
         value = json.loads(raw)
     except (ValueError, TypeError) as error:
         raise StrategyModelError(code, "output must be a static JSON literal") from error
     if isinstance(value, dict) or value is None:
         raise StrategyModelError(code, "output must be a static typed value")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise StrategyModelError(code, "numeric output must be finite")
     return value
 
 
@@ -772,6 +781,8 @@ def extract_control_intents(
     else:
         raise StrategyModelError("JDM_RESULT_INVALID", "decision result must be an object or list")
     intents: list[ControlIntentDraft] = []
+    seen_actions: set[str] = set()
+    seen_entities: set[UUID] = set()
     for ordinal, raw in enumerate(raw_intents):
         if not isinstance(raw, Mapping):
             raise StrategyModelError("JDM_RESULT_INVALID", "every intent result must be an object")
@@ -781,6 +792,12 @@ def extract_control_intents(
         if "target" not in raw:
             raise StrategyModelError("OUTPUT_TARGET_MISSING", "SET target is required")
         binding = bindings[action_id]
+        if action_id in seen_actions:
+            raise StrategyModelError("OUTPUT_ACTION_DUPLICATED", "one result cannot SET the same action twice")
+        if binding.entity_instance_id in seen_entities:
+            raise StrategyModelError("OUTPUT_ENTITY_DUPLICATED", "one result cannot SET the same entity twice")
+        seen_actions.add(action_id)
+        seen_entities.add(binding.entity_instance_id)
         if not binding.controllable:
             raise StrategyModelError("OUTPUT_NOT_CONTROLLABLE", "target L2 is read-only")
         if not binding.confirmed_write_point:

@@ -2,6 +2,7 @@
 
 ## Session 2026-09-08 — final-i 原生 JDM 运行契约修复（未部署）
 
+- Fix round 3：静态有限数值字面用 Decimal 规范化，INT 接受数学整数 `1/1.0/1e0/+1/01`，类型/上下限/动态表达式仍 fail closed；单次真实结果按 action_id 与实体双重拒绝重复，simulate 无 mutation，evaluate 仅保留 FAILED 审计/故障锁、零控制意图。真实 zen focused 后端65/65、前端模型29/29；未操作 dist、PG 或设备。
 - Fix round 1：真实复审图“中间表 target → 后续 expressionNode action_id”曾被误拒绝。现保留带 action_id 的逐目标检查，缺 action_id 的中间表只允许既有单输出有界校验；多输出歧义仍拒绝。新增真实图、上下限/类型/动态目标与未知动作回归；focused 后端57/57、前端29/29，未重跑PG或浏览器。
 - 新通用表直接声明 `action_id`、`target`，使用原生 `collect` / `outputPath=intents`，输出别名通过 `action_id` 选择；多命中按规则顺序产生意图，试算不写设备。
 - 发布静态校验按原生输出列 ID→field→每行 action_id 找到对应 L2，逐目标检查类型、单位与上下限；未知别名和动态输出仍拒绝。
