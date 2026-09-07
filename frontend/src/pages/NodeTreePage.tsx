@@ -625,6 +625,8 @@ export default function NodeTreePage({
   const [treeSearch, setTreeSearch] = useState('')
   const [alarmCounts, setAlarmCounts] = useState<Record<string, number>>({})
   const lastModalTriggerRef = useRef<HTMLElement | null>(null)
+  const nodeLoadGeneration = useRef(0)
+  const [nodesError, setNodesError] = useState('')
 
   const closeModal = (close: () => void) => {
     close()
@@ -632,16 +634,23 @@ export default function NodeTreePage({
   }
 
   const loadNodes = async () => {
+    const generation = ++nodeLoadGeneration.current
     setLoading(true)
     try {
       const data = await fetchNodes()
+      if (generation !== nodeLoadGeneration.current) return
       setNodes(data)
+      setNodesError('')
+      setSelectedId((current) => data.length ? initialNodeSelection(data, current, initialNodeId) : '')
       if (data.length > 0) {
-        setSelectedId((current) => initialNodeSelection(data, current, initialNodeId))
         setExpanded(new Set(data.map((n) => n.id)))
       }
+    } catch {
+      if (generation === nodeLoadGeneration.current) {
+        setNodesError('节点目录加载失败，请重试。')
+      }
     } finally {
-      setLoading(false)
+      if (generation === nodeLoadGeneration.current) setLoading(false)
     }
   }
 
@@ -655,10 +664,11 @@ export default function NodeTreePage({
   }
 
   useEffect(() => {
-    loadNodes()
+    void loadNodes()
     if (!readOnly) {
-      loadCategories()
+      void loadCategories()
     }
+    return () => { nodeLoadGeneration.current += 1 }
   }, [readOnly])
 
   useEffect(() => {
@@ -758,6 +768,13 @@ export default function NodeTreePage({
             className="neu-input w-full px-3 py-1.5 text-xs bg-transparent"
           />
         </div>
+        {nodesError && (
+          <div role="alert" aria-label="节点目录状态" className="mb-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+            <p>{nodesError}</p>
+            {nodes.length > 0 && <p>保留上次目录，可能不是最新。</p>}
+            <button type="button" disabled={loading} onClick={() => void loadNodes()} className="neu-btn engineering-touch mt-1 px-3 disabled:opacity-50">重试加载节点</button>
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto table-container pr-1">
           {filteredRoots.map((root) => (
             <TreeNode
@@ -772,7 +789,7 @@ export default function NodeTreePage({
               onSelect={setSelectedId}
             />
           ))}
-          {filteredRoots.length === 0 && !loading && (
+          {filteredRoots.length === 0 && !loading && !nodesError && (
             <div className="text-xs text-gray-400 py-4 text-center">
               {treeSearch ? '无匹配节点' : readOnly ? '暂无运行节点' : '暂无节点，点击「+ 节点」创建根节点'}
             </div>

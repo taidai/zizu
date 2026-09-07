@@ -67,6 +67,7 @@ export default function InlinePointProcessingPanel({
   const [restoreError, setRestoreError] = useState('')
   const [restoreBusy, setRestoreBusy] = useState(false)
   const [restoreCanRetry, setRestoreCanRetry] = useState(false)
+  const [restorePending, setRestorePending] = useState(false)
   const [restoreAttempt, setRestoreAttempt] = useState(0)
   const [dirty, setDirty] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -79,6 +80,8 @@ export default function InlinePointProcessingPanel({
     && points[0].read_write.toUpperCase() === 'RW'
     && ['FLOAT', 'INT'].includes(points[0].data_type.toUpperCase())
   const canDeclareUnit = canDeclareInlinePassthroughUnit(points, mode)
+  const recoveryLocked = resultUnknown || restorePending || restoreBusy || restoreCanRetry
+  const inputsLocked = busy !== null || recoveryLocked
 
   useEffect(() => {
     setPlan(null)
@@ -98,8 +101,10 @@ export default function InlinePointProcessingPanel({
     if (!retry) {
       setRestoreError('')
       setRestoreCanRetry(false)
+      setRestorePending(false)
       return () => { active = false }
     }
+    setRestorePending(true)
     setRestoreBusy(true)
     setRestoreError('')
     setRestoreCanRetry(false)
@@ -107,6 +112,7 @@ export default function InlinePointProcessingPanel({
       if (!active) return
       if (restoredPlan.node_id !== nodeId || restoredPlan.status !== 'ready') {
         clearDataTrunkApplyRetry(sessionStorage)
+        setRestorePending(false)
         setRestoreError('上次发布计划已结束或身份不一致，请重新检查。')
         return
       }
@@ -117,13 +123,13 @@ export default function InlinePointProcessingPanel({
         planDigest: restoredPlan.digest,
       })
       if (!persisted) {
+        setRestorePending(false)
         setRestoreError('上次发布计划摘要已变化，已停止恢复，请重新检查。')
         return
       }
       const target = restoredPlan.items.find((item) => item.kind === 'output_binding' && item.action === 'add')
       if (!target?.entity_definition_id || !isNewOutputPlan(restoredPlan, target.entity_definition_id)) {
-        clearDataTrunkApplyRetry(sessionStorage)
-        setRestoreError('上次发布计划已不再是新增实体计划，请重新检查。')
+        setRestoreError('上次发布属于已有加工的生命周期操作，计划与幂等键已保留。请到“标准实体”的原入口继续处理；处理前不能新建实体。')
         return
       }
       setDefinitionKey(target.entity_definition_id)
@@ -136,6 +142,7 @@ export default function InlinePointProcessingPanel({
       if (!active) return
       if (pointPlanRestoreFailureDisposition(reason) === 'clear') {
         clearDataTrunkApplyRetry(sessionStorage)
+        setRestorePending(false)
         setRestoreError('上次发布计划已不存在，请重新检查。')
       } else {
         setRestoreError('上次发布计划暂时无法恢复，计划与幂等键已保留。')
@@ -148,6 +155,7 @@ export default function InlinePointProcessingPanel({
   }, [actorId, nodeId, pointIdentity, restoreAttempt])
 
   const invalidatePlan = () => {
+    if (inputsLocked) return
     setPlan(null)
     setIdempotencyKey('')
     setResultUnknown(false)
@@ -158,6 +166,11 @@ export default function InlinePointProcessingPanel({
     triggerRef.current = trigger
     if (resultUnknown && plan) {
       setExpanded(true)
+      return
+    }
+    if (recoveryLocked || busy !== null) return
+    if (findDataTrunkApplyRetry(sessionStorage, actorId, nodeId)) {
+      setRestoreAttempt((current) => current + 1)
       return
     }
     if (points.length === 0) return
@@ -183,9 +196,9 @@ export default function InlinePointProcessingPanel({
 
   const closeEditor = () => {
     if (busy !== null) return
-    if (!resultUnknown && dirty && !window.confirm('放弃尚未发布的点位加工修改？')) return
+    if (!recoveryLocked && dirty && !window.confirm('放弃尚未发布的点位加工修改？')) return
     setExpanded(false)
-    if (resultUnknown) {
+    if (recoveryLocked) {
       requestAnimationFrame(() => triggerRef.current?.focus())
       return
     }
@@ -215,6 +228,11 @@ export default function InlinePointProcessingPanel({
   }, [expanded])
 
   const handlePlan = async () => {
+    if (inputsLocked) return
+    if (findDataTrunkApplyRetry(sessionStorage, actorId, nodeId)) {
+      setRestoreAttempt((current) => current + 1)
+      return
+    }
     setBusy('plan')
     setError('')
     setSuccess('')
@@ -266,7 +284,14 @@ export default function InlinePointProcessingPanel({
   }
 
   const handleApply = async () => {
-    if (!plan || !idempotencyKey) return
+    if (!plan || !idempotencyKey || !isNewOutputPlan(plan, definitionKey)
+      || busy !== null || restoreBusy || restoreCanRetry || (restorePending && !resultUnknown)) return
+    const existing = findDataTrunkApplyRetry(sessionStorage, actorId, nodeId)
+    if (existing && (existing.planId !== plan.id || existing.planDigest !== plan.digest
+      || existing.idempotencyKey !== idempotencyKey)) {
+      setRestoreAttempt((current) => current + 1)
+      return
+    }
     setBusy('apply')
     setError('')
     const retry = {
@@ -282,6 +307,7 @@ export default function InlinePointProcessingPanel({
       setSuccess('标准实体已发布，可到“标准实体”查看实时值、历史和来源。')
       setPlan(null)
       setResultUnknown(false)
+      setRestorePending(false)
       setDirty(false)
       clearDataTrunkApplyRetry(sessionStorage)
       onPublished()
@@ -291,6 +317,7 @@ export default function InlinePointProcessingPanel({
         || (reason instanceof DataTrunkApiError && reason.retryable)
       if (!shouldKeep) {
         clearDataTrunkApplyRetry(sessionStorage)
+        setRestorePending(false)
         setPlan(null)
         setIdempotencyKey('')
       }
@@ -319,7 +346,7 @@ export default function InlinePointProcessingPanel({
         </div>
         <button
           type="button"
-          disabled={points.length === 0 && !resultUnknown}
+          disabled={busy !== null || (recoveryLocked && !(resultUnknown && plan)) || (points.length === 0 && !resultUnknown)}
           onClick={(event) => openEditor(event.currentTarget)}
           className="neu-btn zizu-primary engineering-touch px-4 text-xs font-semibold disabled:bg-gray-300"
         >
@@ -351,6 +378,7 @@ export default function InlinePointProcessingPanel({
             </div>
             <button type="button" onClick={closeEditor} className="neu-btn engineering-touch px-4 text-xs">取消</button>
           </div>
+          <fieldset disabled={inputsLocked} className="min-w-0">
           <div className="grid gap-3 lg:grid-cols-3">
             <label className="text-[11px] font-medium text-gray-700">
               实体名称
@@ -464,6 +492,7 @@ export default function InlinePointProcessingPanel({
               </label>
             </div>
           </details>
+          </fieldset>
 
           {error && <div role="alert" className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
           {resultUnknown && <div className="mt-2 text-xs font-semibold text-amber-800">保留计划 {plan?.id}，重试会沿用同一幂等键。</div>}
@@ -489,8 +518,8 @@ export default function InlinePointProcessingPanel({
             </div>
           )}
           <div className="mt-3 flex justify-end gap-2">
-            <button type="button" disabled={busy !== null || resultUnknown} onClick={() => void handlePlan()} className="neu-btn engineering-touch px-4 text-xs font-semibold text-[#7d1b23] disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
-            <button type="button" disabled={busy !== null || !planView?.canApply || !isNewOutputPlan(plan!, definitionKey)} onClick={() => void handleApply()} className="neu-btn zizu-primary engineering-touch px-4 text-xs font-semibold disabled:bg-gray-300">{busy === 'apply' ? '发布中…' : resultUnknown ? '继续上次发布' : '发布实体'}</button>
+            <button type="button" disabled={inputsLocked} onClick={() => void handlePlan()} className="neu-btn engineering-touch px-4 text-xs font-semibold text-[#7d1b23] disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
+            <button type="button" disabled={busy !== null || restoreBusy || restoreCanRetry || (restorePending && !resultUnknown) || !planView?.canApply || !isNewOutputPlan(plan!, definitionKey)} onClick={() => void handleApply()} className="neu-btn zizu-primary engineering-touch px-4 text-xs font-semibold disabled:bg-gray-300">{busy === 'apply' ? '发布中…' : resultUnknown ? '继续上次发布' : '发布实体'}</button>
           </div>
         </div>
         </div>

@@ -47,6 +47,7 @@ import {
   type CommittedFrameProjection,
 } from './committedFrameProjection'
 import { requestResultIsCurrent } from '../rawPointHistoryModel'
+import { pointPlanRestoreFailureDisposition } from './inlinePointProcessingModel'
 
 type BusyAction = 'plan' | 'apply' | 'formula' | 'edit-apply' | 'deactivate-plan' | 'deactivate-apply' | null
 
@@ -139,7 +140,13 @@ export default function DataTrunkWorkspace({
         if (retry) {
           try {
             const restoredPlan = await fetchPointProcessingPlan(retry.planId)
-            if (!isCurrentNodeResult(restoredPlan.node_id, activeNodeIdRef.current)) return
+            if (generation !== workspaceGenerationRef.current
+              || !isCurrentNodeResult(restoredPlan.node_id, activeNodeIdRef.current)) return
+            if (restoredPlan.status !== 'ready') {
+              clearDataTrunkApplyRetry(sessionStorage)
+              setResultUnknownPlanId(null)
+              return
+            }
             if (readDataTrunkApplyRetry(sessionStorage, {
               actorId,
               nodeId: expectedNodeId,
@@ -153,8 +160,16 @@ export default function DataTrunkWorkspace({
               } else setEditPlan(restoredPlan)
               setResultUnknownPlanId(restoredPlan.id)
             }
-          } catch {
-            clearDataTrunkApplyRetry(sessionStorage)
+          } catch (reason) {
+            if (generation !== workspaceGenerationRef.current
+              || activeNodeIdRef.current !== expectedNodeId) return
+            if (pointPlanRestoreFailureDisposition(reason) === 'clear') {
+              clearDataTrunkApplyRetry(sessionStorage)
+              setResultUnknownPlanId(null)
+            } else {
+              setTrunk(null)
+              setError('上次发布计划暂时无法恢复，计划与幂等键已保留。请重新读取后继续处理。')
+            }
           }
         }
       }
