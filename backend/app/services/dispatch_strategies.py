@@ -548,7 +548,8 @@ def validate_publish_bindings(
                 raise StrategyModelError("OUTPUT_BINDING_MISSING", "action output has no static binding")
             raw_target = static_target.value
         else:
-            # Legacy internal callers supply unlabelled targets for one output.
+            # An intermediate table may leave action_id to a downstream node.
+            # Its unlabelled target can only be checked against one output.
             if len(outputs) != 1:
                 raise StrategyModelError("OUTPUT_TARGET_AMBIGUOUS", "unlabelled targets require one output binding")
             binding, raw_target = outputs[0], static_target
@@ -598,9 +599,9 @@ def validate_strategy_binding_role(
         raise StrategyModelError(code, "SOC value must be within 0..100 percent")
 
 
-def static_jdm_targets(content: Mapping[str, object]) -> tuple[StaticJdmTarget, ...]:
+def static_jdm_targets(content: Mapping[str, object]) -> tuple[object, ...]:
     """Associate native table cells with their output fields before validation."""
-    targets: list[StaticJdmTarget] = []
+    targets: list[object] = []
     nodes = content.get("nodes")
     if not isinstance(nodes, list):
         return ()
@@ -619,10 +620,13 @@ def static_jdm_targets(content: Mapping[str, object]) -> tuple[StaticJdmTarget, 
         }
         if not fields["target"]:
             continue
-        if len(fields["target"]) != 1 or len(fields["action_id"]) != 1:
-            raise StrategyModelError("OUTPUT_ACTION_NOT_STATIC", "target needs one explicit action_id column")
+        if len(fields["target"]) != 1 or len(fields["action_id"]) > 1:
+            raise StrategyModelError("OUTPUT_ACTION_NOT_STATIC", "output columns must be unambiguous")
         for rule in rules:
             if not isinstance(rule, Mapping):
+                continue
+            if not fields["action_id"]:
+                targets.append(_static_jdm_literal(rule.get(fields["target"][0]), "OUTPUT_TARGET_NOT_STATIC"))
                 continue
             action_id = _static_jdm_literal(rule.get(fields["action_id"][0]), "OUTPUT_ACTION_NOT_STATIC")
             if not isinstance(action_id, str) or not action_id:

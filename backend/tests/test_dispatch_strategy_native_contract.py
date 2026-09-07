@@ -70,7 +70,66 @@ def bindings_and_contracts():
     return bindings, contracts
 
 
+def intermediate_target_graph(*, target="12.5", action='"pump_speed"'):
+    return {
+        "nodes": [
+            {"id": "input", "type": "inputNode", "name": "Input"},
+            {"id": "table", "type": "decisionTableNode", "name": "Intermediate", "content": {
+                "hitPolicy": "first", "inputs": [],
+                "outputs": [{"id": "target", "field": "target"}],
+                "rules": [{"_id": "r", "target": target}],
+            }},
+            {"id": "bind", "type": "expressionNode", "name": "Static binding", "content": {
+                "expressions": [{"id": "a", "key": "action_id", "value": action},
+                                {"id": "t", "key": "target", "value": "target"}],
+            }},
+            {"id": "output", "type": "outputNode", "name": "Output"},
+        ],
+        "edges": [{"id": "e1", "sourceId": "input", "targetId": "table"},
+                  {"id": "e2", "sourceId": "table", "targetId": "bind"},
+                  {"id": "e3", "sourceId": "bind", "targetId": "output"}],
+    }
+
+
 class NativeContractTest(unittest.TestCase):
+    def test_intermediate_target_table_keeps_single_output_full_graph_executable(self):
+        graph = intermediate_target_graph()
+        before = deepcopy(graph)
+        outputs = evaluate_standard_jdm(graph, {})
+        self.assertEqual({"action_id": "pump_speed", "target": 12.5}, outputs["result"])
+        bindings, contracts = bindings_and_contracts()
+        bindings = tuple(b for b in bindings if b.binding_key != "fan_enable")
+        validate_publish_bindings(bindings, contracts, static_targets=static_jdm_targets(graph))
+        result, repository = self.simulate(graph)
+        repository.model = replace(repository.model, bindings=bindings)
+        result = StrategyRuntime(repository).simulate(REVISION_ID, {}, NOW)
+        self.assertEqual([("pump_speed", SECOND_OUTPUT, 12.5, 0)], [
+            (i.action_id, i.entity_instance_id, i.value, i.ordinal) for i in result.intents
+        ])
+        self.assertFalse(result.persisted)
+        self.assertEqual([], repository.mutations)
+        self.assertEqual(before, graph)
+
+    def test_intermediate_target_table_does_not_guess_between_multiple_outputs(self):
+        bindings, contracts = bindings_and_contracts()
+        with self.assertRaisesRegex(StrategyModelError, "OUTPUT_TARGET_AMBIGUOUS"):
+            validate_publish_bindings(bindings, contracts, static_targets=static_jdm_targets(intermediate_target_graph()))
+
+    def test_intermediate_targets_still_enforce_limits_type_and_literal_only(self):
+        bindings, contracts = bindings_and_contracts()
+        bindings = tuple(b for b in bindings if b.binding_key != "fan_enable")
+        for target, code in [("9", "OUTPUT_LIMIT_VIOLATION"), ("21", "OUTPUT_LIMIT_VIOLATION"),
+                             ("true", "OUTPUT_TYPE_MISMATCH"), ("temperature", "OUTPUT_TARGET_NOT_STATIC")]:
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(StrategyModelError, code):
+                    validate_publish_bindings(bindings, contracts, static_targets=static_jdm_targets(intermediate_target_graph(target=target)))
+
+    def test_full_graph_unknown_action_remains_rejected_by_real_runtime(self):
+        for action in ('"missing"', "temperature"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(StrategyModelError, "OUTPUT_BINDING_MISSING"):
+                    self.simulate(intermediate_target_graph(action=action))
+
     def test_two_charge_two_discharge_matches_real_time_and_soc_boundaries(self):
         repository = _Repository()
         graph = repository.model.jdm_content
