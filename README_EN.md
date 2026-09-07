@@ -6,15 +6,23 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current version: `v0.9.9`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current code version: `v1.0.2`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
 [v0.9.9 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.9-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
 
-This release is deployed. It adds a local headless vertical acceptance path for fixed-tick JDM in which the browser, FastAPI, PostgreSQL/TimescaleDB, standard GoRules JDM, frame outbox, unified control, and committed-L2 readback are real; only the device-protocol edge is replaced. Success, same-minute deduplication, failure latching, and no retrigger after disable now have executable evidence. Read-only navigation across the real PCS node tree, L0, L1, L2, alarms, and JDM passed, but the selected L2 was still stale, so real-device control closure remains unaccepted. No device writes were made, no strategy was enabled, and no safety gate was relaxed.
+The latest code fixes database-connection reuse in dispatch strategies and distinguishes the current L2 value from the decision-time value on strategy cards, so a decision snapshot is not presented as device readback. The historical deployment and acceptance records above apply only to their respective versions; they do not establish field acceptance of every current feature.
 
 > Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
 > and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
 > complete delivery-ready EMS.
+
+## Interface design preview
+
+The approved visual direction combines **flag red, gold, and bright silver** with skeuomorphic panels for a 10.1-inch tablet: daily operations come first, with engineering configuration grouped under one entry point.
+
+![ZiZu bright-silver EMS homepage design preview: operations overview, energy flow, alarms, and dispatch status, all using demonstration data](docs/images/ems-homepage-bright-silver-preview.png)
+
+> This is a design mockup, **not a screenshot of a live deployment; this page has not been deployed**. All equipment, topology, power, SOC, alarms, dispatch, and energy-flow data shown are demonstrations, not live operating data or acceptance evidence. Grouping operations and engineering configuration does not change existing permissions or control-safety boundaries.
 
 ## Core structure
 
