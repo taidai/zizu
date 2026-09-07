@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID
@@ -31,11 +32,8 @@ class ResolvedWorkbenchSlot:
     key: str
     label: str
     binding_mode: str
-    binding_status: str
-    binding_source: str | None
     reason: str
     entity: EntityInstanceDescriptor | None
-    candidate_count: int
 
 
 @dataclass(frozen=True)
@@ -142,6 +140,7 @@ class EmsWorkbenchSlots:
     ) -> None:
         self._catalog = catalog
         self._repository = repository
+        self._publish_lock = Lock()
 
     def resolve(
         self,
@@ -161,6 +160,26 @@ class EmsWorkbenchSlots:
         actor: str,
         idempotency_key: str,
         runtime_gate: WorkbenchSlotRuntimeGate | None = None,
+    ) -> WorkbenchSlotWriteReceipt:
+        with self._publish_lock:
+            return self._bind_locked(
+                slot_key=slot_key,
+                entity_instance_id=entity_instance_id,
+                base_configuration_revision=base_configuration_revision,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                runtime_gate=runtime_gate,
+            )
+
+    def _bind_locked(
+        self,
+        *,
+        slot_key: str,
+        entity_instance_id: UUID | None,
+        base_configuration_revision: int,
+        actor: str,
+        idempotency_key: str,
+        runtime_gate: WorkbenchSlotRuntimeGate | None,
     ) -> WorkbenchSlotWriteReceipt:
         spec = WORKBENCH_SLOT_SPEC_BY_KEY.get(slot_key)
         if spec is None:
@@ -248,8 +267,6 @@ def resolve_workbench_slots(
                     key=spec.key,
                     label=spec.label,
                     binding_mode="manual",
-                    binding_status="bound" if compatible else "invalid",
-                    binding_source="manual",
                     reason=(
                         "WORKBENCH_SLOT_MANUAL_BINDING"
                         if compatible
@@ -260,7 +277,6 @@ def resolve_workbench_slots(
                         )
                     ),
                     entity=manual if compatible else None,
-                    candidate_count=1 if manual is not None else 0,
                 )
             )
             continue
@@ -273,11 +289,8 @@ def resolve_workbench_slots(
                     key=spec.key,
                     label=spec.label,
                     binding_mode="ambiguous",
-                    binding_status="ambiguous",
-                    binding_source="exact",
                     reason="WORKBENCH_SLOT_EXACT_MATCH_AMBIGUOUS",
                     entity=None,
-                    candidate_count=len(candidates),
                 )
             )
             continue
@@ -288,8 +301,6 @@ def resolve_workbench_slots(
                 key=spec.key,
                 label=spec.label,
                 binding_mode="exact" if entity else "unconfigured",
-                binding_status="bound" if entity else "unconfigured",
-                binding_source="exact" if entity else None,
                 reason=(
                     "WORKBENCH_SLOT_EXACT_MATCH"
                     if entity
@@ -300,7 +311,6 @@ def resolve_workbench_slots(
                     )
                 ),
                 entity=entity,
-                candidate_count=len(candidates),
             )
         )
     return tuple(resolved)

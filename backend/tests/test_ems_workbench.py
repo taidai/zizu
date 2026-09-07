@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Event
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -14,8 +16,16 @@ os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
 from fastapi import FastAPI
 
 from app.api import ems_workbench as ems_workbench_api
-from app.services.configuration_revision import ConfigurationRevisionError, GateState
-from app.services.data_trunk_contracts import DataTrunkError
+from app.services.configuration_revision import (
+    ConfigurationRevisionError,
+    ConfigurationRuntimeGate,
+    GateState,
+)
+from app.services.data_trunk_contracts import (
+    BlackboardRecovery,
+    BlackboardState,
+    DataTrunkError,
+)
 from app.services.ems_workbench_slots import (
     EmsWorkbenchSlotError,
     EmsWorkbenchSlots,
@@ -67,7 +77,6 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
 
         slot = next(item for item in resolved if item.key == "storage-power")
         self.assertEqual("exact", slot.binding_mode)
-        self.assertEqual("bound", slot.binding_status)
         self.assertEqual(PCS_POWER_ID, slot.entity.id if slot.entity else None)
 
     def test_all_five_slots_remain_visible_when_no_entity_matches(self) -> None:
@@ -85,7 +94,7 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
             ],
             [item.key for item in resolved],
         )
-        self.assertEqual({"unconfigured"}, {item.binding_status for item in resolved})
+        self.assertEqual({"unconfigured"}, {item.binding_mode for item in resolved})
 
     def test_two_exact_candidates_are_ambiguous_instead_of_using_row_order(self) -> None:
         # Break caught: silently choosing the first of two exact L2 candidates.
@@ -99,9 +108,8 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
 
         slot = next(item for item in resolved if item.key == "storage-power")
         self.assertEqual("ambiguous", slot.binding_mode)
-        self.assertEqual("ambiguous", slot.binding_status)
         self.assertIsNone(slot.entity)
-        self.assertEqual(2, slot.candidate_count)
+        self.assertEqual("WORKBENCH_SLOT_EXACT_MATCH_AMBIGUOUS", slot.reason)
 
     def test_definition_substring_and_display_name_never_auto_bind(self) -> None:
         # Break caught: guessing from a friendly name or partial definition key.
@@ -117,7 +125,7 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
         )
 
         slot = next(item for item in resolved if item.key == "storage-power")
-        self.assertEqual("unconfigured", slot.binding_status)
+        self.assertEqual("unconfigured", slot.binding_mode)
         self.assertIsNone(slot.entity)
 
     def test_exact_candidate_with_wrong_contract_fails_closed(self) -> None:
@@ -141,7 +149,7 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
                     {},
                 )
                 slot = next(item for item in resolved if item.key == "storage-power")
-                self.assertEqual("unconfigured", slot.binding_status)
+                self.assertEqual("unconfigured", slot.binding_mode)
                 self.assertEqual("WORKBENCH_SLOT_CANDIDATE_INCOMPATIBLE", slot.reason)
                 self.assertIsNone(slot.entity)
 
@@ -159,7 +167,6 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
 
         slot = next(item for item in resolved if item.key == "storage-power")
         self.assertEqual("manual", slot.binding_mode)
-        self.assertEqual("bound", slot.binding_status)
         self.assertEqual(manual_id, slot.entity.id if slot.entity else None)
 
     def test_missing_or_unconfirmed_manual_target_stays_manual_but_invalid(self) -> None:
@@ -183,8 +190,7 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
                 )
                 slot = next(item for item in resolved if item.key == "storage-power")
                 self.assertEqual("manual", slot.binding_mode)
-                self.assertEqual("invalid", slot.binding_status)
-                self.assertEqual("manual", slot.binding_source)
+                self.assertEqual("WORKBENCH_SLOT_MANUAL_TARGET_UNAVAILABLE", slot.reason)
                 self.assertIsNone(slot.entity)
 
     def test_manual_target_with_wrong_type_or_unit_is_invalid(self) -> None:
@@ -206,7 +212,6 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
                 )
                 slot = next(item for item in resolved if item.key == "storage-power")
                 self.assertEqual("manual", slot.binding_mode)
-                self.assertEqual("invalid", slot.binding_status)
                 self.assertEqual("WORKBENCH_SLOT_MANUAL_TARGET_INCOMPATIBLE", slot.reason)
                 self.assertIsNone(slot.entity)
 
@@ -223,8 +228,8 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
 
         valid_slot = next(item for item in valid if item.key == "storage-soc")
         invalid_slot = next(item for item in invalid if item.key == "storage-soc")
-        self.assertEqual("bound", valid_slot.binding_status)
-        self.assertEqual("unconfigured", invalid_slot.binding_status)
+        self.assertEqual("exact", valid_slot.binding_mode)
+        self.assertEqual("unconfigured", invalid_slot.binding_mode)
 
 
 class _CatalogRepository:
@@ -277,6 +282,78 @@ class _ReplayAfterWriteRepository(_SlotRepository):
             True,
         )
         return receipt
+
+
+class _RevisionBlackboard:
+    def __init__(self, revision: int) -> None:
+        self.revision = revision
+
+    @property
+    def state(self) -> BlackboardState:
+        return BlackboardState.READY
+
+    def reset_revision(
+        self,
+        revision: int,
+        active_input_contracts: dict,
+        required_tag_ids: frozenset,
+    ) -> None:
+        self.revision = revision
+
+
+class _InterleavingSlotRepository(_SlotRepository):
+    """Slot and gate repository with a barrier immediately before B commits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.revision = 8
+        self.write_entered = Event()
+        self.allow_commit = Event()
+        self.restore_called = Event()
+        self.restore_revisions: list[int] = []
+
+    def find_replay(self, **kwargs) -> WorkbenchSlotWriteReceipt | None:
+        if kwargs["idempotency_key"] == "old-a":
+            return WorkbenchSlotWriteReceipt(
+                slot_key="storage-power",
+                entity_instance_id=PCS_POWER_ID,
+                configuration_revision=8,
+                replayed=True,
+            )
+        return None
+
+    def set_binding(self, **kwargs) -> WorkbenchSlotWriteReceipt:
+        self.write_entered.set()
+        if not self.allow_commit.wait(timeout=2):
+            raise AssertionError("test did not release the pending slot write")
+        self.calls.append(kwargs)
+        self.revision = kwargs["base_configuration_revision"] + 1
+        return WorkbenchSlotWriteReceipt(
+            slot_key=kwargs["slot_key"],
+            entity_instance_id=kwargs["entity_instance_id"],
+            configuration_revision=self.revision,
+            replayed=False,
+        )
+
+    def current_configuration_revision(self) -> int:
+        return self.revision
+
+    def unfinished_frame_count(self) -> int:
+        return 0
+
+    def unpublished_frame_outbox_count(self) -> int:
+        return 0
+
+    def restore_blackboard(self) -> BlackboardRecovery:
+        self.restore_revisions.append(self.revision)
+        self.restore_called.set()
+        return BlackboardRecovery(
+            capture_beat=0,
+            configuration_revision=self.revision,
+            active_input_contracts={},
+            required_tag_ids=frozenset(),
+            observations=(),
+        )
 
 
 class WorkbenchSlotWriteTest(unittest.TestCase):
@@ -498,6 +575,66 @@ class WorkbenchSlotWriteTest(unittest.TestCase):
                 self.assertEqual([], repository.calls)
                 self.assertEqual([], gate.events)
 
+    def test_old_replay_cannot_reconcile_while_a_new_publish_is_not_committed(self) -> None:
+        # Break caught: interpreting QUIESCED as proof that an old request owns
+        # recovery can reopen the gate while another slot publish is between
+        # begin and commit, leaving database revision 9 over runtime revision 8.
+        repository = _InterleavingSlotRepository()
+        blackboard = _RevisionBlackboard(revision=8)
+        gate = ConfigurationRuntimeGate(repository, blackboard)
+        gate.register_committed_frame_consumer()
+        subject = EmsWorkbenchSlots(
+            EntityInstanceCatalog(
+                _CatalogRepository((_entity(PCS_POWER_ID, "custom.power"),))
+            ),
+            repository,
+        )
+        replay_started = Event()
+
+        def publish_b() -> WorkbenchSlotWriteReceipt:
+            return subject.bind(
+                slot_key="storage-power",
+                entity_instance_id=PCS_POWER_ID,
+                base_configuration_revision=8,
+                actor="user:engineer",
+                idempotency_key="new-b",
+                runtime_gate=gate,
+            )
+
+        def replay_a() -> WorkbenchSlotWriteReceipt:
+            replay_started.set()
+            return subject.bind(
+                slot_key="storage-power",
+                entity_instance_id=PCS_POWER_ID,
+                base_configuration_revision=7,
+                actor="user:engineer",
+                idempotency_key="old-a",
+                runtime_gate=gate,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending_publish = pool.submit(publish_b)
+            self.assertTrue(repository.write_entered.wait(timeout=1))
+            self.assertIs(GateState.QUIESCED, gate.state)
+            old_replay = pool.submit(replay_a)
+            self.assertTrue(replay_started.wait(timeout=1))
+            try:
+                self.assertFalse(
+                    repository.restore_called.wait(timeout=0.2),
+                    "old replay reopened the gate before the new publish committed",
+                )
+            finally:
+                repository.allow_commit.set()
+            published = pending_publish.result(timeout=1)
+            replayed = old_replay.result(timeout=1)
+
+        self.assertEqual(9, published.configuration_revision)
+        self.assertTrue(replayed.replayed)
+        self.assertEqual(9, repository.revision)
+        self.assertEqual(9, blackboard.revision)
+        self.assertEqual([9], repository.restore_revisions)
+        self.assertIs(GateState.RUNNING, gate.state)
+
 
 class _Runtime:
     def read(self, entity_id: UUID):
@@ -565,7 +702,7 @@ class _Pipeline:
 
 
 class EmsWorkbenchProjectionTest(unittest.TestCase):
-    def test_workbench_returns_five_slots_with_binding_metadata_and_no_fake_zero(self) -> None:
+    def test_workbench_returns_five_minimal_slots_and_no_fake_zero(self) -> None:
         # Break caught: omitting unconfigured slots or publishing a synthetic 0
         # instead of the resolved real L2 observation.
         catalog = EntityInstanceCatalog(
@@ -581,9 +718,8 @@ class EmsWorkbenchProjectionTest(unittest.TestCase):
         storage = next(item for item in payload["kpis"] if item["id"] == "storage-power")
         solar = next(item for item in payload["kpis"] if item["id"] == "pv-power")
         self.assertEqual("exact", storage["binding_mode"])
-        self.assertEqual("bound", storage["binding_status"])
         self.assertEqual(123.5, storage["entity"]["value"])
-        self.assertEqual("unconfigured", solar["binding_status"])
+        self.assertEqual("unconfigured", solar["binding_mode"])
         self.assertIsNone(solar["entity"])
         self.assertNotIn("value", solar)
 
@@ -765,17 +901,11 @@ class EmsWorkbenchPublicApiTest(unittest.IsolatedAsyncioTestCase):
             {slot["id"] for slot in slots},
         )
         for slot in slots:
-            self.assertIn("entity", slot)
-            self.assertNotIn("entities", slot)
-            self.assertTrue(
-                {
-                    "binding_mode",
-                    "binding_status",
-                    "binding_source",
-                    "reason",
-                    "candidate_count",
-                }.issubset(slot)
+            self.assertEqual(
+                {"id", "label", "binding_mode", "reason", "entity"},
+                set(slot),
             )
+            self.assertNotIn("entities", slot)
 
     async def test_stale_revision_is_a_stable_409(self) -> None:
         # Break caught: configuration concurrency becoming a generic 500/422.

@@ -6,7 +6,8 @@
 - Schema 063 保存当前人工绑定和幂等回执；写入复用统一配置修订与审计，受 engineer/admin 权限、客户端基线修订、运行期配置栅栏和 L2 当前来源复核约束。功率只接受数值 `kW`，SOC 只接受数值 `%`；无效人工目标保持 `manual + invalid`，不会静默回退。
 - `GET /api/v1/ems-workbench` 固定返回五个槽位及 binding 状态、来源、原因、候选数和可选真实实体；一次读取只使用同一份实体目录快照且不补假 0。`PUT /api/v1/ems-workbench/slots/{slot_key}` 接受可空 `entity_instance_id`、`base_configuration_revision` 和 `Idempotency-Key`。
 - 审查修复：同一 GET 内 groups 与 KPI 共用每个实体唯一一次 runtime read；幂等重放只有在栅栏已 `RUNNING` 时直接返回，遗留 `QUIESCED` 会先重试 runtime reconcile，`DRAINING/CLOSING` 返回稳定 busy，避免数据库已提交但运行态未恢复时假报成功。新接口只保留单个 `entity`，不恢复旧 `entities` 兼容字段。
-- TDD 证据：workbench 25/25；迁移静态契约/仓储假连接 4/4，真实 PostgreSQL 5 项因本机无 `ZIZU_POSTGRES_TEST` 测试库明确跳过；release manifest 7/7；`compileall` 通过。后端全量 757 项中 45 项仅因当前 Python 缺 `zen-engine` 报 `ZEN_ENGINE_UNAVAILABLE`，281 项条件跳过，本 seam 专项均通过。
+- 交错审查修复：槽位服务现在串行化完整的“幂等查询→栅栏→提交→重建”临界区；真实 `ConfigurationRuntimeGate` + 提交屏障回归证明，旧请求重放不能在新发布尚未提交时提前重建并打开栅栏，最终数据库与黑板均停在最新修订且失败关闭。GET 槽位契约进一步精简为 `id`、`label`、`binding_mode`、`reason`、单个可选 `entity`，移除重复的 status/source/count 字段。
+- TDD 证据：workbench 26/26；迁移静态契约/仓储假连接 4/4，真实 PostgreSQL 5 项因本机无 `ZIZU_POSTGRES_TEST` 测试库明确跳过；release manifest 7/7；`compileall` 通过。后端全量 757 项中 45 项仅因当前 Python 缺 `zen-engine` 报 `ZEN_ENGINE_UNAVAILABLE`，281 项条件跳过，本 seam 专项均通过。
 - 本分支没有改前端、没有部署或现场写入。集成时必须先在隔离 PostgreSQL 应用/重放 Schema 063 并跑 5 项仓储集成测试；迁移新增表和外键，生产发布前仍需按既有流程备份并验证恢复。
 
 ## Session 2026-09-08 — v1.0.4 一次发布与现场只读复验完成

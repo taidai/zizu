@@ -57,10 +57,7 @@ class EmsWorkbench:
                     "id": slot.key,
                     "label": slot.label,
                     "binding_mode": slot.binding_mode,
-                    "binding_status": slot.binding_status,
-                    "binding_source": slot.binding_source,
                     "reason": slot.reason,
-                    "candidate_count": slot.candidate_count,
                     "entity": live[0] if live else None,
                 }
             )
