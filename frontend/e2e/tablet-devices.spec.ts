@@ -37,13 +37,14 @@ function frame(nodeId: string) {
       accepted_beat: 6, source_path: 'gateway/group/StatusWord', source_type: 'neuron', frame_sequence: 7,
     }],
     l2: selected.map((entity, index) => {
-      const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-2' ? 0 : 192
+      const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-3' ? 0 : 192
       return {
         entity_instance_id: entity.id, node_id: nodeId, definition_id: entity.definition_id,
         display_name: entity.display_name, data_type: entity.data_type,
         value: entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality,
         reason: quality === 64 ? 'ENTITY_DATA_STALE' : quality === 0 ? 'INPUT_BAD' : null,
-        observed_at: '2026-09-07T02:00:00.000Z', value_observed_at: '2026-09-07T02:00:00.000Z',
+        observed_at: entity.id === 'entity-3' ? '2026-09-07T01:59:55.000Z' : '2026-09-07T02:00:00.000Z',
+        value_observed_at: entity.id === 'entity-1' ? '2026-09-07T01:59:57.000Z' : entity.id === 'entity-3' ? null : '2026-09-07T02:00:00.000Z',
         received_at: '2026-09-07T02:00:00.000Z', calculated_at: '2026-09-07T02:00:00.000Z',
         processing_revision_id: 'pr-1', configuration_revision: 12,
         source_digest: `sha256:${entity.id}`, frame_sequence: 7,
@@ -183,11 +184,36 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   await expect(sameName.nth(0)).toContainText('超时 · 最后值（非当前）')
   await expect(sameName.nth(0)).toContainText('异常 · 最后值（非当前）')
   await expect(sameName.nth(1)).toContainText('正常 · 当前值')
-  await expect(sameName.nth(0).locator('.runtime-device-card__primary')).toContainText('有功功率')
-  await expect(sameName.nth(0).locator('.runtime-device-card__secondary')).toContainText('内部温度')
+  const primaryMetric = sameName.nth(0).locator('.runtime-device-card__primary')
+  const secondaryMetrics = sameName.nth(0).locator('.runtime-device-card__secondary')
+  await expect(primaryMetric).toContainText('有功功率')
+  await expect(primaryMetric).toContainText('正常 · 当前值')
+  await expect(secondaryMetrics).toContainText('内部温度')
+  await expect(secondaryMetrics.locator('.runtime-quality')).toHaveCount(2)
+  await expect(secondaryMetrics.locator('time')).toHaveCount(2)
+  await expect(secondaryMetrics.locator('time').nth(0)).toHaveAttribute('datetime', '2026-09-07T01:59:55.000Z')
+  await expect(secondaryMetrics.locator('time').nth(1)).toHaveAttribute('datetime', '2026-09-07T01:59:57.000Z')
+  const secondaryEvidenceGeometry = await secondaryMetrics.locator('.runtime-quality, time').evaluateAll((items) => items.map((item) => {
+    const rect = item.getBoundingClientRect()
+    const card = item.closest('article')!.getBoundingClientRect()
+    const style = getComputedStyle(item)
+    return {
+      width: rect.width,
+      height: rect.height,
+      visibility: style.visibility,
+      display: style.display,
+      clip: style.clip,
+      position: style.position,
+      opacity: Number(style.opacity),
+      insideCard: rect.top >= card.top && rect.left >= card.left && rect.bottom <= card.bottom && rect.right <= card.right,
+    }
+  }))
+  expect(secondaryEvidenceGeometry.every((item) => item.width > 20 && item.height > 8 && item.visibility === 'visible' && item.display !== 'none' && item.clip === 'auto' && item.position !== 'absolute' && item.opacity === 1 && item.insideCard)).toBe(true)
 
   await page.evaluate(() => (window as Window & { __disconnectDeviceNode: (nodeId: string) => void }).__disconnectDeviceNode('device-1'))
   await expect(sameName.nth(0)).toContainText('正常 · 最后值（非当前）')
+  await expect(primaryMetric.locator('time')).toHaveAttribute('datetime', '2026-09-07T02:00:00.000Z')
+  await expect(primaryMetric.locator('time')).toBeVisible()
 
   const search = page.getByRole('searchbox', { name: '名称或 ID' })
   await search.fill('DEVICE-2')

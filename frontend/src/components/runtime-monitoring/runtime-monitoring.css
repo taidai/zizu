@@ -171,7 +171,7 @@
 .runtime-device-data-summary span:nth-child(4) { border-color: #8a9299; }
 
 .runtime-device-grid { display: grid; min-height: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(200px, 1fr)); gap: 10px; }
-.runtime-device-card { position: relative; display: grid; min-width: 0; min-height: 200px; grid-template-rows: 39px minmax(94px, 1fr) 45px; overflow: hidden; border-radius: 9px; background: radial-gradient(ellipse at 15% 0, #fff 0%, transparent 64%), linear-gradient(130deg, #f9fafb, #e4e8ec); }
+.runtime-device-card { position: relative; display: grid; min-width: 0; min-height: 200px; grid-template-rows: 39px minmax(108px, 1fr) 45px; overflow: hidden; border-radius: 9px; background: radial-gradient(ellipse at 15% 0, #fff 0%, transparent 64%), linear-gradient(130deg, #f9fafb, #e4e8ec); }
 .runtime-device-card::before { position: absolute; top: 0; right: 13px; left: 13px; height: 2px; content: ''; opacity: .75; background: linear-gradient(90deg, #d9bc76, #fff5d7, #b4893f); }
 .runtime-device-card > header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px 12px 5px; }
 .runtime-device-card > header > div { min-width: 0; }
@@ -191,13 +191,16 @@
 .runtime-device-card__primary strong { display: flex; min-width: 0; align-items: baseline; gap: 5px; overflow: hidden; color: #172536; font-size: 29px; font-weight: 750; line-height: 1.05; letter-spacing: -.03em; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-device-card__primary strong em { color: #596671; font-size: 10px; font-style: normal; font-weight: 500; }
 .runtime-device-card__primary .runtime-quality { max-width: 100%; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
-.runtime-device-card__secondary { display: flex; min-width: 0; align-items: center; gap: 10px; overflow: hidden; color: var(--runtime-muted); font-size: 9px; }
+.runtime-device-card__evidence-time { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; color: #6e5120; font-size: 9px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-device-card__secondary { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 6px; overflow: hidden; color: var(--runtime-muted); font-size: 9px; }
 .runtime-device-card__secondary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.runtime-device-card__secondary button { display: grid; min-width: 0; grid-template-columns: minmax(0, auto) auto; align-items: baseline; gap: 4px; color: var(--runtime-muted); font-size: 8px; text-align: left; }
-.runtime-device-card__secondary button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-device-card__secondary button { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-content: start; align-items: baseline; gap: 2px 4px; padding: 3px 5px; border-left: 2px solid #c8cdd2; color: var(--runtime-muted); font-size: 8px; text-align: left; }
+.runtime-device-card__secondary .runtime-device-card__metric-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-device-card__secondary strong { color: #4e5d68; font-size: 10px; font-weight: 650; white-space: nowrap; }
 .runtime-device-card__secondary strong small { margin-left: 2px; font-size: 8px; }
-.runtime-device-card__secondary em { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.runtime-device-card__secondary .runtime-quality,
+.runtime-device-card__secondary .runtime-device-card__evidence-time { grid-column: 1 / -1; }
+.runtime-device-card__secondary .runtime-quality { max-width: 100%; padding: 2px 5px; overflow: hidden; font-size: 9px; line-height: 1.25; text-overflow: ellipsis; }
 .runtime-device-card .runtime-node__notice { max-height: 31px; margin: 2px 0 0; overflow: auto; padding: 4px 6px; font-size: 8px; }
 .runtime-device-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 12px; border-top: 1px solid #cbd1d7; }
 .runtime-device-card__alarm { display: inline-flex; align-items: center; gap: 4px; color: #727b83; font-size: 9px; white-space: nowrap; }
@@ -230,16 +233,6 @@
 .runtime-device-detail__table code { color: #707b84; font: 9px Consolas, monospace; }
 .runtime-device-detail__table td button { color: #7b5515; font-weight: 700; text-decoration: underline; }
 .runtime-device-detail__footer { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 18px; border-top: 1px solid #cbd1d7; color: var(--runtime-muted); font-size: 10px; }
-.runtime-device-entity { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; min-height: 47px; align-items: center; gap: 8px; padding: 7px 9px; text-align: left; }
-.runtime-device-entity > span { min-width: 0; }
-.runtime-device-entity strong,
-.runtime-device-entity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.runtime-device-entity strong { font-size: 10px; }
-.runtime-device-entity small { margin-top: 2px; color: var(--runtime-muted); font: 8px Consolas, monospace; }
-.runtime-device-entity > .font-mono-value { color: #202429; font-size: 13px; font-weight: 800; text-align: right; }
-.runtime-device-entity > .font-mono-value small { display: inline; font-size: 8px; }
-.runtime-device-entity .runtime-quality { font-size: 8px; }
-
 @media (max-width: 1100px) {
   .runtime-node-grid { grid-template-columns: 1fr; }
   .runtime-node__metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -251,7 +244,7 @@
   .runtime-device-filters { gap: 7px; }
   .runtime-device-categories button { min-width: 47px; padding-inline: 8px; }
   .runtime-device-search { max-width: 220px; }
-  .runtime-device-card { grid-template-rows: 37px minmax(90px, 1fr) 43px; }
+  .runtime-device-card { grid-template-rows: 37px minmax(104px, 1fr) 43px; }
   .runtime-device-card__primary { grid-template-columns: 50px minmax(0, 1fr); gap: 7px; }
   .runtime-device-card__glyph { width: 48px; height: 52px; }
   .runtime-device-card__primary strong { font-size: 25px; }

@@ -309,6 +309,35 @@ test('device quality summary distinguishes current, last evidence, unconfigured 
   )
 })
 
+test('mixed-quality device cards retain the exact last-value time with observed-time fallback', () => {
+  assert.equal(typeof runtimeModel.deviceMonitorEvidenceTime, 'function')
+  const observation = completeFrame('node-pcs-a', descriptors[0]).l2[0]
+  const current = runtimeEntityReading(observation, true)
+  const stale = runtimeEntityReading({
+    ...observation,
+    quality: 64,
+    reason: 'ENTITY_DATA_STALE',
+    observed_at: '2026-09-07T01:02:03.000Z',
+    value_observed_at: '2026-09-07T01:01:57.000Z',
+  }, true)
+  const badWithoutValueTime = runtimeEntityReading({
+    ...observation,
+    quality: 0,
+    reason: 'INPUT_BAD',
+    observed_at: '2026-09-07T01:02:01.000Z',
+    value_observed_at: null,
+  }, true)
+
+  assert.equal(runtimeModel.deviceMonitorDataState([
+    { descriptor: descriptors[0], observation },
+    { descriptor: { ...descriptors[0], id: 'stale' }, observation: { ...observation, entity_instance_id: 'stale', quality: 64 } },
+    { descriptor: { ...descriptors[0], id: 'bad' }, observation: { ...observation, entity_instance_id: 'bad', quality: 0 } },
+  ], true), 'last')
+  assert.equal(runtimeModel.deviceMonitorEvidenceTime(current), null)
+  assert.equal(runtimeModel.deviceMonitorEvidenceTime(stale), '2026-09-07T01:01:57.000Z')
+  assert.equal(runtimeModel.deviceMonitorEvidenceTime(badWithoutValueTime), '2026-09-07T01:02:01.000Z')
+})
+
 test('device monitor pages six real nodes and keeps same-name identities and unconfigured nodes separate', () => {
   const nodes = Array.from({ length: 8 }, (_, index) => ({
     id: `device-${index + 1}`,

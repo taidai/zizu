@@ -12,6 +12,7 @@ import {
   buildRuntimeNodes,
   deviceMonitorCategory,
   deviceMonitorDataState,
+  deviceMonitorEvidenceTime,
   orderDeviceMonitorEntities,
   paginateEntityDetails,
   runtimeEntityReading,
@@ -52,7 +53,20 @@ function nodeCurrentStatus(status: string | null | undefined, frameStatus: strin
   return status === 'current' && frameStatus === 'COMPLETE'
 }
 
-function readingLabel(entity: RuntimeEntity, nodeCurrent: boolean): { label: string; value: string; quality: number | null } {
+function formatEvidenceTime(value: string): string {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
+function readingLabel(entity: RuntimeEntity, nodeCurrent: boolean): { label: string; value: string; quality: number | null; evidenceTime: string | null } {
   const reading = runtimeEntityReading(entity.observation, nodeCurrent)
   const quality = qualityLabel(reading.quality)
   return {
@@ -63,22 +77,8 @@ function readingLabel(entity: RuntimeEntity, nodeCurrent: boolean): { label: str
         : `${quality} · 当前状态不确定`,
     value: formatValue(reading.value),
     quality: reading.quality,
+    evidenceTime: deviceMonitorEvidenceTime(reading),
   }
-}
-
-function DeviceEntityRow({ entity, nodeCurrent, onOpen }: {
-  entity: RuntimeEntity
-  nodeCurrent: boolean
-  onOpen: () => void
-}) {
-  const reading = readingLabel(entity, nodeCurrent)
-  return (
-    <button type="button" onClick={onOpen} className="runtime-device-entity neu-inset">
-      <span><strong>{entity.descriptor.display_name}</strong><small>{entity.descriptor.definition_id}</small></span>
-      <span className="font-mono-value">{reading.value}{entity.descriptor.unit ? <small> {entity.descriptor.unit}</small> : null}</span>
-      <span className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{reading.label}</span>
-    </button>
-  )
 }
 
 export default function DeviceMonitorPage({ onOpenEngineering }: DeviceMonitorProps) {
@@ -288,12 +288,12 @@ export default function DeviceMonitorPage({ onOpenEngineering }: DeviceMonitorPr
                   <>
                     {primary && primaryReading && <button type="button" className="runtime-device-card__primary" aria-label={primary.descriptor.display_name} onClick={() => { openDevice(item.node.id); setSelectedEntityId(primary.descriptor.id) }}>
                       <span className="runtime-device-card__glyph">{(item.node.node_type || '设备').slice(0, 6).toUpperCase()}</span>
-                      <span><small>{primary.descriptor.display_name}</small><strong>{primaryReading.value}<em>{primary.descriptor.unit || ''}</em></strong><span className={`runtime-quality runtime-quality--${primaryReading.quality ?? 'unknown'}`}>{primaryReading.label}</span></span>
+                      <span><small>{primary.descriptor.display_name}</small><strong>{primaryReading.value}<em>{primary.descriptor.unit || ''}</em></strong><span className={`runtime-quality runtime-quality--${primaryReading.quality ?? 'unknown'}`}>{primaryReading.label}</span>{primaryReading.evidenceTime && <time className="runtime-device-card__evidence-time" dateTime={primaryReading.evidenceTime}>最后值 {formatEvidenceTime(primaryReading.evidenceTime)}</time>}</span>
                     </button>}
                     <div className="runtime-device-card__secondary">
                       {secondary.length > 0 ? secondary.map((entity) => {
                         const reading = readingLabel(entity, nodeCurrent)
-                        return <button type="button" key={entity.descriptor.id} aria-label={entity.descriptor.display_name} onClick={() => { openDevice(item.node.id); setSelectedEntityId(entity.descriptor.id) }}><span>{entity.descriptor.display_name}</span><strong>{reading.value}<small>{entity.descriptor.unit || ''}</small></strong><em className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{reading.label}</em></button>
+                        return <button type="button" key={entity.descriptor.id} aria-label={entity.descriptor.display_name} onClick={() => { openDevice(item.node.id); setSelectedEntityId(entity.descriptor.id) }}><span className="runtime-device-card__metric-name">{entity.descriptor.display_name}</span><strong>{reading.value}<small>{entity.descriptor.unit || ''}</small></strong><span className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{reading.label}</span>{reading.evidenceTime && <time className="runtime-device-card__evidence-time" dateTime={reading.evidenceTime}>最后值 {formatEvidenceTime(reading.evidenceTime)}</time>}</button>
                       }) : <span>{item.entities.length} 项全局实体 · 详情中查看</span>}
                     </div>
                   </>

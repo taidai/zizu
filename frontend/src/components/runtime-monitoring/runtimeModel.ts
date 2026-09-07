@@ -142,6 +142,11 @@ export function runtimeEntityReading(
   }
 }
 
+export function deviceMonitorEvidenceTime(reading: RuntimeReading): string | null {
+  if (reading.kind === 'current') return null
+  return reading.valueObservedAt || reading.observedAt
+}
+
 export function numericHistorySegments(
   points: Array<{ observed_at: string; value: unknown; quality: number }>,
 ): Array<Array<{ time: number; value: number }>> {
