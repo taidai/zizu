@@ -219,7 +219,10 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
         && body.bindings?.length === 0
         && tables.length === 1
         && tables[0].content?.inputs?.length === 0
-        && tables[0].content?.outputs?.length === 0
+        && tables[0].content?.hitPolicy === 'collect'
+        && tables[0].content?.outputPath === 'intents'
+        && JSON.stringify(tables[0].content?.outputs?.map((column: { field?: string }) => column.field)) === JSON.stringify(['action_id', 'target'])
+        && tables[0].content?.rules?.length === 0
         && !JSON.stringify(body.jdm_content).includes('soc')
       if (!valid) return json({ detail: { code: 'GENERIC_STARTER_INVALID' } }, 409)
       createdStrategy = { ...createdStrategy, name: body.name, draft: { ...createdStrategy.draft, ...body, content_digest: 'd'.repeat(64) } }
@@ -443,7 +446,17 @@ test('通用新建立即保存原生空表草稿而不是固定SOC时段策略',
   const writes = await installReadOnlyApi(page, undefined, 'create')
   await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
   await openNavigation(page, '调度策略')
+  const savedDraft = page.waitForResponse((response) => response.request().method() === 'PUT'
+    && response.url().endsWith('/dispatch-strategies/strategy-created/draft'))
   await page.getByRole('button', { name: '新建通用策略' }).click()
+  const savedResponse = await savedDraft
+  expect(savedResponse.status(), await savedResponse.text()).toBe(200)
+  const savedTable = savedResponse.request().postDataJSON().jdm_content.nodes
+    .find((node: { type: string }) => node.type === 'decisionTableNode').content
+  expect(savedTable.hitPolicy).toBe('collect')
+  expect(savedTable.outputPath).toBe('intents')
+  expect(savedTable.outputs.map((column: { field: string }) => column.field)).toEqual(['action_id', 'target'])
+  expect(savedTable.rules).toEqual([])
   await expect(page.getByTestId('native-decision-table')).toBeVisible()
   await expect(page.getByTestId('generic-l2-bindings')).toBeVisible()
   await expect(page.getByText('不限制为 SOC 或固定时段。')).toBeVisible()
