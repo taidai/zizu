@@ -47,8 +47,13 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function installFixture(page: Page, failCounts = false) {
+async function installFixture(page: Page, options: {
+  nodeFailures?: number
+  countSequence?: Array<'success' | 'fail' | 'pending-success'>
+} = {}) {
   const writes: string[] = []
+  let nodeCalls = 0
+  let countCalls = 0
   await page.addInitScript(() => {
     class FixtureWebSocket {
       readyState = 1
@@ -70,9 +75,20 @@ async function installFixture(page: Page, failCounts = false) {
     const request = route.request()
     const url = new URL(request.url())
     if (request.method() !== 'GET' && !url.pathname.endsWith('/auth/ws-ticket')) writes.push(`${request.method()} ${url.pathname}`)
-    if (url.pathname.endsWith('/nodes')) return fulfillJson(route, { nodes })
+    if (url.pathname.endsWith('/nodes')) {
+      nodeCalls += 1
+      return nodeCalls <= (options.nodeFailures || 0)
+        ? fulfillJson(route, { detail: 'node directory unavailable' }, 503)
+        : fulfillJson(route, { nodes })
+    }
     if (url.pathname.endsWith('/entity-instances')) return fulfillJson(route, { items: entities, total: entities.length })
-    if (url.pathname.endsWith('/alarms/counts')) return failCounts ? fulfillJson(route, { detail: 'count unavailable' }, 503) : fulfillJson(route, { counts: { 'device-1': 2, 'device-2': 1 } })
+    if (url.pathname.endsWith('/alarms/counts')) {
+      const outcome = options.countSequence?.[countCalls++] || 'success'
+      if (outcome === 'pending-success') await new Promise((resolve) => setTimeout(resolve, 1_500))
+      return outcome === 'fail'
+        ? fulfillJson(route, { detail: 'count unavailable' }, 503)
+        : fulfillJson(route, { counts: { 'device-1': 2, 'device-2': 1 } })
+    }
     if (url.pathname.endsWith('/runtime/frame-snapshot')) return fulfillJson(route, frame(url.searchParams.get('node_id')!))
     if (url.pathname.endsWith('/auth/ws-ticket')) return fulfillJson(route, { ticket: 'fixture-ticket' })
     const historyMatch = url.pathname.match(/\/entity-instances\/([^/]+)\/history$/)
@@ -149,10 +165,38 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
 
 test('failed alarm counts stay unknown and cannot masquerade as zero or a valid alarm filter', async ({ page }) => {
   test.setTimeout(180_000)
-  await installFixture(page, true)
+  await installFixture(page, { countSequence: ['fail'] })
   await mountDeviceMonitor(page)
 
   await expect(page.getByRole('alert')).toContainText('计数显示未知')
   await expect(page.getByText('未恢复 —').first()).toBeVisible()
   await expect(page.getByRole('checkbox', { name: '仅有未恢复告警' })).toBeDisabled()
+})
+
+test('a failed node directory is retryable and never rendered as an empty site', async ({ page }) => {
+  test.setTimeout(180_000)
+  await installFixture(page, { nodeFailures: 1 })
+  await mountDeviceMonitor(page)
+
+  const failure = page.getByRole('alert').filter({ hasText: '节点目录读取失败' })
+  await expect(failure).toBeVisible()
+  await expect(page.getByText('当前没有可监控节点')).toHaveCount(0)
+  await failure.getByRole('button', { name: '重试节点' }).click()
+  await expect(page.getByRole('article')).toHaveCount(6)
+})
+
+test('alarm retry remains disabled while counts are unknown and pending', async ({ page }) => {
+  test.setTimeout(180_000)
+  await installFixture(page, { countSequence: ['success', 'fail', 'pending-success'] })
+  await mountDeviceMonitor(page)
+
+  const filter = page.getByRole('checkbox', { name: '仅有未恢复告警' })
+  await expect(filter).toBeEnabled()
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  const failure = page.getByRole('alert').filter({ hasText: '告警计数读取失败' })
+  await expect(failure).toBeVisible()
+  await failure.getByRole('button', { name: '重试计数' }).click()
+  await expect(filter).toBeDisabled()
+  await expect(page.getByRole('article')).toHaveCount(6)
+  await expect(filter).toBeEnabled()
 })

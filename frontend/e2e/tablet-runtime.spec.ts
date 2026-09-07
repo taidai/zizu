@@ -41,6 +41,7 @@ async function fulfillJson(route: Route, body: unknown, delay = 0) {
 async function installFixture(page: Page) {
   const controlWrites: string[] = []
   await page.addInitScript(() => {
+    const sockets: FixtureWebSocket[] = []
     class FixtureWebSocket {
       static OPEN = 1
       readyState = 1
@@ -48,14 +49,23 @@ async function installFixture(page: Page) {
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: ((event: Event) => void) | null = null
       onclose: ((event: CloseEvent) => void) | null = null
-      constructor() { setTimeout(() => this.onopen?.(new Event('open')), 0) }
+      nodeId = ''
+      constructor() {
+        sockets.push(this)
+        setTimeout(() => this.onopen?.(new Event('open')), 0)
+      }
       send(value: string) {
         const payload = JSON.parse(value)
         if (payload.authenticate) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'authenticated' }) })), 0)
-        if (payload.subscribe) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'subscribed' }) })), 0)
+        if (payload.subscribe) {
+          this.nodeId = payload.subscribe.node_id
+          setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'subscribed' }) })), 0)
+        }
       }
       close() { this.readyState = 3 }
+      disconnect() { this.readyState = 3; this.onclose?.(new CloseEvent('close', { code: 1006 })) }
     }
+    Object.assign(window, { __disconnectRuntimeNode: (nodeId: string) => sockets.findLast((socket) => socket.nodeId === nodeId)?.disconnect() })
     Object.defineProperty(window, 'WebSocket', { value: FixtureWebSocket })
   })
   await page.route('**/api/v1/**', async (route) => {
@@ -97,6 +107,9 @@ test('swapped node snapshots stay identity-safe, preserve zero, and expose stale
   await expect(nodeB).toContainText('W')
   await expect(nodeB).toContainText('最后值')
   await expect(nodeB).not.toContainText('当前正常')
+
+  await page.evaluate(() => (window as Window & { __disconnectRuntimeNode: (nodeId: string) => void }).__disconnectRuntimeNode('node-a'))
+  await expect(nodeA).toContainText('最后值（非当前）')
 
   await page.getByRole('button', { name: '历史' }).click()
   await page.getByRole('button', { name: '概览' }).click()

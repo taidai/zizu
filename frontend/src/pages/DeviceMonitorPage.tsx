@@ -191,7 +191,7 @@ export default function DeviceMonitorPage({ onOpenEngineering }: DeviceMonitorPr
       <section className="runtime-device-filters neu-card" aria-label="设备筛选">
         <label><span>名称或 ID</span><input className="neu-input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索设备名称或 ID" /></label>
         <label><span>节点类别</span><select className="neu-input" value={category} onChange={(event) => setCategory(event.target.value)}><option value="">全部类别</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-        <label className="runtime-device-filters__check"><input type="checkbox" checked={onlyAlarms} disabled={!countsLoaded || Boolean(countsError)} onChange={(event) => setOnlyAlarms(event.target.checked)} /><span>仅有未恢复告警</span></label>
+        <label className="runtime-device-filters__check"><input type="checkbox" checked={onlyAlarms} disabled={countsLoading || alarmCounts === null || !countsLoaded || Boolean(countsError)} onChange={(event) => setOnlyAlarms(event.target.checked)} /><span>仅有未恢复告警</span></label>
         <div className="runtime-device-filters__summary">{monitor.total} 个节点 · 第 {monitor.page}/{monitor.totalPages} 页</div>
       </section>
 
