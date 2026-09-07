@@ -78,7 +78,7 @@ Run the two targeted commands plus `npm run build`; commit `feat(ui): freeze fin
 - Create/Test: `backend/tests/test_ems_workbench_slots_postgres.py`
 - Modify: `frontend/src/api/client.ts`
 - Modify: `frontend/src/pages/EMSWorkbenchPage.tsx`
-- Modify: `frontend/src/components/runtime-monitoring/runtime-monitoring.css`
+- Create: `frontend/src/components/runtime-monitoring/workbench.css`
 - Create/Test: `frontend/src/components/runtime-monitoring/workbenchSlotsModel.test.mjs`
 - Create: `frontend/src/components/runtime-monitoring/workbenchSlotsModel.ts`
 - Create/Test: `frontend/e2e/tablet-control.spec.ts`
