@@ -6,15 +6,13 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current code version: `v1.0.2`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current code version: `v1.0.4`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-[v0.9.9 deployment and acceptance record (Chinese)](docs/deploy-1号机-v0.9.9-http.md) · [Previous live readiness assessment (Chinese)](docs/reviews/2026-09-06-v0.9.5-live-readiness.md)
+[v1.0.4 local integration and release acceptance record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [Historical v0.9.9 field record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
-The latest code fixes database-connection reuse in dispatch strategies and distinguishes the current L2 value from the decision-time value on strategy cards, so a decision snapshot is not presented as device readback. The historical deployment and acceptance records above apply only to their respective versions; they do not establish field acceptance of every current feature.
+The v1.0.4 codebase integrates the red-gold-bright-silver production UI, a committed-L2 runtime home page, device monitoring, the Node→L0→L1→L2 engineering path, 10/20-row alarm tables, and generic native JDM editing. Code capability, artifact release, and field acceptance are separate; see the v1.0.4 acceptance record for the tested SHA, evidence, and remaining boundaries.
 
-> Current status: the core data trunk and the dispatch-strategy foundation are implemented, while alarms are being refined through field use. Unified control
-> and the fixed EMS workbench still require end-to-end acceptance on a real solar-storage-charging site. ZiZu is not yet a
-> complete delivery-ready EMS.
+> ZiZu has the core data trunk plus alarm and dispatch/control foundations, but it is not yet a complete delivery-ready solar-storage-charging EMS. Real-device control and full EMS field acceptance still require separate evidence.
 
 ## Interface design preview
 
@@ -22,7 +20,7 @@ The approved visual direction combines **flag red, gold, and bright silver** wit
 
 ![ZiZu bright-silver EMS homepage design preview: operations overview, energy flow, alarms, and dispatch status, all using demonstration data](docs/images/ems-homepage-bright-silver-preview.png)
 
-> This is a design mockup, **not a screenshot of a live deployment; this page has not been deployed**. All equipment, topology, power, SOC, alarms, dispatch, and energy-flow data shown are demonstrations, not live operating data or acceptance evidence. Grouping operations and engineering configuration does not change existing permissions or control-safety boundaries.
+> This image is the local Demo interaction reference, not a live-site screenshot. The v1.0.4 production frontend implements the same information hierarchy and red-gold-bright-silver visual direction, but reads only formal APIs, real nodes, and committed L2. Every device, topology, power, SOC, alarm, dispatch, and energy-flow value in the image remains demonstration data and is not field or acceptance evidence.
 
 ## Core structure
 
@@ -65,11 +63,12 @@ Device → Neuron → NanoMQ → real-time blackboard → committed frame → L1
 
 | Module | Main capabilities |
 |---|---|
+| Runtime home and device monitoring | Real nodes and committed L2, device filters, six-card pages, 10/20-row entity details, history and provenance, with current/last/unknown states kept distinct |
 | Nodes and data | Physical-node CRUD, Neuron point import, L0 live/history, link diagnosis, processing, and L2 live/history/provenance |
-| Alarms | L2 rules, severity, trigger and recovery, multi-code faults, acknowledgement, history, HTTP notifications, and delivery records |
-| Dispatch strategies | Bind L2, configure 2-charge/2-discharge, simulate, publish, enable/disable, and inspect decisions, intents, and readback |
+| Alarms | L2 rules, severity, trigger/recovery, multi-code faults, 10/20-row events, current-page batch acknowledgement, archive, HTTP notifications, and delivery records |
+| Dispatch strategies | Bind multiple L2 inputs, edit native GoRules JDM, and bind multiple controllable L2 outputs; draft, simulate, publish, enable/disable, inspect decisions, intents, and readback; 2-charge/2-discharge is only an optional starter |
 | Control | One safe path for human and strategy intent, one L0 write point, and confirmation through new L2 readback |
-| EMS workbench | Energy flow, power, SOC, trends, and alarms organized by node type and standard L2 semantics |
+| Fixed EMS workbench | Existing power, SOC, trends, and alarms organized by node and standard L2; missing site-level L2 is shown as unconfigured rather than filled with Demo data |
 | System tools | MQTT, HTTP notifications, runtime health, and administrator configuration |
 
 ZiZu deliberately excludes multi-tenancy, solution packages, a device-instance middle layer, a second rules engine,
@@ -121,15 +120,12 @@ processing before changing a unit they use.
 ### 4. Configure upper applications
 
 - In Alarms, select L2 entities and configure severity, trigger, recovery, and duration; bind an HTTP notification when needed.
-- In **Dispatch Strategies**, create a 2-charge/2-discharge strategy, bind the SOC input L2 and power-control L2, then enter four windows, targets, SOC bounds, and the mandatory safe target for all other times.
-- Simulate first and inspect snapshot evidence, the matched row, and proposed intent. Simulation never writes a device. Publish an immutable revision, enable it separately, inspect event/control readback, and disable it when required.
-- Standard GoRules JDM is the sole internal execution semantics. The easy table and **Open Full Rule Graph** edit the same JDM document; there is no second rule or action model.
-- When configuring alarms and dispatch strategies, select the same L2 entity identity in each UI. Both consume committed L2 only; a visible page or vendor point never substitutes for identity, quality, and provenance checks.
-- The starter's SOC input requires a numeric L2 with definition `bms.soc` or `storage.soc`, unit `%`, and a finite value from 0 to 100. Convert vendor 0–1 ratios to percentages in L1 first; temperature, power, and unrelated percentage entities are not SOC. Its power target requires a writable numeric L2 in `kW` with safety bounds. These rules apply only to the reserved `soc` / `power-target` bindings, not to other JDM bindings.
-- Renaming or saving preserves the existing JDM, trigger, timezone, all bindings, and freshness contracts. Graphs that cannot be represented losslessly by the built-in table remain editable in the full graph and are never replaced with default windows. Publication, activation, and execution revalidate bindings; invalid entities are not silently substituted.
-- After site configuration changes, **Save Draft** revalidates current entities and refreshes the draft configuration baseline. A missing legacy binding unit can be filled from the current entity; changed known units or types remain blocked. Published revisions and activation state remain unchanged: simulate again, then explicitly publish and enable. Expired inputs still block simulation and control; freshness limits are never extended automatically.
-- For controllable L2, configure one write point, limits, interlocks, permission, timeout, and readback conditions.
-- Each strategy intent is dispatched once. After failure, resolve the issue and explicitly re-enable the strategy; clearing the failure does not resume control. Readback retains the original deadline and quality checks. An accepted API request does not prove that the device reached its target.
+- The generic dispatch path is: bind one or more committed-L2 inputs with unique aliases → edit the native JDM decision table → bind output aliases to confirmed, controllable L2 targets with safety contracts.
+- A new generic table uses native GoRules `collect` with an `intents` output. Each matching row emits an explicit `action_id` and `target`; duplicate actions or entities in one result fail closed.
+- Save draft, simulate, publish, and enable are separate operations. Simulation shows snapshot evidence, matches, and proposed intents but never writes a device. Publication freezes an immutable revision; enablement is explicit.
+- The complete JDM graph remains the sole source of truth. The native table is used only for one table that can round-trip losslessly; complex graphs remain in the full graph editor and are never silently rewritten.
+- The 2-charge/2-discharge starter remains optional and keeps its dedicated SOC, unit, power-target, and safety validation. Previously stored graphs that use invalid `&&` cells are not migrated automatically; edit them to native GoRules ranges, then save, simulate, and republish explicitly.
+- Configure one write point, limits, interlocks, permission, timeout, and readback for every controllable L2. API acceptance, a JDM match, or a UI refresh is not device success; only matching new committed-L2 readback is success.
 - Let the fixed EMS workbench bind stable L2 semantics rather than vendor addresses.
 
 ### 5. Verify and deliver
@@ -244,7 +240,8 @@ Before a commit or release, follow the [acceptance checklist](docs/acceptance-ch
 - [Domain language](CONTEXT.md)
 - [Architecture decision records](docs/adr/)
 - [Acceptance checklist](docs/acceptance-checklist.md)
-- [v0.8.4 field deployment record](docs/deploy-1号机-v0.8.4-http.md)
+- [v1.0.4 local integration and release acceptance record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md)
+- [Historical v0.9.9 field deployment record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
 If documents disagree, read them in this order: core architecture specification, latest accepted ADR, current subsystem
 specification, then historical records.
