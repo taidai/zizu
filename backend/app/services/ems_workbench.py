@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from uuid import UUID
 
 from app.services.entity_instance_catalog import EntityInstanceCatalog, EntityInstanceDescriptor
 from app.services.entity_instance_registry import EntityInstanceError
@@ -37,19 +38,20 @@ class EmsWorkbench:
 
     def read(self) -> dict[str, Any]:
         descriptors = self._catalog.list()
+        live_by_id: dict[UUID, dict[str, Any]] = {}
         groups = []
         for group_id, label, prefixes in _GROUPS:
             matched = tuple(item for item in descriptors if item.definition_id.lower().startswith(prefixes))
             if matched:
-                groups.append({"id": group_id, "label": label, "entities": self._live_entities(matched)})
+                groups.append({"id": group_id, "label": label, "entities": self._live_entities(matched, live_by_id)})
         assigned = {item["entity_instance_id"] for group in groups for item in group["entities"]}
         remaining = tuple(item for item in descriptors if str(item.id) not in assigned)
         if remaining:
-            groups.append({"id": "other", "label": "其他设备", "entities": self._live_entities(remaining)})
+            groups.append({"id": "other", "label": "其他设备", "entities": self._live_entities(remaining, live_by_id)})
 
         kpis = []
         for slot in self._slots.resolve(descriptors):
-            live = self._live_entities((slot.entity,)) if slot.entity is not None else []
+            live = self._live_entities((slot.entity,), live_by_id) if slot.entity is not None else []
             kpis.append(
                 {
                     "id": slot.key,
@@ -88,16 +90,26 @@ class EmsWorkbench:
             for item in descriptors
         ]}
 
-    def _live_entities(self, descriptors: tuple[EntityInstanceDescriptor, ...]) -> list[dict[str, Any]]:
+    def _live_entities(
+        self,
+        descriptors: tuple[EntityInstanceDescriptor, ...],
+        live_by_id: dict[UUID, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         result = []
         for item in descriptors:
+            cached = live_by_id.get(item.id)
+            if cached is not None:
+                result.append(cached)
+                continue
             public = self._descriptor(item)
             try:
                 observation = self._runtime.read(item.id)
             except EntityInstanceError as error:
-                result.append({**public, "status": "unavailable", "code": error.code})
+                live = {**public, "status": "unavailable", "code": error.code}
             else:
-                result.append({**public, "status": "available", "value": observation.value, "observed_at": observation.observed_at.isoformat(), "quality": observation.quality})
+                live = {**public, "status": "available", "value": observation.value, "observed_at": observation.observed_at.isoformat(), "quality": observation.quality}
+            live_by_id[item.id] = live
+            result.append(live)
         return result
 
     @staticmethod

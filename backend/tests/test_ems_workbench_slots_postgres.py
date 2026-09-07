@@ -69,7 +69,69 @@ class _ReplayConnection:
         return self.cursor_instance
 
 
+class _WriteCursor(_ReplayCursor):
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    def fetchone(self):
+        statement = self.statements[-1][0]
+        if "FROM t_entity_instances AS entity" in statement:
+            return ("FLOAT", "kW")
+        return None
+
+
+class _WriteConnection(_ReplayConnection):
+    def __init__(self) -> None:
+        self.cursor_instance = _WriteCursor()
+        self.commit_count = 0
+        self.rollback_count = 0
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def rollback(self) -> None:
+        self.rollback_count += 1
+
+
+class _RevisionPublisher:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def publish(self, **kwargs) -> int:
+        self.calls.append(kwargs)
+        return kwargs["base_revision"] + 1
+
+
 class WorkbenchSlotRepositoryUnitTest(unittest.TestCase):
+    def test_write_commits_binding_idempotency_and_formal_audit_in_one_connection(self) -> None:
+        connection = _WriteConnection()
+        revisions = _RevisionPublisher()
+        repository = PostgresWorkbenchSlotRepository(lambda: connection)
+        repository._revisions = revisions
+        entity_id = UUID("91000000-0000-0000-0000-000000000101")
+
+        receipt = repository.set_binding(
+            slot_key="storage-power",
+            entity_instance_id=entity_id,
+            base_configuration_revision=7,
+            actor="user:engineer",
+            idempotency_key="bind-storage-power-v1",
+        )
+
+        statements = [item[0] for item in connection.cursor_instance.statements]
+        self.assertEqual(8, receipt.configuration_revision)
+        self.assertEqual((1, 0), (connection.commit_count, connection.rollback_count))
+        self.assertEqual(1, len(revisions.calls))
+        self.assertIs(connection, revisions.calls[0]["transaction"])
+        self.assertEqual("ems_workbench_slot.bind", revisions.calls[0]["action"])
+        self.assertEqual("ems_workbench_slot", revisions.calls[0]["resource_kind"])
+        self.assertTrue(
+            any("INSERT INTO t_ems_workbench_slot_bindings" in item for item in statements)
+        )
+        self.assertTrue(
+            any("INSERT INTO t_ems_workbench_slot_idempotency" in item for item in statements)
+        )
+
     def test_replay_lookup_uses_the_persisted_receipt_without_allocating_revision(self) -> None:
         entity_id = UUID("91000000-0000-0000-0000-000000000101")
         request = {

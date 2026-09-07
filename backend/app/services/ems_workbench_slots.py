@@ -7,6 +7,8 @@ from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID
 
+from app.services.configuration_revision import GateState
+from app.services.data_trunk_contracts import DataTrunkError
 from app.services.entity_instance_catalog import EntityInstanceCatalog, EntityInstanceDescriptor
 
 
@@ -69,6 +71,9 @@ class WorkbenchSlotRepository(Protocol):
 
 
 class WorkbenchSlotRuntimeGate(Protocol):
+    @property
+    def state(self) -> GateState: ...
+
     def begin_configuration_publish(self, base_revision: int) -> None: ...
 
     def cancel_configuration_publish(self) -> None: ...
@@ -171,7 +176,18 @@ class EmsWorkbenchSlots:
             idempotency_key=idempotency_key,
         )
         if replay is not None:
-            return replay
+            if runtime_gate is None:
+                return replay
+            runtime_state = runtime_gate.state
+            if runtime_state is GateState.RUNNING:
+                return replay
+            if runtime_state is GateState.QUIESCED:
+                runtime_gate.reconcile_configuration_runtime()
+                return replay
+            raise DataTrunkError(
+                "CONFIGURATION_RUNTIME_BUSY",
+                "CONFIGURATION_RUNTIME_BUSY",
+            )
         if entity_instance_id is not None:
             by_id = {item.id: item for item in self._catalog.list()}
             descriptor = by_id.get(entity_instance_id)

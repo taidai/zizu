@@ -14,7 +14,8 @@ os.environ.setdefault("JWT_SECRET", "jwt-secret-value-that-is-long-enough")
 from fastapi import FastAPI
 
 from app.api import ems_workbench as ems_workbench_api
-from app.services.configuration_revision import ConfigurationRevisionError
+from app.services.configuration_revision import ConfigurationRevisionError, GateState
+from app.services.data_trunk_contracts import DataTrunkError
 from app.services.ems_workbench_slots import (
     EmsWorkbenchSlotError,
     EmsWorkbenchSlots,
@@ -266,6 +267,18 @@ class _SlotRepository:
         )
 
 
+class _ReplayAfterWriteRepository(_SlotRepository):
+    def set_binding(self, **kwargs) -> WorkbenchSlotWriteReceipt:
+        receipt = super().set_binding(**kwargs)
+        self.replay = WorkbenchSlotWriteReceipt(
+            receipt.slot_key,
+            receipt.entity_instance_id,
+            receipt.configuration_revision,
+            True,
+        )
+        return receipt
+
+
 class WorkbenchSlotWriteTest(unittest.TestCase):
     def _subject(
         self,
@@ -417,6 +430,74 @@ class WorkbenchSlotWriteTest(unittest.TestCase):
         self.assertEqual([], repository.calls)
         self.assertEqual([], gate.events)
 
+    def test_quiesced_replay_retries_runtime_reconciliation_without_a_second_write(self) -> None:
+        # Break caught: the database commit succeeding but runtime rebuild
+        # failing, followed by an idempotent retry returning a false 200 while
+        # the data trunk remains quiesced.
+        repository = _ReplayAfterWriteRepository()
+        subject = EmsWorkbenchSlots(
+            EntityInstanceCatalog(
+                _CatalogRepository((_entity(PCS_POWER_ID, "pcs.active_power"),))
+            ),
+            repository,
+        )
+        gate = _Gate(failed_reconciliations=1)
+        request = {
+            "slot_key": "storage-power",
+            "entity_instance_id": PCS_POWER_ID,
+            "base_configuration_revision": 7,
+            "actor": "user:engineer",
+            "idempotency_key": "recover-runtime-v1",
+            "runtime_gate": gate,
+        }
+
+        with self.assertRaises(DataTrunkError) as first:
+            subject.bind(**request)
+        receipt = subject.bind(**request)
+
+        self.assertEqual(
+            "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+            first.exception.code,
+        )
+        self.assertTrue(receipt.replayed)
+        self.assertEqual(1, len(repository.calls))
+        self.assertEqual(
+            [("begin", 7), "reconcile", "reconcile"],
+            gate.events,
+        )
+        self.assertIs(GateState.RUNNING, gate.state)
+
+    def test_busy_runtime_never_turns_an_idempotent_replay_into_false_success(self) -> None:
+        # Break caught: a replay returning 200 while another configuration
+        # change is still draining or closing the runtime.
+        for state in (GateState.DRAINING, GateState.CLOSING):
+            with self.subTest(state=state):
+                subject, repository = self._subject(())
+                repository.replay = WorkbenchSlotWriteReceipt(
+                    "storage-power",
+                    PCS_POWER_ID,
+                    8,
+                    True,
+                )
+                gate = _Gate(state=state)
+
+                with self.assertRaises(DataTrunkError) as raised:
+                    subject.bind(
+                        slot_key="storage-power",
+                        entity_instance_id=PCS_POWER_ID,
+                        base_configuration_revision=7,
+                        actor="user:engineer",
+                        idempotency_key="busy-replay-v1",
+                        runtime_gate=gate,
+                    )
+
+                self.assertEqual(
+                    "CONFIGURATION_RUNTIME_BUSY",
+                    raised.exception.code,
+                )
+                self.assertEqual([], repository.calls)
+                self.assertEqual([], gate.events)
+
 
 class _Runtime:
     def read(self, entity_id: UUID):
@@ -430,18 +511,52 @@ class _Runtime:
         return []
 
 
-class _Gate:
+class _IncrementingRuntime(_Runtime):
     def __init__(self) -> None:
+        self.read_calls: dict[UUID, int] = {}
+
+    def read(self, entity_id: UUID):
+        count = self.read_calls.get(entity_id, 0) + 1
+        self.read_calls[entity_id] = count
+        return SimpleNamespace(
+            value=count,
+            observed_at=datetime(2026, 9, 8, 8, 0, tzinfo=UTC),
+            quality=192,
+        )
+
+
+class _Gate:
+    def __init__(
+        self,
+        *,
+        state: GateState = GateState.RUNNING,
+        failed_reconciliations: int = 0,
+    ) -> None:
         self.events: list[object] = []
+        self._state = state
+        self._failed_reconciliations = failed_reconciliations
+
+    @property
+    def state(self) -> GateState:
+        return self._state
 
     def begin_configuration_publish(self, revision: int) -> None:
         self.events.append(("begin", revision))
+        self._state = GateState.QUIESCED
 
     def cancel_configuration_publish(self) -> None:
         self.events.append("cancel")
+        self._state = GateState.RUNNING
 
     def reconcile_configuration_runtime(self) -> None:
         self.events.append("reconcile")
+        if self._failed_reconciliations:
+            self._failed_reconciliations -= 1
+            raise DataTrunkError(
+                "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+                "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+            )
+        self._state = GateState.RUNNING
 
 
 class _Pipeline:
@@ -471,6 +586,30 @@ class EmsWorkbenchProjectionTest(unittest.TestCase):
         self.assertEqual("unconfigured", solar["binding_status"])
         self.assertIsNone(solar["entity"])
         self.assertNotIn("value", solar)
+
+    def test_groups_and_slots_share_one_runtime_observation_per_entity(self) -> None:
+        # Break caught: a changing L2 value being read once for the device group
+        # and again for its KPI, exposing two values in one response.
+        catalog = EntityInstanceCatalog(
+            _CatalogRepository((_entity(PCS_POWER_ID, "pcs.active_power"),))
+        )
+        runtime = _IncrementingRuntime()
+        subject = EmsWorkbench(
+            catalog,
+            runtime,
+            lambda: 7,
+            EmsWorkbenchSlots(catalog, _SlotRepository()),
+        )
+
+        payload = subject.read()
+
+        group_entity = payload["groups"][0]["entities"][0]
+        slot_entity = next(
+            item for item in payload["kpis"] if item["id"] == "storage-power"
+        )["entity"]
+        self.assertEqual(1, group_entity["value"])
+        self.assertEqual(group_entity, slot_entity)
+        self.assertEqual({PCS_POWER_ID: 1}, runtime.read_calls)
 
     def test_workbench_resolves_slots_from_the_same_catalog_snapshot(self) -> None:
         # Break caught: a read querying the entity catalog once for groups and
@@ -514,6 +653,12 @@ class EmsWorkbenchPublicApiTest(unittest.IsolatedAsyncioTestCase):
         app.include_router(ems_workbench_api.router, prefix="/api/v1")
         app.dependency_overrides[ems_workbench_api.get_ems_workbench_slots] = (
             lambda: self.slots
+        )
+        app.dependency_overrides[ems_workbench_api.get_ems_workbench] = lambda: EmsWorkbench(
+            EntityInstanceCatalog(self.catalog_repository),
+            _Runtime(),
+            lambda: 7,
+            self.slots,
         )
         app.dependency_overrides[ems_workbench_api.get_ems_workbench_runtime] = (
             lambda: _Pipeline(self.gate)
@@ -597,8 +742,40 @@ class EmsWorkbenchPublicApiTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(403, response.status_code, response.text)
+        self.assertEqual("PERMISSION_DENIED", response.json()["detail"]["code"])
         self.assertEqual([], self.slot_repository.calls)
         self.assertEqual([], self.gate.events)
+
+    async def test_get_exposes_only_the_v105_single_entity_slot_contract(self) -> None:
+        # Break caught: reintroducing the deleted legacy `entities` list during
+        # the coordinated v1.0.5 hard cut.
+        async with AuthenticatedApiClient(self.app) as client:
+            response = await client.get("/api/v1/ems-workbench")
+
+        self.assertEqual(200, response.status_code, response.text)
+        slots = response.json()["kpis"]
+        self.assertEqual(
+            {
+                "site-power",
+                "pv-power",
+                "storage-power",
+                "storage-soc",
+                "charging-power",
+            },
+            {slot["id"] for slot in slots},
+        )
+        for slot in slots:
+            self.assertIn("entity", slot)
+            self.assertNotIn("entities", slot)
+            self.assertTrue(
+                {
+                    "binding_mode",
+                    "binding_status",
+                    "binding_source",
+                    "reason",
+                    "candidate_count",
+                }.issubset(slot)
+            )
 
     async def test_stale_revision_is_a_stable_409(self) -> None:
         # Break caught: configuration concurrency becoming a generic 500/422.
