@@ -24,6 +24,7 @@ async function installSession(page: Page, role: 'admin' | 'engineer' | 'operator
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.fallback()
     if (request.method() !== 'GET') writes.push(`${request.method()} ${path}`)
     if (path === '/api/v1/auth/me') return route.fulfill({ json: { user } })
     if (path === '/api/v1/auth/logout') return route.fulfill({ json: { status: 'ok' } })
@@ -62,6 +63,8 @@ test('operator has bounded runtime navigation without engineering authority', as
   for (const button of await page.getByRole('navigation', { name: '日常运行' }).getByRole('button').all()) {
     expect((await button.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   }
+  await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '运行监控' }).click()
+  await expect(page.getByRole('heading', { name: '设备监控', exact: true })).toBeVisible()
   expect(writes).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('runtime-1280.png') })
 })
@@ -102,12 +105,15 @@ for (const role of ['operator', 'engineer'] as const) {
     } else {
       await page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true }).click()
     }
-    await expect(page.getByRole('alert', { name: '节点目录状态' })).toContainText('节点目录加载失败')
+    const directoryAlert = role === 'operator'
+      ? page.getByRole('alert').filter({ hasText: '节点目录读取失败' })
+      : page.getByRole('alert', { name: '节点目录状态' })
+    await expect(directoryAlert).toContainText(role === 'operator' ? '现有结果不按空站处理' : '节点目录加载失败')
     await expect(page.getByText(/暂无运行节点|暂无节点，点击/)).toHaveCount(0)
     fails = false
-    await page.getByRole('button', { name: '重试加载节点' }).click()
-    await expect(page.getByRole('alert', { name: '节点目录状态' })).toHaveCount(0)
-    await expect(page.getByText(role === 'operator' ? '暂无运行节点' : '暂无节点，点击「+ 节点」创建根节点', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: role === 'operator' ? '重试节点' : '重试加载节点' }).click()
+    await expect(directoryAlert).toHaveCount(0)
+    await expect(page.getByText(role === 'operator' ? '当前没有可监控节点' : '暂无节点，点击「+ 节点」创建根节点', { exact: true })).toBeVisible()
     expect(writes).toEqual([])
   })
 }

@@ -13,6 +13,7 @@ import { Network, Scale, Bell, Settings, LayoutDashboard } from 'lucide-react'
 import { pagesForArea, resolveTabletPage, type TabletArea, type TabletPage } from './appNavigationModel'
 
 const NodeTreePage = lazy(() => import('./pages/NodeTreePage'))
+const DeviceMonitorPage = lazy(() => import('./pages/DeviceMonitorPage'))
 const DispatchStrategyPage = lazy(() => import('./pages/DispatchStrategyPage'))
 const AlarmCenterPage = lazy(() => import('./pages/AlarmCenterPage'))
 const EMSWorkbenchPage = lazy(() => import('./pages/EMSWorkbenchPage'))
@@ -223,15 +224,18 @@ function AuthenticatedApp({ session, onLoggedOut }: { session: AuthSession; onLo
         <div className="zizu-page">
           <Suspense fallback={<PageLoader />}>
             {(safePage === 'workbench' || safePage === 'controls') && <EMSWorkbenchPage key={safePage} {...runtimeProps} />}
-            {(safePage === 'tree' || safePage === 'monitor') && (
+            {safePage === 'tree' && (
               <NodeTreePage
                 {...nodeProps}
                 actorId={session.user.id}
-                readOnly={safePage === 'monitor' || session.user.role === 'operator'}
-                canManageTemplates={safePage === 'tree' && session.user.role === 'admin'}
+                readOnly={session.user.role === 'operator'}
+                canManageTemplates={session.user.role === 'admin'}
                 health={health}
                 onRefreshHealth={loadHealth}
               />
+            )}
+            {safePage === 'monitor' && (
+              <DeviceMonitorPage onOpenEngineering={canConfigure ? openEngineering : undefined} />
             )}
             {safePage === 'strategies' && <DispatchStrategyPage />}
             {safePage === 'alarms' && <AlarmCenterPage actorId={session.user.id} canConfigure={canConfigure} />}
