@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   createPointProcessingDraftPlan,
@@ -72,12 +72,19 @@ export default function PointProcessingTemplateManager({
   const [busy, setBusy] = useState<'load' | 'check' | 'publish' | null>(null)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [draftDirty, setDraftDirty] = useState(false)
+  const draftTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const firstDraftFieldRef = useRef<HTMLInputElement | null>(null)
 
   const activeBaseRevision = baseRevisionId || selectedRevisionId || templates[0]?.revision_id || ''
 
   useEffect(() => {
     if (selectedRevisionId) setBaseRevisionId(selectedRevisionId)
   }, [selectedRevisionId])
+
+  useEffect(() => {
+    if (currentPlan?.status === 'applied') setDraftDirty(false)
+  }, [currentPlan?.status])
 
   const createFromCurrentNode = () => {
     const key = nodeName.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'device'
@@ -95,6 +102,7 @@ export default function PointProcessingTemplateManager({
     setCheckedDigest('')
     setError('')
     setSuccess('已把当前原始点位放入草稿；请确认输入、输出和加工方法。')
+    setDraftDirty(false)
     setOpen(true)
   }
 
@@ -103,6 +111,7 @@ export default function PointProcessingTemplateManager({
     setCheckedDigest('')
     if (draftMode === 'node-edit') onCurrentPlan(null)
     setSuccess('')
+    setDraftDirty(true)
   }
 
   const patchDraft = (update: (current: TemplateDocument) => TemplateDocument) => {
@@ -127,6 +136,7 @@ export default function PointProcessingTemplateManager({
       ])))
       setCheckedContent(null)
       setCheckedDigest('')
+      setDraftDirty(false)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '读取模板失败')
     } finally {
@@ -153,6 +163,7 @@ export default function PointProcessingTemplateManager({
       setCheckedDigest('')
       onCurrentPlan(null)
       setSuccess('已打开当前加工。修改后先检查，再发布为本节点的新修订。')
+      setDraftDirty(false)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '读取当前加工失败')
     } finally {
@@ -229,6 +240,7 @@ export default function PointProcessingTemplateManager({
     try {
       const result = await importPointProcessingTemplate(checkedContent)
       setSuccess(`新版本已发布（修订 ${draft?.revision}），现在可以在下方选择并安装。`)
+      setDraftDirty(false)
       await onPublished(result.revision_id)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '发布模板失败')
@@ -273,12 +285,34 @@ export default function PointProcessingTemplateManager({
     }))
   }
 
+  const closeDraft = () => {
+    if (busy !== null || currentApplyBusy) return
+    if (draftDirty && !window.confirm('放弃尚未发布的加工修改？')) return
+    setDraft(null)
+    setCheckedContent(null)
+    setCheckedDigest('')
+    setError('')
+    setSuccess('')
+    setDraftDirty(false)
+    requestAnimationFrame(() => draftTriggerRef.current?.focus())
+  }
+
+  useEffect(() => {
+    if (!draft) return
+    firstDraftFieldRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDraft()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [draft !== null, draftDirty, busy, currentApplyBusy])
+
   return (
-    <section className="rounded-xl border border-gray-200 bg-white/45">
+    <section className="rounded-xl border border-[#d5ba85] bg-white/55">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center justify-between px-4 py-3 text-left"
+        className="engineering-touch flex w-full items-center justify-between px-4 py-3 text-left"
       >
         <span>
           <span className="block text-sm font-semibold text-gray-900">模板库</span>
@@ -306,16 +340,16 @@ export default function PointProcessingTemplateManager({
                 ))}
               </select>
             </label>
-            <button type="button" disabled={!canConfigure || !currentRevisionId || busy !== null} onClick={() => void loadCurrentProcessing()} className="rounded-lg bg-[#52c41a] px-3 py-2 text-xs font-medium text-white disabled:opacity-40">
+            <button type="button" disabled={!canConfigure || !currentRevisionId || busy !== null} onClick={(event) => { draftTriggerRef.current = event.currentTarget; void loadCurrentProcessing() }} className="neu-btn zizu-primary engineering-touch px-3 text-xs font-medium disabled:opacity-40">
               编辑当前加工
             </button>
-            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={() => void loadDraft('next-revision')} className="neu-btn px-3 py-2 text-xs text-blue-700 disabled:opacity-50">
+            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={(event) => { draftTriggerRef.current = event.currentTarget; void loadDraft('next-revision') }} className="neu-btn engineering-touch px-3 text-xs text-[#7d1b23] disabled:opacity-50">
               复制为下一修订
             </button>
-            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={() => void loadDraft('new-template')} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-50">
+            <button type="button" disabled={!canManage || !activeBaseRevision || busy !== null} onClick={(event) => { draftTriggerRef.current = event.currentTarget; void loadDraft('new-template') }} className="neu-btn engineering-touch px-3 text-xs text-gray-700 disabled:opacity-50">
               另存为新模板
             </button>
-            <button type="button" disabled={!canManage || l0Points.length === 0 || busy !== null} onClick={createFromCurrentNode} className="rounded-lg bg-[#185FA5] px-3 py-2 text-xs font-medium text-white disabled:opacity-40">
+            <button type="button" disabled={!canManage || l0Points.length === 0 || busy !== null} onClick={(event) => { draftTriggerRef.current = event.currentTarget; createFromCurrentNode() }} className="neu-btn engineering-touch px-3 text-xs font-medium text-[#7d1b23] disabled:opacity-40">
               从当前设备创建
             </button>
           </div>
@@ -326,13 +360,19 @@ export default function PointProcessingTemplateManager({
           {!draft && currentPlan && currentResultUnknown && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
               <p className="text-xs text-amber-800">上次发布结果未知。原请求已保留，可安全重试，不会重复执行。</p>
-              <button type="button" disabled={currentApplyBusy} onClick={onApplyCurrentPlan} className="rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+              <button type="button" disabled={currentApplyBusy} onClick={onApplyCurrentPlan} className="neu-btn engineering-touch rounded-lg bg-amber-700 px-3 text-xs font-semibold text-white disabled:opacity-50">
                 {currentApplyBusy ? '正在确认…' : '继续上次发布'}
               </button>
             </div>
           )}
 
           {draft && (
+            <div className="engineering-modal-backdrop" role="presentation">
+            <div className="neu-card engineering-modal w-[1100px] max-w-[97vw] p-5" role="dialog" aria-modal="true" aria-labelledby="template-editor-title">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div><h3 id="template-editor-title" className="text-sm font-bold text-gray-900">{draftMode === 'node-edit' ? '编辑当前加工' : '模板与版本'}</h3><p className="mt-1 text-xs text-gray-500">先检查，再发布；关闭不会写入。</p></div>
+              <button type="button" onClick={closeDraft} className="neu-btn engineering-touch px-4 text-xs">取消</button>
+            </div>
             <fieldset disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} className="space-y-4 disabled:opacity-70">
               <div className="rounded-lg border border-gray-200 bg-white/60 p-3">
                 <h4 className="text-xs font-semibold text-gray-800">1. {draftMode === 'node-edit' ? '当前加工' : '模板是谁'}</h4>
@@ -346,6 +386,7 @@ export default function PointProcessingTemplateManager({
                     <label key={field} className="text-[11px] text-gray-500">
                       {label}
                       <input
+                        ref={field === 'displayName' ? firstDraftFieldRef : undefined}
                         value={String(draft[field])}
                         readOnly={draftMode !== 'new-template' && field !== 'displayName'}
                         onChange={(event) => patchDraft((current) => ({ ...current, [field]: event.target.value }))}
@@ -445,15 +486,17 @@ export default function PointProcessingTemplateManager({
                     : checkedDigest ? `已检查：${checkedDigest.slice(0, 12)}…` : '先检查，检查通过后才能发布。发布只新增版本，不覆盖旧版本。'}
                 </div>
                 <div className="flex gap-2">
-                  <button type="button" disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} onClick={() => void handleCheck()} className="neu-btn px-4 py-2 text-xs font-medium text-blue-700 disabled:opacity-50">{busy === 'check' ? '检查中…' : draftMode === 'node-edit' ? '检查修改' : '检查模板'}</button>
+                  <button type="button" disabled={!(draftMode === 'node-edit' ? canConfigure : canManage) || busy !== null || currentApplyBusy} onClick={() => void handleCheck()} className="neu-btn engineering-touch px-4 text-xs font-medium text-[#7d1b23] disabled:opacity-50">{busy === 'check' ? '检查中…' : draftMode === 'node-edit' ? '检查修改' : '检查模板'}</button>
                   {draftMode === 'node-edit' ? (
-                    <button type="button" disabled={!canApplyCurrent || busy !== null || currentApplyBusy} onClick={onApplyCurrentPlan} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{currentApplyBusy ? '发布中…' : currentResultUnknown ? '继续上次发布' : '发布修改'}</button>
+                    <button type="button" disabled={!canApplyCurrent || busy !== null || currentApplyBusy} onClick={onApplyCurrentPlan} className="neu-btn zizu-primary engineering-touch px-4 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40">{currentApplyBusy ? '发布中…' : currentResultUnknown ? '继续上次发布' : '发布修改'}</button>
                   ) : (
-                    <button type="button" disabled={!canManage || !canPublish || busy !== null} onClick={() => void handlePublish()} className="rounded-lg bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
+                    <button type="button" disabled={!canManage || !canPublish || busy !== null} onClick={() => void handlePublish()} className="neu-btn zizu-primary engineering-touch px-4 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40">{busy === 'publish' ? '发布中…' : '发布新版本'}</button>
                   )}
                 </div>
               </div>
             </fieldset>
+            </div>
+            </div>
           )}
         </div>
       )}

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchNodes, updateNode, createNode, deleteNode, fetchAlarmCounts,
   fetchCategories, fetchNeuronNodes, fetchNeuronGroups, previewNeuronTags, importNeuronTags,
@@ -7,11 +7,31 @@ import {
 } from '../api/client'
 import NodeTagPanel from '../components/NodeTagPanel'
 import { nodeDataTabs, type NodeDataTabKey } from '../components/data-trunk/dataTrunkViewModel'
-import { importPreviewSummary, normalizedGroups, parentCandidates } from '../components/node/nodeUsabilityModel'
+import {
+  importPreviewRows,
+  importPreviewSummary,
+  initialNodeSelection,
+  normalizedGroups,
+  parentCandidates,
+} from '../components/node/nodeUsabilityModel'
+import '../components/node/tabletEngineering.css'
 
 const DataTrunkWorkspace = lazy(() => import('../components/data-trunk/DataTrunkWorkspace'))
 
 type FormMode = 'create' | 'edit'
+
+function useModalKeyboard(onClose: () => void, initialFocus: React.RefObject<HTMLElement>) {
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  useEffect(() => {
+    initialFocus.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeRef.current()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [initialFocus])
+}
 
 const LAYER_NAMES: Record<number, string> = {
   1: '站点 Site',
@@ -62,7 +82,7 @@ function TreeNode({ node, nodes, alarmCounts, depth, selectedId, expanded, onTog
   return (
     <div>
       <div
-        className={`flex items-center py-1.5 pr-2 cursor-pointer rounded-md transition-colors ${
+        className={`flex min-h-11 items-center py-1.5 pr-2 cursor-pointer rounded-md transition-colors ${
           isSelected ? 'bg-[#52c41a]/15 text-gray-900' : 'hover:bg-white/40 text-gray-700'
         }`}
         style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -129,6 +149,15 @@ function NodeFormModal({
   )
   const [sortOrder, setSortOrder] = useState(node?.sort_order ?? 0)
   const [saving, setSaving] = useState(false)
+  const nameRef = useRef<HTMLInputElement>(null)
+  const dirty = name !== (node?.name || '')
+    || nodeType !== (node?.node_type || '')
+    || parentId !== (isCreate ? (parentNode?.id || '') : (node?.parent_id || ''))
+    || sortOrder !== (node?.sort_order ?? 0)
+  const requestClose = () => {
+    if (!saving && (!dirty || window.confirm('放弃尚未保存的节点修改？'))) onClose()
+  }
+  useModalKeyboard(requestClose, nameRef)
 
   const typeOptions = useMemo(() => {
     const set = new Set(categories.map((c) => c.node_type))
@@ -172,13 +201,14 @@ function NodeFormModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="neu-card w-[420px] max-w-[90vw] p-5">
-        <h3 className="text-sm font-bold text-gray-800 mb-3">{isCreate ? '新建节点' : '编辑节点'}</h3>
+    <div className="engineering-modal-backdrop" role="presentation">
+      <div className="neu-card engineering-modal w-[420px] max-w-[90vw] p-5" role="dialog" aria-modal="true" aria-labelledby="node-form-title">
+        <h3 id="node-form-title" className="text-sm font-bold text-gray-800 mb-3">{isCreate ? '新建节点' : '编辑节点'}</h3>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>
             <label className="block text-xs text-gray-600 mb-1">节点名称</label>
             <input
+              ref={nameRef}
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -237,13 +267,13 @@ function NodeFormModal({
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-2">
-            <button type="button" onClick={onClose} className="neu-btn px-4 py-1.5 text-xs text-gray-600">
+            <button type="button" onClick={requestClose} className="neu-btn engineering-touch px-4 text-xs text-gray-600">
               取消
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
+              className="neu-btn zizu-primary engineering-touch px-4 text-xs font-medium disabled:opacity-50"
             >
               {saving ? '保存中...' : '保存'}
             </button>
@@ -270,6 +300,12 @@ function ImportNeuronModal({
   const [preview, setPreview] = useState<NeuronImportPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const firstFieldRef = useRef<HTMLHeadingElement>(null)
+  const requestClose = () => {
+    if (!importing && (!dirty || window.confirm('放弃尚未导入的点位选择？'))) onClose()
+  }
+  useModalKeyboard(requestClose, firstFieldRef)
 
   useEffect(() => {
     let active = true
@@ -340,23 +376,24 @@ function ImportNeuronModal({
       onSaved()
       onClose()
     } catch (e: any) {
-      alert('导入失败：' + (e.message || e))
+      setPreview(null)
+      alert('导入失败：' + (e.message || e) + '。请重新预览后再确认。')
     } finally {
       setImporting(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="neu-card w-[420px] max-w-[90vw] p-5">
-        <h3 className="text-sm font-bold text-gray-800 mb-2">从 Neuron 导入点位</h3>
+    <div className="engineering-modal-backdrop" role="presentation">
+      <div className="neu-card engineering-modal w-[620px] max-w-[94vw] p-5" role="dialog" aria-modal="true" aria-labelledby="neuron-import-title">
+        <h3 ref={firstFieldRef} tabIndex={-1} id="neuron-import-title" className="text-sm font-bold text-gray-800 mb-2">从 Neuron 导入点位</h3>
         <p className="text-xs text-gray-500 mb-3">目标节点: <span className="font-medium text-gray-700">{node.name}</span></p>
         <div className="space-y-3">
           <div>
             <label className="block text-xs text-gray-600 mb-1">Neuron 节点</label>
             <select
               value={selectedNode}
-              onChange={(e) => setSelectedNode(e.target.value)}
+              onChange={(e) => { setSelectedNode(e.target.value); setDirty(true) }}
               disabled={loading}
               className="neu-input w-full px-3 py-1.5 text-xs bg-transparent"
             >
@@ -378,6 +415,7 @@ function ImportNeuronModal({
                         ? normalizedGroups([...current, group.name])
                         : current.filter((name) => name !== group.name))
                       setPreview(null)
+                      setDirty(true)
                     }}
                     className="accent-[#52c41a]"
                   />
@@ -388,31 +426,68 @@ function ImportNeuronModal({
           </div>
           {preview && (() => {
             const summary = importPreviewSummary(preview)
+            const rows = importPreviewRows(preview)
             return (
               <div className={`rounded-lg border p-3 text-xs ${summary.canApply ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
                 <div className="font-medium">导入预览</div>
                 <div className="mt-1">{summary.label}</div>
+                <div className="mt-1 text-[11px]">基础配置修订 {preview.base_configuration_revision}</div>
                 {!summary.canApply && <div className="mt-1">请先处理冲突，当前不会写入任何点位。</div>}
+                <div className="mt-3 max-h-44 overflow-auto rounded border border-current/15 bg-white/70">
+                  <table className="w-full text-left text-[11px]">
+                    <thead><tr><th className="px-2 py-1.5">点位</th><th className="px-2 py-1.5">动作</th><th className="px-2 py-1.5">原因</th></tr></thead>
+                    <tbody>{rows.map((row) => (
+                      <tr key={row.key} className="border-t border-current/10">
+                        <td className="px-2 py-1.5 font-mono">{row.source}</td>
+                        <td className="px-2 py-1.5 font-semibold">{row.actionLabel}</td>
+                        <td className="px-2 py-1.5">{row.reason}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
               </div>
             )
           })()}
           <div className="flex justify-end gap-2 pt-2">
-            <button onClick={onClose} className="neu-btn px-4 py-1.5 text-xs text-gray-600">取消</button>
+            <button onClick={requestClose} className="neu-btn engineering-touch px-4 text-xs text-gray-600">取消</button>
             <button
               onClick={handlePreview}
               disabled={!selectedNode || selectedGroups.length === 0 || importing}
-              className="neu-btn px-4 py-1.5 text-xs font-medium text-[#185FA5] disabled:opacity-50"
+              className="neu-btn engineering-touch px-4 text-xs font-medium text-[#7d1b23] disabled:opacity-50"
             >
               {importing && !preview ? '检查中...' : '预览导入'}
             </button>
             <button
               onClick={handleImport}
               disabled={!preview || !importPreviewSummary(preview).canApply || importing}
-              className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
+              className="neu-btn zizu-primary engineering-touch px-4 text-xs font-medium disabled:opacity-50"
             >
               {importing && preview ? '导入中...' : '确认导入'}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RetireNodeModal({ node, onClose, onConfirm }: {
+  node: Node
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  useModalKeyboard(onClose, cancelRef)
+  return (
+    <div className="engineering-modal-backdrop" role="presentation">
+      <div className="neu-card engineering-modal w-[390px] max-w-[94vw] p-5" role="dialog" aria-modal="true" aria-labelledby="retire-node-title">
+        <h3 id="retire-node-title" className="text-sm font-bold text-gray-800 mb-2">确认退役节点？</h3>
+        <p className="text-xs text-gray-500 mb-4">
+          节点 <span className="font-medium text-gray-700">{node.name}</span> 及其完整子树将从运行树停用；不再产生新数据，但历史数据和来源证据会保留。
+        </p>
+        <div className="flex justify-end gap-2">
+          <button ref={cancelRef} onClick={onClose} className="neu-btn engineering-touch px-4 text-xs text-gray-600">取消</button>
+          <button onClick={onConfirm} className="neu-btn engineering-touch px-4 text-xs font-medium text-white bg-red-600 hover:bg-red-700">确认退役</button>
         </div>
       </div>
     </div>
@@ -425,12 +500,14 @@ export default function NodeTreePage({
   canManageTemplates = false,
   health,
   onRefreshHealth,
+  initialNodeId,
 }: {
   readOnly?: boolean
   actorId: string
   canManageTemplates?: boolean
   health: HealthStatus | null
   onRefreshHealth?: () => Promise<void> | void
+  initialNodeId?: string
 }) {
   const [nodes, setNodes] = useState<Node[]>([])
   const [categories, setCategories] = useState<Category[]>([])
@@ -443,16 +520,20 @@ export default function NodeTreePage({
   const [loading, setLoading] = useState(false)
   const [treeSearch, setTreeSearch] = useState('')
   const [alarmCounts, setAlarmCounts] = useState<Record<string, number>>({})
+  const lastModalTriggerRef = useRef<HTMLElement | null>(null)
+
+  const closeModal = (close: () => void) => {
+    close()
+    requestAnimationFrame(() => lastModalTriggerRef.current?.focus())
+  }
 
   const loadNodes = async () => {
     setLoading(true)
     try {
       const data = await fetchNodes()
       setNodes(data)
-      if (data.length > 0 && !selectedId) {
-        const roots = data.filter((n) => !n.parent_id)
-        const firstId = roots[0]?.id || data[0].id
-        setSelectedId(firstId)
+      if (data.length > 0) {
+        setSelectedId((current) => initialNodeSelection(data, current, initialNodeId))
         setExpanded(new Set(data.map((n) => n.id)))
       }
     } finally {
@@ -478,7 +559,7 @@ export default function NodeTreePage({
 
   useEffect(() => {
     if (nodes.length === 0) return
-    fetchAlarmCounts(nodes.map((n) => n.id))
+    fetchAlarmCounts()
       .then(setAlarmCounts)
       .catch(() => {})
   }, [nodes])
@@ -540,17 +621,17 @@ export default function NodeTreePage({
   }
 
   return (
-    <div className="flex gap-4 h-[calc(100vh-140px)] min-h-[500px]">
+    <div className="engineering-shell flex h-full min-h-0 gap-4">
         {/* 左侧节点管理 */}
-       <div className="neu-card w-80 flex flex-col p-3 overflow-hidden">
+       <div className="neu-card engineering-panel w-80 flex flex-col p-3 overflow-hidden">
          <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-bold text-gray-800">{readOnly ? '运行监控' : '节点管理'}</h2>
           <div className="flex items-center gap-1">
             {!readOnly && (
               <button
-                onClick={() => setNodeFormMode('create')}
+                onClick={(event) => { lastModalTriggerRef.current = event.currentTarget; setNodeFormMode('create') }}
                 title="新建根节点或子节点"
-                className="neu-btn px-2 py-1 text-[10px] font-medium text-[#389e0d]"
+                className="neu-btn engineering-touch px-3 text-[10px] font-medium text-[#7d1b23]"
               >
                 + 节点
               </button>
@@ -558,7 +639,7 @@ export default function NodeTreePage({
             <button
               onClick={refreshWorkspace}
               disabled={loading}
-              className="neu-btn px-2 py-1 text-[10px] text-gray-500 disabled:opacity-50"
+              className="neu-btn engineering-touch px-3 text-[10px] text-gray-500 disabled:opacity-50"
             >
               刷新
             </button>
@@ -599,7 +680,7 @@ export default function NodeTreePage({
       <div className="flex-1 flex flex-col min-w-0">
         {selectedNode ? (
           <>
-            <div className="neu-card p-4 mb-3">
+            <div className="neu-card engineering-panel p-4 mb-3">
               <div className="flex items-start justify-between">
                 <div>
                   <div className="flex items-center gap-2">
@@ -616,20 +697,20 @@ export default function NodeTreePage({
                 </div>
                 {!readOnly && <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setShowImportModal(true)}
-                    className="neu-btn px-3 py-1.5 text-xs text-gray-600"
+                    onClick={(event) => { lastModalTriggerRef.current = event.currentTarget; setShowImportModal(true) }}
+                    className="neu-btn engineering-touch px-3 text-xs text-gray-600"
                   >
                     导入点位
                   </button>
                   <button
-                    onClick={() => setNodeFormMode('edit')}
-                    className="neu-btn px-3 py-1.5 text-xs text-gray-600"
+                    onClick={(event) => { lastModalTriggerRef.current = event.currentTarget; setNodeFormMode('edit') }}
+                    className="neu-btn engineering-touch px-3 text-xs text-gray-600"
                   >
                     编辑
                   </button>
                   <button
-                    onClick={() => setShowDeleteConfirm(true)}
-                    className="neu-btn px-3 py-1.5 text-xs text-red-500 hover:bg-red-50"
+                    onClick={(event) => { lastModalTriggerRef.current = event.currentTarget; setShowDeleteConfirm(true) }}
+                    className="neu-btn engineering-touch px-3 text-xs text-red-600 hover:bg-red-50"
                   >
                     退役
                   </button>
@@ -643,8 +724,8 @@ export default function NodeTreePage({
                   key={tab.key}
                   type="button"
                   onClick={() => setActiveTab(tab.key)}
-                  className={`px-4 py-1.5 text-xs font-medium rounded-full transition-colors ${
-                    activeTab === tab.key ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  className={`engineering-touch px-4 text-xs font-medium rounded-lg transition-colors ${
+                    activeTab === tab.key ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
                   {tab.label}
@@ -659,6 +740,7 @@ export default function NodeTreePage({
                   node={selectedNode}
                   readOnly={readOnly}
                   health={health}
+                  actorId={actorId}
                   onRefreshHealth={onRefreshHealth}
                   onPointCountChanged={() => { void loadNodes() }}
                 />
@@ -690,7 +772,7 @@ export default function NodeTreePage({
           parentNode={nodeFormMode === 'create' ? selectedNode : undefined}
           nodes={nodes}
           categories={categories}
-          onClose={() => setNodeFormMode(null)}
+          onClose={() => closeModal(() => setNodeFormMode(null))}
           onSaved={loadNodes}
         />
       )}
@@ -698,24 +780,17 @@ export default function NodeTreePage({
       {!readOnly && showImportModal && selectedNode && (
         <ImportNeuronModal
           node={selectedNode}
-          onClose={() => setShowImportModal(false)}
+          onClose={() => closeModal(() => setShowImportModal(false))}
           onSaved={loadNodes}
         />
       )}
 
       {!readOnly && showDeleteConfirm && selectedNode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-          <div className="neu-card w-[360px] max-w-[90vw] p-5">
-            <h3 className="text-sm font-bold text-gray-800 mb-2">确认退役节点？</h3>
-            <p className="text-xs text-gray-500 mb-4">
-              节点 <span className="font-medium text-gray-700">{selectedNode.name}</span> 及其子节点将从运行树停用；不再产生新数据，但历史数据和来源证据会保留。
-            </p>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowDeleteConfirm(false)} className="neu-btn px-4 py-1.5 text-xs text-gray-600">取消</button>
-              <button onClick={handleDelete} className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-red-500 hover:bg-red-600">确认退役</button>
-            </div>
-          </div>
-        </div>
+        <RetireNodeModal
+          node={selectedNode}
+          onClose={() => closeModal(() => setShowDeleteConfirm(false))}
+          onConfirm={() => { void handleDelete() }}
+        />
       )}
     </div>
   )

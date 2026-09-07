@@ -329,3 +329,16 @@ test('deactivation review says exactly what stops and what stays', async () => {
   assert.equal(blocked.canApply, false)
   assert.equal(blocked.outputCount, 1)
 })
+
+test('entity catalog defaults to ten rows and offers a stable twenty-row page', async () => {
+  const model = await import('./dataTrunkViewModel.ts')
+  const rows = Array.from({ length: 25 }, (_, index) => ({ id: `entity-${index + 1}` }))
+
+  assert.deepEqual(model.paginateEntityRows(rows, 1, 10), {
+    items: rows.slice(0, 10), page: 1, pageSize: 10, totalPages: 3,
+  })
+  assert.deepEqual(model.paginateEntityRows(rows, 2, 20), {
+    items: rows.slice(20), page: 2, pageSize: 20, totalPages: 2,
+  })
+  assert.equal(model.paginateEntityRows(rows, 9, 10).page, 3)
+})

@@ -1,14 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
+  DataTrunkApiError,
+  DataTrunkResultUnknownError,
   applyPointProcessingPlan,
   createPointProcessingDraftPlan,
+  fetchEntityInstances,
+  fetchPointProcessingPlan,
   type PointProcessingPlan,
   type Tag,
 } from '../../api/client'
+import {
+  clearDataTrunkApplyRetry,
+  findDataTrunkApplyRetry,
+  saveDataTrunkApplyRetry,
+} from './dataTrunkRetryState'
 import { buildDataTrunkViewModel } from './dataTrunkViewModel'
 import {
   buildNodePointProcessingDraft,
+  canCreateEntityDefinition,
   canDeclareInlinePassthroughUnit,
+  isNewOutputPlan,
   projectInlinePointProcessingTrial,
   suggestInlinePointProcessingDefaults,
   type InlinePointProcessingMode,
@@ -19,11 +30,13 @@ export default function InlinePointProcessingPanel({
   deviceCategory,
   points,
   onPublished,
+  actorId = 'current-user',
 }: {
   nodeId: string
   deviceCategory: string
   points: Tag[]
   onPublished: () => void
+  actorId?: string
 }) {
   const [expanded, setExpanded] = useState(false)
   const [mode, setMode] = useState<InlinePointProcessingMode>('passthrough')
@@ -48,6 +61,10 @@ export default function InlinePointProcessingPanel({
   const [busy, setBusy] = useState<'plan' | 'apply' | null>(null)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [resultUnknown, setResultUnknown] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const firstFieldRef = useRef<HTMLInputElement | null>(null)
   const pointIdentity = points.map((point) => point.id).join(',')
   const booleanMapEligible = points.length === 1
     && points[0].wire_data_type?.toUpperCase() === 'BIT'
@@ -62,9 +79,41 @@ export default function InlinePointProcessingPanel({
     setIdempotencyKey('')
     setError('')
     setSuccess('')
+    setResultUnknown(false)
+    setExpanded(false)
   }, [nodeId, pointIdentity])
 
-  const openEditor = () => {
+  useEffect(() => {
+    let active = true
+    const retry = findDataTrunkApplyRetry(sessionStorage, actorId, nodeId)
+    if (!retry) return () => { active = false }
+    fetchPointProcessingPlan(retry.planId).then((restoredPlan) => {
+      if (!active || restoredPlan.node_id !== nodeId) return
+      const target = restoredPlan.items.find((item) => item.kind === 'output_binding' && item.action === 'add')
+      if (!target?.entity_definition_id || !isNewOutputPlan(restoredPlan, target.entity_definition_id)) return
+      setDefinitionKey(target.entity_definition_id)
+      setPlan(restoredPlan)
+      setIdempotencyKey(retry.idempotencyKey)
+      setResultUnknown(true)
+      setDirty(true)
+      setExpanded(true)
+    }).catch(() => clearDataTrunkApplyRetry(sessionStorage))
+    return () => { active = false }
+  }, [actorId, nodeId, pointIdentity])
+
+  const invalidatePlan = () => {
+    setPlan(null)
+    setIdempotencyKey('')
+    setResultUnknown(false)
+    setDirty(true)
+  }
+
+  const openEditor = (trigger: HTMLButtonElement) => {
+    triggerRef.current = trigger
+    if (resultUnknown && plan) {
+      setExpanded(true)
+      return
+    }
     if (points.length === 0) return
     const defaults = suggestInlinePointProcessingDefaults(points, deviceCategory)
     setDisplayName(defaults.displayName)
@@ -77,8 +126,40 @@ export default function InlinePointProcessingPanel({
     setControlEnabled(false)
     setControlMinimum('')
     setControlMaximum('')
+    setPlan(null)
+    setIdempotencyKey('')
+    setError('')
+    setSuccess('')
+    setResultUnknown(false)
+    setDirty(false)
     setExpanded(true)
   }
+
+  const closeEditor = () => {
+    if (busy !== null) return
+    if (!resultUnknown && dirty && !window.confirm('放弃尚未发布的点位加工修改？')) return
+    setExpanded(false)
+    if (resultUnknown) {
+      requestAnimationFrame(() => triggerRef.current?.focus())
+      return
+    }
+    setPlan(null)
+    setIdempotencyKey('')
+    setError('')
+    setResultUnknown(false)
+    setDirty(false)
+    requestAnimationFrame(() => triggerRef.current?.focus())
+  }
+
+  useEffect(() => {
+    if (!expanded) return
+    firstFieldRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeEditor()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [expanded, busy, dirty])
 
   const handlePlan = async () => {
     setBusy('plan')
@@ -105,14 +186,26 @@ export default function InlinePointProcessingPanel({
         controlCooldownSeconds,
         controlTimeoutSeconds,
       })
+      const targetDefinitionId = nextDraft.content.outputs[0].entityDefinition
+      const catalog = await fetchEntityInstances()
+      if (!canCreateEntityDefinition(catalog.items, nodeId, targetDefinitionId)) {
+        throw new Error('该实体定义已存在。新建不会覆盖已有实体，请到“标准实体”编辑当前加工。')
+      }
       const nextPlan = await createPointProcessingDraftPlan(nodeId, {
         content: nextDraft.content,
         input_selections: nextDraft.inputSelections,
       })
+      if (!isNewOutputPlan(nextPlan, targetDefinitionId)) {
+        setPlan(nextPlan)
+        setIdempotencyKey('')
+        throw new Error('检查发现该实体已由当前配置保留或更新。新建已阻止，请到“标准实体”编辑当前加工。')
+      }
       setPlan(nextPlan)
       setIdempotencyKey(crypto.randomUUID())
+      setResultUnknown(false)
+      setDirty(true)
     } catch (reason) {
-      setPlan(null)
+      if (!(reason instanceof Error && reason.message.includes('当前配置保留或更新'))) setPlan(null)
       setError(reason instanceof Error ? reason.message : '检查点位加工失败')
     } finally {
       setBusy(null)
@@ -123,13 +216,37 @@ export default function InlinePointProcessingPanel({
     if (!plan || !idempotencyKey) return
     setBusy('apply')
     setError('')
+    const retry = {
+      actorId,
+      nodeId,
+      planId: plan.id,
+      planDigest: plan.digest,
+      idempotencyKey,
+    }
+    saveDataTrunkApplyRetry(sessionStorage, retry)
     try {
       await applyPointProcessingPlan(plan.id, plan.digest, idempotencyKey)
       setSuccess('标准实体已发布，可到“标准实体”查看实时值、历史和来源。')
       setPlan(null)
+      setResultUnknown(false)
+      setDirty(false)
+      clearDataTrunkApplyRetry(sessionStorage)
       onPublished()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '发布实体失败')
+      const shouldKeep = reason instanceof DataTrunkResultUnknownError
+        || reason instanceof TypeError
+        || (reason instanceof DataTrunkApiError && reason.retryable)
+      if (!shouldKeep) {
+        clearDataTrunkApplyRetry(sessionStorage)
+        setPlan(null)
+        setIdempotencyKey('')
+      }
+      setResultUnknown(shouldKeep)
+      setError(shouldKeep
+        ? '发布结果未知。请使用同一计划和请求键重试；系统不会重复创建实体。'
+        : reason instanceof DataTrunkApiError && reason.status === 409
+          ? '配置已变化，原计划不会自动应用。请重新检查目录并生成新计划。'
+        : reason instanceof Error ? reason.message : '发布实体失败')
     } finally {
       setBusy(null)
     }
@@ -141,7 +258,7 @@ export default function InlinePointProcessingPanel({
     : null
 
   return (
-    <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50/60 p-3" aria-label="加工为实体">
+    <div className="mb-3 rounded-lg border border-[#d5ba85] bg-[#eee4ce]/45 p-3" aria-label="加工为实体">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <span className="text-xs font-semibold text-gray-800">已选择 {points.length} 个原始点位</span>
@@ -149,20 +266,28 @@ export default function InlinePointProcessingPanel({
         </div>
         <button
           type="button"
-          disabled={points.length === 0}
-          onClick={expanded ? () => setExpanded(false) : openEditor}
-          className="rounded bg-blue-700 px-4 py-2 text-xs font-semibold text-white disabled:bg-gray-300"
+          disabled={points.length === 0 && !resultUnknown}
+          onClick={(event) => openEditor(event.currentTarget)}
+          className="neu-btn zizu-primary engineering-touch px-4 text-xs font-semibold disabled:bg-gray-300"
         >
-          {expanded ? '收起' : '加工为实体'}
+          {resultUnknown ? '继续上次发布' : '加工为实体'}
         </button>
       </div>
 
       {expanded && (
-        <div className="mt-3 border-t border-blue-100 pt-3">
+        <div className="engineering-modal-backdrop" role="presentation">
+        <div className="neu-card engineering-modal w-[920px] max-w-[96vw] p-5" role="dialog" aria-modal="true" aria-labelledby="inline-processing-title">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 id="inline-processing-title" className="text-sm font-bold text-gray-900">新建标准实体</h3>
+              <p className="mt-1 text-xs text-gray-500">新建绝不覆盖既有实体；检查后仍需明确发布。</p>
+            </div>
+            <button type="button" onClick={closeEditor} className="neu-btn engineering-touch px-4 text-xs">取消</button>
+          </div>
           <div className="grid gap-3 lg:grid-cols-3">
             <label className="text-[11px] font-medium text-gray-700">
               实体名称
-              <input value={displayName} onChange={(event) => { setDisplayName(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
+              <input ref={firstFieldRef} value={displayName} onChange={(event) => { setDisplayName(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               加工方法
@@ -177,7 +302,7 @@ export default function InlinePointProcessingPanel({
                   setDataType(points[0].data_type.toUpperCase())
                   setUnit(points[0].unit || '')
                 }
-                setPlan(null)
+                invalidatePlan()
               }} className="neu-input mt-1 w-full px-3 py-2 text-xs">
                 <option value="passthrough">直接使用</option>
                 <option value="boolean_map" disabled={!booleanMapEligible}>0/1 转布尔</option>
@@ -188,7 +313,7 @@ export default function InlinePointProcessingPanel({
             </label>
             <label className="text-[11px] font-medium text-gray-700">
               单位
-              <input disabled={mode === 'boolean_map' || (mode === 'passthrough' && !canDeclareUnit)} value={unit} onChange={(event) => { setUnit(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100" placeholder="无单位可留空" />
+              <input disabled={mode === 'boolean_map' || (mode === 'passthrough' && !canDeclareUnit)} value={unit} onChange={(event) => { setUnit(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100" placeholder="无单位可留空" />
               {canDeclareUnit && <span className="mt-1 block font-normal text-amber-700">原始数值未声明单位；仅填写真实工程单位，直接使用不会缩放或猜测数值。</span>}
             </label>
           </div>
@@ -197,7 +322,7 @@ export default function InlinePointProcessingPanel({
             <div className="mt-3 rounded border border-blue-100 bg-white px-3 py-3">
               <label className="text-[11px] font-medium text-gray-700">
                 哪个原值表示 true
-                <select value={trueWhen} onChange={(event) => { setTrueWhen(event.target.value as '0' | '1'); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs sm:w-56">
+                <select value={trueWhen} onChange={(event) => { setTrueWhen(event.target.value as '0' | '1'); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs sm:w-56">
                   <option value="1">1 表示 true（推荐）</option>
                   <option value="0">0 表示 true</option>
                 </select>
@@ -210,21 +335,21 @@ export default function InlinePointProcessingPanel({
 
           {mode === 'numeric' && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <label className="text-[11px] font-medium text-gray-700">倍率<input value={scale} onChange={(event) => { setScale(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
-              <label className="text-[11px] font-medium text-gray-700">偏移<input value={offset} onChange={(event) => { setOffset(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+              <label className="text-[11px] font-medium text-gray-700">倍率<input value={scale} onChange={(event) => { setScale(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+              <label className="text-[11px] font-medium text-gray-700">偏移<input value={offset} onChange={(event) => { setOffset(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
             </div>
           )}
           {mode === 'state' && (
             <label className="mt-3 block text-[11px] font-medium text-gray-700">
               状态映射（每行“原值=标准状态”）
-              <textarea value={entries} onChange={(event) => { setEntries(event.target.value); setPlan(null) }} rows={3} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
+              <textarea value={entries} onChange={(event) => { setEntries(event.target.value); invalidatePlan() }} rows={3} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
             </label>
           )}
           {mode === 'formula' && (
             <div className="mt-3">
               <label className="text-[11px] font-medium text-gray-700">
                 公式
-                <input value={expression} onChange={(event) => { setExpression(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
+                <input value={expression} onChange={(event) => { setExpression(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
               </label>
             </div>
           )}
@@ -235,7 +360,7 @@ export default function InlinePointProcessingPanel({
                 type="checkbox"
                 checked={controlEnabled}
                 disabled={!controlEligible || mode !== 'passthrough'}
-                onChange={(event) => { setControlEnabled(event.target.checked); setPlan(null) }}
+                onChange={(event) => { setControlEnabled(event.target.checked); invalidatePlan() }}
               />
               允许调度控制
             </label>
@@ -244,11 +369,11 @@ export default function InlinePointProcessingPanel({
             </p>
             {controlEnabled && (
               <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                <label className="text-[11px] font-medium text-gray-700">安全最小值<input value={controlMinimum} onChange={(event) => { setControlMinimum(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
-                <label className="text-[11px] font-medium text-gray-700">安全最大值<input value={controlMaximum} onChange={(event) => { setControlMaximum(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
-                <label className="text-[11px] font-medium text-gray-700">回读容差<input value={controlTolerance} onChange={(event) => { setControlTolerance(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
-                <label className="text-[11px] font-medium text-gray-700">冷却秒数<input value={controlCooldownSeconds} onChange={(event) => { setControlCooldownSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
-                <label className="text-[11px] font-medium text-gray-700">回读期限（秒）<input value={controlTimeoutSeconds} onChange={(event) => { setControlTimeoutSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">安全最小值<input value={controlMinimum} onChange={(event) => { setControlMinimum(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">安全最大值<input value={controlMaximum} onChange={(event) => { setControlMaximum(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">回读容差<input value={controlTolerance} onChange={(event) => { setControlTolerance(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">冷却秒数<input value={controlCooldownSeconds} onChange={(event) => { setControlCooldownSeconds(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-[11px] font-medium text-gray-700">回读期限（秒）<input value={controlTimeoutSeconds} onChange={(event) => { setControlTimeoutSeconds(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
               </div>
             )}
           </div>
@@ -258,22 +383,23 @@ export default function InlinePointProcessingPanel({
             <div className="mt-3 grid gap-3 lg:grid-cols-3">
               <label className="text-[11px] font-medium text-gray-700">
                 业务标识
-                <input value={definitionKey} onChange={(event) => { setDefinitionKey(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
+                <input value={definitionKey} onChange={(event) => { setDefinitionKey(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 font-mono text-xs" />
               </label>
               <label className="text-[11px] font-medium text-gray-700">
                 结果类型
-                <select disabled={mode === 'passthrough' || mode === 'boolean_map'} value={dataType} onChange={(event) => { setDataType(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100">
+                <select disabled={mode === 'passthrough' || mode === 'boolean_map'} value={dataType} onChange={(event) => { setDataType(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs disabled:bg-gray-100">
                   {['FLOAT', 'INT', 'BOOL', 'STRING'].map((value) => <option key={value}>{value}</option>)}
                 </select>
               </label>
               <label className="text-[11px] font-medium text-gray-700">
                 超时秒数
-                <input value={freshnessSeconds} onChange={(event) => { setFreshnessSeconds(event.target.value); setPlan(null) }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
+                <input value={freshnessSeconds} onChange={(event) => { setFreshnessSeconds(event.target.value); invalidatePlan() }} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
               </label>
             </div>
           </details>
 
           {error && <div role="alert" className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+          {resultUnknown && <div className="mt-2 text-xs font-semibold text-amber-800">保留计划 {plan?.id}，重试会沿用同一幂等键。</div>}
           {success && <div className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">{success}</div>}
           {planView && (
             <div className={`mt-3 rounded px-3 py-2 text-xs ${planView.canApply ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
@@ -296,9 +422,10 @@ export default function InlinePointProcessingPanel({
             </div>
           )}
           <div className="mt-3 flex justify-end gap-2">
-            <button type="button" disabled={busy !== null} onClick={() => void handlePlan()} className="neu-btn px-4 py-2 text-xs font-semibold text-blue-700 disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
-            <button type="button" disabled={busy !== null || !planView?.canApply} onClick={() => void handleApply()} className="rounded bg-[#52c41a] px-4 py-2 text-xs font-semibold text-white disabled:bg-gray-300">{busy === 'apply' ? '发布中…' : '发布实体'}</button>
+            <button type="button" disabled={busy !== null || resultUnknown} onClick={() => void handlePlan()} className="neu-btn engineering-touch px-4 text-xs font-semibold text-[#7d1b23] disabled:opacity-50">{busy === 'plan' ? '检查中…' : '检查结果'}</button>
+            <button type="button" disabled={busy !== null || !planView?.canApply || !isNewOutputPlan(plan!, definitionKey)} onClick={() => void handleApply()} className="neu-btn zizu-primary engineering-touch px-4 text-xs font-semibold disabled:bg-gray-300">{busy === 'apply' ? '发布中…' : resultUnknown ? '继续上次发布' : '发布实体'}</button>
           </div>
+        </div>
         </div>
       )}
     </div>

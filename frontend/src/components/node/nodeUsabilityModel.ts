@@ -5,6 +5,37 @@ export interface NodeCandidate {
   name: string
 }
 
+export interface PointCatalogState {
+  nodeId: string
+  page: number
+  pageSize: 10 | 20
+  search: string
+  dataType: string
+  selectedIds: string[]
+}
+
+export function changePointCatalogScope(
+  current: PointCatalogState,
+  change: Partial<Pick<PointCatalogState, 'nodeId' | 'pageSize' | 'search' | 'dataType'>>,
+): PointCatalogState {
+  return {
+    ...current,
+    ...change,
+    page: 1,
+    selectedIds: [],
+  }
+}
+
+export function initialNodeSelection(
+  nodes: readonly { id: string; parent_id: string | null }[],
+  currentId: string,
+  requestedId?: string,
+): string {
+  if (currentId && nodes.some((node) => node.id === currentId)) return currentId
+  if (requestedId && nodes.some((node) => node.id === requestedId)) return requestedId
+  return nodes.find((node) => !node.parent_id)?.id || nodes[0]?.id || ''
+}
+
 export function parentCandidates<T extends NodeCandidate>(nodes: T[], editedNodeId?: string): T[] {
   if (!editedNodeId) return nodes.filter((node) => node.layer < 5)
   const excluded = new Set([editedNodeId])
@@ -41,6 +72,32 @@ export function importPreviewSummary(preview: {
     canApply: !preview.has_conflicts && conflict === 0,
     label: `新增 ${create} · 更新 ${update} · 不变 ${unchanged} · 冲突 ${conflict}`,
   }
+}
+
+const IMPORT_ACTION_LABELS = {
+  create: '新增',
+  update: '更新',
+  unchanged: '不变',
+  conflict: '冲突',
+} as const
+
+export function importPreviewRows(preview: {
+  items: Array<{
+    source_path: string
+    group: string
+    name: string
+    source_address: string
+    action: keyof typeof IMPORT_ACTION_LABELS
+    reason?: string | null
+  }>
+}) {
+  return preview.items.map((item) => ({
+    key: item.source_path,
+    source: `${item.group} · ${item.name} · ${item.source_address}`,
+    action: item.action,
+    actionLabel: IMPORT_ACTION_LABELS[item.action],
+    reason: item.reason || '—',
+  }))
 }
 
 export function rawPointSelectionSummary(points: { id: string; enabled: boolean }[]) {

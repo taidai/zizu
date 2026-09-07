@@ -23,7 +23,7 @@ function inputName(inputId: string): string {
   }[inputId] || inputId
 }
 
-const panelClass = 'rounded-lg border border-gray-200 bg-white p-4'
+const panelClass = 'rounded-lg border border-[#d5ba85] bg-white p-4'
 
 export default function PointProcessingPlanPanel({
   trunk,
@@ -80,7 +80,7 @@ export default function PointProcessingPlanPanel({
   }
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white/55 p-4" aria-label="点位加工工作区">
+    <section className="engineering-panel rounded-xl p-4" aria-label="点位加工工作区">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">定义点位加工</h3>
@@ -192,7 +192,7 @@ export default function PointProcessingPlanPanel({
                 type="button"
                 onClick={onPlan}
                 disabled={busy !== null}
-                className="neu-btn mt-4 w-full px-3 py-2 text-xs font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="neu-btn engineering-touch mt-4 w-full px-3 text-xs font-semibold text-[#7d1b23] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {busy === 'plan' ? POINT_PROCESSING_ACTIONS.inspecting : POINT_PROCESSING_ACTIONS.inspect}
               </button>
@@ -245,7 +245,7 @@ export default function PointProcessingPlanPanel({
                 type="button"
                 onClick={onApply}
                 disabled={!model.canApply || busy !== null}
-                className="mt-3 w-full rounded bg-blue-700 px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
+                className="neu-btn zizu-primary engineering-touch mt-3 w-full px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-600"
               >
                 {busy === 'apply'
                   ? POINT_PROCESSING_ACTIONS.publishing

@@ -372,11 +372,19 @@ export default function DataTrunkWorkspace({
       const shouldKeep = reason instanceof DataTrunkResultUnknownError
         || reason instanceof TypeError
         || (reason instanceof DataTrunkApiError && reason.retryable)
+      const requiresRecheck = reason instanceof DataTrunkApiError && reason.status === 409
       if (!shouldKeep) clearDataTrunkApplyRetry(sessionStorage)
       if (generation === operationGenerationRef.current
         && activeNodeIdRef.current === expectedNodeId) {
+        if (requiresRecheck) {
+          if (mode === 'deactivate-apply') setDeactivationPlan(null)
+          else if (mode === 'edit-apply') setEditPlan(null)
+          else setPlan(null)
+        }
         setResultUnknownPlanId(shouldKeep ? preparedPlan.id : null)
-        setError(reason instanceof Error ? reason.message : '应用点位加工失败')
+        setError(requiresRecheck
+          ? '配置已变化，原计划不会自动应用。请重新检查并生成新计划。'
+          : reason instanceof Error ? reason.message : '应用点位加工失败')
       }
     } finally {
       if (generation === operationGenerationRef.current
@@ -433,7 +441,7 @@ export default function DataTrunkWorkspace({
       <div className="neu-card p-6">
         <p className="text-sm font-semibold text-gray-800">标准实体不可用</p>
         <p className="mt-1 text-xs text-red-600">{error || '请检查节点和平台连接。'}</p>
-        <button type="button" onClick={() => void loadWorkspace()} className="neu-btn mt-4 px-3 py-2 text-xs text-blue-700">重新读取</button>
+        <button type="button" onClick={() => void loadWorkspace()} className="neu-btn engineering-touch mt-4 px-3 text-xs text-[#7d1b23]">重新读取</button>
       </div>
     )
   }
@@ -445,7 +453,7 @@ export default function DataTrunkWorkspace({
 
   return (
     <div className="space-y-3 pb-3">
-      <header className="rounded-xl border border-gray-200 bg-white/55 p-4">
+      <header className="engineering-panel rounded-xl p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-gray-900">标准实体</h2>
@@ -459,11 +467,11 @@ export default function DataTrunkWorkspace({
 
       {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">{error}</div>}
 
-      <section className="rounded-xl border border-gray-200 bg-white/55" aria-label="数据来源与计算">
+      <section className="engineering-panel rounded-xl" aria-label="数据来源与计算">
         <button
           type="button"
           onClick={() => setLifecycleOpen((current) => !current)}
-          className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left"
+          className="engineering-touch flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left"
         >
           <span>
             <span className="block text-sm font-semibold text-gray-900">数据来源与计算</span>
@@ -506,10 +514,10 @@ export default function DataTrunkWorkspace({
             {!readOnly && (
               <>
                 <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
-                  <button type="button" onClick={() => setLifecycleSection('node')} className={`rounded-lg px-4 py-2 text-xs font-medium ${lifecycleSection === 'node' ? 'bg-[#52c41a] text-white' : 'bg-white text-gray-600'}`}>
+                  <button type="button" onClick={() => setLifecycleSection('node')} className={`engineering-touch rounded-lg px-4 text-xs font-medium ${lifecycleSection === 'node' ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-white text-gray-600'}`}>
                     本节点配置
                   </button>
-                  <button type="button" onClick={() => setLifecycleSection('library')} className={`rounded-lg px-4 py-2 text-xs font-medium ${lifecycleSection === 'library' ? 'bg-[#185FA5] text-white' : 'bg-white text-gray-600'}`}>
+                  <button type="button" onClick={() => setLifecycleSection('library')} className={`engineering-touch rounded-lg px-4 text-xs font-medium ${lifecycleSection === 'library' ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-white text-gray-600'}`}>
                     模板与版本
                   </button>
                 </div>
@@ -570,7 +578,7 @@ export default function DataTrunkWorkspace({
                           <div className="text-xs font-semibold text-gray-800">不再使用这套加工？</div>
                           <div className="mt-1 text-[11px] text-gray-600">先生成停用预览；不会删除历史数据和来源证据。</div>
                         </div>
-                        <button type="button" disabled={busy !== null} onClick={() => void handlePrepareDeactivation()} className="neu-btn px-3 py-2 text-xs font-medium text-red-700 disabled:opacity-50">
+                        <button type="button" disabled={busy !== null} onClick={() => void handlePrepareDeactivation()} className="neu-btn engineering-touch px-3 text-xs font-medium text-red-700 disabled:opacity-50">
                           {busy === 'deactivate-plan' ? '正在检查…' : '准备停用'}
                         </button>
                       </div>
@@ -590,10 +598,10 @@ export default function DataTrunkWorkspace({
                         )}
                         <div className="mt-3 flex flex-wrap justify-end gap-2">
                           {deactivationPlan.status !== 'applied' && (
-                            <button type="button" disabled={busy !== null} onClick={() => setDeactivationPlan(null)} className="neu-btn px-3 py-2 text-xs text-gray-600 disabled:opacity-50">取消</button>
+                            <button type="button" disabled={busy !== null} onClick={() => setDeactivationPlan(null)} className="neu-btn engineering-touch px-3 text-xs text-gray-600 disabled:opacity-50">取消</button>
                           )}
                           {deactivationPlan.status === 'ready' && deactivationSummary?.canApply && (
-                            <button type="button" disabled={busy !== null} onClick={() => void applyPreparedPlan(deactivationPlan, 'deactivate-apply')} className="rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                            <button type="button" disabled={busy !== null} onClick={() => void applyPreparedPlan(deactivationPlan, 'deactivate-apply')} className="neu-btn engineering-touch rounded-lg bg-red-700 px-3 text-xs font-semibold text-white disabled:opacity-50">
                               {busy === 'deactivate-apply' ? '正在停用…' : '确认停用'}
                             </button>
                           )}

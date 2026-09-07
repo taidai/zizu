@@ -65,6 +65,27 @@ export interface InlinePointProcessingTrialView {
   message: string
 }
 
+export function canCreateEntityDefinition(
+  catalog: readonly { node_id: string; definition_id: string }[],
+  nodeId: string,
+  definitionId: string,
+): boolean {
+  const target = definitionId.trim()
+  return target.length > 0 && !catalog.some(
+    (item) => item.node_id === nodeId && item.definition_id === target,
+  )
+}
+
+export function isNewOutputPlan(
+  plan: { items: Array<{ kind: string; entity_definition_id?: string; action: string }> },
+  definitionId: string,
+): boolean {
+  const target = plan.items.filter(
+    (item) => item.kind === 'output_binding' && item.entity_definition_id === definitionId,
+  )
+  return target.length === 1 && target[0].action === 'add'
+}
+
 export function canDeclareInlinePassthroughUnit(
   points: readonly InlineRawPoint[],
   mode: InlinePointProcessingMode,

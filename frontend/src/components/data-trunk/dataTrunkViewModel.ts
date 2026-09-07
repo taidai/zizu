@@ -45,6 +45,22 @@ export const ENTITY_HISTORY_RANGES = [
 
 export type NodeDataTabKey = 'raw-points' | 'entities'
 
+export function paginateEntityRows<T>(
+  rows: readonly T[],
+  requestedPage: number,
+  pageSize: 10 | 20,
+) {
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize))
+  const page = Math.min(Math.max(1, requestedPage), totalPages)
+  const start = (page - 1) * pageSize
+  return {
+    items: rows.slice(start, start + pageSize),
+    page,
+    pageSize,
+    totalPages,
+  }
+}
+
 export interface NodeDataTab {
   key: NodeDataTabKey
   label: string

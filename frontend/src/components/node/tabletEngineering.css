@@ -1,0 +1,60 @@
+.engineering-shell {
+  color: #23272d;
+}
+
+.engineering-panel {
+  border: 1px solid rgb(213 186 133 / 70%);
+  background: linear-gradient(135deg, #fff 0%, #f0f2f4 35%, #e0e4e8 100%);
+  box-shadow: 0 10px 24px rgb(60 41 21 / 10%);
+}
+
+.engineering-touch {
+  min-height: 44px;
+}
+
+.engineering-shell .zizu-primary,
+.engineering-modal .zizu-primary {
+  color: #fff;
+  border-color: #8f0610;
+  background: linear-gradient(#d20612, #a3000b 75%, #83030c);
+}
+
+.engineering-shell :is(button, input, select, textarea):focus-visible,
+.engineering-modal :is(button, input, select, textarea):focus-visible {
+  outline: 3px solid rgb(184 138 52 / 42%);
+  outline-offset: 2px;
+}
+
+.engineering-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(28 18 19 / 45%);
+}
+
+.engineering-modal {
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border: 1px solid #d5ba85;
+  background: linear-gradient(135deg, #fff 0%, #f0f2f4 58%, #e0e4e8 100%);
+  box-shadow: 0 18px 44px rgb(80 11 17 / 24%);
+}
+
+.engineering-table tbody tr {
+  height: 34px;
+}
+
+.engineering-table thead {
+  color: #6e4c1b;
+  background: #eee4ce;
+}
+
+@media (max-height: 768px) {
+  .engineering-scroll {
+    overflow: auto;
+  }
+}

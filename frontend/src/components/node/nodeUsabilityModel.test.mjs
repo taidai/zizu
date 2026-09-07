@@ -90,3 +90,44 @@ test('raw point display-name change trims input and rejects an empty name', asyn
     /请输入点位显示名称/,
   )
 })
+
+test('point catalog scope changes reset page and visible selection while preserving page size options', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+  const current = {
+    nodeId: 'node-a', page: 3, pageSize: 20, search: '', dataType: '', selectedIds: ['point-a'],
+  }
+
+  assert.deepEqual(model.changePointCatalogScope(current, { search: 'power' }), {
+    nodeId: 'node-a', page: 1, pageSize: 20, search: 'power', dataType: '', selectedIds: [],
+  })
+  assert.deepEqual(model.changePointCatalogScope(current, { nodeId: 'node-b' }), {
+    nodeId: 'node-b', page: 1, pageSize: 20, search: '', dataType: '', selectedIds: [],
+  })
+  assert.deepEqual(model.changePointCatalogScope(current, { pageSize: 10 }), {
+    nodeId: 'node-a', page: 1, pageSize: 10, search: '', dataType: '', selectedIds: [],
+  })
+})
+
+test('neuron preview exposes every item action reason and source identity', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+
+  assert.deepEqual(model.importPreviewRows({
+    items: [
+      { source_path: 'n/g/P', group: 'g', name: 'P', source_address: '1!1', action: 'create', reason: null },
+      { source_path: 'n/g/S', group: 'g', name: 'S', source_address: '1!2', action: 'conflict', reason: '地址重复' },
+    ],
+  }), [
+    { key: 'n/g/P', source: 'g · P · 1!1', action: 'create', actionLabel: '新增', reason: '—' },
+    { key: 'n/g/S', source: 'g · S · 1!2', action: 'conflict', actionLabel: '冲突', reason: '地址重复' },
+  ])
+})
+
+test('initial node is selected only after the fetched catalog contains it', async () => {
+  const model = await import('./nodeUsabilityModel.ts')
+  const nodes = [{ id: 'root', parent_id: null }, { id: 'pcs', parent_id: 'root' }]
+
+  assert.equal(model.initialNodeSelection(nodes, '', 'pcs'), 'pcs')
+  assert.equal(model.initialNodeSelection(nodes, '', 'missing'), 'root')
+  assert.equal(model.initialNodeSelection([], '', 'pcs'), '')
+  assert.equal(model.initialNodeSelection(nodes, 'root', 'pcs'), 'root')
+})

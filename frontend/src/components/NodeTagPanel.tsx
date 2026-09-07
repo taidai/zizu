@@ -19,6 +19,7 @@ import {
 } from './data-trunk/dataTrunkViewModel'
 import InlinePointProcessingPanel from './data-trunk/InlinePointProcessingPanel'
 import {
+  changePointCatalogScope,
   rawPointDisplayNameChange,
   rawPointSelectionSummary,
 } from './node/nodeUsabilityModel'
@@ -31,11 +32,10 @@ interface NodeTagPanelProps {
   onPointCountChanged?: () => void
   health: HealthStatus | null
   onRefreshHealth?: () => Promise<void> | void
+  actorId?: string
 }
 
 type RawPointView = 'realtime' | 'history'
-
-const PAGE_SIZE = 50
 
 function formatTime(timestamp: string | null | undefined): string {
   return timestamp ? new Date(timestamp).toLocaleString('zh-CN') : '未收到'
@@ -61,6 +61,7 @@ export default function NodeTagPanel({
   onPointCountChanged,
   health,
   onRefreshHealth,
+  actorId = 'current-user',
 }: NodeTagPanelProps) {
   const nodeId = node.id
   const [view, setView] = useState<RawPointView>('realtime')
@@ -69,6 +70,7 @@ export default function NodeTagPanel({
   const [search, setSearch] = useState('')
   const [dataType, setDataType] = useState('')
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<10 | 20>(10)
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(false)
@@ -80,6 +82,8 @@ export default function NodeTagPanel({
   const [maintenanceMessage, setMaintenanceMessage] = useState('')
   const [realtimeRefresh, setRealtimeRefresh] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
+  const editTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const editInputRef = useRef<HTMLInputElement | null>(null)
   const activeNodeIdRef = useRef(nodeId)
   const tagRequestGenerationRef = useRef(0)
   activeNodeIdRef.current = nodeId
@@ -98,7 +102,7 @@ export default function NodeTagPanel({
       const data = await fetchTags(
         nodeId,
         page,
-        PAGE_SIZE,
+        pageSize,
         search || undefined,
         dataType || undefined,
         'PHYSICAL',
@@ -124,16 +128,31 @@ export default function NodeTagPanel({
       if (generation === tagRequestGenerationRef.current
         && activeNodeIdRef.current === expectedNodeId) setLoading(false)
     }
-  }, [dataType, nodeId, page, search])
+  }, [dataType, nodeId, page, pageSize, search])
 
   useEffect(() => {
     tagRequestGenerationRef.current += 1
     setPage(1)
-  }, [nodeId, search, dataType])
-
-  useEffect(() => {
     setSelected(new Map())
+    setEditingPoint(null)
   }, [nodeId])
+
+  const changeCatalogScope = (change: Partial<{ search: string; dataType: string; pageSize: 10 | 20 }>) => {
+    const next = changePointCatalogScope({
+      nodeId,
+      page,
+      pageSize,
+      search,
+      dataType,
+      selectedIds: [...selected.keys()],
+    }, change)
+    setSearch(next.search)
+    setDataType(next.dataType)
+    setPageSize(next.pageSize)
+    setPage(next.page)
+    setSelected(new Map())
+    setEditingPoint(null)
+  }
 
   const refreshRawPoints = async () => {
     if (refreshing) return
@@ -268,19 +287,40 @@ export default function NodeTagPanel({
     }
   }
 
-  const startEditingDisplayName = () => {
+  const startEditingDisplayName = (trigger: HTMLButtonElement) => {
     const point = selectedRows[0]
     if (!point || !selectionSummary.canEditDisplayName) return
     setEditingPoint(point)
     setDisplayNameDraft(point.display_name || point.name)
     setMaintenanceMessage('')
+    editTriggerRef.current = trigger
   }
+
+  const closeDisplayNameEditor = () => {
+    if (editingPoint && displayNameDraft !== (editingPoint.display_name || editingPoint.name)
+      && !window.confirm('放弃尚未保存的点位名称修改？')) return
+    setEditingPoint(null)
+    requestAnimationFrame(() => editTriggerRef.current?.focus())
+  }
+  const closeDisplayNameEditorRef = useRef(closeDisplayNameEditor)
+  closeDisplayNameEditorRef.current = closeDisplayNameEditor
+
+  useEffect(() => {
+    if (!editingPoint) return
+    editInputRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDisplayNameEditorRef.current()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [editingPoint])
 
   const saveDisplayName = async () => {
     if (!editingPoint) return
     try {
       const change = rawPointDisplayNameChange(editingPoint.id, displayNameDraft)
       await applyMaintenance(change.tagIds, change.changes, '点位名称已更新')
+      requestAnimationFrame(() => editTriggerRef.current?.focus())
     } catch (reason) {
       setMaintenanceMessage(reason instanceof Error ? reason.message : '点位名称更新失败')
     }
@@ -319,7 +359,7 @@ export default function NodeTagPanel({
   }
 
   return (
-    <section className="neu-card min-h-full p-4" aria-label="原始数据">
+    <section className="neu-card engineering-panel min-h-full p-4" aria-label="原始数据">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-bold text-gray-800">原始数据</h3>
@@ -331,7 +371,7 @@ export default function NodeTagPanel({
             aria-label="刷新原始点位"
             disabled={refreshing}
             onClick={() => { void refreshRawPoints() }}
-            className="neu-btn rounded px-3 py-1.5 text-xs font-medium text-gray-700 disabled:opacity-40"
+            className="neu-btn engineering-touch rounded px-3 text-xs font-medium text-gray-700 disabled:opacity-40"
           >
             {refreshing ? '刷新中...' : '刷新'}
           </button>
@@ -343,9 +383,9 @@ export default function NodeTagPanel({
               key={key}
               type="button"
               onClick={() => setView(key)}
-              className={`rounded px-4 py-1.5 text-xs font-medium ${
+              className={`engineering-touch rounded px-4 text-xs font-medium ${
                 view === key
-                  ? 'bg-[#52c41a] text-white'
+                  ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
@@ -386,7 +426,7 @@ export default function NodeTagPanel({
               <span className="sr-only">搜索点位</span>
               <input
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                onChange={(event) => changeCatalogScope({ search: event.target.value })}
                 placeholder="搜索点位名称"
                 className="neu-inset w-56 rounded px-3 py-2 text-xs text-gray-800 outline-none focus:ring-2 focus:ring-[#52c41a]/30"
               />
@@ -395,7 +435,7 @@ export default function NodeTagPanel({
               <span className="sr-only">数据类型</span>
               <select
                 value={dataType}
-                onChange={(event) => setDataType(event.target.value)}
+                onChange={(event) => changeCatalogScope({ dataType: event.target.value })}
                 className="neu-inset rounded px-3 py-2 text-xs text-gray-700 outline-none focus:ring-2 focus:ring-[#52c41a]/30"
               >
                 <option value="">全部类型</option>
@@ -423,8 +463,8 @@ export default function NodeTagPanel({
                 <button
                   type="button"
                   disabled={!selectionSummary.canEditDisplayName || maintenanceBusy}
-                  onClick={startEditingDisplayName}
-                  className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40"
+                  onClick={(event) => startEditingDisplayName(event.currentTarget)}
+                  className="neu-btn engineering-touch px-3 text-xs disabled:opacity-40"
                 >
                   编辑名称
                 </button>
@@ -432,7 +472,7 @@ export default function NodeTagPanel({
                   type="button"
                   disabled={!selectionSummary.canEnable || maintenanceBusy}
                   onClick={() => { void changeSelectedEnabled(true) }}
-                  className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40"
+                  className="neu-btn engineering-touch px-3 text-xs disabled:opacity-40"
                 >
                   启用
                 </button>
@@ -440,7 +480,7 @@ export default function NodeTagPanel({
                   type="button"
                   disabled={!selectionSummary.canDisable || maintenanceBusy}
                   onClick={() => { void changeSelectedEnabled(false) }}
-                  className="neu-btn px-3 py-1.5 text-xs text-red-700 disabled:opacity-40"
+                  className="neu-btn engineering-touch px-3 text-xs text-red-700 disabled:opacity-40"
                 >
                   停用
                 </button>
@@ -448,27 +488,12 @@ export default function NodeTagPanel({
                   type="button"
                   disabled={!selectionSummary.canDelete || maintenanceBusy}
                   onClick={() => { void deleteSelected() }}
-                  className="neu-btn px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-40"
+                  className="neu-btn engineering-touch px-3 text-xs font-medium text-red-700 disabled:opacity-40"
                 >
                   删除
                 </button>
                 <span className="text-[11px] text-gray-500">停用保留数据；删除将永久清除</span>
               </div>
-
-              {editingPoint && (
-                <div className="mt-2 flex flex-wrap items-end gap-2 border-t border-gray-200 pt-2" aria-label="编辑原始点位名称">
-                  <label className="text-xs text-gray-600">
-                    点位显示名称
-                    <input
-                      value={displayNameDraft}
-                      onChange={(event) => setDisplayNameDraft(event.target.value)}
-                      className="neu-inset ml-2 w-56 rounded px-3 py-1.5 text-xs text-gray-800 outline-none"
-                    />
-                  </label>
-                  <button type="button" disabled={maintenanceBusy} onClick={() => { void saveDisplayName() }} className="neu-btn px-3 py-1.5 text-xs text-green-700 disabled:opacity-40">保存</button>
-                  <button type="button" disabled={maintenanceBusy} onClick={() => setEditingPoint(null)} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">取消</button>
-                </div>
-              )}
 
               {maintenanceMessage && (
                 <p className={`mt-2 text-xs ${maintenanceMessage.includes('已') ? 'text-green-700' : 'text-red-700'}`}>
@@ -481,6 +506,7 @@ export default function NodeTagPanel({
           {!readOnly && (
             <InlinePointProcessingPanel
               nodeId={nodeId}
+              actorId={actorId}
               deviceCategory={node.node_type || 'PCS'}
               points={selectedPoints}
               onPublished={() => undefined}
@@ -493,8 +519,8 @@ export default function NodeTagPanel({
             </div>
           )}
 
-          <div className="overflow-x-auto rounded border border-gray-200 bg-white">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto rounded border border-[#d5ba85] bg-white">
+            <table className="engineering-table w-full text-left text-xs">
               <thead className="bg-gray-50 text-gray-500">
                 <tr>
                   {!readOnly && (
@@ -562,14 +588,35 @@ export default function NodeTagPanel({
             </table>
           </div>
 
-          {totalPages > 1 && (
-            <div className="mt-3 flex items-center justify-end gap-2 text-xs text-gray-500">
-              <button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="neu-btn px-3 py-1.5 disabled:opacity-40">上一页</button>
+          <div className="mt-3 flex items-center justify-end gap-2 text-xs text-gray-500">
+              <label className="flex items-center gap-2">每页
+                <select value={pageSize} onChange={(event) => changeCatalogScope({ pageSize: Number(event.target.value) as 10 | 20 })} className="neu-input engineering-touch px-2 text-xs">
+                  <option value={10}>10 条</option>
+                  <option value={20}>20 条</option>
+                </select>
+              </label>
+              <button type="button" disabled={page <= 1} onClick={() => { setSelected(new Map()); setEditingPoint(null); setPage((value) => value - 1) }} className="neu-btn engineering-touch px-3 disabled:opacity-40">上一页</button>
               <span>第 {page} / {totalPages} 页</span>
-              <button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)} className="neu-btn px-3 py-1.5 disabled:opacity-40">下一页</button>
-            </div>
-          )}
+              <button type="button" disabled={page >= totalPages} onClick={() => { setSelected(new Map()); setEditingPoint(null); setPage((value) => value + 1) }} className="neu-btn engineering-touch px-3 disabled:opacity-40">下一页</button>
+          </div>
         </>
+      )}
+
+      {editingPoint && (
+        <div className="engineering-modal-backdrop" role="presentation">
+          <div className="neu-card engineering-modal w-[420px] max-w-[94vw] p-5" role="dialog" aria-modal="true" aria-labelledby="point-name-title">
+            <h3 id="point-name-title" className="text-sm font-bold text-gray-800">编辑原始点位名称</h3>
+            <p className="mt-1 text-xs text-gray-500">只修改显示名称，不改变协议地址和历史数据。</p>
+            <label className="mt-4 block text-xs text-gray-600">点位显示名称
+              <input ref={editInputRef} value={displayNameDraft} onChange={(event) => setDisplayNameDraft(event.target.value)} className="neu-input mt-1 w-full px-3 py-2 text-xs" />
+            </label>
+            {maintenanceMessage && <p role="alert" className="mt-2 text-xs text-red-700">{maintenanceMessage}</p>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" disabled={maintenanceBusy} onClick={closeDisplayNameEditor} className="neu-btn engineering-touch px-4 text-xs disabled:opacity-40">取消</button>
+              <button type="button" disabled={maintenanceBusy} onClick={() => { void saveDisplayName() }} className="neu-btn zizu-primary engineering-touch px-4 text-xs disabled:opacity-40">保存</button>
+            </div>
+          </div>
+        </div>
       )}
     </section>
   )

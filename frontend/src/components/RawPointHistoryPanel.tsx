@@ -119,7 +119,7 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
       type: 'line',
       showSymbol: false,
       smooth: true,
-      lineStyle: { color: '#52c41a', width: 2 },
+      lineStyle: { color: '#bb0814', width: 2 },
       data: points.map((point) => [point.ts, point.eng_value]),
     }],
   }), [points, selectedTag])
@@ -132,7 +132,7 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
           <select
             value={selectedTagId || ''}
             onChange={(event) => setSelectedTagId(event.target.value || null)}
-            className="neu-input mt-1.5 w-full bg-transparent px-3 py-2 text-xs"
+            className="neu-input engineering-touch mt-1.5 w-full bg-transparent px-3 text-xs"
           >
             <option value="">请选择点位</option>
             {tags.map((tag) => (
@@ -144,12 +144,12 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
         </label>
         <div className="flex flex-wrap gap-2">
           {RANGE_OPTIONS.map((option) => (
-            <button key={option.key} type="button" onClick={() => setRange(option.key)} className={`rounded px-3 py-1.5 text-xs font-medium ${range === option.key ? 'bg-[#52c41a] text-white' : 'bg-gray-100 text-gray-600'}`}>
+            <button key={option.key} type="button" onClick={() => setRange(option.key)} className={`engineering-touch rounded px-3 text-xs font-medium ${range === option.key ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-gray-100 text-gray-600'}`}>
               {option.label}
             </button>
           ))}
           {([['trend', '趋势'], ['table', '明细']] as const).map(([key, label]) => (
-            <button key={key} type="button" onClick={() => setViewMode(key)} className={`rounded px-3 py-1.5 text-xs font-medium ${viewMode === key ? 'bg-blue-700 text-white' : 'bg-gray-100 text-gray-600'}`}>
+            <button key={key} type="button" onClick={() => setViewMode(key)} className={`engineering-touch rounded px-3 text-xs font-medium ${viewMode === key ? 'zizu-tab-active bg-[#eee4ce] text-[#6e1a20] ring-1 ring-[#d5ba85]' : 'bg-gray-100 text-gray-600'}`}>
               {label}
             </button>
           ))}
@@ -160,11 +160,11 @@ export default function RawPointHistoryPanel({ nodeId }: { nodeId: string }) {
       {!selectedTagId && <div className="rounded border border-dashed border-gray-300 px-4 py-12 text-center text-sm text-gray-500">先选择一个原始点位，再读取它的历史数据。</div>}
       {selectedTagId && loading && <div className="px-4 py-12 text-center text-sm text-gray-500">正在读取历史数据...</div>}
       {selectedTagId && !loading && viewMode === 'trend' && (
-        <div className="rounded-lg border border-gray-200 bg-white p-3"><ReactECharts option={chartOption} style={{ height: 360, width: '100%' }} notMerge /></div>
+        <div className="rounded-lg border border-[#d5ba85] bg-white p-3"><ReactECharts option={chartOption} style={{ height: 360, width: '100%' }} notMerge /></div>
       )}
       {selectedTagId && !loading && viewMode === 'table' && (
-        <div className="max-h-[560px] overflow-auto rounded-lg border border-gray-200 bg-white">
-          <table className="w-full text-xs">
+        <div className="max-h-[560px] overflow-auto rounded-lg border border-[#d5ba85] bg-white">
+          <table className="engineering-table w-full text-xs">
             <thead className="sticky top-0 bg-gray-100 text-gray-600"><tr><th className="px-3 py-2 text-left">时间</th><th className="px-3 py-2 text-right">原始值</th><th className="px-3 py-2 text-right">工程值</th></tr></thead>
             <tbody>
               {points.map((point) => <tr key={point.ts} className="border-t border-gray-100"><td className="px-3 py-2">{new Date(point.ts).toLocaleString('zh-CN')}</td><td className="px-3 py-2 text-right font-mono-value">{formatRawHistoryValue(point.raw_value)}</td><td className="px-3 py-2 text-right font-mono-value">{point.eng_value ?? '无'}</td></tr>)}

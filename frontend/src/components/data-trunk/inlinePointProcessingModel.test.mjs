@@ -22,6 +22,48 @@ const CURRENT = {
   read_write: 'R',
 }
 
+test('new processing rejects a definition already present in the entity catalog', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+
+  assert.equal(model.canCreateEntityDefinition([
+    { node_id: 'pcs-1', definition_id: 'pcs.active_power' },
+    { node_id: 'pcs-1', definition_id: 'pcs.soc' },
+  ], 'pcs-1', 'pcs.active_power'), false)
+  assert.equal(model.canCreateEntityDefinition([
+    { node_id: 'pcs-2', definition_id: 'pcs.active_power' },
+  ], 'pcs-1', 'pcs.active_power'), true)
+})
+
+test('new processing rejects a preserve action for its target after a previously empty catalog', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const plan = {
+    items: [{ kind: 'output_binding', entity_definition_id: 'pcs.active_power', action: 'preserve' }],
+  }
+
+  assert.equal(model.isNewOutputPlan(plan, 'pcs.active_power'), false)
+})
+
+test('new processing accepts exactly one add action for its target output', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const plan = {
+    items: [{ kind: 'output_binding', entity_definition_id: 'pcs.active_power', action: 'add' }],
+  }
+
+  assert.equal(model.isNewOutputPlan(plan, 'pcs.active_power'), true)
+})
+
+test('preserved outputs unrelated to the requested definition do not block a new output', async () => {
+  const model = await import('./inlinePointProcessingModel.ts')
+  const plan = {
+    items: [
+      { kind: 'output_binding', entity_definition_id: 'pcs.soc', action: 'preserve' },
+      { kind: 'output_binding', entity_definition_id: 'pcs.active_power', action: 'add' },
+    ],
+  }
+
+  assert.equal(model.isNewOutputPlan(plan, 'pcs.active_power'), true)
+})
+
 test('one RW passthrough point can explicitly publish a bounded controllable L2', async () => {
   const model = await import('./inlinePointProcessingModel.ts')
 
