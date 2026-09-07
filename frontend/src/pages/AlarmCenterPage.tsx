@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
+import { apiFetch, archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
-import { canArchiveAlarmEvent } from '../components/alarm-center/alarmCenterModel'
+import { acknowledgeAlarmBatch, canArchiveAlarmEvent, updateCurrentAlarmSelection } from '../components/alarm-center/alarmCenterModel'
 import '../components/alarm-center/tabletApplications.css'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
@@ -18,11 +18,43 @@ interface Stats {
   critical: number
 }
 
+interface AlarmEventDetail {
+  id: string
+  definition_id: string
+  entity_instance_id: string
+  state: string
+  severity: AlarmLevel
+  pending_at: string
+  active_at: string | null
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+  acknowledgement_note?: string | null
+  recovered_at: string | null
+  node_name: string
+  entity_name: string
+  alarm_name: string
+  duration_seconds: number
+  archived_at: string | null
+  archived_by: string | null
+}
+
+interface AlarmTransition {
+  id: string
+  from_state: string | null
+  to_state: string
+  occurred_at: string
+  code: string
+  evidence?: Record<string, unknown> | null
+  actor?: string | null
+  note?: string | null
+}
+
 function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const pendingRequest = useRef<AbortController | null>(null)
+  const detailRequest = useRef<AbortController | null>(null)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [levelFilter, setLevelFilter] = useState<AlarmLevel | ''>('')
@@ -31,7 +63,12 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'acknowledged' | 'resolved' | 'archived'>('active')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [stats, setStats] = useState<Stats>({ active: 0, unack: 0, critical: 0 })
-  const pageSize = 50
+  const [pageSize, setPageSize] = useState<10 | 20>(10)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [batchMessage, setBatchMessage] = useState('')
+  const [detail, setDetail] = useState<AlarmEventDetail | null>(null)
+  const [transitions, setTransitions] = useState<AlarmTransition[]>([])
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const load = useCallback(async (background = false) => {
     // A slow refresh must not pile up more requests or erase the last result.
@@ -69,11 +106,13 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
         setLoading(false)
       }
     }
-  }, [page, levelFilter, entityFilter, statusFilter])
+  }, [page, pageSize, levelFilter, entityFilter, statusFilter])
 
   useEffect(() => {
     fetchAlarmEntities().then((d) => setAlarmEntities(d.items)).catch(() => {})
   }, [])
+
+  useEffect(() => () => detailRequest.current?.abort(), [])
 
   useEffect(() => {
     void load()
@@ -89,12 +128,48 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
     return () => clearInterval(id)
   }, [autoRefresh, load])
 
-  const handleAck = async (alarm: Alarm) => {
+  const handleAckIds = async (ids: string[]) => {
+    if (!ids.length) return
+    setBatchMessage('')
+    const result = await acknowledgeAlarmBatch(ids, acknowledgeAlarm)
+    setSelectedIds([])
+    setBatchMessage(result.failures.length
+      ? `部分确认未完成：${result.failures.map((item) => `${item.id}（${item.message}）`).join('；')}`
+      : `已确认 ${result.succeededIds.length} 条告警。`)
+    await load()
+  }
+
+  const clearAnd = (operation: () => void) => {
+    setSelectedIds([])
+    setBatchMessage('')
+    operation()
+  }
+
+  const openDetail = async (alarm: Alarm) => {
+    detailRequest.current?.abort()
+    const request = new AbortController()
+    detailRequest.current = request
+    setDetail(null)
+    setTransitions([])
+    setDetailLoading(true)
+    setError('')
     try {
-      await acknowledgeAlarm(alarm.id)
-      void load()
+      const [eventResponse, timelineResponse] = await Promise.all([
+        apiFetch(`/api/v1/alarm-events/${encodeURIComponent(alarm.id)}`, { signal: request.signal }),
+        apiFetch(`/api/v1/alarm-events/${encodeURIComponent(alarm.id)}/transitions`, { signal: request.signal }),
+      ])
+      if (!eventResponse.ok || !timelineResponse.ok) throw new Error('detail unavailable')
+      const [event, timeline] = await Promise.all([eventResponse.json(), timelineResponse.json()]) as [AlarmEventDetail, { items: AlarmTransition[] }]
+      if (request.signal.aborted || detailRequest.current !== request) return
+      setDetail(event)
+      setTransitions(timeline.items)
     } catch {
-      alert('确认失败')
+      if (!request.signal.aborted && detailRequest.current === request) setError('告警详情加载失败，请重试。')
+    } finally {
+      if (detailRequest.current === request) {
+        detailRequest.current = null
+        setDetailLoading(false)
+      }
     }
   }
 
@@ -136,7 +211,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           <div className="text-[10px] text-gray-400 uppercase">未确认</div>
           <div className="text-lg font-bold text-gray-800 font-mono-value">{stats.unack}</div>
         </div>
-        <button onClick={() => { setPage(1); setLevelFilter(levelFilter === 'CRITICAL' ? '' : 'CRITICAL') }} className={`neu-card p-3 text-left transition ${levelFilter === 'CRITICAL' ? 'ring-2 ring-red-400' : ''}`}>
+        <button onClick={() => clearAnd(() => { setPage(1); setLevelFilter(levelFilter === 'CRITICAL' ? '' : 'CRITICAL') })} className={`neu-card p-3 text-left transition ${levelFilter === 'CRITICAL' ? 'ring-2 ring-red-400' : ''}`}>
           <div className="text-[10px] text-gray-400 uppercase">紧急</div>
           <div className="text-lg font-bold text-red-600 font-mono-value">{stats.critical}</div>
         </button>
@@ -155,7 +230,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           ].map((s) => (
             <button
               key={s.key}
-              onClick={() => { setPage(1); setStatusFilter(s.key as typeof statusFilter) }}
+              onClick={() => clearAnd(() => { setPage(1); setStatusFilter(s.key as typeof statusFilter) })}
               className={`neu-btn px-3 py-1 text-xs ${statusFilter === s.key ? 'zizu-tab-active' : 'text-gray-600'}`}
             >
               {s.label}
@@ -166,7 +241,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           <span className="text-xs text-gray-500">实体:</span>
           <select
             value={entityFilter}
-            onChange={(e) => { setPage(1); setEntityFilter(e.target.value) }}
+            onChange={(e) => clearAnd(() => { setPage(1); setEntityFilter(e.target.value) })}
             className="neu-input text-xs px-2 py-1 bg-white border border-gray-200 rounded"
           >
             <option value="">全部实体</option>
@@ -176,7 +251,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           </select>
           {entityFilter && (
             <button
-              onClick={() => { setPage(1); setEntityFilter('') }}
+              onClick={() => clearAnd(() => { setPage(1); setEntityFilter('') })}
               className="text-[10px] text-gray-400 hover:text-gray-600"
             >
               清除
@@ -185,83 +260,44 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
         </div>
       </div>
 
-      {/* 告警列表 */}
-      <div className="space-y-2">
-        {loading && <div className="text-xs text-gray-400">{alarms.length ? '更新中...' : '加载中...'}</div>}
-        {error && <div role="alert" className="text-xs text-red-600">{error} <button onClick={() => void load()} className="underline">重试</button></div>}
-        {alarms.map((alarm) => (
-            <div
-              key={alarm.id}
-              className={`neu-card p-3 transition ${
-                alarm.acknowledged ? 'opacity-70' : alarm.level === 'CRITICAL' ? 'border-l-4 border-l-red-500' : ''
-              }`}
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-wrap items-center gap-2 mb-1">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                        LEVEL_STYLES[alarm.level] || 'bg-gray-100 text-gray-600 border-gray-200'
-                      }`}
-                    >
-                      {alarm.level}
-                    </span>
-                    {alarm.entity_name && (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
-                        {alarm.entity_name}
-                      </span>
-                    )}
-                    <span className="text-xs text-gray-400">{new Date(alarm.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
-                  </div>
-                  <h3 className="text-sm font-bold text-gray-800">{alarm.message}</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {alarm.node_name ? `${alarm.node_name} · ` : ''}持续 {alarm.duration_seconds ?? 0} 秒 · {alarm.state === 'pending' ? '触发待确认' : alarm.resolved_at ? '已恢复' : alarm.acknowledged ? '活动已确认' : '活动未确认'}
-                  </p>
-                </div>
-                <div className="flex flex-col items-end gap-2">
-                  {alarm.state === 'active_unacknowledged' && (
-                    <button
-                      onClick={() => handleAck(alarm)}
-                      className="neu-btn zizu-primary px-3 py-1 text-xs font-medium"
-                    >
-                      确认
-                    </button>
-                  )}
-                  {alarm.acknowledged && (
-                    <span className="text-[10px] text-gray-400">
-                      已确认 {alarm.ack_user ? `by ${alarm.ack_user}` : ''}
-                    </span>
-                  )}
-                  {alarm.resolved_at && (
-                    <span className="text-[10px] text-green-600">已恢复</span>
-                  )}
-                  {canArchive && canArchiveAlarmEvent(alarm) && (
-                    <button
-                      onClick={() => void handleArchive(alarm)}
-                      className="neu-btn px-3 py-1 text-xs text-gray-600"
-                    >
-                      归档
-                    </button>
-                  )}
-                  {alarm.archived_at && (
-                    <span className="text-[10px] text-gray-400">已归档</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-        {alarms.length === 0 && !loading && !error && (
-          <div className="neu-card p-8 text-center text-gray-400 text-sm">
-            当前筛选条件下无告警
+      {/* 告警事件表 */}
+      <div className="neu-card overflow-hidden" data-testid="alarm-event-table">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/70 p-3">
+          <div className="flex items-center gap-2 text-xs text-gray-600">
+            <button type="button" disabled={!selectedIds.length} onClick={() => void handleAckIds(selectedIds)} className="neu-btn zizu-primary px-3 py-2 font-semibold disabled:opacity-40">确认所选（{selectedIds.length}）</button>
+            {loading && <span>{alarms.length ? '更新中…' : '加载中…'}</span>}
           </div>
-        )}
+          <label className="text-xs text-gray-600">每页
+            <select aria-label="每页条数" value={pageSize} onChange={(event) => clearAnd(() => { setPage(1); setPageSize(Number(event.target.value) as 10 | 20) })} className="neu-input mx-2 px-2 py-1.5">
+              <option value={10}>10</option><option value={20}>20</option>
+            </select>条
+          </label>
+        </div>
+        {error && <div role="alert" className="border-b border-red-100 bg-red-50 p-3 text-xs text-red-700">{error} <button onClick={() => void load()} className="underline">重试</button></div>}
+        {batchMessage && <div role="status" className={`border-b p-3 text-xs ${batchMessage.startsWith('部分') ? 'border-amber-100 bg-amber-50 text-amber-800' : 'border-green-100 bg-green-50 text-green-700'}`}>{batchMessage}</div>}
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[850px] text-xs">
+            <thead><tr className="border-b border-white/70 text-left text-gray-500">
+              <th className="p-3"><input aria-label="选择当前页可确认告警" type="checkbox" checked={alarms.some((item) => item.state === 'active_unacknowledged') && alarms.filter((item) => item.state === 'active_unacknowledged').every((item) => selectedIds.includes(item.id))} onChange={(event) => setSelectedIds((current) => updateCurrentAlarmSelection(current, alarms, event.target.checked))} /></th>
+              <th className="p-3">等级</th><th className="p-3">告警 / 实体</th><th className="p-3">节点</th><th className="p-3">触发时间</th><th className="p-3">持续</th><th className="p-3">状态</th><th className="p-3">操作</th>
+            </tr></thead>
+            <tbody>{alarms.map((alarm) => <tr key={alarm.id} tabIndex={0} onClick={() => void openDetail(alarm)} onKeyDown={(event) => { if (event.key === 'Enter') void openDetail(alarm) }} className={`cursor-pointer border-b border-white/60 hover:bg-white/40 ${alarm.level === 'CRITICAL' ? 'border-l-4 border-l-red-500' : ''}`}>
+              <td className="p-3" onClick={(event) => event.stopPropagation()}><input aria-label={`选择告警 ${alarm.id}`} type="checkbox" disabled={alarm.state !== 'active_unacknowledged'} checked={selectedIds.includes(alarm.id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...new Set([...current, alarm.id])] : current.filter((id) => id !== alarm.id))} /></td>
+              <td className="p-3"><span className={`rounded border px-2 py-1 text-[10px] font-bold ${LEVEL_STYLES[alarm.level]}`}>{alarm.level}</span></td>
+              <td className="p-3"><div className="font-semibold text-gray-800">{alarm.message}</div><div className="mt-1 text-gray-500">{alarm.entity_name || alarm.entity_id || '—'}</div></td>
+              <td className="p-3">{alarm.node_name || '—'}</td><td className="p-3">{new Date(alarm.created_at).toLocaleString('zh-CN', { hour12: false })}</td><td className="p-3">{alarm.duration_seconds ?? 0}s</td>
+              <td className="p-3">{alarm.state === 'pending' ? '触发待确认' : alarm.state === 'active_unacknowledged' ? '活动未确认' : alarm.state === 'active_acknowledged' ? '活动已确认' : alarm.archived_at ? '已归档' : '已恢复'}</td>
+              <td className="p-3" onClick={(event) => event.stopPropagation()}><div className="flex gap-2">{alarm.state === 'active_unacknowledged' && <button type="button" onClick={() => void handleAckIds([alarm.id])} className="neu-btn zizu-primary px-3 py-1.5 font-medium">确认</button>}{canArchive && canArchiveAlarmEvent(alarm) && <button type="button" onClick={() => void handleArchive(alarm)} className="neu-btn px-3 py-1.5 text-gray-600">归档</button>}</div></td>
+            </tr>)}{!alarms.length && !loading && !error && <tr><td colSpan={8} className="p-8 text-center text-sm text-gray-400">当前筛选条件下无告警</td></tr>}</tbody>
+          </table>
+        </div>
       </div>
 
       {/* 分页 */}
       {totalPages > 1 && (
         <div className="flex justify-center items-center gap-2 text-xs text-gray-500">
           <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            onClick={() => clearAnd(() => setPage((p) => Math.max(1, p - 1)))}
             disabled={page <= 1}
             className="neu-btn w-7 h-7 flex items-center justify-center disabled:opacity-30"
           >
@@ -269,7 +305,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           </button>
           <span className="px-2 font-mono">{page} / {totalPages}</span>
           <button
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            onClick={() => clearAnd(() => setPage((p) => Math.min(totalPages, p + 1)))}
             disabled={page >= totalPages}
             className="neu-btn w-7 h-7 flex items-center justify-center disabled:opacity-30"
           >
@@ -277,6 +313,16 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
           </button>
         </div>
       )}
+
+      {(detail || detailLoading) && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4" role="dialog" aria-modal="true" aria-label="告警详情">
+        <div className="neu-card max-h-[90vh] w-full max-w-3xl overflow-y-auto p-5">
+          <div className="flex items-start justify-between gap-3"><div><h3 className="text-base font-bold text-gray-800">告警详情</h3><p className="mt-1 font-mono text-[10px] text-gray-400">{detail?.id}</p></div><button type="button" onClick={() => { detailRequest.current?.abort(); detailRequest.current = null; setDetailLoading(false); setDetail(null); setTransitions([]) }} className="neu-btn px-3 py-2 text-xs">关闭</button></div>
+          {detailLoading ? <p className="py-10 text-center text-sm text-gray-500">正在读取事件和流转证据…</p> : detail && <div className="mt-4 space-y-4 text-xs">
+            <dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-gray-400">告警 / 等级</dt><dd className="mt-1 font-semibold">{detail.alarm_name} · {detail.severity}</dd></div><div><dt className="text-gray-400">状态</dt><dd className="mt-1">{detail.state}</dd></div><div><dt className="text-gray-400">节点 / 实体</dt><dd className="mt-1">{detail.node_name} / {detail.entity_name}</dd></div><div><dt className="text-gray-400">定义 / 实例</dt><dd className="mt-1 break-all font-mono text-[10px]">{detail.definition_id}<br />{detail.entity_instance_id}</dd></div><div><dt className="text-gray-400">触发 / 恢复</dt><dd className="mt-1">{detail.active_at || detail.pending_at}<br />{detail.recovered_at || '尚未恢复'}</dd></div><div><dt className="text-gray-400">确认记录</dt><dd className="mt-1">{detail.acknowledged_at ? `${detail.acknowledged_by || '未知'} · ${detail.acknowledged_at}${detail.acknowledgement_note ? ` · ${detail.acknowledgement_note}` : ''}` : '尚未确认'}</dd></div></dl>
+            <div><h4 className="font-semibold text-gray-700">状态流转与证据</h4><div className="mt-2 space-y-2">{transitions.map((item) => <div key={item.id} className="neu-inset p-3"><div className="flex flex-wrap justify-between gap-2"><span className="font-semibold">{item.code} · {item.from_state || '开始'} → {item.to_state}</span><span>{item.occurred_at}</span></div>{(item.actor || item.note) && <p className="mt-1 text-gray-500">{item.actor || '系统'}{item.note ? ` · ${item.note}` : ''}</p>}{item.evidence && <pre className="mt-2 whitespace-pre-wrap break-all rounded bg-white/50 p-2 font-mono text-[10px]">{JSON.stringify(item.evidence, null, 2)}</pre>}</div>)}{!transitions.length && <p className="text-gray-400">暂无状态流转。</p>}</div></div>
+          </div>}
+        </div>
+      </div>}
     </div>
   )
 }

@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+const model = await import('./nativeDecisionTableModel.ts')
+
+const singleTableGraph = () => ({
+  nodes: [
+    { id: 'input', type: 'inputNode', content: { untouched: true } },
+    { id: 'rules', type: 'decisionTableNode', name: '峰谷规则', content: { hitPolicy: 'first', inputs: [], outputs: [], rules: [] }, custom: 'keep' },
+    { id: 'unknown', type: 'vendorNode', content: { formula: 'x + 1' } },
+  ],
+  edges: [{ id: 'edge-1', sourceId: 'input', targetId: 'rules', metadata: { keep: true } }],
+  metadata: { owner: 'site-a', nested: { revision: 7 } },
+})
+
+test('a unique decision table is inspected without changing the graph', () => {
+  const graph = singleTableGraph()
+  const before = structuredClone(graph)
+  assert.deepEqual(model.inspectNativeDecisionTable(graph), { nodeId: 'rules', content: graph.nodes[1].content })
+  assert.deepEqual(graph, before)
+})
+
+test('zero or multiple decision tables stay in the full graph editor', () => {
+  assert.equal(model.inspectNativeDecisionTable({ nodes: [], edges: [] }), null)
+  const graph = singleTableGraph()
+  graph.nodes.push({ id: 'rules-2', type: 'decisionTableNode', content: { rules: [] } })
+  assert.equal(model.inspectNativeDecisionTable(graph), null)
+  assert.throws(() => model.replaceDecisionTableContent(graph, 'rules', { rules: [] }), /完整规则图/)
+  assert.equal(model.inspectNativeDecisionTable({ nodes: [{ id: 'broken', type: 'decisionTableNode', content: { rules: [] } }] }), null)
+})
+
+test('native edit replaces only the sole table content and preserves every unknown field', () => {
+  const graph = singleTableGraph()
+  const before = structuredClone(graph)
+  const content = { hitPolicy: 'collect', rules: [{ _id: 'changed', temperature: 'temperature > 30' }] }
+  const next = model.replaceDecisionTableContent(graph, 'rules', content)
+  assert.notEqual(next, graph)
+  assert.notEqual(next.nodes, graph.nodes)
+  assert.deepEqual(graph, before)
+  assert.deepEqual(next.metadata, before.metadata)
+  assert.deepEqual(next.edges, before.edges)
+  assert.deepEqual(next.nodes[0], before.nodes[0])
+  assert.deepEqual(next.nodes[2], before.nodes[2])
+  assert.deepEqual(next.nodes[1], { ...before.nodes[1], content })
+})
+
+test('general L2 input accepts confirmed readable bool, numeric, and string entities', () => {
+  const base = { confirmed: true, direction: 'R' }
+  for (const data_type of ['BOOL', 'BOOLEAN', 'INT', 'FLOAT', 'NUMBER', 'STRING', 'STATE', 'ENUM']) {
+    assert.equal(model.isNativeDecisionInputEntity({ ...base, data_type }), true, data_type)
+  }
+  assert.equal(model.isNativeDecisionInputEntity({ ...base, data_type: 'BINARY' }), false)
+  assert.equal(model.isNativeDecisionInputEntity({ ...base, data_type: 'FLOAT', confirmed: false }), false)
+  assert.equal(model.isNativeDecisionInputEntity({ ...base, data_type: 'FLOAT', direction: 'W' }), false)
+})
+
+test('general output requires an explicitly controllable confirmed writable L2 entity', () => {
+  const output = { confirmed: true, direction: 'RW', data_type: 'FLOAT', control_eligible: true }
+  assert.equal(model.isNativeDecisionOutputEntity(output), true)
+  assert.equal(model.isNativeDecisionOutputEntity({ ...output, direction: 'W', data_type: 'BOOL' }), true)
+  for (const patch of [{ confirmed: false }, { direction: 'R' }, { control_eligible: false }, { control_eligible: undefined }, { data_type: 'BINARY' }]) {
+    assert.equal(model.isNativeDecisionOutputEntity({ ...output, ...patch }), false)
+  }
+})
+
+test('binding aliases are generic and unique', () => {
+  assert.deepEqual(model.validateBindingAliases([
+    { direction: 'INPUT', binding_key: 'room_temp' },
+    { direction: 'INPUT', binding_key: 'tariff_state' },
+    { direction: 'OUTPUT', binding_key: 'fan_enable' },
+  ]), { valid: true, message: '' })
+  assert.match(model.validateBindingAliases([
+    { direction: 'INPUT', binding_key: 'room_temp' },
+    { direction: 'INPUT', binding_key: 'room_temp' },
+  ]).message, /唯一/)
+  assert.equal(model.validateBindingAliases([
+    { direction: 'INPUT', binding_key: 'state' },
+    { direction: 'OUTPUT', binding_key: 'state' },
+  ]).valid, true)
+  assert.match(model.validateBindingAliases([{ direction: 'INPUT', binding_key: '   ' }]).message, /不能为空/)
+})
+
+test('editing one binding preserves order, extra bindings, and untouched server fields', () => {
+  const bindings = [
+    { direction: 'INPUT', binding_key: 'temperature', ordinal: 0, entity_instance_id: 'old', expected_data_type: 'FLOAT', unit: 'C', freshness_seconds: 10, server_extension: { keep: true } },
+    { direction: 'INPUT', binding_key: 'tariff', ordinal: 1, entity_instance_id: 'tariff-1', expected_data_type: 'STRING', unit: null, freshness_seconds: 30, extra: 'keep' },
+    { direction: 'OUTPUT', binding_key: 'fan', ordinal: 0, entity_instance_id: 'fan-1', expected_data_type: 'BOOL', unit: null, freshness_seconds: 5 },
+  ]
+  const before = structuredClone(bindings)
+  const next = model.updateStrategyBinding(bindings, 0, { id: 'temperature-2', data_type: 'NUMBER', unit: 'degC', freshness_seconds: 15 }, 'room_temp')
+  assert.deepEqual(bindings, before)
+  assert.deepEqual(next[0], { ...before[0], binding_key: 'room_temp', entity_instance_id: 'temperature-2', expected_data_type: 'NUMBER', unit: 'degC', freshness_seconds: 15 })
+  assert.deepEqual(next.slice(1), before.slice(1))
+})

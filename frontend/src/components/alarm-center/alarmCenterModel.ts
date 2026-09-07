@@ -84,6 +84,33 @@ export function canArchiveAlarmEvent(event: {
   return event.state === 'recovered' && !event.archived_at
 }
 
+export function updateCurrentAlarmSelection(
+  selectedIds: string[],
+  pageItems: { id: string; state?: string }[],
+  select: boolean,
+): string[] {
+  const eligible = new Set(pageItems.filter((item) => item.state === 'active_unacknowledged').map((item) => item.id))
+  if (!select) return selectedIds.filter((id) => !eligible.has(id))
+  return [...new Set([...selectedIds, ...eligible])]
+}
+
+export async function acknowledgeAlarmBatch(
+  ids: string[],
+  acknowledge: (id: string) => Promise<void>,
+): Promise<{ succeededIds: string[]; failures: { id: string; message: string }[] }> {
+  const settled = await Promise.allSettled(ids.map(async (id) => {
+    await acknowledge(id)
+    return id
+  }))
+  const succeededIds: string[] = []
+  const failures: { id: string; message: string }[] = []
+  settled.forEach((result, index) => {
+    if (result.status === 'fulfilled') succeededIds.push(result.value)
+    else failures.push({ id: ids[index], message: result.reason instanceof Error ? result.reason.message : String(result.reason) })
+  })
+  return { succeededIds, failures }
+}
+
 export function canDeleteAlarmRuleGroup(group: {
   enabled_entity_instance_ids: string[]
 }): boolean {
