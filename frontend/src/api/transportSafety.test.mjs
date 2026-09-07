@@ -21,6 +21,11 @@ test('node directory HTTP failure is never an empty site, but a genuine empty li
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ nodes: [], error: 'node directory query failed' })))
   await assert.rejects(fetchNodes, /node directory query failed/)
   t.mock.restoreAll()
+  for (const error of ['', '   ', null, false, 0, { code: 'NODE_QUERY_FAILED' }]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ nodes: [], error })))
+    await assert.rejects(fetchNodes, /节点目录查询失败，请重试/)
+    t.mock.restoreAll()
+  }
   t.mock.method(globalThis, 'fetch', async () => new Response('{}'))
   await assert.rejects(fetchNodes, /响应不完整/)
 })

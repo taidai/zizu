@@ -31,15 +31,19 @@ function frame(nodeId: string) {
     type: 'frame_snapshot', node_id: nodeId, cursor: `cursor-${nodeId}`, frame_sequence: 7,
     frame_time: '2026-09-07T02:00:00.000Z', configuration_revision: 12,
     frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [],
-    l2: selected.map((entity, index) => ({
-      entity_instance_id: entity.id, node_id: nodeId, definition_id: entity.definition_id,
-      display_name: entity.display_name, data_type: entity.data_type,
-      value: entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality: 192,
-      reason: null, observed_at: '2026-09-07T02:00:00.000Z', value_observed_at: '2026-09-07T02:00:00.000Z',
-      received_at: '2026-09-07T02:00:00.000Z', calculated_at: '2026-09-07T02:00:00.000Z',
-      processing_revision_id: 'pr-1', configuration_revision: 12,
-      source_digest: `sha256:${entity.id}`, frame_sequence: 7,
-    })),
+    l2: selected.map((entity, index) => {
+      const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-2' ? 0 : 192
+      return {
+        entity_instance_id: entity.id, node_id: nodeId, definition_id: entity.definition_id,
+        display_name: entity.display_name, data_type: entity.data_type,
+        value: entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality,
+        reason: quality === 64 ? 'ENTITY_DATA_STALE' : quality === 0 ? 'INPUT_BAD' : null,
+        observed_at: '2026-09-07T02:00:00.000Z', value_observed_at: '2026-09-07T02:00:00.000Z',
+        received_at: '2026-09-07T02:00:00.000Z', calculated_at: '2026-09-07T02:00:00.000Z',
+        processing_revision_id: 'pr-1', configuration_revision: 12,
+        source_digest: `sha256:${entity.id}`, frame_sequence: 7,
+      }
+    }),
   }
 }
 
@@ -121,7 +125,7 @@ async function installFixture(page: Page, options: {
 }
 
 async function mountDeviceMonitor(page: Page) {
-  await page.goto('/src/pages/DeviceMonitorPage.tsx', { waitUntil: 'domcontentloaded' })
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
   await page.evaluate(async () => {
     document.head.innerHTML = '<meta charset="UTF-8"><title>Device monitor fixture</title>'
     document.body.innerHTML = '<div id="root"></div>'
@@ -151,9 +155,12 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   await expect(sameName.nth(0)).toContainText('未恢复 2')
   await expect(sameName.nth(1)).toContainText('device-2')
   await expect(sameName.nth(1)).toContainText('未恢复 1')
+  await expect(sameName.nth(0)).toContainText('超时 · 最后值（非当前）')
+  await expect(sameName.nth(0)).toContainText('异常 · 最后值（非当前）')
+  await expect(sameName.nth(1)).toContainText('正常 · 当前值')
 
   await page.evaluate(() => (window as Window & { __disconnectDeviceNode: (nodeId: string) => void }).__disconnectDeviceNode('device-1'))
-  await expect(sameName.nth(0)).toContainText('最后值（非当前）')
+  await expect(sameName.nth(0)).toContainText('正常 · 最后值（非当前）')
 
   const search = page.getByRole('searchbox', { name: '名称或 ID' })
   await search.fill('DEVICE-2')
