@@ -2,9 +2,11 @@ import { expect, test, type BrowserContext, type Locator, type Page } from '@pla
 
 import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
 import { fixtureNames, publishRawPoint, runFixture } from './support/e2eFixture'
+import { openEngineeringPage } from './support/tabletNavigation'
 
 const CONFIGURATION_CHANGE_TIMEOUT_MS = 40_000
 const POINT_PROCESSING_DEVICE_CATEGORY = 'E2E_DEVICE'
+test.use({ actionTimeout: 10_000 })
 
 test.describe.serial('节点管理主干', () => {
   const environment = buildAcceptanceEnvironment(process.env)
@@ -59,15 +61,17 @@ test.describe.serial('节点管理主干', () => {
     await page.goto('/')
     const loginButton = page.getByRole('button', { name: '登录', exact: true })
     const nodeNavigation = page.getByRole('button', { name: '节点管理' })
+    const engineeringEntry = page.getByRole('banner').getByRole('button', { name: /^(工程配置|返回现场)$/ })
     await Promise.race([
       loginButton.waitFor({ state: 'visible' }),
-      nodeNavigation.waitFor({ state: 'visible' }),
+      engineeringEntry.waitFor({ state: 'visible' }),
     ])
     if (await loginButton.isVisible().catch(() => false)) {
       await page.getByLabel('用户名').fill(environment.username)
       await page.getByLabel('密码').fill(environment.password)
       await loginButton.click()
     }
+    await openEngineeringPage(page, '节点管理')
     await expect(nodeNavigation).toBeVisible()
     await expect(page.getByText(environment.username, { exact: true })).toBeVisible()
   })
@@ -154,7 +158,11 @@ test.describe.serial('节点管理主干', () => {
     await expect(modal).toBeHidden()
 
     await expect(page.getByText('共 52 个点位', { exact: true })).toBeVisible()
-    await expect(page.getByText('第 1 / 2 页', { exact: true })).toBeVisible()
+    await expect(page.getByText('第 1 / 6 页', { exact: true })).toBeVisible()
+    await page.getByRole('combobox', { name: /^每页/ }).selectOption('20')
+    await expect(page.getByText('第 1 / 3 页', { exact: true })).toBeVisible()
+    await page.getByRole('combobox', { name: /^每页/ }).selectOption('10')
+    await expect(page.getByText('第 1 / 6 页', { exact: true })).toBeVisible()
     await expect(page.getByRole('region', { name: '数据链路' })).toBeVisible()
     await Promise.all([
       page.waitForResponse((response) => response.url().includes('/api/v1/tags?') && response.ok()),
@@ -162,7 +170,7 @@ test.describe.serial('节点管理主干', () => {
       page.getByRole('button', { name: '刷新原始点位' }).click(),
     ])
     await page.getByRole('button', { name: '下一页' }).click()
-    await expect(page.getByText('e2e_spare_050', { exact: true })).toBeVisible()
+    await expect(page.getByText('e2e_spare_009', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '上一页' }).click()
 
     await page.getByLabel('数据类型').selectOption('FLOAT')
@@ -233,7 +241,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('checkbox', { name: `选择 ${names.neuronTag}` }).check()
     await page.getByRole('button', { name: '加工为实体', exact: true }).click()
 
-    const editor = page.getByLabel('加工为实体')
+    const editor = page.getByRole('dialog', { name: '新建标准实体', exact: true })
     await editor.getByLabel('实体名称').fill(entityDisplayName)
     await editor.getByLabel('加工方法').selectOption('passthrough')
     await editor.getByText('高级设置', { exact: true }).click()
@@ -251,6 +259,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+    await editor.getByRole('button', { name: '取消', exact: true }).click()
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
     const entity = page.getByRole('button', { name: new RegExp(entityDisplayName) })
@@ -275,6 +284,7 @@ test.describe.serial('节点管理主干', () => {
     await page.getByPlaceholder('型号').fill(environment.runId)
     await page.getByRole('button', { name: '确认保存', exact: true }).click()
     await expect(page.getByText('已保存为共享模板；当前节点运行配置没有改变。', { exact: true })).toBeVisible()
+    await page.getByRole('dialog', { name: '保存为共享模板', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
 
     await page.getByRole('button', { name: '模板与版本', exact: true }).click()
     await expect(page.getByLabel('从哪个模板开始').locator('option:checked')).toContainText(
@@ -284,6 +294,8 @@ test.describe.serial('节点管理主干', () => {
     await page.getByRole('button', { name: '检查模板', exact: true }).click()
     await expect(page.getByText('检查通过，可以发布这个新版本。', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '发布新版本', exact: true }).click()
+    // Successful publication selects the new revision and returns to node configuration.
+    await expect(page.getByRole('dialog', { name: '模板与版本', exact: true })).toBeHidden()
     await expect(page.getByRole('button', { name: '检查加工结果', exact: true })).toBeVisible()
     await page.getByRole('button', { name: '检查加工结果', exact: true }).click()
     await expect(page.getByText('检查通过', { exact: true })).toBeVisible()
@@ -307,6 +319,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(page.getByText('当前加工的新修订已发布。', { exact: true })).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+    await page.getByRole('dialog', { name: '编辑当前加工', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
     await publishUntilShows(
       names.neuronTag,
@@ -387,6 +400,8 @@ test.describe.serial('节点管理主干', () => {
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
 
+    await page.getByRole('dialog', { name: '编辑当前加工', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
+
     await page.getByRole('button', { name: '本节点配置', exact: true }).click()
     const entityAfterUnitDeclaration = page.getByRole('button', { name: new RegExp(entityDisplayName) })
     await publishUntilShows(names.neuronTag, 17.5, entityAfterUnitDeclaration, '17.5')
@@ -401,6 +416,7 @@ test.describe.serial('节点管理主干', () => {
     await expect(knownOutputUnit).toHaveValue('kW')
     await expect(knownOutputUnit).toHaveJSProperty('readOnly', true)
     await expect(knownOutputUnit).not.toBeEditable()
+    await page.getByRole('dialog', { name: '编辑当前加工', exact: true }).getByRole('button', { name: '取消', exact: true }).click()
 
   })
 
@@ -419,7 +435,7 @@ test.describe.serial('节点管理主干', () => {
 
     await page.getByRole('checkbox', { name: `选择 ${names.bitTag}` }).check()
     await page.getByRole('button', { name: '加工为实体', exact: true }).click()
-    const editor = page.getByLabel('加工为实体')
+    const editor = page.getByRole('dialog', { name: '新建标准实体', exact: true })
     await expect(editor.getByLabel('加工方法')).toHaveValue('boolean_map')
     await expect(editor.getByLabel('结果类型')).toHaveValue('BOOL')
     await expect(editor).toContainText('原值等于 1 → 实体值 false')
@@ -438,6 +454,8 @@ test.describe.serial('节点管理主干', () => {
     await expect(editor.getByText(/标准实体已发布/)).toBeVisible({
       timeout: CONFIGURATION_CHANGE_TIMEOUT_MS,
     })
+
+    await editor.getByRole('button', { name: '取消', exact: true }).click()
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     const bitEntity = page.getByRole('button', { name: new RegExp(bitEntityDisplayName) })
@@ -545,5 +563,5 @@ function nodeTree(page: Page) {
 }
 
 function nodeModal(page: Page, heading: string) {
-  return page.locator('div.fixed.inset-0').filter({ hasText: heading }).first()
+  return page.getByRole('dialog', { name: heading, exact: true })
 }

@@ -5,8 +5,11 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { buildTwoChargeTwoDischargeJdm } from '../src/components/dispatch-strategy/dispatchStrategyModel.mjs'
 import { stopSpawnedProcess } from './support/localProcess.mjs'
+import { openEngineeringPage } from './support/tabletNavigation'
+import { localDatabaseEnvironment } from './support/localDatabase.mjs'
 
 const execFileAsync = promisify(execFile)
+test.use({ actionTimeout: 10_000 })
 let localFixtureOutput = ''
 
 const now = '2026-09-05T00:00:00+00:00'
@@ -51,6 +54,22 @@ function strategyView() {
 }
 
 async function installApi(page: Page, initialStrategy: any = null, entityRows = entities, currentConfigurationRevision = 7) {
+  await page.addInitScript(() => {
+    class IsolatedStream {
+      static OPEN = 1
+      readyState = 1
+      onopen: ((event: Event) => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      constructor() { setTimeout(() => this.onopen?.(new Event('open')), 0) }
+      send(value: string) {
+        const request = JSON.parse(value)
+        const type = request.authenticate ? 'authenticated' : request.subscribe ? 'subscribed' : null
+        if (type) setTimeout(() => this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type }) })), 0)
+      }
+      close() { this.readyState = 3 }
+    }
+    Object.defineProperty(window, 'WebSocket', { value: IsolatedStream })
+  })
   let strategy: any = initialStrategy
   let events: any[] = []
   const calls: string[] = []
@@ -69,6 +88,15 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
     if (path === '/auth/me') return json(route, { user: { id: 'engineer-1', username: 'e2e-engineer', role: 'engineer' } })
     if (path === '/health') return json(route, { version: '0.8.5', pipeline: { status: 'running', messages_received: 10, points_written_db: 10, last_message_at: now }, components: { mqtt: { status: 'connected' } } })
     if (path === '/ems-workbench') return json(route, { workbench_id: 'default', configuration_revision: 7, navigation: [], groups: [], kpis: [], trends: [], alarms: { visible: true }, controls: { visible: false, entities: [] } })
+    if (path === '/nodes') return json(route, { nodes: [] })
+    if (path === '/categories') return json(route, { categories: [] })
+    if (path === '/alarms/counts') return json(route, { counts: {} })
+    if (path === '/auth/ws-ticket') return json(route, { ticket: 'isolated-strategy-ui' })
+    if (path === '/runtime/frame-snapshot') return json(route, {
+      type: 'frame_snapshot', node_id: url.searchParams.get('node_id'), cursor: 'isolated',
+      frame_sequence: 0, frame_time: null, configuration_revision: 7, frame_status: null,
+      failure: null, backlog_frames: 0, l0: [], l2: [],
+    })
     if (path === '/entity-instances' && method === 'GET') return json(route, { items: entityRows, total: entityRows.length })
     if (path.endsWith('/realtime') && method === 'GET') {
       const id = path.split('/')[2]
@@ -152,7 +180,7 @@ test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', 
   const expectedRevision = structuredClone(original.draft)
   const api = await installApi(page, original)
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toHaveValue(original.name)
   await expect.soft(page.getByLabel('时段 1 功率目标')).not.toBeVisible()
   await expect.soft(page.getByLabel('SOC 输入实体')).toBeDisabled()
@@ -163,7 +191,7 @@ test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', 
   await page.getByRole('button', { name: '收起完整规则图', exact: true }).click()
   await page.getByLabel('策略名称').fill('只修改显示名称')
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
   expect(api.savedDrafts).toHaveLength(1)
   const submitted = api.savedDrafts[0]
   expect(submitted.name).toBe('只修改显示名称')
@@ -198,13 +226,13 @@ test('非标准 JDM 的旧缺失单位可显式保存并刷新到当前实体合
   const originalBindings = structuredClone(original.draft.bindings)
   const api = await installApi(page, original, entities, 7)
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('SOC 输入实体')).toBeDisabled()
   await expect(page.getByLabel('功率控制实体')).toBeDisabled()
 
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
 
-  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
   expect(api.savedDrafts).toHaveLength(1)
   expect(api.savedDrafts[0].base_configuration_revision).toBe(6)
   expect(api.savedDrafts[0].jdm_content).toEqual(originalGraph)
@@ -222,15 +250,15 @@ test('内置表编辑直接更新完整图并保留原绑定契约和触发', as
   ]
   const api = await installApi(page, original)
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await page.getByLabel('时段 1 功率目标').fill('-25')
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
   expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].target).toBe('-25')
   expect(api.savedDrafts[0].bindings).toEqual(original.draft.bindings)
   expect(api.savedDrafts[0].trigger_kind).toBe('DATA_CHANGE')
   await page.reload()
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('时段 1 功率目标')).toHaveValue('-25')
 })
 
@@ -247,7 +275,7 @@ test('候选只允许标准 SOC 百分比输入和 kW 数值控制输出', async
     { ...entities[1], id: 'boolean-output', data_type: 'BOOL' },
   ])
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   expect(await page.getByLabel('SOC 输入实体').locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual(['', 'entity-soc', 'storage-soc'])
   expect(await page.getByLabel('功率控制实体').locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual(['', 'entity-limit'])
@@ -261,7 +289,7 @@ test('已有错误 SOC 绑定明确阻止保存且不自动选择其他实体', 
   ]
   const api = await installApi(page, original, [...entities, { ...entities[0], id: 'wrong-soc', definition_id: 'bms.current', display_name: 'SOC', unit: 'A' }])
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText(/SOC.*绑定.*不符合/, { timeout: 3000 })
@@ -269,14 +297,14 @@ test('已有错误 SOC 绑定明确阻止保存且不自动选择其他实体', 
   await expect(page.getByLabel('SOC 输入实体')).toHaveValue('wrong-soc')
   await page.getByLabel('SOC 输入实体').selectOption('entity-soc')
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
   expect(api.savedDrafts[0].bindings[0].entity_instance_id).toBe('entity-soc')
 })
 
 test('没有合法 SOC 候选时提示先建立标准百分比实体', async ({ page }) => {
   await installApi(page, strategyView(), [entities[1]])
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await expect(page.getByText(/先.*建立.*标准 SOC.*百分比/)).toBeVisible({ timeout: 3000 })
 })
@@ -292,7 +320,7 @@ test('午夜结束时间保持 24:00 原义且无效编辑不能保存旧图', a
   ]
   const api = await installApi(page, original)
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await expect(page.getByLabel('时段 1 结束')).toHaveValue('24:00', { timeout: 3000 })
   await page.getByLabel('其他时段安全目标').fill('')
@@ -301,7 +329,7 @@ test('午夜结束时间保持 24:00 原义且无效编辑不能保存旧图', a
   expect(api.savedDrafts).toHaveLength(0)
   await page.getByLabel('其他时段安全目标').fill('1')
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('草稿已保存')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
   expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].site_local_minute).toBe('site_local_minute >= 1320 && site_local_minute < 1440')
   expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules.at(-1).target).toBe('1')
 })
@@ -311,7 +339,7 @@ test('2充2放从 L2 绑定到控制回读只走一条策略流程', async ({ pa
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
   const api = await installApi(page)
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await page.getByRole('button', { name: '新建 2充2放' }).click()
   await expect(page.getByLabel('策略名称')).toHaveValue('2充2放调度策略')
 
@@ -325,9 +353,9 @@ test('2充2放从 L2 绑定到控制回读只走一条策略流程', async ({ pa
   await expect(page.getByTestId('strategy-simulation')).toContainText('power-target=80')
 
   await page.getByRole('button', { name: '发布', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('已发布为不可变版本')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('已发布为不可变版本')
   await page.getByRole('button', { name: '启用', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('下一个整分钟')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('下一个整分钟')
   await page.getByRole('region', { name: '策略状态' }).getByText('已启用', { exact: true }).waitFor()
 
   await page.getByRole('region', { name: '策略状态' }).scrollIntoViewIfNeeded()
@@ -335,7 +363,7 @@ test('2充2放从 L2 绑定到控制回读只走一条策略流程', async ({ pa
   await expect(page.getByRole('cell', { name: 'command-1' })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'confirmed' })).toBeVisible()
   await page.getByRole('button', { name: '停用', exact: true }).click()
-  await expect(page.getByRole('status')).toContainText('不再产生新的控制意图')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('不再产生新的控制意图')
 
   expect(api.getStrategy().enabled).toBe(false)
   expect(api.calls).toContain('PUT /dispatch-strategies/strategy-1/draft')
@@ -363,7 +391,7 @@ test('策略卡片用当前 committed L2 代替上次决策快照冒充回读', 
   await installApi(page, original)
 
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
 
   const card = page.getByRole('button', { name: /2充2放调度策略/ })
   await expect(card).toContainText('当前 L2 156.8')
@@ -374,7 +402,7 @@ test('策略卡片用当前 committed L2 代替上次决策快照冒充回读', 
 test('已发布策略直接试算不保存草稿、不改变发布状态', async ({ page }) => {
   const api = await installApi(page, publishedStrategy())
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
   await page.getByRole('button', { name: '试算', exact: true }).click()
@@ -382,7 +410,9 @@ test('已发布策略直接试算不保存草稿、不改变发布状态', async
   await expect(page.getByTestId('strategy-simulation')).toContainText('帧 42')
   expect(api.savedDrafts).toHaveLength(0)
   await expect(page.getByRole('region', { name: '策略状态' })).not.toContainText('有未发布修改')
-  expect(api.calls.filter((call) => call.startsWith('POST '))).toEqual(['POST /dispatch-strategies/strategy-1/simulate'])
+  // The runtime shell obtains read-only stream tickets before entering engineering.
+  expect(api.calls.filter((call) => call.startsWith('POST ') && call !== 'POST /auth/ws-ticket'))
+    .toEqual(['POST /dispatch-strategies/strategy-1/simulate'])
 })
 
 test('试算被数据超时阻断时明确解释原因且不显示无需控制', async ({ page }) => {
@@ -398,7 +428,7 @@ test('试算被数据超时阻断时明确解释原因且不显示无需控制',
     }),
   }))
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await page.getByRole('button', { name: '试算', exact: true }).click()
   const result = page.getByTestId('strategy-simulation')
@@ -414,7 +444,7 @@ test('试算被数据超时阻断时明确解释原因且不显示无需控制',
 test('修改后试算使用新草稿，非法输入不能复用旧结果', async ({ page }) => {
   const api = await installApi(page, publishedStrategy())
   await page.goto('/')
-  await page.getByRole('button', { name: '调度策略' }).click()
+  await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
   await page.getByLabel('时段 1 功率目标').fill('-20')
   const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
@@ -446,9 +476,10 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
   let frontend: ChildProcess | undefined
 
   test.beforeAll(async () => {
-    database = await createDisposablePostgresDatabase(databaseName)
+    database = localDatabaseEnvironment(process.env, databaseName)
+    await createDisposablePostgresDatabase(databaseName)
     backend = await startLocalDispatchFixture(database, password, backendPort)
-    frontend = await startViteForLocalFixture(backendPort, frontendPort)
+    frontend = await startPreviewForLocalFixture(backendPort, frontendPort)
   })
 
   test.afterAll(async () => {
@@ -473,7 +504,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByLabel('密码').fill(password)
     await page.getByRole('button', { name: '登录', exact: true }).click()
     consoleErrors.length = 0
-    await page.getByRole('button', { name: '调度策略' }).click()
+    await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
     await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
     await page.getByLabel('功率控制实体').selectOption({ index: 1 })
@@ -551,7 +582,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByLabel('用户名').fill('local-e2e')
     await page.getByLabel('密码').fill(password)
     await page.getByRole('button', { name: '登录', exact: true }).click()
-    await page.getByRole('button', { name: '调度策略' }).click()
+    await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
     await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
     await page.getByLabel('功率控制实体').selectOption({ index: 1 })
@@ -610,7 +641,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     })
     expect(fresh.ok()).toBeTruthy()
 
-    await page.getByRole('button', { name: '节点管理', exact: true }).click()
+    await openEngineeringPage(page, '节点管理')
     await page.getByPlaceholder('搜索节点...').fill('strategy-test')
     await page.getByTitle('strategy-test', { exact: true }).click()
     await expect(page.getByRole('region', { name: '原始数据' })).toBeVisible()
@@ -622,8 +653,11 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     const l1 = page.getByLabel('加工为实体')
     await expect(l1).toContainText('已选择 1 个原始点位')
     await l1.getByRole('button', { name: '加工为实体', exact: true }).click()
-    await expect(l1.getByLabel('加工方法')).toHaveValue('passthrough')
-    await expect(l1).toContainText('业务标识')
+    const l1Editor = page.getByRole('dialog', { name: '新建标准实体', exact: true })
+    await expect(l1Editor.getByLabel('加工方法')).toHaveValue('passthrough')
+    await l1Editor.getByText('高级设置', { exact: true }).click()
+    await expect(l1Editor).toContainText('业务标识')
+    await l1Editor.getByRole('button', { name: '取消', exact: true }).click()
 
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
     await expect(page.getByRole('heading', { name: '标准实体' })).toBeVisible()
@@ -636,7 +670,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText('definition_id: bms.soc')
     await expect(page.getByRole('region', { name: '实体来源' })).toContainText('processing_revision_id:')
 
-    await page.getByRole('button', { name: '调度策略', exact: true }).click()
+    await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
     await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
     await page.getByLabel('功率控制实体').selectOption({ index: 1 })
@@ -646,7 +680,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByLabel('时段 4 功率目标').fill('0.5')
     await page.getByLabel('其他时段安全目标').fill('0.5')
     await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-    await expect(page.getByRole('status')).toContainText('草稿已保存')
+    await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
 
     await page.getByRole('button', { name: '告警中心', exact: true }).click()
     await page.getByRole('button', { name: '告警规则', exact: true }).click()
@@ -682,16 +716,15 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
 })
 
 async function createDisposablePostgresDatabase(name: string): Promise<Record<string, string>> {
-  const { stdout: encodedPgpass } = await execFileAsync('wsl.exe', ['-d', 'Ubuntu', '-u', 'root', '--', 'python3', '-c', "import base64; print(base64.b64encode(open('/mnt/wsl/zizu-dispatch-recovery-20260905-c73f/rootfs/run/zizu-recovery/pgpass', 'rb').read()).decode())"])
-  const pgpass = Buffer.from(encodedPgpass.trim(), 'base64').toString('utf8')
-  const database = { DB_HOST: '127.0.0.1', DB_PORT: '15433', DB_USER: 'postgres', DB_PASSWORD: pgpass.trim(), DB_NAME: name }
-  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("CREATE DATABASE " + os.environ["DB_NAME"]); c.close(); d=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname=os.environ["DB_NAME"]); d.autocommit=True; d.cursor().execute("CREATE EXTENSION timescaledb CASCADE")'], { env: { ...process.env, ...database } })
+  const database = localDatabaseEnvironment(process.env, name)
+  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("CREATE DATABASE " + os.environ["DB_NAME"]); c.close(); d=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname=os.environ["DB_NAME"]); d.autocommit=True; d.cursor().execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")'], { env: { ...process.env, ...database } })
   return database
 }
 
 async function dropDisposablePostgresDatabase(database: Record<string, string>): Promise<void> {
-  if (!database?.DB_NAME?.endsWith('_test')) return
-  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=%s AND pid<>pg_backend_pid()", (os.environ["DB_NAME"],)); cur.execute("DROP DATABASE " + os.environ["DB_NAME"])'], { env: { ...process.env, ...database } })
+  if (!database) return
+  localDatabaseEnvironment(database, database.DB_NAME)
+  await execFileAsync('C:\\veighna_studio\\python.exe', ['-c', 'import os, psycopg2; c=psycopg2.connect(host=os.environ["DB_HOST"],port=os.environ["DB_PORT"],user=os.environ["DB_USER"],password=os.environ["DB_PASSWORD"],dbname="postgres"); c.autocommit=True; cur=c.cursor(); cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=%s AND pid<>pg_backend_pid()", (os.environ["DB_NAME"],)); cur.execute("DROP DATABASE IF EXISTS " + os.environ["DB_NAME"])'], { env: { ...process.env, ...database } })
 }
 
 async function startLocalDispatchFixture(database: Record<string, string>, localPassword: string, port: number): Promise<ChildProcess> {
@@ -699,13 +732,15 @@ async function startLocalDispatchFixture(database: Record<string, string>, local
   return startUntilReady('C:\\veighna_studio\\python.exe', [path.join(root, 'backend', 'scripts', 'node_management_e2e_fixture.py'), 'local-dispatch-server', '--port', String(port)], {
     ...process.env, ...database, ZIZU_LOCAL_E2E_PASSWORD: localPassword,
     NEURON_PASSWORD: localPassword, NANOMQ_API_PASSWORD: localPassword, JWT_SECRET: localPassword,
+    NEURON_API_URL: 'http://127.0.0.1:17994', NANOMQ_API_URL: 'http://127.0.0.1:18994',
+    MQTT_HOST: '127.0.0.1', MQTT_PORT: '21994',
     DEPLOYMENT_MODE: 'development', AUTH_REQUIRE_HTTPS: 'false', ALLOW_INSECURE_DEV_SECRETS: 'false',
     PYTHONPATH: `C:\\Users\\chent\\AppData\\Local\\Temp\\zizu-v087-local-514b7ea4b65748a1b7673a8577fe3ef8\\python-packages;${path.join(root, 'backend')};${root}`,
   }, 'LOCAL_DISPATCH_FIXTURE')
 }
 
-async function startViteForLocalFixture(backendPort: number, port: number): Promise<ChildProcess> {
-  return startUntilReady('npm.cmd', ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(port)], {
+async function startPreviewForLocalFixture(backendPort: number, port: number): Promise<ChildProcess> {
+  return startUntilReady('npm.cmd', ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
     ...process.env, ZIZU_DEV_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
   }, 'Local:')
 }

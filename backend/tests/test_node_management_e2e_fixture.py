@@ -282,6 +282,33 @@ class NodeManagementE2EFixtureTest(unittest.TestCase):
 
 
 class LocalDispatchPumpTest(unittest.IsolatedAsyncioTestCase):
+    async def test_intent_claim_clock_is_sampled_after_slow_tick_finishes(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        started = datetime(2026, 9, 6, 13, 0, 1, tzinfo=UTC)
+        clock = [started]
+        claimed = []
+
+        class Outbox:
+            async def run_once(self, *, now):
+                return 1
+
+        class FixedTick:
+            def run_once(self, now):
+                clock[0] += timedelta(seconds=5)
+                return 1
+
+        class IntentDispatcher:
+            def run_once(self, now):
+                claimed.append(now)
+                return "IN_FLIGHT"
+
+        await pump_local_dispatch_once(
+            Outbox(), FixedTick(), IntentDispatcher(), tick_at=started,
+            dispatch_at=started, dispatch_clock=lambda: clock[0],
+        )
+        self.assertEqual([started + timedelta(seconds=5)], claimed)
+
     def test_local_server_registers_the_production_configuration_lifecycle(self) -> None:
         source = inspect.getsource(run_local_dispatch_server)
 
@@ -290,6 +317,13 @@ class LocalDispatchPumpTest(unittest.IsolatedAsyncioTestCase):
             "pipeline.data_trunk.configuration_gate.register_committed_frame_consumer()",
             source,
         )
+
+    def test_local_server_claims_new_intents_with_the_postgres_clock(self) -> None:
+        source = inspect.getsource(run_local_dispatch_server)
+
+        self.assertIn("SELECT clock_timestamp()", source)
+        self.assertEqual(3, source.count("dispatch_clock=database_clock"))
+        self.assertNotIn("dispatch_clock=lambda: datetime.now(UTC)", source)
 
     async def test_single_pump_drains_outbox_then_runs_fixed_tick_and_intent_dispatcher(self) -> None:
         calls: list[tuple[str, object]] = []

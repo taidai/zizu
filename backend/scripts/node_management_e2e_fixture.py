@@ -22,13 +22,15 @@ SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 async def pump_local_dispatch_once(
-    outbox, fixed_tick_worker, intent_dispatcher, *, tick_at, dispatch_at,
+    outbox, fixed_tick_worker, intent_dispatcher, *, tick_at, dispatch_at, dispatch_clock=None,
 ):
     """Advance one bounded local turn with a stable tick and claimable dispatch time."""
     import asyncio
 
     published = await outbox.run_once(now=dispatch_at)
     ticks = await asyncio.to_thread(fixed_tick_worker.run_once, tick_at)
+    if dispatch_clock is not None:
+        dispatch_at = dispatch_clock()
     dispatched = await asyncio.to_thread(intent_dispatcher.run_once, dispatch_at)
     return published, ticks, dispatched
 
@@ -680,6 +682,12 @@ def run_local_dispatch_server(port: int) -> None:
     LocalFixture.setUpClass()
     fixture = LocalFixture()
     fixture.setUp()
+
+    def database_clock():
+        with fixture._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT clock_timestamp()")
+            return cursor.fetchone()[0]
+
     with fixture._connection() as connection, connection.cursor() as cursor:
         cursor.execute(
             "CREATE TABLE t_node_categories("
@@ -754,6 +762,7 @@ def run_local_dispatch_server(port: int) -> None:
             intent_dispatcher,
             tick_at=fixed_tick_at,
             dispatch_at=now + timedelta(seconds=1),
+            dispatch_clock=database_clock,
         )
 
     intent_dispatcher = ControlIntentDispatcher(repository, get_automated_control_commands())
@@ -782,6 +791,7 @@ def run_local_dispatch_server(port: int) -> None:
             intent_dispatcher,
             tick_at=fixed_tick_at,
             dispatch_at=now + timedelta(seconds=1),
+            dispatch_clock=database_clock,
         )
         return {"protocol_messages": 1, "device_submissions": len(protocol_dispatcher.requests)}
 
@@ -793,6 +803,7 @@ def run_local_dispatch_server(port: int) -> None:
             intent_dispatcher,
             tick_at=fixed_tick_at,
             dispatch_at=datetime.now(UTC) + timedelta(seconds=1),
+            dispatch_clock=database_clock,
         )
         return {
             "clock": fixed_tick_at.isoformat(),

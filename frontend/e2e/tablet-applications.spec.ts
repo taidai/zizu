@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
+import { openEngineeringPage } from './support/tabletNavigation'
 
 const now = '2026-09-07T08:00:00+08:00'
 const tabletPort = 4186
@@ -67,11 +68,18 @@ function staleStrategyView() {
 async function installReadOnlyApi(page: Page, staleCode?: string) {
   const writes: string[] = []
   const staleStrategy = staleCode ? staleStrategyView() : null
+  await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
+    socket.onMessage((message) => {
+      const body = JSON.parse(String(message))
+      if (body.authenticate) socket.send(JSON.stringify({ type: 'authenticated' }))
+      if (body.subscribe) socket.send(JSON.stringify({ type: 'subscribed' }))
+    })
+  })
   await page.route('**/api/v1/**', async (route: Route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
     const method = request.method()
-    if (method !== 'GET') writes.push(`${method} ${path}`)
+    if (method !== 'GET' && path !== '/auth/ws-ticket') writes.push(`${method} ${path}`)
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) })
     if (path === '/auth/me') return json({ user: { id: 'admin-tablet', username: 'tablet-admin', role: 'admin' } })
     if (path === '/health') return json({
@@ -80,6 +88,10 @@ async function installReadOnlyApi(page: Page, staleCode?: string) {
       components: { timescaledb: { status: 'connected' }, mqtt: { status: 'connected' }, neuron: { status: 'connected' } },
     })
     if (path === '/ems-workbench') return json({ workbench_id: 'default', configuration_revision: 7, navigation: [], groups: [], kpis: [], trends: [], alarms: { visible: true }, controls: { visible: false, entities: [] } })
+    if (path === '/auth/ws-ticket') return json({ ticket: 'isolated-applications-ui' })
+    if (path === '/runtime/frame-snapshot') return json({ type: 'frame_snapshot', node_id: null, cursor: 'isolated', frame_sequence: 0, frame_time: null, configuration_revision: 7, frame_status: null, failure: null, backlog_frames: 0, l0: [], l2: [] })
+    if (path === '/categories') return json({ categories: [] })
+    if (path === '/alarms/counts') return json({ counts: {} })
     if (path.startsWith('/alarm-events')) return json({ items: [], total: 0, page: 1, page_size: 50, total_pages: 1, summary: { active: 0, unacknowledged: 0, critical: 0 } })
     if (path === '/alarms/entities') return json({ items: [] })
     if (path === '/dispatch-strategies') return json({ strategies: staleStrategy ? [staleStrategy] : [] })
@@ -96,7 +108,7 @@ async function installReadOnlyApi(page: Page, staleCode?: string) {
     if (path === '/pipeline/config') return json({ batch_size: 50, flush_interval_sec: 1 })
     if (path === '/mqtt-config') return json({ mqtt_telemetry_topic: '/neuron/#', persisted: null, effective_topics: [] })
     if (path === '/admin/alarm-http-notifications') return json([])
-    if (path === '/nodes') return json([])
+    if (path === '/nodes') return json({ nodes: [] })
     if (path.startsWith('/telemetry')) return json({ points: [], has_more: false, next_cursor: null })
     if (path.startsWith('/fault-maps')) return json({ items: [], total: 0 })
     if (path.startsWith('/nanomq/clients')) return json({ clients: [] })
@@ -141,10 +153,8 @@ async function expectTouchTargets(page: Page, names: string[]) {
   }
 }
 
-async function openNavigation(page: Page, name: string) {
-  const button = page.getByRole('button', { name, exact: true })
-  await expect(button).toBeVisible()
-  await button.evaluate((element) => (element as HTMLButtonElement).click())
+async function openNavigation(page: Page, name: '告警中心' | '调度策略' | '系统工具') {
+  await openEngineeringPage(page, name)
 }
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768 }]) {
