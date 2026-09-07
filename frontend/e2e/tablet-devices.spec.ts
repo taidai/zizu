@@ -122,8 +122,8 @@ async function mountDeviceMonitor(page: Page) {
       $RefreshSig$: () => (type: unknown) => type,
       __vite_plugin_react_preamble_installed__: true,
     })
-    const React = (await import('/node_modules/.vite/deps/react.js')).default
-    const ReactDOM = (await import('/node_modules/.vite/deps/react-dom_client.js')).default
+    const React = (await import('/@id/react')).default
+    const ReactDOM = (await import('/@id/react-dom/client')).default
     const DeviceMonitorPage = (await import('/src/pages/DeviceMonitorPage.tsx')).default
     ReactDOM.createRoot(document.getElementById('root')!).render(React.createElement(DeviceMonitorPage, {}))
   })
