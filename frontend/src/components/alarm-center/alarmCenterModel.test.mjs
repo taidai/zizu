@@ -215,14 +215,16 @@ test('select all filtered entities preserves hidden selections and enforces the 
 })
 
 test('current alarm selection contains only confirmable rows from the visible page', async () => {
-  const { updateCurrentAlarmSelection } = await import('./alarmCenterModel.ts')
+  const { pruneCurrentAlarmSelection, updateCurrentAlarmSelection } = await import('./alarmCenterModel.ts')
   const rows = [
     { id: 'open-1', state: 'active_unacknowledged' },
     { id: 'acked', state: 'active_acknowledged' },
     { id: 'open-2', state: 'active_unacknowledged' },
   ]
   assert.deepEqual(updateCurrentAlarmSelection([], rows, true), ['open-1', 'open-2'])
-  assert.deepEqual(updateCurrentAlarmSelection(['open-1', 'hidden'], rows, false), ['hidden'])
+  assert.deepEqual(updateCurrentAlarmSelection(['open-1', 'old-page-id'], rows, false), [])
+  assert.deepEqual(updateCurrentAlarmSelection(['old-page-id'], rows, true), ['open-1', 'open-2'])
+  assert.deepEqual(pruneCurrentAlarmSelection(['open-1', 'old-page-id', 'acked'], rows), ['open-1'])
 })
 
 test('batch acknowledgement reports each failed alarm without hiding successes', async () => {

@@ -85,13 +85,20 @@ export function canArchiveAlarmEvent(event: {
 }
 
 export function updateCurrentAlarmSelection(
-  selectedIds: string[],
+  _selectedIds: string[],
   pageItems: { id: string; state?: string }[],
   select: boolean,
 ): string[] {
+  if (!select) return []
+  return pageItems.filter((item) => item.state === 'active_unacknowledged').map((item) => item.id)
+}
+
+export function pruneCurrentAlarmSelection(
+  selectedIds: string[],
+  pageItems: { id: string; state?: string }[],
+): string[] {
   const eligible = new Set(pageItems.filter((item) => item.state === 'active_unacknowledged').map((item) => item.id))
-  if (!select) return selectedIds.filter((id) => !eligible.has(id))
-  return [...new Set([...selectedIds, ...eligible])]
+  return selectedIds.filter((id) => eligible.has(id))
 }
 
 export async function acknowledgeAlarmBatch(

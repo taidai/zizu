@@ -6,7 +6,13 @@ const model = await import('./nativeDecisionTableModel.ts')
 const singleTableGraph = () => ({
   nodes: [
     { id: 'input', type: 'inputNode', content: { untouched: true } },
-    { id: 'rules', type: 'decisionTableNode', name: '峰谷规则', content: { hitPolicy: 'first', inputs: [], outputs: [], rules: [] }, custom: 'keep' },
+    { id: 'rules', type: 'decisionTableNode', name: '峰谷规则', content: {
+      hitPolicy: 'first',
+      inputs: [{ id: 'temperature', field: 'temperature', metadata: { source: 'plant-a' } }],
+      outputs: [{ id: 'fan', field: 'fan', vendorFlag: true }],
+      rules: [],
+      metadata: { owner: 'plant-a' },
+    }, custom: 'keep' },
     { id: 'unknown', type: 'vendorNode', content: { formula: 'x + 1' } },
   ],
   edges: [{ id: 'edge-1', sourceId: 'input', targetId: 'rules', metadata: { keep: true } }],
@@ -32,7 +38,12 @@ test('zero or multiple decision tables stay in the full graph editor', () => {
 test('native edit replaces only the sole table content and preserves every unknown field', () => {
   const graph = singleTableGraph()
   const before = structuredClone(graph)
-  const content = { hitPolicy: 'collect', rules: [{ _id: 'changed', temperature: 'temperature > 30' }] }
+  const content = {
+    hitPolicy: 'collect',
+    inputs: [{ id: 'temperature', field: 'ambient_temperature' }],
+    outputs: [{ id: 'fan', field: 'fan_enable' }],
+    rules: [{ _id: 'changed', temperature: 'temperature > 30' }],
+  }
   const next = model.replaceDecisionTableContent(graph, 'rules', content)
   assert.notEqual(next, graph)
   assert.notEqual(next.nodes, graph.nodes)
@@ -41,7 +52,29 @@ test('native edit replaces only the sole table content and preserves every unkno
   assert.deepEqual(next.edges, before.edges)
   assert.deepEqual(next.nodes[0], before.nodes[0])
   assert.deepEqual(next.nodes[2], before.nodes[2])
-  assert.deepEqual(next.nodes[1], { ...before.nodes[1], content })
+  assert.deepEqual(next.nodes[1], { ...before.nodes[1], content: {
+    ...content,
+    inputs: [{ ...content.inputs[0], metadata: { source: 'plant-a' } }],
+    outputs: [{ ...content.outputs[0], vendorFlag: true }],
+    metadata: { owner: 'plant-a' },
+  } })
+})
+
+test('a newly added column does not inherit unknown fields from a removed column at the same position', () => {
+  const graph = singleTableGraph()
+  const next = model.replaceDecisionTableContent(graph, 'rules', {
+    hitPolicy: 'first', inputs: [{ id: 'humidity', field: 'humidity' }], outputs: [], rules: [],
+  })
+  assert.deepEqual(next.nodes[1].content.inputs, [{ id: 'humidity', field: 'humidity' }])
+})
+
+test('edited bindings remain the save source after a native graph becomes a multi-table graph', () => {
+  const current = [{ direction: 'OUTPUT', binding_key: 'fan', ordinal: 0, entity_instance_id: 'fan-A', expected_data_type: 'BOOL', unit: null, freshness_seconds: 5 }]
+  const edited = [{ ...current[0], entity_instance_id: 'fan-B' }]
+  const saved = model.bindingsForDraft(edited)
+  assert.deepEqual(saved, edited)
+  assert.notEqual(saved, edited)
+  assert.notDeepEqual(saved, current)
 })
 
 test('general L2 input accepts confirmed readable bool, numeric, and string entities', () => {

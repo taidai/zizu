@@ -21,6 +21,8 @@ type StrategyBinding = {
   freshness_seconds: number
 }
 
+type DecisionTableContent = Record<string, unknown>
+
 const NATIVE_TYPES = new Set(['BOOL', 'BOOLEAN', 'INT', 'FLOAT', 'NUMBER', 'NUMERIC', 'DOUBLE', 'DECIMAL', 'STRING', 'STATE', 'ENUM'])
 
 export function inspectNativeDecisionTable(graph: NativeDecisionGraph | null | undefined): { nodeId: string; content: unknown } | null {
@@ -36,10 +38,34 @@ export function inspectNativeDecisionTable(graph: NativeDecisionGraph | null | u
 export function replaceDecisionTableContent(graph: NativeDecisionGraph, nodeId: string, content: unknown): NativeDecisionGraph {
   const candidates = graph.nodes.filter((node) => node.type === 'decisionTableNode')
   if (candidates.length !== 1 || candidates[0].id !== nodeId) throw new Error('请使用完整规则图编辑此策略')
+  if (!content || typeof content !== 'object') throw new Error('原生决策表内容无效，请使用完整规则图编辑此策略')
+  const original = candidates[0].content as DecisionTableContent
+  const edited = content as DecisionTableContent
+  const ownedFields = ['hitPolicy', 'rules', 'inputs', 'outputs', 'passThrough', 'inputField', 'outputPath', 'executionMode'] as const
+  const merged: DecisionTableContent = { ...original }
+  for (const field of ownedFields) {
+    if (!Object.prototype.hasOwnProperty.call(edited, field)) continue
+    merged[field] = field === 'inputs' || field === 'outputs'
+      ? mergeDecisionColumns(original[field], edited[field])
+      : edited[field]
+  }
   return {
     ...graph,
-    nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, content } : node),
+    nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, content: merged } : node),
   }
+}
+
+function mergeDecisionColumns(original: unknown, edited: unknown): unknown {
+  if (!Array.isArray(edited)) return edited
+  const originalColumns = Array.isArray(original) ? original : []
+  return edited.map((column) => {
+    if (!column || typeof column !== 'object' || Array.isArray(column)) return column
+    const id = (column as { id?: unknown }).id
+    const previous = originalColumns.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate) && (candidate as { id?: unknown }).id === id)
+    return previous && typeof previous === 'object' && !Array.isArray(previous)
+      ? { ...previous, ...column }
+      : column
+  })
 }
 
 export function isNativeDecisionInputEntity(entity: EntityCandidate | null | undefined): boolean {
@@ -83,4 +109,8 @@ export function updateStrategyBinding<T extends StrategyBinding>(
     unit: entity.unit ?? null,
     freshness_seconds: Number(entity.freshness_seconds),
   } as T : binding)
+}
+
+export function bindingsForDraft<T>(draftBindings: T[]): T[] {
+  return [...draftBindings]
 }

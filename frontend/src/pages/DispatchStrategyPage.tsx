@@ -42,6 +42,7 @@ import {
 } from '../components/dispatch-strategy/dispatchStrategyModel.mjs'
 import NativeDecisionTableEditor from '../components/dispatch-strategy/NativeDecisionTableEditor'
 import {
+  bindingsForDraft,
   inspectNativeDecisionTable,
   isNativeDecisionInputEntity,
   isNativeDecisionOutputEntity,
@@ -94,6 +95,7 @@ export default function DispatchStrategyPage() {
   const [socId, setSocId] = useState('')
   const [outputId, setOutputId] = useState('')
   const [draftBindings, setDraftBindings] = useState<DispatchStrategyBinding[]>([])
+  const [bindingsEdited, setBindingsEdited] = useState(false)
   const [graph, setGraph] = useState<DecisionGraphType>(() => buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0) as DecisionGraphType)
   const [showGraph, setShowGraph] = useState(false)
   const [simulation, setSimulation] = useState<DispatchStrategySimulation | null>(null)
@@ -196,6 +198,7 @@ export default function DispatchStrategyPage() {
         setSocId(source?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')?.entity_instance_id || '')
         setOutputId(source?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')?.entity_instance_id || '')
         setDraftBindings(source?.bindings ? structuredClone(source.bindings) : [])
+        setBindingsEdited(false)
         setSimulation(null)
         setRequiresReload(false)
         setError('')
@@ -245,8 +248,8 @@ export default function DispatchStrategyPage() {
     if (easyTable && socBindingInvalid) throw new Error(socBindingIssue)
     if (easyTable && outputBindingInvalid) throw new Error(outputBindingIssue)
     if (easyTable && !validation.valid) throw new Error(validation.message)
-    let bindings = nativeTable ? [...draftBindings] : [...currentRevision.bindings]
-    if (nativeTable) {
+    const bindings = bindingsForDraft(draftBindings)
+    if (nativeTable || bindingsEdited) {
       if (!bindings.some((item) => item.direction === 'INPUT')) throw new Error('请至少绑定一个 L2 输入实体。')
       if (!bindings.some((item) => item.direction === 'OUTPUT')) throw new Error('请至少绑定一个可控 L2 输出实体。')
       const aliases = validateBindingAliases(bindings)
@@ -283,6 +286,7 @@ export default function DispatchStrategyPage() {
     setStrategy(saved)
     setGraph((saved.draft?.jdm_content || graph) as DecisionGraphType)
     setDraftBindings(saved.draft?.bindings ? structuredClone(saved.draft.bindings) : bindings)
+    setBindingsEdited(false)
     await refreshList(saved.id)
     return saved
   }
@@ -300,7 +304,7 @@ export default function DispatchStrategyPage() {
       || !isJdmGraphUnchanged(graph, currentRevision.jdm_content)
       || socId !== (socBinding?.entity_instance_id || '')
       || outputId !== (outputBinding?.entity_instance_id || '')
-      || (nativeTable && !isJdmGraphUnchanged(draftBindings, currentRevision.bindings))
+      || (bindingsEdited && !isJdmGraphUnchanged(draftBindings, currentRevision.bindings))
     const revision = changed ? (await saveDraft()).draft : currentRevision
     if (!revision) throw new Error('没有可试算的策略版本。')
     const result = await simulateDispatchStrategy(strategy.id, {
@@ -370,6 +374,7 @@ export default function DispatchStrategyPage() {
       }
       return current.map((item, itemIndex) => itemIndex === index ? { ...item, binding_key: patch.alias ?? item.binding_key } : item)
     })
+    setBindingsEdited(true)
     setSimulation(null)
   }
 
@@ -385,6 +390,7 @@ export default function DispatchStrategyPage() {
     const prefix = direction === 'INPUT' ? 'input' : 'output'
     const binding = makeStrategyBinding(entity, direction, `${prefix}_${ordinal + 1}`, ordinal)
     setDraftBindings((current) => [...current, binding])
+    setBindingsEdited(true)
     setSimulation(null)
     setError('')
   }
@@ -396,6 +402,7 @@ export default function DispatchStrategyPage() {
         ? { ...item, ordinal: current.filter((_candidate, candidateIndex) => candidateIndex !== index).filter((candidate) => candidate.direction === direction).findIndex((candidate) => candidate === item) }
         : item)
     })
+    setBindingsEdited(true)
     setSimulation(null)
   }
 
@@ -474,7 +481,7 @@ export default function DispatchStrategyPage() {
               })}
               {!outputEntities.length && <p className="lg:col-span-2 text-xs text-amber-700">没有明确具备控制资格的输出候选。可控资格只表示配置可选，保存、发布和运行时仍由后端重新校验质量、授权、范围和所有权。</p>}
             </div> : null}
-            {bindingReadOnly && <div className="mt-3 text-xs text-gray-600"><p>此策略的实体绑定在当前页面只读；保存会保留全部绑定与新鲜度，并核对当前实体契约、更新配置基线。</p><ul className="mt-2 space-y-1">{currentRevision?.bindings.map((binding) => <li key={`${binding.direction}:${binding.binding_key}`}>{binding.direction === 'INPUT' ? '输入' : '输出'} · {binding.binding_key} → {entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id} · {binding.expected_data_type} {binding.unit || ''} · 新鲜度 {binding.freshness_seconds}s · 顺序 {binding.ordinal}</li>)}</ul></div>}
+            {bindingReadOnly && <div className="mt-3 text-xs text-gray-600"><p>此策略的实体绑定在当前页面只读；保存会保留全部绑定与新鲜度，并核对当前实体契约、更新配置基线。</p><ul className="mt-2 space-y-1">{(bindingsEdited ? draftBindings : currentRevision?.bindings)?.map((binding) => <li key={`${binding.direction}:${binding.binding_key}`}>{binding.direction === 'INPUT' ? '输入' : '输出'} · {binding.binding_key} → {entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id} · {binding.expected_data_type} {binding.unit || ''} · 新鲜度 {binding.freshness_seconds}s · 顺序 {binding.ordinal}</li>)}</ul></div>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="schedule-heading">

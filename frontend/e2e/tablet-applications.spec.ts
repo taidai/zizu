@@ -71,9 +71,10 @@ function applicationStrategy(multipleTables = false) {
       { id: 'input', type: 'inputNode', name: 'Input', metadata: { keep: true } },
       { id: 'rules', type: 'decisionTableNode', name: '通用规则', content: {
         hitPolicy: 'first',
-        inputs: [{ id: 'room_temp', name: '室温', type: 'expression', field: 'room_temp' }],
+        inputs: [{ id: 'room_temp', name: '室温', type: 'expression', field: 'room_temp', metadata: { source: 'fixture' } }],
         outputs: [{ id: 'fan_enable', name: '风机启停', type: 'expression', field: 'fan_enable' }],
         rules: [{ _id: 'hot', room_temp: '> 30', fan_enable: 'true' }],
+        metadata: { owner: 'plant-a' },
       } },
       ...(multipleTables ? [{ id: 'rules-2', type: 'decisionTableNode', name: '第二张表', content: { hitPolicy: 'first', inputs: [], outputs: [], rules: [] } }] : []),
       { id: 'vendor', type: 'vendorNode', content: { preserve: 'always' } },
@@ -147,6 +148,7 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       const nodes = body.jdm_content?.nodes || []
       const preserved = body.jdm_content?.metadata?.owner === 'fixture'
         && nodes.some((node: { id: string; content?: { preserve?: string } }) => node.id === 'vendor' && node.content?.preserve === 'always')
+        && nodes.some((node: { id: string; content?: { metadata?: { owner?: string }; inputs?: { metadata?: { source?: string } }[] } }) => node.id === 'rules' && node.content?.metadata?.owner === 'plant-a' && node.content?.inputs?.[0]?.metadata?.source === 'fixture')
         && body.jdm_content?.edges?.[0]?.metadata?.keep === true
         && body.bindings?.length === 2
       if (!preserved) return json({ detail: { code: 'ROUND_TRIP_LOSS', message: 'fixture graph or bindings lost' } }, 409)

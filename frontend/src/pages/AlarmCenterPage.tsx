@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type Alarm, type AlarmLevel } from '../api/client'
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
-import { acknowledgeAlarmBatch, canArchiveAlarmEvent, updateCurrentAlarmSelection } from '../components/alarm-center/alarmCenterModel'
+import { acknowledgeAlarmBatch, canArchiveAlarmEvent, pruneCurrentAlarmSelection, updateCurrentAlarmSelection } from '../components/alarm-center/alarmCenterModel'
 import '../components/alarm-center/tabletApplications.css'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
@@ -90,6 +90,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
       )
       if (request.signal.aborted || pendingRequest.current !== request) return
       setAlarms(data.alarms)
+      setSelectedIds((current) => pruneCurrentAlarmSelection(current, data.alarms))
       setTotalPages(data.total_pages || 1)
       setStats({
         active: data.summary.active,
