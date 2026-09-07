@@ -3,6 +3,7 @@ import { archiveAlarm, fetchAlarms, acknowledgeAlarm, fetchAlarmEntities, type A
 import MinimalAlarmRulesPage from './MinimalAlarmRulesPage'
 import AlarmNotificationRecords from '../components/alarm-center/AlarmNotificationRecords'
 import { canArchiveAlarmEvent } from '../components/alarm-center/alarmCenterModel'
+import '../components/alarm-center/tabletApplications.css'
 
 const LEVEL_STYLES: Record<AlarmLevel, string> = {
   CRITICAL: 'bg-red-100 text-red-700 border-red-200',
@@ -155,7 +156,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
             <button
               key={s.key}
               onClick={() => { setPage(1); setStatusFilter(s.key as typeof statusFilter) }}
-              className={`neu-btn px-3 py-1 text-xs ${statusFilter === s.key ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}
+              className={`neu-btn px-3 py-1 text-xs ${statusFilter === s.key ? 'zizu-tab-active' : 'text-gray-600'}`}
             >
               {s.label}
             </button>
@@ -221,7 +222,7 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
                   {alarm.state === 'active_unacknowledged' && (
                     <button
                       onClick={() => handleAck(alarm)}
-                      className="neu-btn px-3 py-1 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
+                      className="neu-btn zizu-primary px-3 py-1 text-xs font-medium"
                     >
                       确认
                     </button>
@@ -282,11 +283,11 @@ function CurrentAlarmView({ canArchive }: { canArchive: boolean }) {
 
 export default function AlarmCenterPage({ actorId, canConfigure }: { actorId: string; canConfigure: boolean }) {
   const [tab, setTab] = useState<'events' | 'notifications' | 'rules'>('events')
-  return <div className="space-y-4">
+  return <div className="tablet-applications space-y-4" data-testid="tablet-alarm-applications">
     <div className="flex gap-2 border-b border-white/70 pb-2">
-      <button onClick={() => setTab('events')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'events' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>当前告警</button>
-      <button onClick={() => setTab('notifications')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'notifications' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>通知记录</button>
-      {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'bg-[#52c41a] text-white' : 'text-gray-600'}`}>告警规则</button>}
+      <button onClick={() => setTab('events')} className={`rounded-lg border border-transparent px-4 py-2 text-sm font-semibold ${tab === 'events' ? 'zizu-tab-active' : 'text-gray-600'}`}>当前告警</button>
+      <button onClick={() => setTab('notifications')} className={`rounded-lg border border-transparent px-4 py-2 text-sm font-semibold ${tab === 'notifications' ? 'zizu-tab-active' : 'text-gray-600'}`}>通知记录</button>
+      {canConfigure && <button onClick={() => setTab('rules')} className={`rounded-lg border border-transparent px-4 py-2 text-sm font-semibold ${tab === 'rules' ? 'zizu-tab-active' : 'text-gray-600'}`}>告警规则</button>}
     </div>
     {tab === 'events' && <CurrentAlarmView canArchive={canConfigure} />}
     {tab === 'notifications' && <AlarmNotificationRecords canManage={canConfigure} />}

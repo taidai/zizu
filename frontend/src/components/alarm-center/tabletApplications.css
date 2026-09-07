@@ -1,0 +1,45 @@
+.tablet-applications {
+  color: #2f3338;
+}
+
+.tablet-applications .neu-card {
+  border-color: rgba(184, 138, 52, 0.24);
+  border-radius: 10px;
+}
+
+.tablet-applications button,
+.tablet-applications select,
+.tablet-applications input:not([type='checkbox']):not([type='radio']) {
+  min-height: 44px;
+}
+
+.tablet-applications .zizu-primary {
+  border-color: #9d0711;
+  background: #bb0814;
+  color: #fff;
+}
+
+.tablet-applications .zizu-tab-active {
+  border-color: #d5ba85;
+  background-color: #eee4ce;
+  color: #981320;
+}
+
+.tablet-applications :focus-visible {
+  outline: 3px solid rgba(184, 138, 52, 0.48);
+  outline-offset: 2px;
+}
+
+.tablet-applications table {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+  .tablet-dispatch-layout {
+    flex-direction: column;
+  }
+
+  .tablet-dispatch-layout > aside {
+    width: 100%;
+  }
+}

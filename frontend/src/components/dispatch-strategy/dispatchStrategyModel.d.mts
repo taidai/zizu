@@ -62,6 +62,11 @@ export function readTwoChargeTwoDischargeJdm(graph: Record<string, any>): {
 } | null
 export function isJdmGraphUnchanged(left: Record<string, any>, right: Record<string, any>): boolean
 export function describeDispatchStrategyError(reason: any): string
+export function dispatchStrategyFailureState(reason: any): {
+  message: string
+  requiresReload: boolean
+  keepSimulation: boolean
+}
 export function projectStrategyStatus(strategy: any): {
   draftRevision: number | null
   publishedRevision: number | null

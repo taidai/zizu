@@ -269,7 +269,7 @@ export default function AlarmHttpNotificationPanel() {
           <h3 className="text-sm font-bold text-gray-800">HTTP 通知</h3>
           <p className="mt-1 text-xs text-gray-500">告警发生或恢复后，向指定地址发送 HTTP 请求。</p>
         </div>
-        <button type="button" onClick={startCreate} className="neu-btn bg-[#52c41a] px-3 py-1.5 text-xs font-medium text-white">
+        <button type="button" onClick={startCreate} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-medium">
           新增通知
         </button>
       </header>
@@ -370,7 +370,7 @@ export default function AlarmHttpNotificationPanel() {
           </div>
 
           <div className="mt-4 flex items-center gap-3">
-            <button type="button" disabled={busy !== ''} onClick={() => void save()} className="neu-btn bg-[#52c41a] px-4 py-2 text-xs font-medium text-white disabled:opacity-50">
+            <button type="button" disabled={busy !== ''} onClick={() => void save()} className="neu-btn zizu-primary px-4 py-2 text-xs font-medium disabled:opacity-50">
               {busy === 'save' ? '保存中...' : '保存'}
             </button>
             <span className="text-[11px] text-gray-500">保存后请点“发送测试”；测试成功才可启用。</span>

@@ -245,11 +245,11 @@ export default function MinimalAlarmRulesPage() {
     finally { setBusy('') }
   }
 
-  return <div className="space-y-4">
+  return <div className="tablet-rules-applications space-y-4">
     {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</div>}
     {message && <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">{message}</div>}
     <section className="neu-card p-4">
-      <div className="flex items-center justify-between"><div><h3 className="text-sm font-bold text-gray-800">已配置规则</h3><p className="mt-1 text-xs text-gray-500">启停也通过正式发布链，数据库提交后才改变。</p></div><button onClick={() => { setSelectedRevision(null); setName('现场告警规则'); changeType('NUMBER') }} className="rounded-lg bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white">新建规则</button></div>
+      <div className="flex items-center justify-between"><div><h3 className="text-sm font-bold text-gray-800">已配置规则</h3><p className="mt-1 text-xs text-gray-500">启停也通过正式发布链，数据库提交后才改变。</p></div><button onClick={() => { setSelectedRevision(null); setName('现场告警规则'); changeType('NUMBER') }} className="zizu-primary rounded-lg px-3 py-2 text-xs font-semibold">新建规则</button></div>
       <p className="mt-2 text-xs text-gray-500">启用只恢复正式配置，不发布草稿。同一次未恢复告警不会重复发送 HTTP 通知；恢复后再次发生会重新通知。启停、确认不补发消息，旧告警仍按发生时的条件等待恢复。</p>
       <div className="mt-3 space-y-2">{groups.map((group) => {
         const enabled = group.enabled_entity_instance_ids.length > 0
@@ -278,7 +278,7 @@ export default function MinimalAlarmRulesPage() {
     </section>
     <section className="neu-card p-4 space-y-4">
       <h3 className="text-sm font-bold text-gray-800">1. 选择实体</h3>
-      <div className="flex gap-2">{(['NUMBER', 'STATE', 'CODE_SET'] as AlarmDraftDataType[]).map((type) => <button key={type} onClick={() => changeType(type)} className={`rounded px-3 py-1.5 text-xs ${dataType === type ? 'bg-[#52c41a] text-white' : 'bg-white/50 text-gray-600'}`}>{type === 'NUMBER' ? '数值' : type === 'STATE' ? '状态' : '多故障码'}</button>)}</div>
+      <div className="flex gap-2">{(['NUMBER', 'STATE', 'CODE_SET'] as AlarmDraftDataType[]).map((type) => <button key={type} onClick={() => changeType(type)} className={`rounded border border-transparent px-3 py-1.5 text-xs ${dataType === type ? 'zizu-tab-active' : 'bg-white/50 text-gray-600'}`}>{type === 'NUMBER' ? '数值' : type === 'STATE' ? '状态' : '多故障码'}</button>)}</div>
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,0.45fr)_auto]">
         <input value={entitySearch} onChange={(event) => setEntitySearch(event.target.value)} placeholder="搜索实体名称、业务标识或节点" className="neu-input px-3 py-2 text-xs" />
         <select value={nodeFilter} onChange={(event) => setNodeFilter(event.target.value)} className="neu-input px-3 py-2 text-xs"><option value="">全部节点</option>{entityNodeOptions.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
@@ -335,10 +335,10 @@ export default function MinimalAlarmRulesPage() {
       {firstRule && selectedEntities[0] && <p className="rounded bg-white/50 p-3 text-xs text-gray-700">{describeAlarmDraft(firstRule, { displayName: entities.find((item) => item.id === selectedEntities[0])?.display_name || '所选实体', unit: entities.find((item) => item.id === selectedEntities[0])?.unit || null })}</p>}
       <h3 className="text-sm font-bold text-gray-800">3. 试算并发布</h3>
       {selectedEntity && <p className="text-xs text-gray-600">本次试算对象：<strong>{selectedEntity.node_display_name} / {selectedEntity.display_name}</strong>{selectedEntities.length > 1 ? `（已批量选择 ${selectedEntities.length} 个实体，试算以此实体为准）` : ''}</p>}
-      <div className="flex flex-wrap items-end gap-2"><label className="text-xs">试算值{selectedEntityIsBoolean ? <select value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} className="neu-input mt-1 block px-3 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} placeholder={dataType === 'CODE_SET' ? 'E30,E42' : '当前值'} className="neu-input mt-1 block px-3 py-2" />}</label><button onClick={() => void runTrial()} disabled={!!busy || !trialInput.ready} className="rounded bg-white/70 px-3 py-2 text-xs disabled:opacity-40">试算</button><button onClick={() => void preview()} disabled={!!busy || !trialText} className="rounded bg-[#52c41a] px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">生成发布预览</button></div>
+      <div className="flex flex-wrap items-end gap-2"><label className="text-xs">试算值{selectedEntityIsBoolean ? <select value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} className="neu-input mt-1 block px-3 py-2"><option value="false">false（正常）</option><option value="true">true（故障）</option></select> : <input value={trialValue} onChange={(event) => { setTrialValue(event.target.value); setTrialText('') }} placeholder={dataType === 'CODE_SET' ? 'E30,E42' : '当前值'} className="neu-input mt-1 block px-3 py-2" />}</label><button onClick={() => void runTrial()} disabled={!!busy || !trialInput.ready} className="rounded bg-white/70 px-3 py-2 text-xs disabled:opacity-40">试算</button><button onClick={() => void preview()} disabled={!!busy || !trialText} className="zizu-primary rounded px-3 py-2 text-xs font-semibold disabled:opacity-40">生成发布预览</button></div>
       {!trialInput.ready && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">{trialInput.message}</p>}
       {trialText && <p className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">{trialText}</p>}
-      {plan && <div className="rounded border border-white/70 p-3 text-xs"><p>将影响 {selectedEntities.length} 个实体，共 {plan.items.length} 项变更。</p><button onClick={() => void publish()} disabled={!!busy || plan.status !== 'ready'} className="mt-3 rounded bg-[#52c41a] px-3 py-2 font-semibold text-white disabled:opacity-40">确认发布</button></div>}
+      {plan && <div className="rounded border border-white/70 p-3 text-xs"><p>将影响 {selectedEntities.length} 个实体，共 {plan.items.length} 项变更。</p><button onClick={() => void publish()} disabled={!!busy || plan.status !== 'ready'} className="zizu-primary mt-3 rounded px-3 py-2 font-semibold disabled:opacity-40">确认发布</button></div>}
     </section>
   </div>
 }

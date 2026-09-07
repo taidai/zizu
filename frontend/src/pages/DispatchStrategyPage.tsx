@@ -4,6 +4,7 @@ import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import '../monaco'
 import '@gorules/jdm-editor/dist/style.css'
+import '../components/alarm-center/tabletApplications.css'
 import {
   clearDispatchStrategyFailure,
   createDispatchStrategy,
@@ -26,6 +27,7 @@ import {
 import {
   buildTwoChargeTwoDischargeJdm,
   describeDispatchStrategyError,
+  dispatchStrategyFailureState,
   isDispatchSocEntity,
   isDispatchPowerTargetEntity,
   isJdmGraphUnchanged,
@@ -85,6 +87,8 @@ export default function DispatchStrategyPage() {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [requiresReload, setRequiresReload] = useState(false)
+  const [reloadNonce, setReloadNonce] = useState(0)
 
   const currentRevision = strategy?.draft || strategy?.published_revision || strategy?.active_revision || null
   const validation = useMemo(() => validateDispatchWindows(rows, safeTarget), [rows, safeTarget])
@@ -158,10 +162,12 @@ export default function DispatchStrategyPage() {
     Promise.all([
       fetchDispatchStrategy(selectedId),
       fetchDispatchStrategyEvents(selectedId, { limit: 30 }),
+      fetchEntityInstances(),
     ])
-      .then(([next, eventPage]) => {
+      .then(([next, eventPage, entityRows]) => {
         setStrategy(next)
         setEvents(eventPage.items)
+        setEntities(entityRows.items)
         setName(next.name)
         const source = next.draft || next.published_revision || next.active_revision
         const nextGraph = (source?.jdm_content || buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0)) as DecisionGraphType
@@ -173,11 +179,12 @@ export default function DispatchStrategyPage() {
         setSocId(source?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')?.entity_instance_id || '')
         setOutputId(source?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')?.entity_instance_id || '')
         setSimulation(null)
+        setRequiresReload(false)
         setError('')
       })
       .catch((reason) => setError(describeDispatchStrategyError(reason)))
       .finally(() => setBusy(''))
-  }, [selectedId])
+  }, [selectedId, reloadNonce])
 
   useEffect(() => {
     const ids = [...new Set([socId, outputId, selectedSummaryOutputId].filter(Boolean))]
@@ -198,7 +205,12 @@ export default function DispatchStrategyPage() {
     setError('')
     setNotice('')
     try { await operation() }
-    catch (reason) { setError(describeDispatchStrategyError(reason)) }
+    catch (reason) {
+      const failure = dispatchStrategyFailureState(reason)
+      setError(failure.message)
+      if (!failure.keepSimulation) setSimulation(null)
+      setRequiresReload(failure.requiresReload)
+    }
     finally { setBusy('') }
   }
 
@@ -317,11 +329,11 @@ export default function DispatchStrategyPage() {
   }
 
   return (
-    <div className="flex min-h-[650px] gap-4" data-testid="dispatch-strategy-page">
+    <div className="tablet-applications tablet-dispatch-layout flex min-h-[650px] gap-4" data-tablet-applications="dispatch" data-testid="dispatch-strategy-page">
       <aside className="neu-card w-72 shrink-0 p-4">
         <div className="mb-4 flex items-center justify-between">
           <div><h2 className="text-sm font-bold text-gray-800">调度策略</h2><p className="mt-1 text-[11px] text-gray-500">基于 L2 决策，经统一控制闭环执行</p></div>
-          <button type="button" onClick={createNew} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs font-semibold text-[#287c12]">新建 2充2放</button>
+          <button type="button" onClick={createNew} disabled={!!busy} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-semibold">新建 2充2放</button>
         </div>
         <div className="space-y-2" aria-label="策略列表">
           {strategies.map((item) => {
@@ -329,7 +341,7 @@ export default function DispatchStrategyPage() {
             const currentOutput = item.id === selectedId && selectedSummaryOutputId
               ? observations[selectedSummaryOutputId]
               : null
-            return <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'border-[#52c41a] bg-[#52c41a]/10' : 'border-white/60 bg-white/30'}`}>
+            return <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'zizu-tab-active' : 'border-white/60 bg-white/30'}`}>
               <div className="truncate text-xs font-semibold text-gray-800">{item.name}</div>
               <div className="mt-2 flex flex-wrap gap-1 text-[10px]"><span>{itemStatus.enableLabel}</span><span>·</span><span>{itemStatus.lifecycleLabel}</span><span>·</span><span>{itemStatus.healthLabel}</span></div>
               <div className="mt-1 text-[10px] text-gray-400">目标 {valueText(item.last_desired)} / {currentOutput ? '当前 L2' : '决策时值'} {valueText(currentOutput?.value ?? item.last_actual)}</div>
@@ -352,7 +364,7 @@ export default function DispatchStrategyPage() {
             </div>
           </section>
 
-          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}>{error || notice}</div>}
+          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{requiresReload && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
 
           <section className="neu-card p-4" aria-labelledby="binding-heading">
             <div className="mb-3"><h3 id="binding-heading" className="text-sm font-bold text-gray-800">1. 绑定 L2 全局实体</h3><p className="mt-1 text-xs text-gray-500">策略只认稳定实体，不直接使用品牌点位。这里只显示已确认、类型合适的实体。</p></div>
@@ -386,7 +398,7 @@ export default function DispatchStrategyPage() {
           </section>
 
           <section className="neu-card p-4" aria-labelledby="verification-heading">
-            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">试算</button><button type="button" onClick={publish} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-[#287c12]">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || !strategy.published_revision} className="rounded-lg bg-[#52c41a] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || !strategy.published_revision} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
             {simulation && <div className="mt-4 space-y-3" data-testid="strategy-simulation">
               {simulation.status !== 'EVALUATED' && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                 {describeDispatchStrategyError({ code: simulation.reason_code, message: '试算未通过，请检查实体绑定与数据状态。' })}

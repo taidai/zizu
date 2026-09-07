@@ -11,6 +11,8 @@ const ERROR_MESSAGES = {
   L2_INPUT_STALE: '当前实体数据已超时，请先检查数据链路。',
   COMMITTED_L2_SNAPSHOT_UNAVAILABLE: '当前还没有完整、已提交的实体快照。',
   STRATEGY_DRAFT_CONFLICT: '策略已被其他人修改，请刷新后重试。',
+  STRATEGY_DRAFT_STALE: '策略草稿已被其他人修改，请重新加载后再试算。',
+  DATA_FRAME_CONFIGURATION_STALE: '实体配置已变化，请重新加载策略后再试算。',
   CONFIGURATION_REVISION_CHANGED: '实体配置已经变化，请重新保存后发布。',
   SOC_BINDING_DEFINITION_INVALID: 'SOC 输入必须绑定 bms.soc 或 storage.soc 标准实体。',
   SOC_BINDING_TYPE_INVALID: 'SOC 输入必须是 INT 或 FLOAT 数值实体。',
@@ -245,6 +247,19 @@ export function describeDispatchStrategyError(reason) {
   if (code && ERROR_MESSAGES[code]) return ERROR_MESSAGES[code]
   const message = detail?.message || (typeof detail === 'string' ? detail : null)
   return message || reason?.message || '调度策略操作未完成，请检查配置后重试。'
+}
+
+const STALE_DRAFT_CODES = new Set(['STRATEGY_DRAFT_STALE', 'DATA_FRAME_CONFIGURATION_STALE'])
+
+export function dispatchStrategyFailureState(reason) {
+  const payload = reason?.payload || reason
+  const code = reason?.code || payload?.detail?.code
+  const requiresReload = STALE_DRAFT_CODES.has(code)
+  return {
+    message: describeDispatchStrategyError(reason),
+    requiresReload,
+    keepSimulation: !requiresReload,
+  }
 }
 
 export function projectStrategyStatus(strategy) {

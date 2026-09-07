@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildTwoChargeTwoDischargeJdm,
+  dispatchStrategyFailureState,
   describeDispatchStrategyError,
   isDispatchSocEntity,
   isDispatchPowerTargetEntity,
@@ -81,6 +82,25 @@ test('API validation error maps to one plain-Chinese field message', () => {
     describeDispatchStrategyError({ detail: [{ loc: ['body', 'name'], msg: 'Field required' }] }),
     '请检查“名称”后重试。',
   )
+})
+
+test('stale strategy rejections require reload and invalidate an old simulation', () => {
+  const cases = [
+    ['STRATEGY_DRAFT_STALE', '策略草稿已被其他人修改，请重新加载后再试算。'],
+    ['DATA_FRAME_CONFIGURATION_STALE', '实体配置已变化，请重新加载策略后再试算。'],
+  ]
+  for (const [code, message] of cases) {
+    assert.deepEqual(dispatchStrategyFailureState({ detail: { code } }), {
+      message,
+      requiresReload: true,
+      keepSimulation: false,
+    })
+  }
+  assert.deepEqual(dispatchStrategyFailureState({ detail: { code: 'OUTPUT_LIMIT_VIOLATION' } }), {
+    message: '功率目标超出该实体允许的控制范围。',
+    requiresReload: false,
+    keepSimulation: true,
+  })
 })
 
 test('strategy status keeps revision, enable state and runtime health separate', () => {

@@ -8,6 +8,7 @@ import DataBrowser from './DataBrowser'
 import NanoMQManager from './NanoMQManager'
 import FaultMapManager from './FaultMapManager'
 import AlarmHttpNotificationPanel from './admin/AlarmHttpNotificationPanel'
+import './alarm-center/tabletApplications.css'
 
 export default function AdminPanel() {
   // 入库节拍
@@ -97,7 +98,7 @@ export default function AdminPanel() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="tablet-applications space-y-4" data-testid="tablet-admin-applications">
       {/* 入库节拍配置 */}
       <div className="neu-card p-4">
         <h3 className="text-sm font-bold text-gray-800 mb-3">入库节拍配置</h3>
@@ -130,7 +131,7 @@ export default function AdminPanel() {
           <button
             onClick={handleSaveConfig}
             disabled={configSaving}
-            className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
+            className="neu-btn zizu-primary px-4 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             {configSaving ? '保存中...' : '保存配置'}
           </button>
@@ -158,7 +159,7 @@ export default function AdminPanel() {
           <button
             onClick={handleSaveMqtt}
             disabled={mqttSaving}
-            className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50"
+            className="neu-btn zizu-primary px-4 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             {mqttSaving ? '保存中...' : '保存并重订阅'}
           </button>
@@ -212,7 +213,7 @@ export default function AdminPanel() {
           <button
             onClick={handleExecuteSql}
             disabled={sqlLoading}
-            className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d] disabled:opacity-50 self-start"
+            className="neu-btn zizu-primary px-4 py-1.5 text-xs font-medium disabled:opacity-50 self-start"
           >
             {sqlLoading ? '执行中...' : '执行'}
           </button>
