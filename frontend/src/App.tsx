@@ -62,12 +62,12 @@ const ROLE_LABELS: Record<AuthRole, string> = {
 
 const CONFIG_ROLES: AuthRole[] = ['admin', 'engineer']
 const NAV_ITEMS: Record<TabletPage, { label: string; icon: React.ReactNode }> = {
-  workbench: { label: '光储充现场', icon: <LayoutDashboard size={20} strokeWidth={1.8} /> },
-  monitor: { label: '运行监控', icon: <Network size={20} strokeWidth={1.8} /> },
-  tree: { label: '节点管理', icon: <Network size={20} strokeWidth={1.8} /> },
-  alarms: { label: '告警中心', icon: <Bell size={20} strokeWidth={1.8} /> },
+  workbench: { label: '总览', icon: <LayoutDashboard size={20} strokeWidth={1.8} /> },
+  monitor: { label: '设备监控', icon: <Network size={20} strokeWidth={1.8} /> },
+  tree: { label: '节点与数据', icon: <Network size={20} strokeWidth={1.8} /> },
+  alarms: { label: '告警', icon: <Bell size={20} strokeWidth={1.8} /> },
   strategies: { label: '调度策略', icon: <Scale size={20} strokeWidth={1.8} /> },
-  controls: { label: '授权控制', icon: <Scale size={20} strokeWidth={1.8} /> },
+  controls: { label: '手动控制', icon: <Scale size={20} strokeWidth={1.8} /> },
   admin: { label: '系统工具', icon: <Settings size={20} strokeWidth={1.8} /> },
 }
 

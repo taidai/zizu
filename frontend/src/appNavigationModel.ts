@@ -13,5 +13,5 @@ export function pagesForArea(role: Role, area: TabletArea): TabletPage[] {
     if (role === 'operator') return []
     return role === 'admin' ? ['tree', 'alarms', 'strategies', 'admin'] : ['tree', 'alarms', 'strategies']
   }
-  return ['workbench', 'monitor', 'alarms', 'controls']
+  return ['workbench', 'monitor', 'controls']
 }

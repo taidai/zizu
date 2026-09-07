@@ -51,19 +51,27 @@ async function installSession(page: Page, role: 'admin' | 'engineer' | 'operator
   return writes
 }
 
+async function expectTouchTargets(page: Page, locator: ReturnType<Page['locator']>) {
+  for (const target of await locator.all()) {
+    const box = await target.boundingBox()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  }
+}
+
 test('operator has bounded runtime navigation without engineering authority', async ({ page }, testInfo) => {
   const writes = await installSession(page, 'operator')
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '自足IOT', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '工程配置', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('navigation', { name: '日常运行' }).getByRole('button')).toHaveCount(4)
-  const nav = await page.getByRole('navigation', { name: '日常运行' }).boundingBox()
+  const runtimeNavigation = page.getByRole('navigation', { name: '日常运行' })
+  await expect(runtimeNavigation.getByRole('button')).toHaveCount(3)
+  await expect(runtimeNavigation.getByRole('button').allTextContents()).resolves.toEqual(['总览', '设备监控', '手动控制'])
+  const nav = await runtimeNavigation.boundingBox()
   expect(nav && nav.y + nav.height).toBeLessThanOrEqual(800)
-  for (const button of await page.getByRole('navigation', { name: '日常运行' }).getByRole('button').all()) {
-    expect((await button.boundingBox())?.height).toBeGreaterThanOrEqual(44)
-  }
-  await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '运行监控' }).click()
+  await expectTouchTargets(page, runtimeNavigation.getByRole('button'))
+  await expectTouchTargets(page, page.getByRole('banner').getByRole('button'))
+  await runtimeNavigation.getByRole('button', { name: '设备监控' }).click()
   await expect(page.getByRole('heading', { name: '设备监控', exact: true })).toBeVisible()
   expect(writes).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('runtime-1280.png') })
@@ -75,9 +83,12 @@ test('engineer opens existing node configuration without admin tools or implicit
   await page.goto('/')
   await page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true }).click()
   const engineering = page.getByRole('navigation', { name: '工程配置导航' })
-  await expect(engineering.getByRole('button', { name: '节点管理', exact: true })).toBeVisible()
+  await expect(engineering.getByRole('button').allTextContents()).resolves.toEqual(['节点与数据', '告警', '调度策略'])
+  await expect(engineering.getByRole('button', { name: '节点与数据', exact: true })).toBeVisible()
   await expect(engineering.getByRole('button', { name: '调度策略', exact: true })).toBeVisible()
   await expect(engineering.getByRole('button', { name: '系统工具', exact: true })).toHaveCount(0)
+  await expectTouchTargets(page, engineering.getByRole('button'))
+  await expectTouchTargets(page, page.getByRole('banner').getByRole('button'))
   await page.screenshot({ path: testInfo.outputPath('engineering-1024.png') })
   await page.getByRole('button', { name: '返回现场', exact: true }).click()
   await expect(page.getByRole('navigation', { name: '日常运行' })).toBeVisible()
@@ -89,7 +100,40 @@ test('admin tools remain reachable and unavailable health is not green', async (
   await page.goto('/')
   await expect(page.getByRole('status', { name: '数据链路状态' })).toContainText('连接未知')
   await page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true }).click()
-  await expect(page.getByRole('navigation', { name: '工程配置导航' }).getByRole('button', { name: '系统工具', exact: true })).toBeVisible()
+  const engineering = page.getByRole('navigation', { name: '工程配置导航' })
+  await expect(engineering.getByRole('button').allTextContents()).resolves.toEqual(['节点与数据', '告警', '调度策略', '系统工具'])
+  await expect(engineering.getByRole('button', { name: '系统工具', exact: true })).toBeVisible()
+})
+
+test('overview keeps alarm events reachable without adding alarm to runtime navigation', async ({ page }) => {
+  await installSession(page, 'operator')
+  await page.goto('/')
+  await expect(page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '告警', exact: true })).toHaveCount(0)
+  await page.getByRole('navigation', { name: '运行工作台' }).getByRole('button', { name: '告警', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '告警中心', exact: true })).toBeVisible()
+})
+
+test('production shell uses the approved red gold bright-silver tokens and excludes demo controls', async ({ page }) => {
+  await installSession(page, 'admin')
+  await page.goto('/')
+  const tokens = await page.evaluate(() => {
+    const styles = getComputedStyle(document.documentElement)
+    return {
+      red: styles.getPropertyValue('--zizu-red').trim(),
+      redLight: styles.getPropertyValue('--zizu-red-light').trim(),
+      gold: styles.getPropertyValue('--zizu-gold').trim(),
+      goldLight: styles.getPropertyValue('--zizu-gold-light').trim(),
+      silver: styles.getPropertyValue('--zizu-silver').replaceAll(' ', ''),
+    }
+  })
+  expect(tokens).toEqual({
+    red: '#bb0814',
+    redLight: '#e41622',
+    gold: '#b88a34',
+    goldLight: '#f3d88b',
+    silver: 'linear-gradient(135deg,#fff0%,#f0f2f435%,#e0e4e8100%)',
+  })
+  await expect(page.getByText(/前端\s*DEMO|切换场景|切换角色|重置演示|模拟回读/)).toHaveCount(0)
 })
 
 for (const role of ['operator', 'engineer'] as const) {
@@ -101,7 +145,7 @@ for (const role of ['operator', 'engineer'] as const) {
       : route.fulfill({ json: { nodes: [] } }))
     await page.goto('/')
     if (role === 'operator') {
-      await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '运行监控' }).click()
+      await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '设备监控' }).click()
     } else {
       await page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true }).click()
     }

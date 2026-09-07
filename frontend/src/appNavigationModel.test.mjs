@@ -15,11 +15,16 @@ test('engineering navigation preserves the admin-only tools boundary', () => {
   assert.deepEqual(pagesForArea('admin', 'engineering'), ['tree', 'alarms', 'strategies', 'admin'])
 })
 
-test('runtime navigation retains monitoring alarms and explicit control for all roles', () => {
+test('runtime navigation stays focused on overview monitoring and manual control', () => {
   for (const role of ['admin', 'engineer', 'operator']) {
-    assert.deepEqual(pagesForArea(role, 'runtime'), ['workbench', 'monitor', 'alarms', 'controls'])
-    for (const page of ['workbench', 'monitor', 'alarms', 'controls']) {
+    assert.deepEqual(pagesForArea(role, 'runtime'), ['workbench', 'monitor', 'controls'])
+    for (const page of ['workbench', 'monitor', 'controls']) {
       assert.equal(resolveTabletPage(role, page), page)
     }
   }
+})
+
+test('alarm events remain reachable without becoming a runtime navigation destination', () => {
+  assert.equal(resolveTabletPage('operator', 'alarms'), 'alarms')
+  assert.equal(pagesForArea('operator', 'runtime').includes('alarms'), false)
 })

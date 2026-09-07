@@ -5,14 +5,26 @@
 /* ── Neumorphism 基础 ── */
 :root {
   --zizu-red: #bb0814;
+  --zizu-red-light: #e41622;
+  --zizu-red-shade: #910910;
   --zizu-gold: #b88a34;
+  --zizu-gold-light: #f3d88b;
+  --zizu-gold-soft: #f9e6bb9c;
+  --zizu-gold-shade: #997124;
+  --zizu-gold-ink: #71531d;
+  --zizu-gold-surface: linear-gradient(#fff8ec, #f0dfb9);
   --zizu-silver: linear-gradient(135deg, #fff 0%, #f0f2f4 35%, #e0e4e8 100%);
+  --zizu-stroke: #b9bec5;
+  --zizu-muted: #707780;
+  --zizu-shadow: 3px 4px 9px #929aa246, -2px -2px 5px #fff;
+  --zizu-inset: inset 2px 2px 4px #a3aab230, inset -2px -2px 3px #fff;
   --zizu-font: 'Noto Sans SC', 'Noto Sans CJK SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
 html, body, #root { min-height: 100%; margin: 0; }
 body {
-  background-color: #e4e7eb;
+  min-width: 360px;
+  background-color: #d2d6da;
   font-family: var(--zizu-font);
   font-size: 13px;
   color: #333;
@@ -127,14 +139,18 @@ body {
 }
 
 /* ── 自足IOT：红金亮银平板外壳 ── */
-.zizu-shell { height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.zizu-header {
-  display: flex; align-items: center; gap: 24px; flex-shrink: 0; min-height: 76px; padding: 10px 22px;
-  color: #fff5e4; border-bottom: 2px solid #b88a34;
-  background: radial-gradient(ellipse at 32% 0%, #ff4a4a88, transparent 55%), linear-gradient(#d20612, #a3000b 75%, #83030c);
-  box-shadow: inset 0 1px 0 #ffb4a95c, 0 3px 8px #5a091525;
+.zizu-shell {
+  height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 3px;
+  border: 1px solid #a8aeb5; background: radial-gradient(ellipse at 10% 0, #fff8, transparent 60%), linear-gradient(125deg, #e4e7ea, #cdd2d7);
+  box-shadow: inset 0 0 0 1px #fff;
 }
-.zizu-brand { margin: 0; color: #f3d88b; font-size: 36px; font-weight: 750; letter-spacing: 2px; white-space: nowrap; text-shadow: 0 2px 1px #5f0915; }
+.zizu-header {
+  position: relative; z-index: 2; display: flex; align-items: center; gap: 24px; flex-shrink: 0; min-height: 76px; padding: 9px 24px;
+  color: #fff5e4; border: 1px solid #75050c; border-radius: 9px 9px 2px 2px;
+  background: radial-gradient(ellipse at 30% 0%, #f5232866, transparent 72%), linear-gradient(#d20612, #a3000b 75%, #83030c);
+  box-shadow: inset 0 2px 2px #ffa9a9aa, inset 0 -2px 1px #69060c, 0 3px 0 var(--zizu-gold);
+}
+.zizu-brand { margin: 0; color: var(--zizu-gold-light); font-size: 41px; line-height: 1; font-weight: 800; letter-spacing: 3px; white-space: nowrap; text-shadow: 0 1px 0 #fff2b9, 1px 3px 2px #623700, 0 -1px #b7944f; }
 .zizu-brand span { font-size: .58em; letter-spacing: 1px; margin-left: 4px; }
 .zizu-header-title { display: flex; flex-direction: column; gap: 3px; }
 .zizu-header-title strong { font-size: 21px; font-weight: 650; }
@@ -142,7 +158,7 @@ body {
 .zizu-account { margin-left: auto; text-align: right; display: flex; flex-direction: column; gap: 3px; font-size: 12px; max-width: 145px; }
 .zizu-account > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .zizu-account small { color: #f3c5be; font-size: 10px; }
-.zizu-header-action { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #e9c271; border-radius: 8px; padding: 8px 15px; background: linear-gradient(#faeaca, #e4c284); color: #623d13; box-shadow: inset 0 1px 0 #fff9e5, 0 2px 4px #4600074a; font-size: 14px; font-weight: 650; white-space: nowrap; }
+.zizu-header-action { min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #aeb4bb; border-radius: 7px; padding: 9px 17px; background: linear-gradient(#fff, #e1e4e8); color: #30363d; box-shadow: inset 0 0 0 2px #fff, 0 0 0 2px #989fa7, 0 0 0 4px #f5f5f5, 0 3px 6px #4c060780; font-size: 17px; font-weight: 650; white-space: nowrap; }
 .zizu-logout { min-height: 44px; border: 1px solid #efbab254; border-radius: 7px; padding: 8px 10px; color: #f8dfd9; white-space: nowrap; font-size: 12px; }
 .zizu-header-action:active, .zizu-logout:active { transform: translateY(1px); }
 .zizu-pipeline { min-height: 34px; padding: 6px 20px; display: flex; flex-shrink: 0; align-items: center; gap: 20px; border-bottom: 1px solid #c9cfd7; background: linear-gradient(#fff, #edf0f3); color: #6b7581; font-size: 11px; }
@@ -157,13 +173,13 @@ body {
 .zizu-primary { min-height: 44px; background: linear-gradient(#d3222c, #a70d19); color: white; border: 1px solid #9a0a15; box-shadow: inset 0 1px 0 #ff7b8059, 0 2px 4px #5b0c161f; }
 .zizu-primary:hover { background: linear-gradient(#da2c37, #b10e1b); }
 .zizu-primary:active { box-shadow: inset 0 2px 3px #64071150; }
-.zizu-tab-active, .neu-btn.zizu-tab-active { color: #981320; background: linear-gradient(#f7eedc, #eaddbf); border-color: #d5ba85; box-shadow: inset 0 1px 0 #fff9eb, 0 2px 3px #8f722c18; }
+.zizu-tab-active, .neu-btn.zizu-tab-active { color: #981320; background: var(--zizu-gold-surface); border-color: #d5ba85; box-shadow: inset 0 1px 0 #fff9eb, 0 2px 3px #8f722c18; }
 .zizu-auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: radial-gradient(ellipse at 50% 0, #f5f7fa, #d5dce3); }
 .zizu-login { border-top: 5px solid var(--zizu-red); }
 .zizu-login h1 { color: var(--zizu-red); }
-.zizu-skip-link { position: fixed; top: -100px; left: 16px; z-index: 100; background: white; color: #92111e; padding: 12px 16px; border: 2px solid #b88a34; border-radius: 6px; }
+.zizu-skip-link { position: fixed; top: -100px; left: 16px; z-index: 100; background: white; color: #92111e; padding: 12px 16px; border: 2px solid var(--zizu-gold); border-radius: 6px; }
 .zizu-skip-link:focus { top: 10px; }
-button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #9c7022; outline-offset: 3px; }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--zizu-gold-ink); outline-offset: 3px; }
 button:disabled { cursor: not-allowed; }
 @media (max-width: 1100px) {
   .zizu-header { gap: 16px; padding-inline: 16px; }
