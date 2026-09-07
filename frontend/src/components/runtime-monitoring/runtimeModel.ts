@@ -1,8 +1,56 @@
-import type { EntityInstance, EntityInstanceObservation, Node } from '../../api/client'
-import type { CommittedFrameSnapshot, L2FrameItem } from '../../api/committedFrameStream'
+import type { EntityInstance, EntityInstanceObservation, Node, NodeDataTrunk } from '../../api/client'
+import type { CommittedFrameSnapshot, L0FrameItem, L2FrameItem } from '../../api/committedFrameStream'
 import type { CommittedFrameProjection } from '../data-trunk/committedFrameProjection'
 
 type RuntimeFrame = CommittedFrameSnapshot | CommittedFrameProjection
+
+type ProvenanceSource = {
+  kind: 'l0' | 'l2'
+  inputId: string
+  sourceKey: string
+  point?: L0FrameItem
+  error?: string
+}
+
+export function entityProvenanceModel({ descriptor, observation, trunk, l0 }: {
+  descriptor: EntityInstance
+  observation: L2FrameItem | null
+  trunk: NodeDataTrunk | null
+  l0: readonly L0FrameItem[]
+}): { error: string | null; processingKind?: string; revisionId?: string; sources: ProvenanceSource[] } {
+  const unavailable = (error: string) => ({ error, sources: [] })
+  if (!trunk) return unavailable('节点数据主干尚未读取。')
+  if (trunk.node_id !== descriptor.node_id) return unavailable('节点数据主干身份不匹配。')
+  if (!observation || observation.entity_instance_id !== descriptor.id || observation.node_id !== descriptor.node_id
+    || observation.definition_id !== descriptor.definition_id) return unavailable('所选 L2 提交观测缺失或身份不匹配。')
+  const revisionId = trunk.l1_summary?.revision_id
+  if (!trunk.l1_summary?.installed || !revisionId || revisionId !== observation.processing_revision_id) {
+    return unavailable('当前 L1 加工修订与 L2 提交观测不匹配。')
+  }
+  const outputs = trunk.l2?.filter((item) => item.entity_instance_id === descriptor.id) || []
+  if (outputs.length !== 1) return unavailable('所选 L2 的 L1 输出映射缺失或存在歧义。')
+  const output = outputs[0]
+  if (!output.processing_kind) return unavailable('L1 加工类型缺失。')
+  if (!output.source_summary?.length) return unavailable('L1 输出来源映射缺失。')
+  const sources = output.source_summary.map((source): ProvenanceSource => {
+    const base = { kind: source.source_kind, inputId: source.input_id, sourceKey: source.source_key }
+    if (!source.source_key || !['l0', 'l2'].includes(source.source_kind)) return { ...base, error: '来源种类或稳定键缺失。' }
+    if (source.source_kind === 'l2') return base
+    const catalog = trunk.l0?.filter((item) => item.source_key === source.source_key) || []
+    // The current API declares tag.name as the L0 stable key. Never use display names or path suffixes.
+    const points = l0.filter((point) => point.node_id === descriptor.node_id && (
+      catalog.length ? catalog.some((item) => item.source_id === point.tag_id) : point.name === source.source_key
+    ))
+    if (catalog.length > 1 || points.length > 1) return { ...base, error: `L0 来源 ${source.source_key} 存在歧义。` }
+    if (!points.length) return { ...base, error: `已提交投影缺少 L0 来源 ${source.source_key}。` }
+    const point = points[0]
+    if (!Number.isFinite(point.frame_sequence) || point.frame_sequence > observation.frame_sequence) {
+      return { ...base, error: `L0 来源 ${source.source_key} 的帧证据晚于或无法对应 L2。` }
+    }
+    return { ...base, point }
+  })
+  return { error: null, processingKind: output.processing_kind, revisionId, sources }
+}
 
 export interface RuntimeEntity {
   descriptor: EntityInstance

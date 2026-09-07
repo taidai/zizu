@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import * as runtimeModel from './runtimeModel.ts'
 
 import {
   buildDeviceMonitorPage,
@@ -38,6 +39,85 @@ const descriptors = [
     confirmed: true,
   },
 ]
+
+function provenanceFixture() {
+  return {
+    descriptor: descriptors[0],
+    observation: completeFrame('node-pcs-a', descriptors[0]).l2[0],
+    trunk: {
+      node_id: 'node-pcs-a', l0: [{ source_id: 'tag-power', source_key: 'ActivePower', data_type: 'float', unit: 'W' }],
+      l1_summary: { installed: true, revision_id: 'processing-revision-1', output_count: 1, source_summary: [] },
+      l2: [{ output_key: 'power', entity_instance_id: descriptors[0].id, processing_kind: 'scale', source_summary: [
+        { input_id: 'raw-power', source_kind: 'l0', source_key: 'ActivePower' },
+      ] }],
+    },
+    l0: [{ tag_id: 'tag-power', node_id: 'node-pcs-a', name: 'ActivePower', display_name: '品牌原始功率',
+      value: 0, unit: 'W', data_type: 'float', source_quality: 192, effective_quality: 64,
+      source_timestamp: '2026-09-07T01:00:00Z', received_at: '2026-09-07T01:00:01Z',
+      source_path: 'gateway/group/ActivePower', frame_sequence: 40 }],
+  }
+}
+
+test('provenance joins the selected output to exact committed L0 identity and preserves zero and quality evidence', () => {
+  assert.equal(typeof runtimeModel.entityProvenanceModel, 'function')
+  const result = runtimeModel.entityProvenanceModel(provenanceFixture())
+  assert.equal(result.error, null)
+  assert.equal(result.processingKind, 'scale')
+  assert.equal(result.revisionId, 'processing-revision-1')
+  assert.equal(result.sources[0].point.value, 0)
+  assert.equal(result.sources[0].point.unit, 'W')
+  assert.equal(result.sources[0].point.source_quality, 192)
+  assert.equal(result.sources[0].point.effective_quality, 64)
+  assert.equal(result.sources[0].point.source_path, 'gateway/group/ActivePower')
+  assert.equal(result.sources[0].point.source_timestamp, '2026-09-07T01:00:00Z')
+  assert.equal(result.sources[0].point.received_at, '2026-09-07T01:00:01Z')
+})
+
+test('operator provenance uses exact declared source keys, never display-name guesses or cross-node L0', () => {
+  const fixture = provenanceFixture()
+  fixture.trunk.l0 = []
+  assert.equal(runtimeModel.entityProvenanceModel(fixture).sources[0].point.tag_id, 'tag-power')
+  fixture.l0[0].name = 'different'
+  fixture.l0[0].display_name = 'ActivePower'
+  assert.match(runtimeModel.entityProvenanceModel(fixture).sources[0].error, /L0.*ActivePower/)
+  fixture.l0[0].name = 'ActivePower'
+  fixture.l0[0].node_id = 'other-node'
+  assert.match(runtimeModel.entityProvenanceModel(fixture).sources[0].error, /L0/)
+})
+
+test('cross-node L2 retains its source kind and key without borrowing a similarly named L0', () => {
+  const fixture = provenanceFixture()
+  fixture.trunk.l2[0].source_summary = [{ input_id: 'other-power', source_kind: 'l2', source_key: 'pcs.active_power' }]
+  const result = runtimeModel.entityProvenanceModel(fixture)
+  assert.equal(result.error, null)
+  assert.deepEqual(result.sources, [{ kind: 'l2', inputId: 'other-power', sourceKey: 'pcs.active_power' }])
+})
+
+test('missing trunk, identity, revision, output, processing and source mapping fail with concrete reasons', () => {
+  for (const [mutate, reason] of [
+    [(f) => { f.trunk = null }, /主干/],
+    [(f) => { f.trunk.node_id = 'other' }, /节点/],
+    [(f) => { f.observation = null }, /L2/],
+    [(f) => { f.observation.entity_instance_id = 'other' }, /L2/],
+    [(f) => { f.trunk.l1_summary.revision_id = 'new-revision' }, /修订/],
+    [(f) => { f.trunk.l2 = [] }, /输出/],
+    [(f) => { f.trunk.l2[0].processing_kind = null }, /加工/],
+    [(f) => { f.trunk.l2[0].source_summary = [] }, /来源/],
+  ]) {
+    const fixture = provenanceFixture()
+    mutate(fixture)
+    assert.match(runtimeModel.entityProvenanceModel(fixture).error, reason)
+  }
+})
+
+test('ambiguous and newer-than-L2 L0 evidence is unavailable rather than joined as proof', () => {
+  const fixture = provenanceFixture()
+  fixture.l0.push({ ...fixture.l0[0] })
+  assert.match(runtimeModel.entityProvenanceModel(fixture).sources[0].error, /歧义/)
+  fixture.l0.pop()
+  fixture.l0[0].frame_sequence = 42
+  assert.match(runtimeModel.entityProvenanceModel(fixture).sources[0].error, /帧/)
+})
 
 function completeFrame(nodeId, entity) {
   return {

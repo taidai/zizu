@@ -254,7 +254,7 @@ export default function DeviceMonitorPage({ onOpenEngineering }: DeviceMonitorPr
       )}
 
       {selectedEntity && (
-        <EntityRuntimeDetail descriptor={selectedEntity.descriptor} observation={selectedEntity.observation} nodeCurrent={states.get(selectedEntity.descriptor.node_id)?.status === 'current' && states.get(selectedEntity.descriptor.node_id)?.projection?.status === 'COMPLETE'} onClose={() => setSelectedEntityId(null)} />
+        <EntityRuntimeDetail descriptor={selectedEntity.descriptor} observation={selectedEntity.observation} l0={[...(states.get(selectedEntity.descriptor.node_id)?.projection?.l0.values() || [])]} nodeCurrent={states.get(selectedEntity.descriptor.node_id)?.status === 'current' && states.get(selectedEntity.descriptor.node_id)?.projection?.status === 'COMPLETE'} onClose={() => setSelectedEntityId(null)} />
       )}
     </section>
   )

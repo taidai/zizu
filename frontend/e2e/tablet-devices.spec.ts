@@ -30,7 +30,12 @@ function frame(nodeId: string) {
   return {
     type: 'frame_snapshot', node_id: nodeId, cursor: `cursor-${nodeId}`, frame_sequence: 7,
     frame_time: '2026-09-07T02:00:00.000Z', configuration_revision: 12,
-    frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [],
+    frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [{
+      tag_id: `raw-${nodeId}`, node_id: nodeId, name: 'StatusWord', display_name: '原始状态字',
+      data_type: 'int', value: 2, unit: null, source_quality: 192, effective_quality: 64,
+      source_timestamp: '2026-09-07T01:59:58.000Z', received_at: '2026-09-07T01:59:59.000Z',
+      accepted_beat: 6, source_path: 'gateway/group/StatusWord', source_type: 'neuron', frame_sequence: 7,
+    }],
     l2: selected.map((entity, index) => {
       const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-2' ? 0 : 192
       return {
@@ -54,10 +59,12 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 async function installFixture(page: Page, options: {
   nodeFailures?: number
   countSequence?: Array<'success' | 'fail' | 'pending-success'>
+  trunkFailures?: number
 } = {}) {
   const writes: string[] = []
   let nodeCalls = 0
   let countCalls = 0
+  let trunkCalls = 0
   await page.addInitScript(() => {
     const sockets: FixtureWebSocket[] = []
     class FixtureWebSocket {
@@ -105,6 +112,18 @@ async function installFixture(page: Page, options: {
     }
     if (url.pathname.endsWith('/runtime/frame-snapshot')) return fulfillJson(route, frame(url.searchParams.get('node_id')!))
     if (url.pathname.endsWith('/auth/ws-ticket')) return fulfillJson(route, { ticket: 'fixture-ticket' })
+    if (url.pathname.endsWith('/data-trunk')) {
+      trunkCalls += 1
+      if (trunkCalls <= (options.trunkFailures || 0)) return fulfillJson(route, { detail: 'trunk unavailable' }, 503)
+      return fulfillJson(route, {
+        node_id: 'device-1', l0: [],
+        l1_summary: { installed: true, revision_id: 'pr-1', output_count: 2, source_summary: [] },
+        l2: [
+          { entity_instance_id: 'entity-1', output_key: 'state', processing_kind: 'boolean_map', source_summary: [{ input_id: 'raw-state', source_kind: 'l0', source_key: 'StatusWord' }] },
+          { entity_instance_id: 'entity-2', output_key: 'power', processing_kind: 'passthrough', source_summary: [{ input_id: 'power', source_kind: 'l2', source_key: 'pcs.active_power' }] },
+        ],
+      })
+    }
     const historyMatch = url.pathname.match(/\/entity-instances\/([^/]+)\/history$/)
     if (historyMatch) return fulfillJson(route, { items: [{
       type: 'entity_observation', event_id: 'status-history-1', entity_instance_id: historyMatch[1],
@@ -203,6 +222,41 @@ test('failed alarm counts stay unknown and cannot masquerade as zero or a valid 
   await expect(page.getByRole('alert')).toContainText('计数显示未知')
   await expect(page.getByText('未恢复 —').first()).toBeVisible()
   await expect(page.getByRole('checkbox', { name: '仅有未恢复告警' })).toBeDisabled()
+})
+
+test('entity provenance shows committed raw evidence, retries trunk failure and labels cross-node L2 honestly', async ({ page }, testInfo) => {
+  const requests: string[] = []
+  page.on('request', (request) => requests.push(request.url()))
+  await installFixture(page, { trunkFailures: 1 })
+  await mountDeviceMonitor(page)
+  await page.getByRole('article', { name: /同名 PCS 设备卡片/ }).first().getByRole('button', { name: '查看详情' }).click()
+  const device = page.getByRole('dialog', { name: '同名 PCS' })
+  await device.getByRole('button', { name: '运行状态' }).click()
+  const detail = page.getByRole('dialog', { name: '运行状态', exact: true })
+  await expect(detail).toContainText('来源证据不可用')
+  await detail.getByRole('button', { name: '重试来源' }).click()
+  const provenance = detail.getByRole('region', { name: '实体来源证据' })
+  await expect(provenance).toContainText('L2 运行状态')
+  await expect(provenance).toContainText('L1 boolean_map · pr-1')
+  await expect(provenance).toContainText('L0 原始状态字')
+  await expect(provenance).toContainText('gateway/group/StatusWord')
+  await expect(provenance).toContainText('原始值2')
+  await expect(provenance).toContainText('源质量正常')
+  await expect(provenance).toContainText('有效质量超时')
+  await expect(provenance).toContainText('数据时间')
+  await expect(provenance).toContainText('接收时间')
+  await detail.getByRole('button', { name: '6小时', exact: true }).click()
+  await expect(detail.getByRole('region', { name: '实体历史' })).toContainText('false')
+  expect(requests.filter((url) => url.endsWith('/data-trunk'))).toHaveLength(2)
+  expect(requests.filter((url) => /entity-instances\/[^/]+\/realtime/.test(url))).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('l0-provenance.png'), fullPage: true })
+  await detail.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: /^指标 2 pcs/ }).click()
+  const crossSource = page.getByRole('region', { name: '实体来源证据' })
+  await expect(crossSource).toContainText('跨节点 L2 pcs.active_power')
+  await expect(crossSource).toContainText('需另行打开来源节点证据')
+  await expect(crossSource).not.toContainText('原始状态字')
+  await page.screenshot({ path: testInfo.outputPath('l2-provenance.png'), fullPage: true })
 })
 
 test('a failed node directory is retryable and never rendered as an empty site', async ({ page }) => {

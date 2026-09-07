@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   fetchEntityInstanceHistory,
-  fetchEntityInstanceRealtime,
+  fetchNodeDataTrunk,
   type EntityHistoryRange,
   type EntityInstance,
   type EntityInstanceObservation,
+  type NodeDataTrunk,
 } from '../../api/client'
-import type { L2FrameItem } from '../../api/committedFrameStream'
-import { entityHistoryModel, runtimeEntityReading } from './runtimeModel'
+import type { L0FrameItem, L2FrameItem } from '../../api/committedFrameStream'
+import { entityHistoryModel, entityProvenanceModel, runtimeEntityReading } from './runtimeModel'
 
 const RANGES: Array<[EntityHistoryRange, string]> = [
   ['1h', '1小时'],
@@ -69,46 +70,57 @@ function HistoryChart({ segments, label }: {
 export default function EntityRuntimeDetail({
   descriptor,
   observation,
+  l0,
   nodeCurrent,
   onClose,
 }: {
   descriptor: EntityInstance
   observation: L2FrameItem | null
+  l0: readonly L0FrameItem[]
   nodeCurrent: boolean
   onClose: () => void
 }) {
   const [range, setRange] = useState<EntityHistoryRange>('1h')
   const [history, setHistory] = useState<EntityInstanceObservation[]>([])
-  const [evidence, setEvidence] = useState<EntityInstanceObservation | null>(null)
+  const [trunk, setTrunk] = useState<NodeDataTrunk | null>(null)
   const [historyError, setHistoryError] = useState('')
   const [evidenceError, setEvidenceError] = useState('')
   const [loading, setLoading] = useState(true)
   const [generation, setGeneration] = useState(0)
+  const [evidenceGeneration, setEvidenceGeneration] = useState(0)
+  const [evidenceLoading, setEvidenceLoading] = useState(true)
 
   useEffect(() => {
     let active = true
     setLoading(true)
     setHistory([])
-    setEvidence(null)
     setHistoryError('')
-    setEvidenceError('')
-    Promise.allSettled([
-      fetchEntityInstanceHistory(descriptor.id, range),
-      fetchEntityInstanceRealtime(descriptor.id),
-    ]).then(([historyResult, evidenceResult]) => {
+    fetchEntityInstanceHistory(descriptor.id, range).then((value) => {
       if (!active) return
-      if (historyResult.status === 'fulfilled') setHistory(historyResult.value)
-      else setHistoryError(historyResult.reason instanceof Error ? historyResult.reason.message : '读取实体历史失败。')
-      if (evidenceResult.status === 'fulfilled') setEvidence(evidenceResult.value)
-      else setEvidenceError(evidenceResult.reason instanceof Error ? evidenceResult.reason.message : '读取实体来源证据失败。')
-      setLoading(false)
-    })
+      setHistory(value)
+    }).catch((error) => {
+      if (active) setHistoryError(error instanceof Error ? error.message : '读取实体历史失败。')
+    }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [descriptor.id, generation, range])
+
+  useEffect(() => {
+    let active = true
+    setTrunk(null)
+    setEvidenceError('')
+    setEvidenceLoading(true)
+    fetchNodeDataTrunk(descriptor.node_id).then((value) => {
+      if (active) setTrunk(value)
+    }).catch((error) => {
+      if (active) setEvidenceError(error instanceof Error ? error.message : '读取节点数据主干失败。')
+    }).finally(() => { if (active) setEvidenceLoading(false) })
+    return () => { active = false }
+  }, [descriptor.node_id, evidenceGeneration])
 
   const historyModel = useMemo(() => entityHistoryModel(descriptor, history), [descriptor, history])
   const reading = runtimeEntityReading(observation, nodeCurrent)
   const numeric = ['float', 'int'].includes(descriptor.data_type.toLowerCase())
+  const provenance = entityProvenanceModel({ descriptor, observation, trunk, l0 })
 
   return (
     <div className="runtime-detail-backdrop" role="presentation" onMouseDown={(event) => {
@@ -144,7 +156,7 @@ export default function EntityRuntimeDetail({
         <div className="runtime-detail__body">
           <section aria-label="实体历史">
             <h4>历史</h4>
-            {loading ? <div className="runtime-empty">正在读取历史与来源证据…</div> : historyError ? (
+            {loading ? <div className="runtime-empty">正在读取历史…</div> : historyError ? (
               <div className="runtime-error"><span>{historyError}</span><button type="button" onClick={() => setGeneration((value) => value + 1)}>重试历史</button></div>
             ) : numeric ? (
               <HistoryChart segments={historyModel.numericSegments} label={`${descriptor.display_name} ${range}历史趋势`} />
@@ -163,6 +175,33 @@ export default function EntityRuntimeDetail({
 
           <section aria-label="实体来源证据">
             <h4>来源与帧证据</h4>
+            {evidenceLoading ? <div className="runtime-empty">正在读取来源映射…</div> : evidenceError || provenance.error ? (
+              <div className="runtime-error"><span>来源证据不可用：{evidenceError || provenance.error}</span><button type="button" onClick={() => setEvidenceGeneration((value) => value + 1)}>重试来源</button></div>
+            ) : (
+              <div className="runtime-provenance">
+                <p>L2 {descriptor.display_name}（{descriptor.definition_id}）<br />← L1 {provenance.processingKind} · {provenance.revisionId}</p>
+                {provenance.sources.map((source, index) => (
+                  <div className="runtime-provenance__source" key={`${source.inputId}-${source.sourceKey}-${index}`}>
+                    {source.error ? <p className="runtime-error">来源证据不可用：{source.error}</p> : source.kind === 'l2' ? (
+                      <p>← 跨节点 L2 {source.sourceKey}<br />输入 {source.inputId} · 需另行打开来源节点证据；此处不将其视为 L0。</p>
+                    ) : source.point ? (
+                      <>
+                        <p>← L0 {source.point.display_name || source.point.name || source.sourceKey}<br />{source.point.source_path || '路径未记录'}</p>
+                        <dl className="runtime-evidence">
+                          <div><dt>输入 / 稳定来源键</dt><dd>{source.inputId} / {source.sourceKey}</dd></div>
+                          <div><dt>原始值</dt><dd>{formatValue(source.point.value)}{source.point.unit ? ` ${source.point.unit}` : ''}</dd></div>
+                          <div><dt>源质量</dt><dd>{qualityLabel(source.point.source_quality)}</dd></div>
+                          <div><dt>有效质量</dt><dd>{qualityLabel(source.point.effective_quality)}</dd></div>
+                          <div><dt>数据时间</dt><dd>{formatTime(source.point.source_timestamp)}</dd></div>
+                          <div><dt>接收时间</dt><dd>{formatTime(source.point.received_at)}</dd></div>
+                        </dl>
+                      </>
+                    ) : null}
+                  </div>
+                ))}
+                <p className="runtime-evidence-note">L0 来自所选节点的已提交投影，非独立实时查询。下方帧信息属于本次 L2 状态观测；非当前值不代表本帧重新产生了最后正常值。</p>
+              </div>
+            )}
             <dl className="runtime-evidence">
               <div><dt>实体实例</dt><dd>{descriptor.id}</dd></div>
               <div><dt>节点</dt><dd>{descriptor.node_id}</dd></div>
@@ -171,15 +210,6 @@ export default function EntityRuntimeDetail({
               <div><dt>加工修订</dt><dd>{observation?.processing_revision_id || '未记录'}</dd></div>
               <div><dt>来源摘要</dt><dd>{observation?.source_digest || '未记录'}</dd></div>
             </dl>
-            {evidenceError ? (
-              <div className="runtime-error"><span>{evidenceError}</span><button type="button" onClick={() => setGeneration((value) => value + 1)}>重试来源</button></div>
-            ) : evidence ? (
-              <div className="runtime-evidence-note">
-                逐实体证据查询：{qualityLabel(evidence.quality)} · {formatTime(evidence.observed_at)}
-                <br />来源摘要：{typeof evidence.source_summary === 'string' ? evidence.source_summary : evidence.source_summary?.digest || evidence.source_digest || '未记录'}
-                <br />此查询不与节点提交帧拼接为同一帧。
-              </div>
-            ) : null}
           </section>
         </div>
       </section>

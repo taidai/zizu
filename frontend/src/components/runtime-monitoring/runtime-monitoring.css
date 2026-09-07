@@ -138,6 +138,9 @@
 .runtime-evidence dt { color: var(--runtime-muted); }
 .runtime-evidence dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 .runtime-evidence-note { margin-top: 12px; padding: 9px; border-left: 3px solid #b88a34; color: var(--runtime-muted); background: #fbf7ec; font-size: 10px; line-height: 1.65; }
+.runtime-provenance { margin-bottom: 16px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.runtime-provenance__source { margin: 10px 0; padding: 10px; border: 1px solid #d5ba85; border-radius: 6px; }
+.runtime-provenance__source p { margin: 0 0 8px; }
 
 .runtime-device-filters { display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(160px, .7fr) auto auto; align-items: end; gap: 12px; padding: 14px 16px; border-radius: 12px; background: linear-gradient(135deg, #fff 0%, #f0f2f4 35%, #e0e4e8 100%); }
 .runtime-device-filters label > span { display: block; margin: 0 0 5px; color: var(--runtime-muted); font-size: 10px; font-weight: 700; }

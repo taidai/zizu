@@ -356,6 +356,7 @@ export default function EMSWorkbenchPage({
         <EntityRuntimeDetail
           descriptor={selected.descriptor}
           observation={selected.observation}
+          l0={[...(states.get(selected.descriptor.node_id)?.projection?.l0.values() || [])]}
           nodeCurrent={states.get(selected.descriptor.node_id)?.status === 'current' && states.get(selected.descriptor.node_id)?.projection?.status === 'COMPLETE'}
           onClose={() => setSelectedEntityId(null)}
         />
