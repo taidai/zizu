@@ -666,7 +666,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768
 
     await openNavigation(page, '调度策略')
     await expect(page.locator('[data-tablet-applications="dispatch"]')).toBeVisible()
-    await expectTouchTargets(page, ['新建 2充2放'])
+    await expectTouchTargets(page, ['新建通用策略'])
 
     await openNavigation(page, '系统工具')
     const tools = page.getByTestId('tablet-admin-applications')

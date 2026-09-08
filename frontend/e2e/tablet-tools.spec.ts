@@ -216,6 +216,11 @@ async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin',
     })
     if (pathName === '/categories') return json({ categories: [] })
     if (pathName === '/alarms/counts') return json({ counts: {} })
+    if (pathName === '/alarm-events') return json({
+      items: [], total: 0, page: 1, page_size: 10, total_pages: 1,
+      summary: { active: 0, unacknowledged: 0, critical: 0 },
+    })
+    if (pathName === '/dispatch-strategies') return json({ strategies: [] })
     if (pathName === '/entity-instances') return json({ items: [], total: 0 })
     if (pathName === '/pipeline/config' && method === 'GET' && scenario.configReadFailure) return json({ detail: 'PIPELINE_READ_FORBIDDEN' }, 403)
     if (pathName === '/pipeline/config' && method === 'PUT' && scenario.configWriteFailure) return json({ detail: 'PIPELINE_REVISION_CONFLICT' }, 409)
@@ -262,9 +267,13 @@ async function login(page: Page, role: 'admin' | 'engineer' = 'admin') {
 }
 
 test('系统工具以四个正式分区打开管理器且打开动作不产生写请求', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
   const writes = await installToolsApi(page)
   await login(page)
   await openEngineeringPage(page, '系统工具')
+
+  expect(pageErrors).toEqual([])
 
   const tools = page.getByTestId('tablet-admin-applications')
   for (const name of ['NanoMQ / MQTT', 'HTTP 通知', '故障映射', '数据与系统状态']) {
@@ -302,11 +311,14 @@ test('系统工具以四个正式分区打开管理器且打开动作不产生�
 })
 
 test('非管理员没有系统工具入口且不会触发系统管理请求', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
   const writes = await installToolsApi(page, 'engineer')
   await login(page, 'engineer')
   await page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true }).click()
 
   await expect(page.getByRole('button', { name: '系统工具', exact: true })).toHaveCount(0)
+  expect(pageErrors).toEqual([])
   expect(writes).toEqual([])
 })
 
