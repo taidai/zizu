@@ -58,10 +58,20 @@ const notification = {
   enabled: false,
 }
 
+const faultMap = {
+  id: 'fault-map-1',
+  name: 'PCS 故障映射',
+  description: '正式故障表',
+  entries: [{ code: '1', message: '过温' }],
+  created_at: '2026-09-08T02:00:00Z',
+  updated_at: '2026-09-08T02:00:00Z',
+}
+
 type ToolsApiScenario = {
   configReadFailure?: boolean
   configWriteFailure?: boolean
   faultMapsFailure?: boolean
+  faultMapSave?: FaultMapSaveController
   healthFailure?: boolean
   healthDisconnected?: boolean
   healthRace?: HealthRaceController
@@ -78,6 +88,7 @@ function deferred(): Deferred {
 
 type HealthRaceController = ReturnType<typeof createHealthRaceController>
 type HealthSlowController = ReturnType<typeof createHealthSlowController>
+type FaultMapSaveController = ReturnType<typeof createFaultMapSaveController>
 
 function createHealthRaceController() {
   return {
@@ -94,6 +105,14 @@ function createHealthSlowController() {
     requestCount: 0,
     started: deferred(),
     release: deferred(),
+  }
+}
+
+function createFaultMapSaveController() {
+  return {
+    readCount: 0,
+    refreshStarted: deferred(),
+    releaseRefresh: deferred(),
   }
 }
 
@@ -246,6 +265,17 @@ async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin',
     if (pathName === '/admin/truncate' && method === 'POST') {
       return json({ status: 'ok', table: 't_telemetry', rows_deleted: 12 })
     }
+    if (pathName === '/fault-maps/fault-map-1' && method === 'PUT' && scenario.faultMapSave) {
+      return json({ ...faultMap, updated_at: '2026-09-08T02:01:00Z' })
+    }
+    if (pathName === '/fault-maps' && method === 'GET' && scenario.faultMapSave) {
+      const readNumber = ++scenario.faultMapSave.readCount
+      if (readNumber === 2) {
+        scenario.faultMapSave.refreshStarted.resolve()
+        await scenario.faultMapSave.releaseRefresh.promise
+      }
+      return json({ items: [faultMap], total: 1 })
+    }
     if (pathName === '/fault-maps' && method === 'GET' && scenario.faultMapsFailure) return json({ detail: 'FAULT_MAP_SERVICE_UNAVAILABLE' }, 503)
     if (pathName === '/fault-maps') return json({ items: [], total: 0 })
     if (pathName === '/nodes') return json({ nodes: [] })
@@ -343,6 +373,9 @@ test('系统工具顶层、嵌套编辑器和永久确认框形成键盘焦点�
   await expect(saveHttp).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(httpEditorClose).toBeFocused()
+  await httpEditor.getByRole('heading', { name: '编辑：值班系统', exact: true }).click()
+  await page.keyboard.press('Shift+Tab')
+  await expect(saveHttp).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(httpEditor).toHaveCount(0)
   await expect(httpParent).toBeVisible()
@@ -417,6 +450,26 @@ test('异步系统健康响应完成后不抢走当前输入焦点', async ({ pa
   const health = page.getByRole('dialog', { name: '数据与系统状态', exact: true }).getByRole('region', { name: '系统健康状态' })
   await expect(health).toContainText('API slow-success')
   await expect(sql).toBeFocused()
+})
+
+test('故障映射保存刷新后恢复到重新渲染的编辑按钮', async ({ page }) => {
+  const save = createFaultMapSaveController()
+  await installToolsApi(page, 'admin', { faultMapSave: save })
+  await login(page)
+  await openEngineeringPage(page, '系统工具')
+
+  await page.getByRole('button', { name: '打开故障映射', exact: true }).click()
+  const parent = page.getByRole('dialog', { name: '故障映射', exact: true })
+  await parent.locator('article, div').filter({ hasText: 'PCS 故障映射' }).getByRole('button', { name: '编辑', exact: true }).first().click()
+  const editor = page.getByRole('dialog', { name: '故障映射编辑器', exact: true })
+  await editor.getByRole('button', { name: '保存', exact: true }).click()
+  await save.refreshStarted.promise
+  await expect(editor).toHaveCount(0)
+
+  save.releaseRefresh.resolve()
+  const refreshedEdit = parent.locator('article, div').filter({ hasText: 'PCS 故障映射' }).getByRole('button', { name: '编辑', exact: true }).first()
+  await expect(refreshedEdit).toBeVisible()
+  await expect(refreshedEdit).toBeFocused()
 })
 
 test('非管理员没有系统工具入口且不会触发系统管理请求', async ({ page }) => {

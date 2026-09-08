@@ -16,6 +16,8 @@ export default function FaultMapManager() {
   const [editing, setEditing] = useState<FaultMap | null>(null)
   const [showForm, setShowForm] = useState(false)
   const editorTrigger = useRef<HTMLButtonElement | null>(null)
+  const editorTriggerKey = useRef<string | null>(null)
+  const editTriggers = useRef<Record<string, HTMLButtonElement | null>>({})
   const [form, setForm] = useState<{ name: string; description: string; entries: FaultMapEntry[] }>({
     name: '',
     description: '',
@@ -66,8 +68,9 @@ export default function FaultMapManager() {
       } else {
         await createFaultMap(payload)
       }
-      closeEditor()
+      closeEditor(false)
       await load()
+      restoreEditorFocus()
     } catch (e: any) {
       alert('保存失败：' + (e.message || e))
     }
@@ -99,15 +102,21 @@ export default function FaultMapManager() {
     setForm({ ...form, entries: next })
   }
 
-  function closeEditor() {
+  function restoreEditorFocus() {
+    const key = editorTriggerKey.current
+    restoreModalTrigger(() => key ? editTriggers.current[key] : editorTrigger.current)
+  }
+
+  function closeEditor(restoreFocus = true) {
     setShowForm(false)
     setEditing(null)
-    restoreModalTrigger(editorTrigger.current)
+    if (restoreFocus) restoreEditorFocus()
   }
-  const editorModal = useModalFocus({ open: showForm, onClose: closeEditor })
+  const editorModal = useModalFocus({ open: showForm, onClose: () => closeEditor() })
 
   const startCreate = (trigger: HTMLButtonElement) => {
     editorTrigger.current = trigger
+    editorTriggerKey.current = null
     setEditing(null)
     setForm({ name: '', description: '', entries: [] })
     setShowForm(true)
@@ -115,6 +124,7 @@ export default function FaultMapManager() {
 
   const startEdit = (map: FaultMap, trigger: HTMLButtonElement) => {
     editorTrigger.current = trigger
+    editorTriggerKey.current = map.id
     setEditing(map)
   }
 
@@ -144,6 +154,7 @@ export default function FaultMapManager() {
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  ref={(node) => { editTriggers.current[map.id] = node }}
                   onClick={(event) => startEdit(map, event.currentTarget)}
                   className="neu-btn px-3 py-1 text-xs"
                 >
@@ -183,7 +194,7 @@ export default function FaultMapManager() {
           <section ref={editorModal.dialogRef} tabIndex={-1} onKeyDown={editorModal.onKeyDown} role="dialog" aria-modal="true" aria-label="故障映射编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
             <header className="zizu-tools-dialog-header">
               <div><span>FAULT MAP</span><h2>{editing ? `编辑：${editing.name}` : '新建故障映射'}</h2></div>
-              <button type="button" onClick={closeEditor} className="neu-btn zizu-tools-close">关闭</button>
+              <button type="button" onClick={() => closeEditor()} className="neu-btn zizu-tools-close">关闭</button>
             </header>
             <div className="zizu-tools-dialog-body space-y-4">
               <div className="grid grid-cols-2 gap-3">
@@ -202,7 +213,7 @@ export default function FaultMapManager() {
                 {!form.entries.length && <p className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-xs text-gray-400">尚未添加故障码条目。</p>}
               </div>
               <div className="flex justify-end gap-2">
-                <button type="button" onClick={closeEditor} className="neu-btn px-4 text-xs">取消</button>
+                <button type="button" onClick={() => closeEditor()} className="neu-btn px-4 text-xs">取消</button>
                 <button type="button" onClick={() => void handleSave()} className="neu-btn zizu-primary px-4 text-xs font-medium">保存</button>
               </div>
             </div>

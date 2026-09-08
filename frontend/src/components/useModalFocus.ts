@@ -16,8 +16,17 @@ function focusableElements(dialog: HTMLElement): HTMLElement[] {
   ))
 }
 
-export function restoreModalTrigger(trigger: HTMLElement | null) {
-  window.requestAnimationFrame(() => trigger?.focus())
+function isTopmostModal(dialog: HTMLElement): boolean {
+  const modals = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'))
+    .filter((element) => element.offsetWidth > 0 || element.offsetHeight > 0 || element.getClientRects().length > 0)
+  return modals[modals.length - 1] === dialog
+}
+
+export function restoreModalTrigger(trigger: HTMLElement | null | (() => HTMLElement | null)) {
+  window.requestAnimationFrame(() => {
+    const target = typeof trigger === 'function' ? trigger() : trigger
+    target?.focus()
+  })
 }
 
 export function useModalFocus({
@@ -48,7 +57,7 @@ export function useModalFocus({
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     const dialog = dialogRef.current
     const origin = event.target instanceof Element ? event.target : null
-    if (!dialog || event.defaultPrevented || origin?.closest('[role="dialog"]') !== dialog) return
+    if (!dialog || !isTopmostModal(dialog) || event.defaultPrevented || origin?.closest('[role="dialog"]') !== dialog) return
 
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -68,10 +77,11 @@ export function useModalFocus({
     const first = elements[0]
     const last = elements[elements.length - 1]
     const current = document.activeElement
-    if (event.shiftKey && (current === first || !dialog.contains(current))) {
+    const currentIsFocusable = current instanceof HTMLElement && elements.includes(current)
+    if (event.shiftKey && (current === first || !currentIsFocusable)) {
       event.preventDefault()
       last.focus()
-    } else if (!event.shiftKey && (current === last || !dialog.contains(current))) {
+    } else if (!event.shiftKey && (current === last || !currentIsFocusable)) {
       event.preventDefault()
       first.focus()
     }
