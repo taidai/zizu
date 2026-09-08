@@ -77,10 +77,32 @@ export function replaceDecisionTableContent(graph: NativeDecisionGraph, nodeId: 
       ? mergeDecisionColumns(original[field], edited[field])
       : edited[field]
   }
+  if (Array.isArray(edited.rules)) {
+    const originalRules = Array.isArray(original.rules) ? original.rules : []
+    const knownColumnIds = new Set([original.inputs, original.outputs].flatMap((columns) => Array.isArray(columns) ? columns.map((column) => column.id) : []))
+    merged.rules = edited.rules.map((row) => {
+      const previous = originalRules.find((candidate) => candidate._id && candidate._id === row._id)
+      // Only extension fields survive. Deleted native cells/columns stay deleted.
+      const extensions = Object.fromEntries(Object.entries(previous || {}).filter(([key]) => !knownColumnIds.has(key)))
+      return { ...extensions, ...row }
+    })
+  }
   return {
     ...graph,
     nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, content: merged } : node),
   }
+}
+
+export function addNativeExampleColumns(graph: NativeDecisionGraph, nodeId: string): NativeDecisionGraph {
+  const table = inspectNativeDecisionTable(graph)
+  if (!table || table.nodeId !== nodeId) throw new Error('请使用完整规则图编辑此策略')
+  const content = table.content as DecisionTableContent
+  const inputs = content.inputs as { id: string; field?: string }[]
+  const examples = [
+    { id: 'site_local_minute', field: 'site_local_minute', name: '时段示例（站点分钟）' },
+    { id: 'soc', field: 'soc', name: 'SOC 示例（需绑定 soc 输入）' },
+  ].filter((column) => !inputs.some((existing) => existing.id === column.id || existing.field === column.field))
+  return replaceDecisionTableContent(graph, nodeId, { ...content, inputs: [...inputs, ...examples] })
 }
 
 function mergeDecisionColumns(original: unknown, edited: unknown): unknown {

@@ -102,6 +102,25 @@ test('a newly added column does not inherit unknown fields from a removed column
   assert.deepEqual(next.nodes[1].content.inputs, [{ id: 'humidity', field: 'humidity' }])
 })
 
+test('native row edits preserve unknown evidence while removing intentionally deleted column cells', () => {
+  const graph = singleTableGraph()
+  graph.nodes[1].content.rules = [{ _id: 'row-1', temperature: '> 30', fan: 'true', vendorEvidence: { revision: 9 } }]
+  const next = model.replaceDecisionTableContent(graph, 'rules', {
+    ...graph.nodes[1].content, outputs: [], rules: [{ _id: 'row-1', temperature: '> 35' }],
+  })
+  assert.deepEqual(next.nodes[1].content.rules, [{ _id: 'row-1', temperature: '> 35', vendorEvidence: { revision: 9 } }])
+})
+
+test('optional examples add only native input columns without replacing existing rules or graph metadata', () => {
+  assert.equal(typeof model.addNativeExampleColumns, 'function')
+  const graph = singleTableGraph()
+  const next = model.addNativeExampleColumns(graph, 'rules')
+  assert.deepEqual(next.nodes[1].content.inputs.map((column) => column.field), ['temperature', 'site_local_minute', 'soc'])
+  assert.deepEqual(next.nodes[1].content.rules, [])
+  assert.deepEqual(next.metadata, graph.metadata)
+  assert.deepEqual(model.addNativeExampleColumns(next, 'rules'), next)
+})
+
 test('edited bindings remain the save source after a native graph becomes a multi-table graph', () => {
   const current = [{ direction: 'OUTPUT', binding_key: 'fan', ordinal: 0, entity_instance_id: 'fan-A', expected_data_type: 'BOOL', unit: null, freshness_seconds: 5 }]
   const edited = [{ ...current[0], entity_instance_id: 'fan-B' }]

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { buildTwoChargeTwoDischargeJdm } from '../src/components/dispatch-strategy/dispatchStrategyModel.mjs'
+import { buildGenericDecisionTableJdm } from '../src/components/dispatch-strategy/nativeDecisionTableModel'
 import { stopSpawnedProcess } from './support/localProcess.mjs'
 import { openEngineeringPage } from './support/tabletNavigation'
 import { localDatabaseEnvironment } from './support/localDatabase.mjs'
@@ -15,7 +16,7 @@ let localFixtureOutput = ''
 const now = '2026-09-05T00:00:00+00:00'
 const entities = [
   { id: 'entity-soc', node_id: 'node-ess', node_type: 'ESS', node_display_name: '1#储能', definition_id: 'bms.soc', display_name: 'SOC', data_type: 'FLOAT', unit: '%', direction: 'R', freshness_seconds: 10, confirmed: true },
-  { id: 'entity-limit', node_id: 'node-pcs', node_type: 'PCS', node_display_name: '1#PCS', definition_id: 'pcs.max_discharge_limit', display_name: '最大放电功率限值', data_type: 'FLOAT', unit: 'kW', direction: 'RW', freshness_seconds: 10, confirmed: true },
+  { id: 'entity-limit', node_id: 'node-pcs', node_type: 'PCS', node_display_name: '1#PCS', definition_id: 'pcs.max_discharge_limit', display_name: '最大放电功率限值', data_type: 'FLOAT', unit: 'kW', direction: 'RW', freshness_seconds: 10, confirmed: true, control_eligible: true },
 ]
 
 function revision(id: string, lifecycle: 'DRAFT' | 'PUBLISHED', body: any = {}) {
@@ -108,7 +109,11 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
       return json(route, strategy)
     }
     if (path === '/dispatch-strategies/strategy-1' && method === 'GET') return json(route, strategy)
-    if (path === '/dispatch-strategies/strategy-1/events' && method === 'GET') return json(route, { items: events, next_cursor: null })
+    if (path === '/dispatch-strategies/strategy-1/events' && method === 'GET') {
+      const offset = Number(url.searchParams.get('cursor') || 0)
+      const limit = Number(url.searchParams.get('limit') || 10)
+      return json(route, { items: events.slice(offset, offset + limit), next_cursor: offset + limit < events.length ? String(offset + limit) : null })
+    }
     if (path === '/dispatch-strategies/strategy-1/draft' && method === 'PUT') {
       const body = request.postDataJSON()
       savedDrafts.push(body)
@@ -142,17 +147,70 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
     }
     if (path === '/dispatch-strategies/strategy-1/enable' && method === 'POST') {
       strategy = { ...strategy, enabled: true, active_revision_id: 'published-1', active_revision: strategy.published_revision, runtime_health: 'READY' }
-      events = [{ id: 'event-1', occurred_at: now, event_kind: 'DECISION_CHANGED', trigger_kind: 'FIXED_TICK', trigger_key: 'tick:1', frame_sequence: 42, configuration_revision: 7, snapshot_evidence: {}, decision: { matched_rule: 'discharge-1' }, intent_summary: [{ value: 80 }], control_command_id: 'command-1', control_status: 'confirmed', reason_code: null }]
+      events = [{ id: 'event-1', occurred_at: now, event_kind: 'DECISION_CHANGED', trigger_kind: 'FIXED_TICK', trigger_key: 'tick:1', frame_sequence: 42, configuration_revision: 7, snapshot_evidence: {}, decision: { matched_rule: 'discharge-1' }, intent_summary: [{ value: 80 }], control_command_id: 'command-1', control_status: 'dispatched', reason_code: null }]
       return json(route, strategy)
     }
     if (path === '/dispatch-strategies/strategy-1/disable' && method === 'POST') {
       strategy = { ...strategy, enabled: false }
       return json(route, strategy)
     }
+    if (path === '/dispatch-strategies/strategy-1/failure-latch/clear' && method === 'POST') {
+      strategy = { ...strategy, runtime_health: 'READY', failure_code: null }
+      return json(route, strategy)
+    }
+    if (path === '/control-commands/command-1' && method === 'GET') return json(route, { id: 'command-1', status: 'dispatched', code: 'WAITING_READBACK', source_type: 'strategy' })
     return json(route, { detail: { code: 'UNMOCKED', message: `${method} ${path}` } }, 500)
   })
-  return { calls, savedDrafts, getStrategy: () => strategy }
+  return { calls, savedDrafts, getStrategy: () => strategy, setEvents: (items: any[]) => { events = items } }
 }
+
+test('三步原生工作流保留多类型绑定，编辑使试算与草稿收据失效', async ({ page }) => {
+  const original = strategyView()
+  original.draft.jdm_content = buildGenericDecisionTableJdm()
+  const api = await installApi(page, original, [
+    ...entities,
+    { ...entities[0], id: 'mode', display_name: '运行模式', data_type: 'STRING', unit: null },
+    { ...entities[1], id: 'fan', display_name: '风机启停', data_type: 'BOOL', unit: null },
+    { ...entities[1], id: 'uncontrolled', display_name: '无控制合同', control_eligible: false },
+  ])
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  const inputs = page.getByRole('region', { name: '1. 选择 L2 输入' })
+  const table = page.getByRole('region', { name: '2. 编辑原生 JDM 决策表' })
+  const outputs = page.getByRole('region', { name: '3. 绑定可控 L2 输出' })
+  await expect(inputs).toBeVisible({ timeout: 3000 })
+  await expect(table).toBeVisible()
+  await expect(outputs).toBeVisible()
+  await inputs.getByRole('button', { name: '添加输入' }).click()
+  await inputs.getByRole('button', { name: '添加输入' }).click()
+  await page.getByLabel('输入 2 实体').selectOption('mode')
+  await outputs.getByRole('button', { name: '添加输出' }).click()
+  await outputs.getByRole('button', { name: '添加输出' }).click()
+  await expect(page.getByLabel('输出 1 实体')).not.toContainText('无控制合同')
+  await table.getByRole('button', { name: '添加可选示例列' }).click()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('strategy-draft-receipt')).toContainText('draft-1')
+  expect(api.savedDrafts[0].bindings.map((binding: any) => binding.expected_data_type)).toEqual(['FLOAT', 'STRING', 'FLOAT', 'BOOL'])
+  expect(api.savedDrafts[0].jdm_content.nodes[1].content.inputs.map((column: any) => column.field)).toEqual(['site_local_minute', 'soc'])
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  await expect(page.getByTestId('strategy-simulation')).toContainText('未下发')
+  await page.getByLabel('输入 1 别名').fill('temperature')
+  await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
+  await expect(page.getByTestId('strategy-draft-receipt')).not.toBeVisible()
+  await expect(page.getByRole('region', { name: '策略状态' })).toContainText('未保存修改')
+  await expect(page.getByRole('button', { name: '启用', exact: true })).toBeDisabled()
+  expect(api.calls.some((call) => /control-commands|\/enable/.test(call))).toBe(false)
+  for (const size of [{ width: 1280, height: 800 }, { width: 1024, height: 768 }]) {
+    await page.setViewportSize(size)
+    await page.getByLabel('策略名称').scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath(`native-workflow-${size.width}.png`), fullPage: true })
+    await table.getByRole('heading', { name: '2. 编辑原生 JDM 决策表' }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath(`native-table-${size.width}.png`), fullPage: true })
+    await outputs.getByRole('heading', { name: '3. 绑定可控 L2 输出' }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath(`native-outputs-${size.width}.png`), fullPage: true })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+})
 
 test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', async ({ page }) => {
   const pageErrors: string[] = []
@@ -178,14 +236,17 @@ test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', 
     { direction: 'OUTPUT', binding_key: 'run-mode', ordinal: 1, entity_instance_id: 'entity-mode', expected_data_type: 'INT', unit: null, freshness_seconds: 60 },
   ]
   const expectedRevision = structuredClone(original.draft)
-  const api = await installApi(page, original)
+  const api = await installApi(page, original, [...entities,
+    { ...entities[0], id: 'entity-temperature', display_name: '温度', unit: '°C' },
+    { ...entities[1], id: 'entity-mode', display_name: '模式', data_type: 'INT', unit: null },
+  ])
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toHaveValue(original.name)
   await expect.soft(page.getByLabel('时段 1 功率目标')).not.toBeVisible()
-  await expect.soft(page.getByLabel('SOC 输入实体')).toBeDisabled()
-  await expect.soft(page.getByLabel('功率控制实体')).toBeDisabled()
-  await expect.soft(page.getByText(/无法由 2充2放表无损表示/)).toBeVisible()
+  await expect(page.getByLabel('输入 2 实体')).toHaveValue('entity-temperature')
+  await expect(page.getByLabel('输出 2 实体')).toHaveValue('entity-mode')
+  await expect(page.getByText(/不是可无损往返的唯一决策表/)).toBeVisible()
   await page.getByRole('button', { name: '打开完整规则图', exact: true }).click()
   await expect(page.getByText('完整决策', { exact: true }).first()).toBeVisible()
   await page.getByRole('button', { name: '收起完整规则图', exact: true }).click()
@@ -227,8 +288,8 @@ test('非标准 JDM 的旧缺失单位可显式保存并刷新到当前实体合
   const api = await installApi(page, original, entities, 7)
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('SOC 输入实体')).toBeDisabled()
-  await expect(page.getByLabel('功率控制实体')).toBeDisabled()
+  await expect(page.getByLabel('输入 1 实体')).toHaveValue('entity-soc')
+  await expect(page.getByLabel('输出 1 实体')).toHaveValue('entity-limit')
 
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
 
@@ -241,137 +302,147 @@ test('非标准 JDM 的旧缺失单位可显式保存并刷新到当前实体合
   expect(api.getStrategy().draft.bindings.map((item: any) => item.unit)).toEqual(['%', '%', 'kW'])
 })
 
-test('内置表编辑直接更新完整图并保留原绑定契约和触发', async ({ page }) => {
-  const original = strategyView()
-  original.draft.trigger_kind = 'DATA_CHANGE'
-  original.draft.bindings = [
-    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: '%', freshness_seconds: 30 },
-    { direction: 'OUTPUT', binding_key: 'power-target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: 'kW', freshness_seconds: 30 },
-  ]
+test('运行事件默认10条可切20条，游标翻页不覆盖未保存草稿', async ({ page }) => {
+  const api = await installApi(page, publishedStrategy())
+  api.setEvents(Array.from({ length: 21 }, (_, index) => ({ id: `event-${index}`, occurred_at: now, event_kind: `RULE_${index}`, trigger_kind: 'FIXED_TICK', trigger_key: `tick:${index}`, frame_sequence: index, configuration_revision: 7, snapshot_evidence: {}, decision: null, intent_summary: [], control_command_id: null, control_status: null, reason_code: null })))
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  const region = page.getByRole('region', { name: '4. 关键事件与控制回读' })
+  await expect(region.locator('tbody tr')).toHaveCount(10)
+  await page.getByLabel('策略名称').fill('本地未保存')
+  await region.getByRole('button', { name: '下一页' }).click()
+  await expect(region.getByRole('cell', { name: 'RULE_10', exact: true })).toBeVisible()
+  await expect(page.getByLabel('策略名称')).toHaveValue('本地未保存')
+  await page.getByLabel('事件每页条数').selectOption('20')
+  await expect(region.locator('tbody tr')).toHaveCount(20)
+  await expect(region.getByRole('cell', { name: 'RULE_0', exact: true })).toBeVisible()
+  expect(api.savedDrafts).toHaveLength(0)
+})
+
+test('原生策略显式选择正式触发方式，不改写同一 JDM 图', async ({ page }) => {
+  const original = publishedStrategy()
+  original.published_revision.trigger_kind = 'DATA_CHANGE'
+  const graph = structuredClone(original.published_revision.jdm_content)
   const api = await installApi(page, original)
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
-  await page.getByLabel('时段 1 功率目标').fill('-25')
+  await page.getByLabel('触发方式').selectOption('FIXED_TICK')
+  await expect(page.getByRole('button', { name: '启用', exact: true })).toBeDisabled()
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
-  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].target).toBe('-25')
-  expect(api.savedDrafts[0].bindings).toEqual(original.draft.bindings)
-  expect(api.savedDrafts[0].trigger_kind).toBe('DATA_CHANGE')
-  await page.reload()
-  await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('时段 1 功率目标')).toHaveValue('-25')
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  expect(api.savedDrafts[0].trigger_kind).toBe('FIXED_TICK')
+  expect(api.savedDrafts[0].jdm_content).toEqual(graph)
 })
 
-test('候选只允许标准 SOC 百分比输入和 kW 数值控制输出', async ({ page }) => {
-  await installApi(page, strategyView(), [
-    ...entities,
-    { ...entities[0], id: 'storage-soc', definition_id: 'storage.soc', data_type: 'INT' },
-    { ...entities[0], id: 'misnamed-current', definition_id: 'bms.current', display_name: 'SOC', unit: 'A' },
-    { ...entities[0], id: 'legacy-soc', definition_id: 'ess.soc' },
-    { ...entities[0], id: 'soc-ratio', unit: 'ratio' },
-    { ...entities[0], id: 'soc-bool', data_type: 'BOOL' },
-    { ...entities[0], id: 'soc-unconfirmed', confirmed: false },
-    { ...entities[1], id: 'voltage-output', unit: 'V' },
-    { ...entities[1], id: 'boolean-output', data_type: 'BOOL' },
+test('策略目录读取失败显示真实错误而不是伪装成尚无策略', async ({ page }) => {
+  await installApi(page)
+  await page.route('**/api/v1/dispatch-strategies', (route) => route.fulfill({
+    status: 403, contentType: 'application/json', body: JSON.stringify({ detail: { code: 'FORBIDDEN', message: '没有策略读取权限' } }),
+  }))
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText(/权限|授权/, { timeout: 3000 })
+})
+
+test('原生规则行编辑直接保存 action_id 与强类型目标到唯一 JDM', async ({ page }) => {
+  const original = strategyView()
+  original.draft.jdm_content = buildGenericDecisionTableJdm()
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await configureNativeControl(page)
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  const content = api.savedDrafts[0].jdm_content.nodes[1].content
+  expect(content.rules).toHaveLength(1)
+  expect(content.rules[0]).toMatchObject({ action_id: '"power-target"', target: '0.5' })
+  expect(content.hitPolicy).toBe('collect')
+  expect(content.outputPath).toBe('intents')
+})
+
+test('已有时段 JDM 在原生表改名保存仍保留条件、公式与触发原义', async ({ page }) => {
+  const original = publishedStrategy()
+  original.published_revision.trigger_kind = 'DATA_CHANGE'
+  original.published_revision.jdm_content.nodes[1].content.rules[0].site_local_minute = '[1320..1440)'
+  original.published_revision.jdm_content.metadata = { external: 'keep' }
+  const before = structuredClone(original.published_revision)
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await expect(page.getByTestId('native-decision-table')).toBeVisible()
+  await expect(page.getByLabel('时段 1 功率目标')).not.toBeVisible()
+  await page.getByLabel('策略名称').fill('保留时段原义')
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  expect(api.savedDrafts[0].jdm_content).toEqual(before.jdm_content)
+  expect(api.savedDrafts[0].bindings).toEqual(before.bindings)
+  expect(api.savedDrafts[0].trigger_kind).toBe('DATA_CHANGE')
+})
+
+test('不合格 L2 绑定不能保存且不自动改选；明确重新绑定后恢复', async ({ page }) => {
+  const original = publishedStrategy()
+  const api = await installApi(page, original, [
+    { ...entities[0], confirmed: false }, entities[1],
+    { ...entities[0], id: 'confirmed-input', definition_id: 'cabinet.temperature', unit: '°C' },
   ])
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('策略名称')).toBeVisible()
-  expect(await page.getByLabel('SOC 输入实体').locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual(['', 'entity-soc', 'storage-soc'])
-  expect(await page.getByLabel('功率控制实体').locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual(['', 'entity-limit'])
-})
-
-test('已有错误 SOC 绑定明确阻止保存且不自动选择其他实体', async ({ page }) => {
-  const original = strategyView()
-  original.draft.bindings = [
-    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'wrong-soc', expected_data_type: 'FLOAT', unit: 'A', freshness_seconds: 10 },
-    { direction: 'OUTPUT', binding_key: 'power-target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: 'kW', freshness_seconds: 10 },
-  ]
-  const api = await installApi(page, original, [...entities, { ...entities[0], id: 'wrong-soc', definition_id: 'bms.current', display_name: 'SOC', unit: 'A' }])
-  await page.goto('/')
-  await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('策略名称')).toBeVisible()
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText(/SOC.*绑定.*不符合/, { timeout: 3000 })
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('不再可读')
   expect(api.savedDrafts).toHaveLength(0)
-  await expect(page.getByLabel('SOC 输入实体')).toHaveValue('wrong-soc')
-  await page.getByLabel('SOC 输入实体').selectOption('entity-soc')
+  await expect(page.getByLabel('输入 1 实体')).toHaveValue('entity-soc')
+  await page.getByLabel('输入 1 实体').selectOption('confirmed-input')
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
-  expect(api.savedDrafts[0].bindings[0].entity_instance_id).toBe('entity-soc')
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  expect(api.savedDrafts[0].bindings[0]).toMatchObject({ entity_instance_id: 'confirmed-input', unit: '°C' })
 })
 
-test('没有合法 SOC 候选时提示先建立标准百分比实体', async ({ page }) => {
-  await installApi(page, strategyView(), [entities[1]])
+test('空候选不提供伪造实体或控制输出', async ({ page }) => {
+  const api = await installApi(page, strategyView(), [])
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('策略名称')).toBeVisible()
-  await expect(page.getByText(/先.*建立.*标准 SOC.*百分比/)).toBeVisible({ timeout: 3000 })
-})
-
-test('午夜结束时间保持 24:00 原义且无效编辑不能保存旧图', async ({ page }) => {
-  const original = strategyView()
-  original.draft.jdm_content = buildTwoChargeTwoDischargeJdm([
-    { key: 'night', start: '22:00', end: '24:00', action: 'CHARGE', target: -10, socMin: 10, socMax: 90 },
-  ], 0)
-  original.draft.bindings = [
-    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: '%', freshness_seconds: 10 },
-    { direction: 'OUTPUT', binding_key: 'power-target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: 'kW', freshness_seconds: 10 },
-  ]
-  const api = await installApi(page, original)
-  await page.goto('/')
-  await openEngineeringPage(page, '调度策略')
-  await expect(page.getByLabel('策略名称')).toBeVisible()
-  await expect(page.getByLabel('时段 1 结束')).toHaveValue('24:00', { timeout: 3000 })
-  await page.getByLabel('其他时段安全目标').fill('')
-  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('其他时段安全目标')
+  await page.getByRole('button', { name: '添加输入' }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('没有更多可读')
+  await page.getByRole('button', { name: '添加输出' }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('没有更多明确具备控制资格')
+  await expect(page.getByText(/请先配置正式 L2 控制合同/)).toBeVisible()
   expect(api.savedDrafts).toHaveLength(0)
-  await page.getByLabel('其他时段安全目标').fill('1')
-  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
-  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].site_local_minute).toBe('site_local_minute >= 1320 && site_local_minute < 1440')
-  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules.at(-1).target).toBe('1')
 })
 
-test('2充2放从 L2 绑定到控制回读只走一条策略流程', async ({ page }) => {
-  const consoleErrors: string[] = []
-  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
-  const api = await installApi(page)
+test('发布与启用明确分开；故障锁解除不恢复运行，事件受理不冒充回读成功', async ({ page }) => {
+  const api = await installApi(page, publishedStrategy())
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
-  await page.getByRole('button', { name: '新建 2充2放' }).click()
-  await expect(page.getByLabel('策略名称')).toHaveValue('2充2放调度策略')
-
-  await page.getByLabel('SOC 输入实体').selectOption('entity-soc')
-  await page.getByLabel('功率控制实体').selectOption('entity-limit')
-  await expect(page.getByText(/质量：正常/).first()).toBeVisible()
-
-  await page.getByRole('button', { name: '试算', exact: true }).click()
-  await expect(page.getByTestId('strategy-simulation')).toContainText('帧 42')
-  await expect(page.getByTestId('strategy-simulation')).toContainText('discharge-1')
-  await expect(page.getByTestId('strategy-simulation')).toContainText('power-target=80')
-
+  await page.getByLabel('策略名称').fill('新的调度修订')
+  await expect(page.getByRole('button', { name: '启用', exact: true })).toBeDisabled()
   await page.getByRole('button', { name: '发布', exact: true }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('已发布为不可变版本')
+  expect(api.calls.some((call) => call.endsWith('/enable'))).toBe(false)
   await page.getByRole('button', { name: '启用', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('下一个整分钟')
-  await page.getByRole('region', { name: '策略状态' }).getByText('已启用', { exact: true }).waitFor()
-
-  await page.getByRole('region', { name: '策略状态' }).scrollIntoViewIfNeeded()
-  await page.getByRole('region', { name: '4. 关键事件与控制回读' }).getByRole('button', { name: '刷新' }).click()
-  await expect(page.getByRole('cell', { name: 'command-1' })).toBeVisible()
-  await expect(page.getByRole('cell', { name: 'confirmed' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '策略状态' })).toContainText('已启用')
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(page.getByRole('cell', { name: /等待回读/ })).toBeVisible()
+  await page.getByRole('button', { name: '查看控制回读 command-1' }).click()
+  await expect(page.getByTestId('strategy-control-evidence')).toContainText('dispatched')
+  await expect(page.getByTestId('strategy-control-evidence')).not.toContainText('回读确认到位')
+  await page.route('**/api/v1/control-commands/command-1', (route) => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ id: 'command-1', status: 'readback_confirmed', code: 'READBACK_CONFIRMED', source_type: 'strategy', readback_evidence: { frame_sequence: 43, value: 80, observed_at: now } }),
+  }))
+  await page.getByRole('button', { name: '查看控制回读 command-1' }).click()
+  await expect(page.getByTestId('strategy-control-evidence')).toContainText('回读确认到位')
+  await expect(page.getByTestId('strategy-control-evidence')).toContainText('43')
   await page.getByRole('button', { name: '停用', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('不再产生新的控制意图')
-
+  await expect(page.getByRole('region', { name: '策略状态' })).toContainText('已停用')
+  api.getStrategy().runtime_health = 'FAILED'
+  api.getStrategy().failure_code = 'CONTROL_COMMAND_FAILED'
+  await page.reload()
+  await openEngineeringPage(page, '调度策略')
+  await expect(page.getByRole('button', { name: '启用', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '清除故障锁' }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('仍保持停用')
   expect(api.getStrategy().enabled).toBe(false)
-  expect(api.calls).toContain('PUT /dispatch-strategies/strategy-1/draft')
-  expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/simulate')
-  expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/publish')
-  expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/enable')
-  expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/disable')
-  expect(consoleErrors, api.calls.join('\n')).toEqual([])
+  expect(api.calls).toContain('POST /dispatch-strategies/strategy-1/failure-latch/clear')
+  expect(api.calls.filter((call) => call.includes('control-commands'))).toEqual(['GET /control-commands/command-1'])
 })
 
 function publishedStrategy() {
@@ -446,20 +517,20 @@ test('修改后试算使用新草稿，非法输入不能复用旧结果', async
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
-  await page.getByLabel('时段 1 功率目标').fill('-20')
+  await page.getByLabel('输入 1 别名').fill('new_input')
   const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
   await page.getByRole('button', { name: '试算', exact: true }).click()
   expect((await request).postDataJSON()).toEqual({ revision_id: 'draft-1', expected_digest: 'b'.repeat(64) })
   await expect(page.getByTestId('strategy-simulation')).toBeVisible()
   expect(api.savedDrafts).toHaveLength(1)
-  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules[0].target).toBe('-20')
+  expect(api.savedDrafts[0].bindings[0].binding_key).toBe('new_input')
   await page.getByRole('button', { name: '试算', exact: true }).click()
   await expect(page.getByTestId('strategy-simulation')).toBeVisible()
   expect(api.savedDrafts).toHaveLength(1)
   const requestsBefore = api.calls.filter((call) => call.endsWith('/simulate')).length
-  await page.getByLabel('其他时段安全目标').fill('')
+  await page.getByLabel('输入 1 别名').fill('')
   await page.getByRole('button', { name: '试算', exact: true }).click()
-  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('其他时段安全目标')
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('别名不能为空')
   await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
   expect(api.savedDrafts).toHaveLength(1)
   expect(api.calls.filter((call) => call.endsWith('/simulate'))).toHaveLength(requestsBefore)
@@ -506,13 +577,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     consoleErrors.length = 0
     await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
-    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
-    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
-    await page.getByLabel('时段 1 功率目标').fill('0.5')
-    await page.getByLabel('时段 2 功率目标').fill('0.5')
-    await page.getByLabel('时段 3 功率目标').fill('0.5')
-    await page.getByLabel('时段 4 功率目标').fill('0.5')
-    await page.getByLabel('其他时段安全目标').fill('0.5')
+    await configureNativeControl(page)
     const freshSnapshot = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
       data: { node: 'strategy-test', group: 'group0', values: { soc: protocolSoc, limit: 156.8 } },
     })
@@ -584,13 +649,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.getByRole('button', { name: '登录', exact: true }).click()
     await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
-    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
-    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
-    await page.getByLabel('时段 1 功率目标').fill('0.5')
-    await page.getByLabel('时段 2 功率目标').fill('0.5')
-    await page.getByLabel('时段 3 功率目标').fill('0.5')
-    await page.getByLabel('时段 4 功率目标').fill('0.5')
-    await page.getByLabel('其他时段安全目标').fill('0.5')
+    await configureNativeControl(page)
     const baseline = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
       data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 156.8 } },
     })
@@ -672,13 +731,7 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
 
     await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)
-    await page.getByLabel('SOC 输入实体').selectOption({ index: 1 })
-    await page.getByLabel('功率控制实体').selectOption({ index: 1 })
-    await page.getByLabel('时段 1 功率目标').fill('0.5')
-    await page.getByLabel('时段 2 功率目标').fill('0.5')
-    await page.getByLabel('时段 3 功率目标').fill('0.5')
-    await page.getByLabel('时段 4 功率目标').fill('0.5')
-    await page.getByLabel('其他时段安全目标').fill('0.5')
+    await configureNativeControl(page)
     await page.getByRole('button', { name: '保存草稿', exact: true }).click()
     await expect(page.getByTestId('dispatch-strategy-page').getByRole('status')).toContainText('草稿已保存')
 
@@ -751,7 +804,7 @@ async function createStrategyDraft(page: Page): Promise<string> {
     return response.request().method() === 'POST'
       && url.pathname === '/api/v1/dispatch-strategies'
   })
-  await page.getByRole('button', { name: '新建 2充2放' }).click()
+  await page.getByRole('button', { name: '新建通用策略' }).click()
   const strategyId = (await (await created).json()).id as string
   const loaded = page.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -759,9 +812,27 @@ async function createStrategyDraft(page: Page): Promise<string> {
       && url.pathname === `/api/v1/dispatch-strategies/${strategyId}`
   })
   await loaded
-  await expect(page.getByLabel('SOC 输入实体')).toHaveValue('')
-  await expect(page.getByLabel('功率控制实体')).toHaveValue('')
+  await expect(page.getByTestId('native-decision-table')).toBeVisible()
+  await expect(page.getByRole('button', { name: '添加输入' })).toBeVisible()
   return strategyId
+}
+
+async function configureNativeControl(page: Page) {
+  await page.getByLabel('触发方式').selectOption('FIXED_TICK')
+  await page.getByRole('button', { name: '添加输入' }).click()
+  await page.getByLabel('输入 1 别名').fill('soc')
+  await page.getByLabel('输入 1 实体').selectOption({ index: 1 })
+  await page.getByRole('button', { name: '添加输出' }).click()
+  await page.getByLabel('输出 1 别名').fill('power-target')
+  await page.getByLabel('输出 1 实体').selectOption({ index: 1 })
+  await page.getByTestId('native-decision-table').getByRole('button', { name: /Add row$/ }).click()
+  const cells = page.getByTestId('native-decision-table').locator('.grl-dt__cell__input')
+  await cells.nth(1).click()
+  await page.keyboard.type('"power-target"')
+  await page.keyboard.press('Tab')
+  await cells.nth(2).click()
+  await page.keyboard.type('0.5')
+  await page.keyboard.press('Tab')
 }
 
 function startUntilReady(command: string, args: string[], env: NodeJS.ProcessEnv, ready: string): Promise<ChildProcess> {

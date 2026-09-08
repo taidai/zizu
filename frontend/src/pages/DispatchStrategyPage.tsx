@@ -1,15 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { DecisionGraph, JdmConfigProvider, ensureWasmLoaded } from '@gorules/jdm-editor'
-import { DndProvider } from 'react-dnd'
-import { HTML5Backend } from 'react-dnd-html5-backend'
-import '../monaco'
-import '@gorules/jdm-editor/dist/style.css'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import '../components/alarm-center/tabletApplications.css'
 import {
   clearDispatchStrategyFailure,
   createDispatchStrategy,
   disableDispatchStrategy,
   enableDispatchStrategy,
+  fetchControlCommand,
   fetchDispatchStrategies,
   fetchDispatchStrategy,
   fetchDispatchStrategyEvents,
@@ -26,22 +22,16 @@ import {
   type EntityInstanceObservation,
 } from '../api/client'
 import {
-  buildTwoChargeTwoDischargeJdm,
   createDispatchLoadGate,
   describeDispatchStrategyError,
   dispatchStrategyFailureState,
-  isDispatchSocEntity,
-  isDispatchPowerTargetEntity,
   isJdmGraphUnchanged,
   makeStrategyBinding,
   projectStrategyStatus,
-  readTwoChargeTwoDischargeJdm,
   retainDispatchReloadLock,
-  validateDispatchWindows,
-  type DispatchWindow,
 } from '../components/dispatch-strategy/dispatchStrategyModel.mjs'
-import NativeDecisionTableEditor from '../components/dispatch-strategy/NativeDecisionTableEditor'
 import {
+  addNativeExampleColumns,
   buildGenericDecisionTableJdm,
   bindingsForDraft,
   inspectNativeDecisionTable,
@@ -52,18 +42,11 @@ import {
   validateBindingAliases,
 } from '../components/dispatch-strategy/nativeDecisionTableModel'
 
-ensureWasmLoaded().catch(() => {})
-
-const DEFAULT_ROWS: DispatchWindow[] = [
-  { key: 'charge-1', start: '00:00', end: '06:00', action: 'CHARGE', target: -60, socMin: 10, socMax: 90 },
-  { key: 'discharge-1', start: '10:00', end: '12:00', action: 'DISCHARGE', target: 80, socMin: 10, socMax: 90 },
-  { key: 'charge-2', start: '12:00', end: '14:00', action: 'CHARGE', target: -60, socMin: 10, socMax: 90 },
-  { key: 'discharge-2', start: '18:00', end: '22:00', action: 'DISCHARGE', target: 80, socMin: 10, socMax: 90 },
-]
+const NativeDecisionTableEditor = lazy(() => import('../components/dispatch-strategy/NativeDecisionTableEditor'))
+const NativeDecisionGraphEditor = lazy(() => import('../components/dispatch-strategy/NativeDecisionTableEditor').then((module) => ({ default: module.NativeDecisionGraphEditor })))
 
 type DecisionGraphType = { nodes: any[]; edges: any[]; [key: string]: any }
 
-const ACTION_LABELS = { CHARGE: '充电', DISCHARGE: '放电', HOLD: '保持' }
 const HEALTH_STYLES: Record<string, string> = {
   READY: 'bg-green-100 text-green-700',
   IDLE: 'bg-gray-100 text-gray-600',
@@ -90,37 +73,33 @@ export default function DispatchStrategyPage() {
   const [entities, setEntities] = useState<EntityInstance[]>([])
   const [observations, setObservations] = useState<Record<string, EntityInstanceObservation | null>>({})
   const [events, setEvents] = useState<DispatchStrategyEvent[]>([])
+  const [eventPageSize, setEventPageSize] = useState(10)
+  const [eventCursor, setEventCursor] = useState<string | null>(null)
+  const [nextEventCursor, setNextEventCursor] = useState<string | null>(null)
+  const [eventHistory, setEventHistory] = useState<(string | null)[]>([])
+  const [eventsBusy, setEventsBusy] = useState(false)
+  const [eventsError, setEventsError] = useState('')
+  const eventGeneration = useRef(0)
+  const [controlEvidence, setControlEvidence] = useState<{ id: string; command?: Awaited<ReturnType<typeof fetchControlCommand>>; error?: string } | null>(null)
   const [name, setName] = useState('')
-  const [rows, setRows] = useState<DispatchWindow[]>(DEFAULT_ROWS)
-  const [safeTarget, setSafeTarget] = useState<number | string>(0)
-  const [socId, setSocId] = useState('')
-  const [outputId, setOutputId] = useState('')
+  const [triggerKind, setTriggerKind] = useState<'DATA_CHANGE' | 'FIXED_TICK'>('DATA_CHANGE')
   const [draftBindings, setDraftBindings] = useState<DispatchStrategyBinding[]>([])
   const [bindingsEdited, setBindingsEdited] = useState(false)
-  const [graph, setGraph] = useState<DecisionGraphType>(() => buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0) as DecisionGraphType)
+  const [graph, setGraph] = useState<DecisionGraphType>(() => buildGenericDecisionTableJdm() as DecisionGraphType)
   const [showGraph, setShowGraph] = useState(false)
+  const [editorPending, setEditorPending] = useState(false)
   const [simulation, setSimulation] = useState<DispatchStrategySimulation | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [draftReceipt, setDraftReceipt] = useState<{ id: string; digest: string; revision: number } | null>(null)
   const [requiresReload, setRequiresReload] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
   const loadGate = useRef(createDispatchLoadGate())
   const editGeneration = useRef(0)
 
   const currentRevision = strategy?.draft || strategy?.published_revision || strategy?.active_revision || null
-  const validation = useMemo(() => validateDispatchWindows(rows, safeTarget), [rows, safeTarget])
-  const representedSchedule = useMemo(() => readTwoChargeTwoDischargeJdm(graph), [graph])
-  const easyTable = useMemo(() => {
-    if (!representedSchedule) return null
-    const bindings = currentRevision?.bindings || []
-    return bindings.every((binding) => (
-      binding.direction === 'INPUT' && binding.binding_key === 'soc' && binding.ordinal === 0
-    ) || (
-      binding.direction === 'OUTPUT' && binding.binding_key === 'power-target' && binding.ordinal === 0
-    )) ? representedSchedule : null
-  }, [currentRevision?.bindings, representedSchedule])
-  const nativeTable = useMemo(() => easyTable ? null : inspectNativeDecisionTable(graph), [easyTable, graph])
+  const nativeTable = useMemo(() => inspectNativeDecisionTable(graph), [graph])
   const editorGraph = useMemo(() => {
     const view = structuredClone(graph)
     view.nodes = view.nodes.map((node, index) => node.position ? node : { ...node, position: { x: index * 320, y: 80 } })
@@ -128,38 +107,19 @@ export default function DispatchStrategyPage() {
   }, [graph])
   const status = strategy ? projectStrategyStatus(strategy) : null
 
-  const inputEntities = useMemo(
-    () => entities.filter(easyTable ? isDispatchSocEntity : isNativeDecisionInputEntity),
-    [easyTable, entities],
-  )
-  const outputEntities = useMemo(
-    () => entities.filter(easyTable ? isDispatchPowerTargetEntity : isNativeDecisionOutputEntity),
-    [easyTable, entities],
-  )
+  const inputEntities = useMemo(() => entities.filter(isNativeDecisionInputEntity), [entities])
+  const outputEntities = useMemo(() => entities.filter(isNativeDecisionOutputEntity), [entities])
+  const dirty = !!strategy && !!currentRevision && (editorPending || name.trim() !== strategy.name
+    || triggerKind !== currentRevision.trigger_kind
+    || !isJdmGraphUnchanged(graph, currentRevision.jdm_content)
+    || !isJdmGraphUnchanged(draftBindings, currentRevision.bindings))
 
-  const socEntity = entities.find((item) => item.id === socId)
-  const outputEntity = entities.find((item) => item.id === outputId)
-  const socBinding = currentRevision?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')
-  const outputBinding = currentRevision?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')
   const selectedSummaryOutputId = useMemo(() => {
     const revision = strategy?.active_revision || strategy?.published_revision || strategy?.draft
     return revision?.bindings
       .filter((item) => item.direction === 'OUTPUT')
       .sort((left, right) => left.ordinal - right.ordinal)[0]?.entity_instance_id || ''
   }, [strategy])
-  const socBindingInvalid = !!socId && (!isDispatchSocEntity(socEntity)
-    || (socBinding?.entity_instance_id === socId && (
-      socBinding.expected_data_type !== socEntity?.data_type.toUpperCase()
-      || (!!socBinding.unit?.trim() && socBinding.unit.trim() !== '%')
-    )))
-  const outputBindingInvalid = !!outputId && (!isDispatchPowerTargetEntity(outputEntity)
-    || (outputBinding?.entity_instance_id === outputId && (
-      outputBinding.expected_data_type !== outputEntity?.data_type.toUpperCase()
-      || (!!outputBinding.unit?.trim() && outputBinding.unit.trim() !== 'kW')
-    )))
-  const socBindingIssue = '当前 SOC 绑定不符合要求，请明确选择已确认、可读的 bms.soc / storage.soc 数值百分比实体。'
-  const outputBindingIssue = '当前功率控制绑定不符合要求，请明确选择已确认、可写的 kW 数值实体。'
-
   const refreshList = async (preferId?: string) => {
     const next = await fetchDispatchStrategies()
     setStrategies(next)
@@ -172,10 +132,10 @@ export default function DispatchStrategyPage() {
       .then(([strategyRows, entityRows]) => {
         setStrategies(strategyRows)
         setEntities(entityRows.items)
-        if (strategyRows[0]) setSelectedId(strategyRows[0].id)
+        if (!selectedId && strategyRows[0]) setSelectedId(strategyRows[0].id)
       })
       .catch((reason) => setError(describeDispatchStrategyError(reason)))
-  }, [])
+  }, [reloadNonce])
 
   useEffect(() => {
     if (!selectedId) {
@@ -184,29 +144,35 @@ export default function DispatchStrategyPage() {
     }
     const request = loadGate.current.begin()
     setBusy('load')
+    eventGeneration.current += 1
+    setEventsBusy(false)
+    setEventsError('')
+    setControlEvidence(null)
     Promise.all([
       fetchDispatchStrategy(selectedId),
-      fetchDispatchStrategyEvents(selectedId, { limit: 30 }),
+      fetchDispatchStrategyEvents(selectedId, { limit: eventPageSize }),
       fetchEntityInstances(),
     ])
       .then(([next, eventPage, entityRows]) => {
         if (!request.isCurrent()) return
         setStrategy(next)
         setEvents(eventPage.items)
+        setNextEventCursor(eventPage.next_cursor)
+        setEventCursor(null)
+        setEventHistory([])
         setEntities(entityRows.items)
         setName(next.name)
         const source = next.draft || next.published_revision || next.active_revision
-        const nextGraph = (source?.jdm_content || buildTwoChargeTwoDischargeJdm(DEFAULT_ROWS, 0)) as DecisionGraphType
-        const easy = readTwoChargeTwoDischargeJdm(nextGraph)
-        setRows(easy?.rows || [])
-        setSafeTarget(easy?.safeTarget ?? 0)
+        const nextGraph = (source?.jdm_content || buildGenericDecisionTableJdm()) as DecisionGraphType
         setGraph(nextGraph)
+        setTriggerKind(source?.trigger_kind || 'DATA_CHANGE')
         setShowGraph(false)
-        setSocId(source?.bindings.find((item) => item.direction === 'INPUT' && item.binding_key === 'soc')?.entity_instance_id || '')
-        setOutputId(source?.bindings.find((item) => item.direction === 'OUTPUT' && item.binding_key === 'power-target')?.entity_instance_id || '')
+        setEditorPending(false)
         setDraftBindings(source?.bindings ? structuredClone(source.bindings) : [])
         setBindingsEdited(false)
         setSimulation(null)
+        setDraftReceipt(null)
+        setNotice('')
         setRequiresReload(false)
         setError('')
       })
@@ -216,7 +182,7 @@ export default function DispatchStrategyPage() {
   }, [selectedId, reloadNonce])
 
   useEffect(() => {
-    const ids = [...new Set([socId, outputId, selectedSummaryOutputId].filter(Boolean))]
+    const ids = [...new Set([...draftBindings.map((binding) => binding.entity_instance_id), selectedSummaryOutputId].filter(Boolean))]
     if (!ids.length) return
     Promise.allSettled(ids.map(async (id) => [id, await fetchEntityInstanceRealtime(id)] as const))
       .then((results) => setObservations((current) => {
@@ -227,7 +193,7 @@ export default function DispatchStrategyPage() {
         })
         return next
       }))
-  }, [socId, outputId, selectedSummaryOutputId])
+  }, [draftBindings, selectedSummaryOutputId])
 
   const run = async (label: string, operation: () => Promise<void>) => {
     setBusy(label)
@@ -237,6 +203,7 @@ export default function DispatchStrategyPage() {
     catch (reason) {
       const failure = dispatchStrategyFailureState(reason)
       setError(failure.message)
+      setDraftReceipt(null)
       if (!failure.keepSimulation) setSimulation(null)
       setRequiresReload((current) => retainDispatchReloadLock(current, reason))
     }
@@ -246,14 +213,14 @@ export default function DispatchStrategyPage() {
   const markEdited = () => {
     editGeneration.current += 1
     setSimulation(null)
+    setDraftReceipt(null)
+    setNotice('')
   }
 
-  const createSchedule = () => run('create', async () => {
-    const created = await createDispatchStrategy({ name: '2充2放调度策略' })
-    await refreshList(created.id)
-    setSelectedId(created.id)
-    setNotice('已建立策略草稿，请绑定 SOC 和功率控制实体。')
-  })
+  const handleEditorPending = (pending: boolean) => {
+    setEditorPending(pending)
+    if (pending) markEdited()
+  }
 
   const createGeneric = () => run('create', async () => {
     const created = await createDispatchStrategy({ name: '通用调度策略' })
@@ -275,34 +242,16 @@ export default function DispatchStrategyPage() {
 
   const saveDraft = async (): Promise<DispatchStrategy> => {
     if (!strategy || !currentRevision) throw new Error('请先选择策略。')
-    if (easyTable && socBindingInvalid) throw new Error(socBindingIssue)
-    if (easyTable && outputBindingInvalid) throw new Error(outputBindingIssue)
-    if (easyTable && !validation.valid) throw new Error(validation.message)
     const bindings = bindingsForDraft(draftBindings)
-    if (!easyTable) {
-      if (nativeTable || bindingsEdited || bindings.length > 0) {
-        if (!bindings.some((item) => item.direction === 'INPUT')) throw new Error('请至少绑定一个 L2 输入实体。')
-        if (!bindings.some((item) => item.direction === 'OUTPUT')) throw new Error('请至少绑定一个可控 L2 输出实体。')
-        const aliases = validateBindingAliases(bindings)
-        if (!aliases.valid) throw new Error(aliases.message)
-        for (const binding of bindings) {
-          const entity = entities.find((item) => item.id === binding.entity_instance_id)
-          const valid = binding.direction === 'INPUT' ? isNativeDecisionInputEntity(entity) : isNativeDecisionOutputEntity(entity)
-          if (!valid) throw new Error(binding.direction === 'INPUT' ? `输入别名 ${binding.binding_key} 的实体不再可读或类型不受支持。` : `输出别名 ${binding.binding_key} 的实体没有明确的控制资格。`)
-        }
-      }
-    } else {
-      for (const [direction, key, id, label] of [
-        ['INPUT', 'soc', socId, 'SOC'],
-        ['OUTPUT', 'power-target', outputId, '功率控制'],
-      ] as const) {
-        const index = bindings.findIndex((binding) => binding.direction === direction && binding.binding_key === key)
-        if (index >= 0 && bindings[index].entity_instance_id === id) continue
-        const entity = entities.find((item) => item.id === id)
-        if (!entity) throw new Error(`请选择${label}全局实体。`)
-        const binding = makeStrategyBinding(entity, direction, key, 0)
-        if (index >= 0) bindings[index] = binding
-        else bindings.push(binding)
+    if (nativeTable || bindingsEdited || bindings.length > 0) {
+      if (!bindings.some((item) => item.direction === 'INPUT')) throw new Error('请至少绑定一个 L2 输入实体。')
+      if (!bindings.some((item) => item.direction === 'OUTPUT')) throw new Error('请至少绑定一个可控 L2 输出实体。')
+      const aliases = validateBindingAliases(bindings)
+      if (!aliases.valid) throw new Error(aliases.message)
+      for (const binding of bindings) {
+        const entity = entities.find((item) => item.id === binding.entity_instance_id)
+        const valid = binding.direction === 'INPUT' ? isNativeDecisionInputEntity(entity) : isNativeDecisionOutputEntity(entity)
+        if (!valid) throw new Error(binding.direction === 'INPUT' ? `输入别名 ${binding.binding_key} 的实体不再可读或类型不受支持。` : `输出别名 ${binding.binding_key} 的实体没有明确的控制资格。`)
       }
     }
     const requestGeneration = editGeneration.current
@@ -310,7 +259,7 @@ export default function DispatchStrategyPage() {
       expected_digest: currentRevision.content_digest,
       name: name.trim(),
       description: strategy.description,
-      trigger_kind: currentRevision.trigger_kind,
+      trigger_kind: triggerKind,
       site_timezone: currentRevision.site_timezone,
       base_configuration_revision: currentRevision.base_configuration_revision,
       jdm_content: graph,
@@ -324,6 +273,7 @@ export default function DispatchStrategyPage() {
     setGraph((saved.draft?.jdm_content || graph) as DecisionGraphType)
     setDraftBindings(saved.draft?.bindings ? structuredClone(saved.draft.bindings) : bindings)
     setBindingsEdited(false)
+    if (saved.draft) setDraftReceipt({ id: saved.draft.id, digest: saved.draft.content_digest, revision: saved.draft.base_configuration_revision })
     return saved
   }
 
@@ -336,13 +286,7 @@ export default function DispatchStrategyPage() {
     const requestGeneration = editGeneration.current
     setSimulation(null)
     if (!strategy || !currentRevision) throw new Error('请先选择策略。')
-    if (easyTable && !validation.valid) throw new Error(validation.message)
-    const changed = name.trim() !== strategy.name
-      || !isJdmGraphUnchanged(graph, currentRevision.jdm_content)
-      || socId !== (socBinding?.entity_instance_id || '')
-      || outputId !== (outputBinding?.entity_instance_id || '')
-      || (bindingsEdited && !isJdmGraphUnchanged(draftBindings, currentRevision.bindings))
-    const revision = changed ? (await saveDraft()).draft : currentRevision
+    const revision = dirty ? (await saveDraft()).draft : currentRevision
     if (!revision) throw new Error('没有可试算的策略版本。')
     const result = await simulateDispatchStrategy(strategy.id, {
       revision_id: revision.id,
@@ -366,11 +310,12 @@ export default function DispatchStrategyPage() {
     const next = await fetchDispatchStrategy(saved.id)
     setStrategy(next)
     await refreshList(saved.id)
+    setDraftReceipt(null)
     setNotice('已发布为不可变版本；确认后可启用。')
   })
 
   const enable = () => run('enable', async () => {
-    if (!strategy?.published_revision) throw new Error('请先发布策略。')
+    if (!strategy?.published_revision || dirty || strategy.draft) throw new Error('请先保存并发布当前草稿。')
     const next = await enableDispatchStrategy(strategy.id, strategy.published_revision.id)
     setStrategy(next)
     await refreshList(next.id)
@@ -391,17 +336,8 @@ export default function DispatchStrategyPage() {
     if (!strategy) return
     const next = await clearDispatchStrategyFailure(strategy.id)
     setStrategy(next)
-    setNotice('故障锁已清除。')
+    setNotice('故障锁已清除，策略仍保持停用；确认安全后须显式启用。')
   })
-
-  const patchRow = (index: number, patch: Partial<DispatchWindow>) => {
-    const next = rows.map((row, itemIndex) => itemIndex === index ? { ...row, ...patch } : row)
-    setRows(next)
-    if (validateDispatchWindows(next, safeTarget).valid) {
-      setGraph(buildTwoChargeTwoDischargeJdm(next, safeTarget) as DecisionGraphType)
-    }
-    markEdited()
-  }
 
   const patchGenericBinding = (index: number, patch: { alias?: string; entityId?: string }) => {
     setDraftBindings((current) => {
@@ -446,12 +382,59 @@ export default function DispatchStrategyPage() {
     markEdited()
   }
 
+  const loadEventPage = async (cursor: string | null = null, history: (string | null)[] = [], size = eventPageSize) => {
+    if (!selectedId) return
+    const generation = ++eventGeneration.current
+    setEventsBusy(true)
+    setEventsError('')
+    try {
+      const page = await fetchDispatchStrategyEvents(selectedId, { limit: size, cursor })
+      if (generation !== eventGeneration.current) return
+      setEvents(page.items)
+      setNextEventCursor(page.next_cursor)
+      setEventCursor(cursor)
+      setEventHistory(history)
+      setEventPageSize(size)
+    } catch (reason) {
+      if (generation === eventGeneration.current) setEventsError(describeDispatchStrategyError(reason))
+    } finally {
+      if (generation === eventGeneration.current) setEventsBusy(false)
+    }
+  }
+
+  const readControlEvidence = async (id: string) => {
+    setControlEvidence({ id })
+    try {
+      const command = await fetchControlCommand(id)
+      setControlEvidence((current) => current?.id === id ? { id, command } : current)
+    } catch (reason) {
+      setControlEvidence((current) => current?.id === id ? { id, error: describeDispatchStrategyError(reason) } : current)
+    }
+  }
+
+  const renderBindings = (direction: 'INPUT' | 'OUTPUT') => {
+    const label = direction === 'INPUT' ? '输入' : '输出'
+    const candidates = direction === 'INPUT' ? inputEntities : outputEntities
+    const rowsForDirection = draftBindings.map((binding, index) => ({ binding, index })).filter((item) => item.binding.direction === direction)
+    return <div className="neu-inset p-3" data-testid={direction === 'INPUT' ? 'generic-l2-bindings' : undefined}>
+      <div className="flex items-center justify-between gap-2"><div><h4 className="text-xs font-bold text-gray-700">{label}绑定</h4><p className="mt-1 text-[10px] text-gray-500">{direction === 'INPUT' ? '已确认、可读的布尔/数值/字符串 L2' : '已确认、明确可控且可写的 L2'}</p></div><button type="button" onClick={() => addGenericBinding(direction)} className="neu-btn px-3 py-1.5 text-xs">添加{label}</button></div>
+      <div className="mt-3 space-y-3">{rowsForDirection.map(({ binding, index }, visibleIndex) => {
+        const currentEntity = entities.find((item) => item.id === binding.entity_instance_id)
+        return <div key={`${direction}:${index}`} className="rounded-lg border border-white/70 bg-white/35 p-3">
+          <label className="block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 别名<input aria-label={`${label} ${visibleIndex + 1} 别名`} value={binding.binding_key} onChange={(event) => patchGenericBinding(index, { alias: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5 font-mono" /></label>
+          <label className="mt-2 block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 实体<select aria-label={`${label} ${visibleIndex + 1} 实体`} value={binding.entity_instance_id} onChange={(event) => patchGenericBinding(index, { entityId: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5"><option value="">请选择</option>{currentEntity && !candidates.some((item) => item.id === currentEntity.id) && <option value={currentEntity.id} disabled>当前绑定不再符合资格：{currentEntity.display_name}</option>}{candidates.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}</select></label>
+          <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-gray-500"><span>{binding.expected_data_type} {binding.unit || '无单位'} · 新鲜度 {binding.freshness_seconds}s · 质量：{qualityText(observations[binding.entity_instance_id])}</span><button type="button" onClick={() => removeGenericBinding(index)} className="text-red-600">移除</button></div>
+        </div>
+      })}{!rowsForDirection.length && <p className="py-3 text-center text-xs text-amber-700">尚未添加{label}绑定。</p>}</div>
+    </div>
+  }
+
   return (
     <div className="tablet-applications tablet-dispatch-layout flex min-h-[650px] gap-4" data-tablet-applications="dispatch" data-testid="dispatch-strategy-page">
       <aside className="neu-card w-72 shrink-0 p-4">
         <div className="mb-4 flex items-center justify-between">
           <div><h2 className="text-sm font-bold text-gray-800">调度策略</h2><p className="mt-1 text-[11px] text-gray-500">基于 L2 决策，经统一控制闭环执行</p></div>
-          <div className="flex flex-col items-end gap-2"><button type="button" onClick={createGeneric} disabled={!!busy} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-semibold">新建通用策略</button><button type="button" onClick={createSchedule} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs font-semibold">新建 2充2放</button></div>
+          <div className="flex flex-col items-end gap-2"><button type="button" onClick={createGeneric} disabled={!!busy} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-semibold">新建通用策略</button></div>
         </div>
         <div className="space-y-2" aria-label="策略列表">
           {strategies.map((item) => {
@@ -459,22 +442,25 @@ export default function DispatchStrategyPage() {
             const currentOutput = item.id === selectedId && selectedSummaryOutputId
               ? observations[selectedSummaryOutputId]
               : null
-            return <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'zizu-tab-active' : 'border-white/60 bg-white/30'}`}>
+            return <button key={item.id} type="button" disabled={!!busy || editorPending} onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'zizu-tab-active' : 'border-white/60 bg-white/30'}`}>
               <div className="truncate text-xs font-semibold text-gray-800">{item.name}</div>
               <div className="mt-2 flex flex-wrap gap-1 text-[10px]"><span>{itemStatus.enableLabel}</span><span>·</span><span>{itemStatus.lifecycleLabel}</span><span>·</span><span>{itemStatus.healthLabel}</span></div>
               <div className="mt-1 text-[10px] text-gray-400">目标 {valueText(item.last_desired)} / {currentOutput ? '当前 L2' : '决策时值'} {valueText(currentOutput?.value ?? item.last_actual)}</div>
             </button>
           })}
-          {!strategies.length && <p className="py-8 text-center text-xs text-gray-400">尚无策略，请新建通用策略或 2充2放策略。</p>}
+          {!strategies.length && !error && <p className="py-8 text-center text-xs text-gray-400">尚无策略，请新建通用策略。</p>}
         </div>
       </aside>
 
       <main className="min-w-0 flex-1 space-y-4">
-        {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">请选择或新建调度策略</div> : <>
+          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{(requiresReload || (!strategy && error)) && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
+        {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">{error ? '策略读取失败，请查看上方原因。' : busy ? '正在读取调度策略…' : '请选择或新建调度策略'}</div> : <>
           <section className="neu-card p-4" aria-label="策略状态">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => { setName(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">{currentRevision?.trigger_kind === 'DATA_CHANGE' ? 'L2 数据变化触发' : '固定整分钟节拍'} · {currentRevision?.site_timezone} · 所有控制先形成意图，再由统一控制回读确认</p></div>
+              <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => { setName(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">{triggerKind === 'DATA_CHANGE' ? 'L2 数据变化触发' : '固定整分钟节拍'} · {currentRevision?.site_timezone} · 所有控制先形成意图，再由统一控制回读确认</p></div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
+                <label className="text-gray-600">触发方式<select aria-label="触发方式" className="neu-input ml-2 px-2" value={triggerKind} onChange={(event) => { setTriggerKind(event.target.value as 'DATA_CHANGE' | 'FIXED_TICK'); markEdited() }}><option value="DATA_CHANGE">L2 数据变化</option><option value="FIXED_TICK">固定整分钟</option></select></label>
+                {dirty && <span className="rounded bg-amber-100 px-2 py-1 text-amber-800">未保存修改 · 旧试算及收据已失效</span>}
                 <span className="rounded bg-indigo-50 px-2 py-1 text-indigo-700">{status?.lifecycleLabel} {status?.publishedRevision ? `v${status.publishedRevision}` : ''}</span>
                 <span className={`rounded px-2 py-1 ${strategy.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{status?.enableLabel}</span>
                 <span className={`rounded px-2 py-1 ${HEALTH_STYLES[strategy.runtime_health] || 'bg-gray-100'}`}>{status?.healthLabel}</span>
@@ -482,58 +468,37 @@ export default function DispatchStrategyPage() {
             </div>
           </section>
 
-          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{requiresReload && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
+
 
           <section className="neu-card p-4" aria-labelledby="binding-heading">
-            <div className="mb-3"><h3 id="binding-heading" className="text-sm font-bold text-gray-800">1. 绑定 L2 全局实体</h3><p className="mt-1 text-xs text-gray-500">策略只认稳定实体，不直接使用品牌点位。这里只显示已确认、类型合适的实体。</p></div>
-            {easyTable ? <div className="grid gap-3 md:grid-cols-2">
-              <label className="text-xs font-semibold text-gray-600">SOC 输入实体
-                <select aria-label="SOC 输入实体" value={socId} onChange={(event) => { setSocId(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2">
-                  <option value="">请选择</option>{socId && !inputEntities.some((item) => item.id === socId) && <option value={socId} disabled>当前绑定不符合 SOC 要求：{socEntity?.display_name || socId}</option>}{inputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}
-                </select>
-                {!inputEntities.length && <span className="mt-2 block font-normal text-amber-700">暂无合法候选，请先在 L1 点位加工建立并确认标准 SOC 百分比实体（bms.soc 或 storage.soc，单位 %）。</span>}
-                {socBindingInvalid && <span className="mt-2 block font-normal text-red-600">{socBindingIssue}</span>}
-                {socId && <span className="mt-2 block font-normal text-gray-500">质量：{qualityText(observations[socId])} · 新鲜度 {entities.find((item) => item.id === socId)?.freshness_seconds}s · 当前值 {valueText(observations[socId]?.value)}</span>}
-              </label>
-              <label className="text-xs font-semibold text-gray-600">功率控制实体
-                <select aria-label="功率控制实体" value={outputId} onChange={(event) => { setOutputId(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2">
-                  <option value="">请选择</option>{outputId && !outputEntities.some((item) => item.id === outputId) && <option value={outputId} disabled>当前绑定不符合功率控制要求：{outputEntity?.display_name || outputId}</option>}{outputEntities.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.direction} · {item.data_type} {item.unit || ''}</option>)}
-                </select>
-                {outputBindingInvalid && <span className="mt-2 block font-normal text-red-600">{outputBindingIssue}</span>}
-                {outputId && <span className="mt-2 block font-normal text-gray-500">可控：是 · 质量：{qualityText(observations[outputId])} · 当前回读 {valueText(observations[outputId]?.value)}</span>}
-              </label>
-            </div> : <div className="grid gap-4 lg:grid-cols-2" data-testid="generic-l2-bindings">
-              {(['INPUT', 'OUTPUT'] as const).map((direction) => {
-                const label = direction === 'INPUT' ? '输入' : '输出'
-                const candidates = direction === 'INPUT' ? inputEntities : outputEntities
-                const rowsForDirection = draftBindings.map((binding, index) => ({ binding, index })).filter((item) => item.binding.direction === direction)
-                return <div key={direction} className="neu-inset p-3">
-                  <div className="flex items-center justify-between gap-2"><div><h4 className="text-xs font-bold text-gray-700">{label}绑定</h4><p className="mt-1 text-[10px] text-gray-500">{direction === 'INPUT' ? '已确认、可读的布尔/数值/字符串 L2' : '已确认、明确可控且可写的 L2'}</p></div><button type="button" onClick={() => addGenericBinding(direction)} className="neu-btn px-3 py-1.5 text-xs">添加{label}</button></div>
-                  <div className="mt-3 space-y-3">{rowsForDirection.map(({ binding, index }, visibleIndex) => {
-                    const currentEntity = entities.find((item) => item.id === binding.entity_instance_id)
-                    return <div key={`${direction}:${index}`} className="rounded-lg border border-white/70 bg-white/35 p-3">
-                      <label className="block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 别名<input aria-label={`${label} ${visibleIndex + 1} 别名`} value={binding.binding_key} onChange={(event) => patchGenericBinding(index, { alias: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5 font-mono" /></label>
-                      <label className="mt-2 block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 实体<select aria-label={`${label} ${visibleIndex + 1} 实体`} value={binding.entity_instance_id} onChange={(event) => patchGenericBinding(index, { entityId: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5"><option value="">请选择</option>{currentEntity && !candidates.some((item) => item.id === currentEntity.id) && <option value={currentEntity.id} disabled>当前绑定不再符合资格：{currentEntity.display_name}</option>}{candidates.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}</select></label>
-                      <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-gray-500"><span>顺序 {binding.ordinal} · 新鲜度 {binding.freshness_seconds}s</span><button type="button" onClick={() => removeGenericBinding(index)} className="text-red-600">移除</button></div>
-                    </div>
-                  })}{!rowsForDirection.length && <p className="py-3 text-center text-xs text-amber-700">尚未添加{label}绑定。</p>}</div>
-                </div>
-              })}
-              {!outputEntities.length && <p className="lg:col-span-2 text-xs text-amber-700">没有明确具备控制资格的输出候选。可控资格只表示配置可选，保存、发布和运行时仍由后端重新校验质量、授权、范围和所有权。</p>}
-            </div>}
+            <h3 id="binding-heading" className="mb-3 text-sm font-bold text-gray-800">1. 选择 L2 输入</h3>
+            <p className="mb-3 text-xs text-gray-500">选择多个强类型实体，以别名引用；跨设备只读取已提交 L2，不读取品牌点位。</p>
+            {renderBindings('INPUT')}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="schedule-heading">
-            <div className="mb-3 flex items-start justify-between gap-3"><div><h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 决策规则</h3><p className="mt-1 text-xs text-gray-500">{easyTable ? '2充2放：正功率表示放电，负功率表示充电；重叠时间会在保存前拦住。' : nativeTable ? '通用原生决策表直接编辑现有唯一表节点，不限制为 SOC 或固定时段。' : '该策略保留完整规则图作为唯一事实来源。'}</p></div><button type="button" disabled={!!easyTable && !validation.valid} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 py-1.5 text-xs text-indigo-700">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button></div>
-            {easyTable ? <>
-            <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时段</th><th className="p-2">开始</th><th className="p-2">结束</th><th className="p-2">动作</th><th className="p-2">功率目标</th><th className="p-2">SOC 下限</th><th className="p-2">SOC 上限</th></tr></thead><tbody>{rows.map((row, index) => <tr key={row.key} className={`border-b border-white/60 ${validation.overlapKeys.includes(row.key) ? 'bg-red-50' : ''}`}><td className="p-2 font-medium">{index + 1}</td><td className="p-1"><input aria-label={`时段 ${index + 1} 开始`} type="time" value={row.start} onChange={(event) => patchRow(index, { start: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} 结束`} type="text" placeholder="HH:mm（可填 24:00）" value={row.end} onChange={(event) => patchRow(index, { end: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><select aria-label={`时段 ${index + 1} 动作`} value={row.action} onChange={(event) => patchRow(index, { action: event.target.value as DispatchWindow['action'] })} className="neu-input w-full px-2 py-1.5">{Object.entries(ACTION_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td><td className="p-1"><input aria-label={`时段 ${index + 1} 功率目标`} type="number" step="0.1" value={row.target} onChange={(event) => patchRow(index, { target: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 下限`} type="number" min="0" max="100" value={row.socMin} onChange={(event) => patchRow(index, { socMin: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td><td className="p-1"><input aria-label={`时段 ${index + 1} SOC 上限`} type="number" min="0" max="100" value={row.socMax} onChange={(event) => patchRow(index, { socMax: event.target.value })} className="neu-input w-full px-2 py-1.5" /></td></tr>)}</tbody></table></div>
-            <div className="mt-3 flex flex-wrap items-center gap-3"><label className="text-xs font-semibold text-gray-600">其他时段安全目标 <input aria-label="其他时段安全目标" type="number" step="0.1" value={safeTarget} onChange={(event) => { const value = event.target.value; setSafeTarget(value); if (validateDispatchWindows(rows, value).valid) setGraph(buildTwoChargeTwoDischargeJdm(rows, value) as DecisionGraphType); markEdited() }} className="neu-input ml-2 w-32 px-2 py-1.5" /></label>{!validation.valid && <span className="text-xs text-red-600">{validation.message}</span>}</div>
-            </> : nativeTable ? <NativeDecisionTableEditor content={nativeTable.content} onChange={(content) => { setGraph((current) => replaceDecisionTableContent(current, nativeTable.nodeId, content) as DecisionGraphType); markEdited() }} /> : <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">当前规则不是可无损往返的唯一决策表，请使用完整规则图编辑。保存、试算和发布均使用同一份完整 JDM，不会重建为内置表。</p>}
-            {showGraph && <div className="mt-4 h-[520px] overflow-hidden rounded-xl border border-white/70"><JdmConfigProvider><DndProvider backend={HTML5Backend}><DecisionGraph value={editorGraph} onChange={(value) => { const next = value as DecisionGraphType; if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph(next); const easy = readTwoChargeTwoDischargeJdm(next); if (easy) { setRows(easy.rows); setSafeTarget(easy.safeTarget) } markEdited() }} mode="dev" /></DndProvider></JdmConfigProvider></div>}
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+              <div><h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 编辑原生 JDM 决策表</h3><p className="mt-1 text-xs text-gray-500">通用原生决策表直接编辑现有唯一表节点，不限制为 SOC 或固定时段。</p></div>
+              <button type="button" disabled={editorPending} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 text-xs text-[#981320]">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button>
+            </div>
+            {nativeTable ? <>
+              <div className="mb-3 flex flex-wrap items-center gap-3"><button type="button" className="neu-btn px-3 text-xs" onClick={() => { setGraph(addNativeExampleColumns(graph, nativeTable.nodeId) as DecisionGraphType); markEdited() }}>添加可选示例列</button><span className="text-xs text-gray-500">时段 / SOC 只是可删除的原生条件列，不新增规则或输出目标。</span></div>
+              {!showGraph && <Suspense fallback={<p aria-live="polite">正在加载原生决策表…</p>}><NativeDecisionTableEditor onPendingChange={handleEditorPending} content={nativeTable.content} onChange={(content) => { setGraph((current) => replaceDecisionTableContent(current, nativeTable.nodeId, content) as DecisionGraphType); markEdited() }} /></Suspense>}
+            </> : <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">当前规则不是可无损往返的唯一决策表，请使用完整规则图编辑。保存、试算和发布均使用同一份完整 JDM，不会重建为内置表。</p>}
+            {showGraph && <Suspense fallback={<p aria-live="polite">正在加载完整规则图…</p>}><NativeDecisionGraphEditor graph={editorGraph} onChange={(next) => { if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph(next); markEdited() }} /></Suspense>}
+          </section>
+
+          <section className="neu-card p-4" aria-labelledby="output-heading">
+            <h3 id="output-heading" className="mb-3 text-sm font-bold text-gray-800">3. 绑定可控 L2 输出</h3>
+            <p className="mb-3 text-xs text-gray-500">action_id 对应输出别名；多个目标按意图顺序交给唯一控制链。接口受理不是设备执行成功。</p>
+            {renderBindings('OUTPUT')}
+            {!outputEntities.length && <p className="mt-3 text-xs text-amber-700">没有明确具备控制资格的输出候选。请先配置正式 L2 控制合同；保存、发布和运行仍由后端复核。</p>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="verification-heading">
-            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">3. 试算、发布和启用</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || !strategy.published_revision} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">草稿、试算与运行</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload || editorPending} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || dirty || !!strategy.draft || !strategy.published_revision || strategy.runtime_health === 'FAILED'} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+            {editorPending && <p aria-live="polite" className="mt-3 text-xs text-amber-700">正在同步原生编辑内容，完成后可保存和试算。</p>}
+            {draftReceipt && <div data-testid="strategy-draft-receipt" className="mt-3 break-all rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800">草稿收据：{draftReceipt.id} · 配置修订 {draftReceipt.revision} · 摘要 {draftReceipt.digest}</div>}
             {simulation && <div className="mt-4 space-y-3" data-testid="strategy-simulation">
               {simulation.status !== 'EVALUATED' && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                 {describeDispatchStrategyError({ code: simulation.reason_code, message: '试算未通过，请检查实体绑定与数据状态。' })}
@@ -556,7 +521,12 @@ export default function DispatchStrategyPage() {
             </div>}
           </section>
 
-          <section className="neu-card p-4" aria-labelledby="events-heading"><div className="mb-3 flex items-center justify-between"><div><h3 id="events-heading" className="text-sm font-bold text-gray-800">4. 关键事件与控制回读</h3><p className="mt-1 text-xs text-gray-500">只保留有意义的变化、阻断、恢复和控制结果。</p></div><button type="button" onClick={() => selectedId && fetchDispatchStrategyEvents(selectedId, { limit: 30 }).then((page) => setEvents(page.items)).catch((reason) => setError(describeDispatchStrategyError(reason)))} className="neu-btn px-3 py-1.5 text-xs">刷新</button></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时间</th><th className="p-2">事件</th><th className="p-2">原因/命中</th><th className="p-2">控制命令</th><th className="p-2">回读状态</th></tr></thead><tbody>{events.map((event) => <tr key={event.id} className="border-b border-white/60"><td className="p-2">{new Date(event.occurred_at).toLocaleString()}</td><td className="p-2 font-medium">{event.event_kind}</td><td className="p-2">{event.reason_code || valueText(event.decision?.matched_rule)}</td><td className="p-2 font-mono text-[10px]">{event.control_command_id || '—'}</td><td className="p-2">{event.control_status || '—'}</td></tr>)}{!events.length && <tr><td colSpan={5} className="p-6 text-center text-gray-400">暂无关键事件</td></tr>}</tbody></table></div></section>
+          <section className="neu-card p-4" aria-labelledby="events-heading"><div className="mb-3 flex items-center justify-between"><div><h3 id="events-heading" className="text-sm font-bold text-gray-800">4. 关键事件与控制回读</h3><p className="mt-1 text-xs text-gray-500">只读运行证据；accepted / dispatched 仅表示受理或等待回读，readback_confirmed 才是已确认到位。</p></div><button type="button" disabled={eventsBusy} onClick={() => loadEventPage()} className="neu-btn px-3 py-1.5 text-xs">刷新</button></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时间</th><th className="p-2">事件</th><th className="p-2">原因/命中</th><th className="p-2">控制命令</th><th className="p-2">回读状态</th></tr></thead><tbody>{events.map((event) => <tr key={event.id} className="border-b border-white/60"><td className="p-2">{new Date(event.occurred_at).toLocaleString()}</td><td className="p-2 font-medium">{event.event_kind}</td><td className="p-2">{event.reason_code || valueText(event.decision?.matched_rule)}</td><td className="p-2 font-mono text-[10px]">{event.control_command_id ? <button type="button" className="text-[#981320] underline" aria-label={`查看控制回读 ${event.control_command_id}`} onClick={() => readControlEvidence(event.control_command_id!)}>{event.control_command_id}</button> : '—'}</td><td className="p-2">{event.control_status === 'readback_confirmed' ? '回读确认到位' : ['accepted', 'validated', 'dispatched'].includes(event.control_status || '') ? '等待回读' : event.control_status || '—'}<details className="mt-1"><summary className="cursor-pointer text-[#981320]">查看证据</summary><pre className="max-w-sm whitespace-pre-wrap break-all text-[10px]">{JSON.stringify({ frame_sequence: event.frame_sequence, configuration_revision: event.configuration_revision, snapshot: event.snapshot_evidence, decision: event.decision, intents: event.intent_summary, command_id: event.control_command_id, control_status: event.control_status }, null, 2)}</pre></details></td></tr>)}{!events.length && <tr><td colSpan={5} className="p-6 text-center text-gray-400">暂无关键事件</td></tr>}</tbody></table></div>
+            {eventsError && <p role="alert" className="mt-3 text-xs text-red-700">事件读取失败：{eventsError}。上表保留上次证据，不代表最新状态。</p>}
+            {eventsBusy && <p aria-live="polite" className="mt-3 text-xs text-gray-500">正在读取运行事件…</p>}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs"><label>每页条数<select aria-label="事件每页条数" value={eventPageSize} disabled={eventsBusy} onChange={(event) => loadEventPage(null, [], Number(event.target.value))} className="neu-input ml-2 px-2"><option value={10}>10</option><option value={20}>20</option></select></label><span>第 {eventHistory.length + 1} 页 · 本页 {events.length} 条</span><div className="flex gap-2"><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !eventHistory.length} onClick={() => loadEventPage(eventHistory[eventHistory.length - 1], eventHistory.slice(0, -1))}>上一页</button><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !nextEventCursor} onClick={() => loadEventPage(nextEventCursor, [...eventHistory, eventCursor])}>下一页</button></div></div>
+          </section>
+          {controlEvidence && <section className="neu-card p-4" aria-label="控制回读证据" data-testid="strategy-control-evidence"><div className="flex items-center justify-between gap-3"><h3 className="text-sm font-bold">控制回读证据</h3><button type="button" className="neu-btn px-3 text-xs" onClick={() => setControlEvidence(null)}>关闭证据</button></div><p className="mt-2 text-xs">{controlEvidence.command?.status === 'readback_confirmed' ? '回读确认到位（后端新 committed L2 证据）' : '未确认执行成功；仅按后端控制命令状态判断，不将接口受理当设备动作。'}</p>{controlEvidence.error ? <p role="alert" className="mt-2 text-xs text-red-700">{controlEvidence.error}</p> : controlEvidence.command ? <pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(controlEvidence.command, null, 2)}</pre> : <p aria-live="polite" className="mt-3 text-xs">正在读取控制命令…</p>}</section>}
         </>}
       </main>
     </div>
