@@ -7,6 +7,13 @@ test.setTimeout(15000)
 test.beforeEach(async ({ page, baseURL }) => {
   test.skip(!baseURL || !['localhost', '127.0.0.1'].includes(new URL(baseURL).hostname), 'Synthetic local test only')
   const user = { id: 'cursor-user', username: 'cursor-test', role: 'admin' }
+  await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
+    socket.onMessage((message) => {
+      const body = JSON.parse(String(message))
+      if (body.authenticate) socket.send(JSON.stringify({ type: 'authenticated' }))
+      if (body.subscribe) socket.send(JSON.stringify({ type: 'subscribed' }))
+    })
+  })
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/v1/auth/login') {
@@ -19,6 +26,16 @@ test.beforeEach(async ({ page, baseURL }) => {
       await route.fulfill({ json: { mqtt_telemetry_topic: '/neuron/#', persisted: null, effective_topics: [] } })
     } else if (path === '/api/v1/pipeline/config') {
       await route.fulfill({ json: { batch_size: 50, flush_interval_sec: 1 } })
+    } else if (path === '/api/v1/ems-workbench') {
+      await route.fulfill({ json: { workbench_id: 'default', configuration_revision: 7, navigation: [], groups: [], kpis: [], trends: [], alarms: { visible: true }, controls: { visible: false, entities: [] } } })
+    } else if (path === '/api/v1/entity-instances') {
+      await route.fulfill({ json: { items: [], total: 0 } })
+    } else if (path === '/api/v1/auth/ws-ticket') {
+      await route.fulfill({ json: { ticket: 'cursor-test' } })
+    } else if (path === '/api/v1/categories') {
+      await route.fulfill({ json: { categories: [] } })
+    } else if (path === '/api/v1/alarms/counts') {
+      await route.fulfill({ json: { counts: {} } })
     } else if (path === '/api/v1/fault-maps') {
       await route.fulfill({ json: { items: [], total: 0 } })
     } else if (path === '/api/v1/health') {
@@ -41,6 +58,7 @@ test.beforeEach(async ({ page, baseURL }) => {
     await login.click()
   }
   await openEngineeringPage(page, '系统工具')
+  await page.getByRole('button', { name: '打开HTTP 通知', exact: true }).click()
   await page.getByRole('region', { name: 'HTTP 通知' }).getByRole('button', { name: '新增通知', exact: true }).click()
 })
 

@@ -68,7 +68,7 @@ export default function FaultMapManager() {
   }
 
   const handleDelete = async (map: FaultMap) => {
-    if (!confirm(`确定删除故障码映射表 "${map.name}"？`)) return
+    if (!confirm(`确定永久删除故障码映射表“${map.name}”吗？\n此操作不可恢复，引用该表的点位关联将被清空。`)) return
     try {
       await deleteFaultMap(map.id)
       load()
@@ -93,78 +93,23 @@ export default function FaultMapManager() {
     setForm({ ...form, entries: next })
   }
 
+  const startCreate = () => {
+    setEditing(null)
+    setForm({ name: '', description: '', entries: [] })
+    setShowForm(true)
+  }
+
   return (
-    <div className="neu-card p-4">
+    <section className="neu-card p-4" aria-label="故障映射管理">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-bold text-gray-800">故障码映射表</h3>
         <button
-          onClick={() => { setEditing(null); setShowForm(true) }}
+          onClick={startCreate}
           className="neu-btn px-3 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
         >
           新建映射表
         </button>
       </div>
-
-      {showForm && (
-        <div className="neu-inset p-3 mb-3 space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <input
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="映射表名称"
-              className="neu-input px-3 py-2 text-xs"
-            />
-            <input
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder="描述"
-              className="neu-input px-3 py-2 text-xs"
-            />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xs text-gray-500">故障码条目</div>
-            {form.entries.map((entry, idx) => (
-              <div key={idx} className="flex items-center gap-2">
-                <input
-                  value={entry.code}
-                  onChange={(e) => updateEntry(idx, 'code', e.target.value)}
-                  placeholder="故障码"
-                  className="neu-input px-2 py-1 text-xs w-32"
-                />
-                <input
-                  value={entry.message}
-                  onChange={(e) => updateEntry(idx, 'message', e.target.value)}
-                  placeholder="故障描述"
-                  className="neu-input px-2 py-1 text-xs flex-1"
-                />
-                <button
-                  onClick={() => removeEntry(idx)}
-                  className="neu-btn px-2 py-1 text-xs text-red-500"
-                >
-                  删除
-                </button>
-              </div>
-            ))}
-            <button onClick={addEntry} className="neu-btn px-3 py-1 text-xs text-gray-600">
-              + 添加条目
-            </button>
-          </div>
-          <div className="flex justify-end gap-2">
-            <button
-              onClick={() => { setShowForm(false); setEditing(null) }}
-              className="neu-btn px-4 py-1.5 text-xs"
-            >
-              取消
-            </button>
-            <button
-              onClick={handleSave}
-              className="neu-btn px-4 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
-            >
-              保存
-            </button>
-          </div>
-        </div>
-      )}
 
       {loading && <div className="text-xs text-gray-400">加载中...</div>}
 
@@ -211,6 +156,38 @@ export default function FaultMapManager() {
           <div className="text-center text-gray-400 text-xs py-6">暂无故障码映射表</div>
         )}
       </div>
-    </div>
+
+      {showForm && (
+        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setShowForm(false); setEditing(null) } }}>
+          <section role="dialog" aria-modal="true" aria-label="故障映射编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
+            <header className="zizu-tools-dialog-header">
+              <div><span>FAULT MAP</span><h2>{editing ? `编辑：${editing.name}` : '新建故障映射'}</h2></div>
+              <button type="button" onClick={() => { setShowForm(false); setEditing(null) }} className="neu-btn zizu-tools-close">关闭</button>
+            </header>
+            <div className="zizu-tools-dialog-body space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-xs text-gray-600">映射表名称<input autoFocus aria-label="映射表名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-xs text-gray-600">描述<input aria-label="映射表描述" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between"><h3 className="text-xs font-semibold text-gray-700">故障码条目</h3><button type="button" onClick={addEntry} className="neu-btn px-3 text-xs text-gray-600">添加条目</button></div>
+                {form.entries.map((entry, idx) => (
+                  <div key={idx} className="grid grid-cols-[130px_1fr_auto] items-center gap-2">
+                    <input aria-label={`故障码 ${idx + 1}`} value={entry.code} onChange={(event) => updateEntry(idx, 'code', event.target.value)} placeholder="故障码" className="neu-input px-2 py-2 text-xs" />
+                    <input aria-label={`故障描述 ${idx + 1}`} value={entry.message} onChange={(event) => updateEntry(idx, 'message', event.target.value)} placeholder="故障描述" className="neu-input px-2 py-2 text-xs" />
+                    <button type="button" onClick={() => removeEntry(idx)} className="neu-btn px-3 text-xs text-red-600">移除</button>
+                  </div>
+                ))}
+                {!form.entries.length && <p className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-xs text-gray-400">尚未添加故障码条目。</p>}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => { setShowForm(false); setEditing(null) }} className="neu-btn px-4 text-xs">取消</button>
+                <button type="button" onClick={() => void handleSave()} className="neu-btn zizu-primary px-4 text-xs font-medium">保存</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+    </section>
   )
 }

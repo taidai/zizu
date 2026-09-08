@@ -53,6 +53,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
   test('界面可创建、测试并启用 HTTP 请求', async () => {
     test.setTimeout(180_000)
     await openEngineeringPage(page, '系统工具')
+    await page.getByRole('button', { name: '打开HTTP 通知', exact: true }).click()
     const panel = page.getByRole('region', { name: 'HTTP 通知' })
     await expect(panel).toBeVisible()
     await panel.getByRole('button', { name: '新增通知' }).click()
@@ -68,6 +69,7 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     const card = panel.locator('article').filter({ hasText: fixture.config_name })
     await card.getByRole('button', { name: '发送测试' }).click()
     await expect(panel.getByText('测试请求已送达，可以启用。')).toBeVisible()
+    await expect(card.getByRole('status', { name: 'HTTP 测试收据' })).toContainText(/HTTP \d+|无 HTTP 状态/)
     await card.getByRole('button', { name: '启用', exact: true }).click()
     await expect(panel.getByText('通知已启用。')).toBeVisible()
     await expect(card).toContainText('已启用')

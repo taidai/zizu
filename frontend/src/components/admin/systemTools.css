@@ -1,0 +1,263 @@
+.zizu-tools {
+  color: #202326;
+}
+
+.zizu-tools-intro {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 2px 18px;
+}
+
+.zizu-tools-intro span,
+.zizu-tools-card > p:first-of-type,
+.zizu-tools-dialog-header span {
+  color: #9f6d20;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+.zizu-tools-intro h1 {
+  margin-top: 4px;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -.02em;
+}
+
+.zizu-tools-intro > p {
+  max-width: 520px;
+  color: #60666b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.zizu-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.zizu-tools-card {
+  position: relative;
+  display: flex;
+  min-height: 286px;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 22px 20px 18px;
+  border: 1px solid rgba(255, 255, 255, .82);
+  background: linear-gradient(145deg, rgba(255, 255, 255, .95), rgba(229, 232, 235, .9));
+}
+
+.zizu-tools-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: #bb0814;
+  content: '';
+}
+
+.zizu-tools-card-index {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  color: rgba(34, 38, 42, .1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 32px;
+  font-weight: 900;
+}
+
+.zizu-tools-card h2 {
+  margin-top: 8px;
+  padding-right: 34px;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.zizu-tools-rule {
+  width: 36px;
+  height: 2px;
+  margin: 14px 0;
+  background: #bb0814;
+}
+
+.zizu-tools-description {
+  min-height: 62px;
+  color: #596066;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.zizu-tools-card ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 18px;
+  padding: 0;
+  list-style: none;
+}
+
+.zizu-tools-card li {
+  border: 1px solid #d5ba85;
+  border-radius: 999px;
+  background: rgba(238, 228, 206, .7);
+  padding: 3px 8px;
+  color: #754f18;
+  font-size: 10px;
+}
+
+.zizu-tools-open,
+.zizu-tools-close,
+.zizu-tools-dialog button,
+.zizu-tools-confirm button {
+  min-height: 44px;
+}
+
+.zizu-tools-open {
+  width: 100%;
+  margin-top: auto;
+  border-radius: 10px;
+  font-weight: 700;
+}
+
+.zizu-tools-overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  background: rgba(24, 28, 31, .5);
+  backdrop-filter: blur(2px);
+}
+
+.zizu-tools-dialog {
+  display: flex;
+  width: min(940px, calc(100vw - 56px));
+  height: 100%;
+  flex-direction: column;
+  border-left: 1px solid #fff;
+  background: #eceeef;
+  box-shadow: -24px 0 60px rgba(20, 24, 28, .24);
+}
+
+.zizu-tools-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  gap: 16px;
+  min-height: 78px;
+  padding: 14px 22px;
+  border-bottom: 1px solid #d8dcdf;
+  background: linear-gradient(145deg, #fff, #e2e5e8);
+}
+
+.zizu-tools-dialog-header h2,
+.zizu-tools-confirm h2 {
+  margin-top: 3px;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.zizu-tools-dialog-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 18px;
+}
+
+.zizu-tools-editor-dialog {
+  width: min(820px, calc(100vw - 64px));
+  height: min(700px, calc(100vh - 48px));
+  border: 1px solid #d5d9dc;
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(20, 24, 28, .32);
+}
+
+.zizu-tools-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.zizu-tools-dialog-body > .neu-card,
+.zizu-tools-stack > .neu-card {
+  box-shadow: 6px 6px 14px rgba(36, 40, 44, .08), -5px -5px 12px rgba(255, 255, 255, .72);
+}
+
+.zizu-tools-danger-card {
+  border: 1px solid #e7b7ba;
+  background: #fff8f8;
+}
+
+.zizu-tools-danger-button {
+  border: 1px solid #a90913;
+  background: #bb0814;
+  color: #fff;
+}
+
+.zizu-tools-danger-button:hover {
+  background: #960710;
+}
+
+.zizu-tools-danger-overlay {
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.zizu-tools-confirm {
+  width: min(440px, 100%);
+  border: 1px solid #d68f94;
+  border-radius: 16px;
+  background: #f7f7f6;
+  padding: 24px;
+  box-shadow: 0 24px 80px rgba(35, 12, 14, .35);
+}
+
+.zizu-tools-danger-kicker {
+  color: #bb0814;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .14em;
+}
+
+.zizu-tools-confirm > p,
+.zizu-tools-confirm > label {
+  display: block;
+  margin-top: 14px;
+  color: #565b60;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.zizu-tools-confirm-warning {
+  border-left: 3px solid #bb0814;
+  background: #fff0f1;
+  padding: 10px 12px;
+  color: #7b1017 !important;
+}
+
+.zizu-tools-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+@media (max-width: 900px) {
+  .zizu-tools-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .zizu-tools-card { min-height: 220px; }
+  .zizu-tools-description { min-height: 42px; }
+}
+
+@media (max-width: 720px) {
+  .zizu-tools-intro { align-items: start; flex-direction: column; }
+  .zizu-tools-grid { grid-template-columns: 1fr; }
+  .zizu-tools-dialog { width: 100%; }
+  .zizu-tools-editor-dialog { height: calc(100vh - 24px); border-radius: 12px; }
+  .zizu-tools-dialog-body { padding: 12px; }
+}

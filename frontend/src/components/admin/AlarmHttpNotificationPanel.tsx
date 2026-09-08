@@ -307,6 +307,19 @@ export default function AlarmHttpNotificationPanel() {
                 </button>
                 <button type="button" disabled={busy !== ''} onClick={() => void remove(config)} className="neu-btn px-3 py-1.5 text-xs text-red-500">删除</button>
               </div>
+              {config.last_test_status && (
+                <div role="status" aria-label="HTTP 测试收据" className={`basis-full rounded-lg border px-3 py-2 text-[11px] ${config.last_test_status.delivered ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono">
+                    <strong>{config.last_test_status.outcome}</strong>
+                    <span>{config.last_test_status.http_status === null ? '无 HTTP 状态' : `HTTP ${config.last_test_status.http_status}`}</span>
+                    <span>{config.last_test_status.duration_ms} ms</span>
+                    {config.tested_at && <time dateTime={config.tested_at}>{new Date(config.tested_at).toLocaleString('zh-CN', { hour12: false })}</time>}
+                  </div>
+                  {config.last_test_status.error_code && <p className="mt-1 font-mono">{config.last_test_status.error_code}</p>}
+                  {config.last_test_status.error_detail && <p className="mt-1 break-words">{config.last_test_status.error_detail}</p>}
+                  {config.last_test_status.response_excerpt && <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all">{config.last_test_status.response_excerpt}</pre>}
+                </div>
+              )}
             </article>
           )
         })}
@@ -315,12 +328,14 @@ export default function AlarmHttpNotificationPanel() {
       </div>
 
       {editingId !== undefined && (
-        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/30 p-4">
-          <div className="flex items-center justify-between">
-            <h4 className="text-sm font-semibold text-gray-800">{editingId ? `编辑：${selected?.name || ''}` : '新增 HTTP 通知'}</h4>
-            <button type="button" onClick={() => setEditingId(undefined)} className="text-xs text-gray-500">收起</button>
-          </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingId(undefined) }}>
+          <section role="dialog" aria-modal="true" aria-label="HTTP 通知编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
+            <header className="zizu-tools-dialog-header">
+              <div><span>HTTP REQUEST</span><h2>{editingId ? `编辑：${selected?.name || ''}` : '新增 HTTP 通知'}</h2></div>
+              <button type="button" onClick={() => setEditingId(undefined)} className="neu-btn zizu-tools-close">关闭</button>
+            </header>
+            <div className="zizu-tools-dialog-body">
+          <div className="grid gap-3 md:grid-cols-2">
             <label className="text-xs text-gray-600">名称
               <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="neu-input mt-1 w-full px-3 py-2" placeholder="例如：值班群" />
             </label>
@@ -375,6 +390,8 @@ export default function AlarmHttpNotificationPanel() {
             </button>
             <span className="text-[11px] text-gray-500">保存后请点“发送测试”；测试成功才可启用。</span>
           </div>
+            </div>
+          </section>
         </div>
       )}
     </section>

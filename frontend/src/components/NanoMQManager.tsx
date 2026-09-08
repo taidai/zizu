@@ -143,6 +143,7 @@ export default function NanoMQManager() {
   }
 
   const handleRestart = async () => {
+    if (!window.confirm('确认重启 NanoMQ 服务吗？\n现有客户端连接会短暂中断，配置是否生效仍以服务端返回结果为准。')) return
     setRestartLoading(true)
     setConfigMsg('')
     try {
@@ -184,7 +185,7 @@ export default function NanoMQManager() {
   }
 
   return (
-    <div className="neu-card p-4">
+    <section className="neu-card p-4" aria-label="NanoMQ 管理">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-bold text-gray-800">nanoMQ 管理</h3>
         <button
@@ -195,7 +196,7 @@ export default function NanoMQManager() {
         </button>
       </div>
 
-      {error && <div className="text-xs text-red-500 mb-3">{error}</div>}
+      {error && <div role="alert" className="text-xs text-red-500 mb-3">{error}</div>}
 
       <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
         {tabs.map((t) => (
@@ -361,14 +362,14 @@ export default function NanoMQManager() {
             >
               {restartLoading ? '重启中...' : '保存并重启 nanoMQ'}
             </button>
-            {configMsg && <span className="text-xs text-gray-500">{configMsg}</span>}
+            {configMsg && <span role="status" className="text-xs text-gray-500">{configMsg}</span>}
           </div>
           <p className="text-[11px] text-gray-400">
             修改 HOCON 配置文件后保存，再点击“保存并重启 nanoMQ”使配置生效。重启前会自动备份原配置。
           </p>
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
