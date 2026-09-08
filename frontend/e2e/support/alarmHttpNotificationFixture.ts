@@ -65,16 +65,21 @@ export function resolveAlarmHttpFixtureScript(
   } catch {
     throw new Error('Local alarm HTTP fixture override requires HTTP loopback 127.0.0.1:19027')
   }
+  const rawAuthority = /^http:\/\/([^/?#]*)/i.exec(environment.baseUrl)?.[1] ?? ''
+  const rawHost = rawAuthority
+    .slice(rawAuthority.lastIndexOf('@') + 1)
+    .split(':', 1)[0]
   if (
     site.protocol !== 'http:'
     || site.hostname !== '127.0.0.1'
     || site.port !== '19027'
+    || rawHost !== '127.0.0.1'
   ) {
     throw new Error('Local alarm HTTP fixture override requires HTTP loopback 127.0.0.1:19027')
   }
   const remoteOption = Object.entries(source).find(([key, value]) => (
     (key.startsWith('ZIZU_E2E_SSH_') || key === 'ZIZU_E2E_SUDO_PASSWORD')
-    && String(value ?? '').trim() !== ''
+    && String(value ?? '') !== ''
   ))
   if (remoteOption) {
     throw new Error('Local alarm HTTP fixture override refuses SSH or sudo options')

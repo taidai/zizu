@@ -18,7 +18,7 @@ async function withTemporaryPythonFixture(run) {
   const script = path.join(directory, 'fixture.py')
   await writeFile(script, '# private local test fixture\n', 'utf8')
   try {
-    await run(script)
+    await run(script, directory)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -103,6 +103,9 @@ test('alarm fixture rejects local override before spawn for every unapproved URL
       'http://localhost:19027',
       'http://[::1]:19027',
       'http://127.0.0.1:19026',
+      'http://2130706433:19027',
+      'http://0x7f000001:19027',
+      'http://0177.0.0.1:19027',
     ]) {
       assert.throws(
         () => resolveAlarmHttpFixtureScript(repositoryRoot, { baseUrl }, source),
@@ -112,21 +115,32 @@ test('alarm fixture rejects local override before spawn for every unapproved URL
     }
   })
 
-  for (const script of [
-    'relative.py',
-    path.resolve(os.tmpdir(), 'zizu-missing-alarm-fixture.py'),
-    path.resolve(os.tmpdir(), 'zizu-alarm-fixture.txt'),
-  ]) {
-    assert.throws(
-      () => resolveAlarmHttpFixtureScript(
-        repositoryRoot,
-        localEnvironment,
-        { ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT: script },
-      ),
-      /existing absolute Python script path/i,
-      script,
-    )
-  }
+  assert.throws(
+    () => resolveAlarmHttpFixtureScript(
+      repositoryRoot,
+      localEnvironment,
+      { ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT: 'relative.py' },
+    ),
+    /existing absolute Python script path/i,
+  )
+
+  await withTemporaryPythonFixture(async (_script, directory) => {
+    const missingPythonScript = path.join(directory, 'missing.py')
+    const nonPythonScript = path.join(directory, 'fixture.txt')
+    await writeFile(nonPythonScript, '# wrong extension\n', 'utf8')
+
+    for (const script of [missingPythonScript, nonPythonScript]) {
+      assert.throws(
+        () => resolveAlarmHttpFixtureScript(
+          repositoryRoot,
+          localEnvironment,
+          { ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT: script },
+        ),
+        /existing absolute Python script path/i,
+        script,
+      )
+    }
+  })
 })
 
 test('alarm fixture rejects every SSH or sudo setting before spawning a local override', async () => {
@@ -136,6 +150,7 @@ test('alarm fixture rejects every SSH or sudo setting before spawning a local ov
       'ZIZU_E2E_SSH_PORT',
       'ZIZU_E2E_SSH_USER',
       'ZIZU_E2E_SSH_PASSWORD',
+      'ZIZU_E2E_SSH_FUTURE_OPTION',
       'ZIZU_E2E_SUDO_PASSWORD',
     ]) {
       assert.throws(
@@ -144,7 +159,7 @@ test('alarm fixture rejects every SSH or sudo setting before spawning a local ov
           'setup',
           [],
           localEnvironment,
-          { ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT: script, [key]: 'private-value' },
+          { ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT: script, [key]: ' ' },
         ),
         /SSH or sudo options/i,
         key,
