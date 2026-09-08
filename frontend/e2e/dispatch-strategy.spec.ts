@@ -481,6 +481,54 @@ test('取消原生菜单后可明确确认放弃未同步编辑恢复提交', as
   expect(api.savedDrafts[0].jdm_content).toEqual(original.published_revision.jdm_content)
 })
 
+test('完整图同节点改名不能确认尚未回调的表内容，三个提交入口等待C1', async ({ page }, testInfo) => {
+  const original = publishedStrategy()
+  const count = original.published_revision.jdm_content.nodes[1].content.rules.length
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByRole('button', { name: '打开完整规则图' }).click()
+  const node = page.locator(`.react-flow__node[data-id="${original.published_revision.jdm_content.nodes[1].id}"]`)
+  await node.getByRole('button', { name: 'Edit Table', exact: true }).click()
+  await page.clock.install()
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  try {
+    await page.getByRole('button', { name: /Add row$/ }).evaluate((button: HTMLButtonElement) => button.click())
+    // Attempt a real native tab switch and same-node rename while C1 is still
+    // inside the table debounce. A safe editor may reject the navigation itself.
+    await page.getByRole('tab').filter({ hasText: 'Graph' }).evaluate((tab: HTMLElement) => tab.click())
+    await node.locator('.grl-text-edit__text').first().evaluate((label: HTMLElement) => label.click())
+    const nameInput = node.locator('input.grl-text-edit__input')
+    if (await nameInput.count()) {
+      await nameInput.fill('same-node-metadata-C0')
+      await nameInput.press('Tab')
+    }
+    for (const name of ['保存草稿', '试算', '发布']) {
+      const submit = page.getByRole('button', { name, exact: true })
+      await expect(submit).toBeDisabled({ timeout: 1000 })
+      await submit.evaluate((button: HTMLButtonElement) => button.click())
+    }
+    expect(api.savedDrafts).toHaveLength(0)
+    expect(api.calls.filter((call) => /^(PUT|POST).*\/(draft|simulate|publish)$/.test(call))).toEqual([])
+    await page.getByRole('button', { name: '保存草稿', exact: true }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath('native-content-pending.png'), fullPage: true })
+    await page.clock.runFor(500)
+  } finally { await page.clock.resume() }
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  expect(api.savedDrafts[0].jdm_content.nodes[1].content.rules).toHaveLength(count + 1)
+  expect(api.savedDrafts[0].jdm_content.nodes[1].name).toBe(original.published_revision.jdm_content.nodes[1].name)
+  // Navigation and metadata editing work again after the native C1 commit.
+  await page.getByRole('tab').filter({ hasText: 'Graph' }).click()
+  await node.locator('.grl-text-edit__text').first().evaluate((label: HTMLElement) => label.click())
+  await node.locator('input.grl-text-edit__input').fill('metadata-after-C1')
+  await page.keyboard.press('Tab')
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(2)
+  expect(api.savedDrafts[1].jdm_content.nodes[1]).toMatchObject({ name: 'metadata-after-C1' })
+  expect(api.savedDrafts[1].jdm_content.nodes[1].content.rules).toHaveLength(count + 1)
+})
+
 test('已有时段 JDM 在原生表改名保存仍保留条件、公式与触发原义', async ({ page }) => {
   const original = publishedStrategy()
   original.published_revision.trigger_kind = 'DATA_CHANGE'
