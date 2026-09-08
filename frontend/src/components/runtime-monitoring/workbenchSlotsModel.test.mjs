@@ -29,7 +29,14 @@ const entity = (overrides = {}) => ({
 test('five fixed slots keep product order and a real GOOD zero remains current', () => {
   const slots = buildWorkbenchSlots([
     { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity() },
-  ])
+  ], [{
+    entityInstanceId: 'entity-pv',
+    observation: {
+      value: 0, unit: 'kW', quality: 192, reason: null,
+      observed_at: '2026-09-08T08:00:01Z', value_observed_at: '2026-09-08T08:00:00Z',
+    },
+    nodeCurrent: true,
+  }])
 
   assert.deepEqual(slots.map((slot) => slot.id), [
     'site-power', 'pv-power', 'storage-power', 'storage-soc', 'charging-power',
@@ -40,6 +47,45 @@ test('five fixed slots keep product order and a real GOOD zero remains current',
   assert.equal(slots[0].reading.kind, 'missing')
   assert.equal(slots[0].reading.valueText, '—')
   assert.match(slots[0].reason, /未返回/)
+})
+
+test('committed runtime evidence replaces the workbench snapshot and disconnect downgrades it', () => {
+  const kpis = [
+    { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ value: 999 }) },
+  ]
+  const observation = {
+    value: 15, unit: 'kW', quality: 192, reason: null,
+    observed_at: '2026-09-08T08:00:03Z', value_observed_at: '2026-09-08T08:00:02Z',
+  }
+
+  const current = buildWorkbenchSlots(kpis, [{ entityInstanceId: 'entity-pv', observation, nodeCurrent: true }])
+  assert.equal(current[1].reading.kind, 'current')
+  assert.equal(current[1].reading.valueText, '15.0')
+  assert.equal(current[1].reading.observedAt, '2026-09-08T08:00:02Z')
+
+  const disconnected = buildWorkbenchSlots(kpis, [{
+    entityInstanceId: 'entity-pv', observation, nodeCurrent: false, reason: '实时数据连接已断开，正在重连',
+  }])
+  assert.equal(disconnected[1].reading.kind, 'last')
+  assert.equal(disconnected[1].reading.valueText, '15.0')
+  assert.match(disconnected[1].reading.reason, /连接已断开/)
+})
+
+test('workbench GET refresh failure prevents committed evidence from being labelled current', () => {
+  const slots = buildWorkbenchSlots([
+    { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ value: 999 }) },
+  ], [{
+    entityInstanceId: 'entity-pv',
+    observation: {
+      value: 15, unit: 'kW', quality: 192, reason: null,
+      observed_at: '2026-09-08T08:00:03Z', value_observed_at: '2026-09-08T08:00:02Z',
+    },
+    nodeCurrent: true,
+  }], false)
+
+  assert.equal(slots[1].reading.kind, 'last')
+  assert.equal(slots[1].reading.valueText, '15.0')
+  assert.match(slots[1].reading.reason, /工作台刷新失败/)
 })
 
 test('unconfigured, ambiguous, unavailable, bad quality, and non-numeric readings never become fake zero', () => {

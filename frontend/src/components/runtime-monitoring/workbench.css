@@ -116,6 +116,12 @@ button.workbench-metric:active { transform: translateY(1px); }
 .workbench-flow-node p { font-family: Consolas, 'SFMono-Regular', monospace; font-size: 24px; font-weight: 700; letter-spacing: -.04em; white-space: nowrap; }
 .workbench-flow-node p small { font-family: var(--zizu-font); font-size: 10px; font-weight: 500; letter-spacing: 0; }
 .workbench-flow-node em { display: block; color: var(--workbench-muted); font-size: 8px; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workbench-flow-node__state,
+.workbench-flow-node__reason { display: block; max-width: 190px; margin-top: 2px; overflow: hidden; color: var(--workbench-muted); font-size: 7px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.workbench-flow-node__state.is-current { color: #2e765b; }
+.workbench-flow-node__state.is-last,
+.workbench-flow-node__state.is-missing { color: #9c6b1c; }
+.workbench-flow-node__reason { margin-top: 1px; color: #7c8791; }
 .workbench-flow-node--pv { grid-column: 1; grid-row: 1; }
 .workbench-flow-node--site { grid-column: 2; grid-row: 3; }
 .workbench-flow-node--storage { grid-column: 2; grid-row: 1; }

@@ -31,6 +31,7 @@ import {
   fixedEnergyFlow,
   isConfirmationExpired,
   type WorkbenchSlotView,
+  type WorkbenchRuntimeEvidence,
 } from '../components/runtime-monitoring/workbenchSlotsModel'
 import { useRuntimeNodes } from '../components/runtime-monitoring/useRuntimeNodes'
 import '../components/runtime-monitoring/runtime-monitoring.css'
@@ -61,6 +62,13 @@ function controlError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
 }
 
+function qualityLabel(quality: number | null): string {
+  if (quality === 192) return '正常'
+  if (quality === 64) return '超时'
+  if (quality === 1) return '未知'
+  return quality == null ? '无数据' : `异常（${quality}）`
+}
+
 function mergeControlEvidence(workbench: EmsWorkbench): WorkbenchEntity[] {
   const liveById = new Map(
     workbench.groups.flatMap((group) => group.entities).map((entity) => [entity.entity_instance_id, entity]),
@@ -81,7 +89,6 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const pending = useRef(new Set<string>())
-  const operationKeys = useRef(new Map<string, { confirmationKey: string; commandKey: string }>())
 
   const setBusy = (key: string, busy: boolean) => {
     if (busy) pending.current.add(key)
@@ -103,15 +110,6 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
       return null
     }
     return value
-  }
-
-  const keysFor = (entityId: string, value: unknown) => {
-    const identity = `${entityId}\u0000${JSON.stringify(value)}`
-    const current = operationKeys.current.get(identity)
-    if (current) return current
-    const created = { confirmationKey: crypto.randomUUID(), commandKey: crypto.randomUUID() }
-    operationKeys.current.set(identity, created)
-    return created
   }
 
   const refresh = async (entityInstanceId: string, command: ControlCommand) => {
@@ -142,13 +140,12 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
     }
     const value = valueFor(entity)
     if (value === null) return
-    const operation = keysFor(entity.entity_instance_id, value)
     setBusy(key, true)
     setMessage('')
     setError('')
     try {
-      const receipt = await requestControlConfirmation(entity.entity_instance_id, value, operation.confirmationKey)
-      setConfirmation({ entity, value, receipt, commandKey: operation.commandKey })
+      const receipt = await requestControlConfirmation(entity.entity_instance_id, value, crypto.randomUUID())
+      setConfirmation({ entity, value, receipt, commandKey: crypto.randomUUID() })
     } catch (reason) {
       setError(controlError(reason, '控制二次确认申请失败。'))
     } finally {
@@ -250,8 +247,8 @@ function MetricCard({ slot, onOpen }: { slot: WorkbenchSlotView; onOpen: () => v
         <span className="workbench-metric__reading"><strong>{slot.reading.valueText}</strong><small>{slot.reading.unit}</small></span>
         <span className="workbench-metric__source">{slot.entity?.node_name || slot.bindingLabel}</span>
       </span>
-      <span className={`workbench-metric__state is-${slot.reading.kind}`}>{slot.reading.kind === 'current' ? '当前值' : slot.reading.kind === 'last' ? '最后值（非当前）' : slot.bindingLabel}</span>
-      <span className="workbench-metric__reason">{slot.reason}</span>
+      <span className={`workbench-metric__state is-${slot.reading.kind}`}>{slot.reading.kind === 'current' ? '当前值' : slot.reading.kind === 'last' ? '最后值（非当前）' : slot.entity ? '当前未知' : slot.bindingLabel}</span>
+      <span className="workbench-metric__reason">{slot.reading.reason || slot.reason}</span>
     </>
   )
   return slot.entity ? (
@@ -260,10 +257,17 @@ function MetricCard({ slot, onOpen }: { slot: WorkbenchSlotView; onOpen: () => v
 }
 
 function FlowNode({ slot, role }: { slot: WorkbenchSlotView; role: string }) {
+  const stateLabel = slot.reading.kind === 'current' ? '当前值' : slot.reading.kind === 'last' ? '最后值（非当前）' : '当前未知'
   return (
     <div className={`workbench-flow-node workbench-flow-node--${role}`}>
       <span aria-hidden="true">{SLOT_ICONS[slot.id]}</span>
-      <div><strong>{slot.label}</strong><p>{slot.reading.valueText} <small>{slot.reading.unit}</small></p><em>{slot.entity?.node_name || slot.bindingLabel}</em></div>
+      <div>
+        <strong>{slot.label}</strong>
+        <p>{slot.reading.valueText} <small>{slot.reading.unit}</small></p>
+        <em>{slot.entity?.node_name || slot.bindingLabel}</em>
+        <small className={`workbench-flow-node__state is-${slot.reading.kind}`}>{stateLabel} · 质量{qualityLabel(slot.reading.quality)} · 最后值 {formatTime(slot.reading.observedAt)}</small>
+        <small className="workbench-flow-node__reason">{slot.reading.reason || slot.reason}</small>
+      </div>
     </div>
   )
 }
@@ -273,14 +277,14 @@ function SlotConfigurationDialog({
   descriptors,
   configurationRevision,
   directoryError,
-  onRevision,
+  onSaved,
   onClose,
 }: {
   slots: WorkbenchSlotView[]
   descriptors: EntityInstance[]
   configurationRevision: number
   directoryError: string
-  onRevision: (revision: number) => void
+  onSaved: () => Promise<EmsWorkbench>
   onClose: () => void
 }) {
   const [selections, setSelections] = useState<Record<string, string>>(() => Object.fromEntries(slots.map((slot) => [slot.id, slot.entity?.entity_instance_id || ''])))
@@ -305,9 +309,15 @@ function SlotConfigurationDialog({
     try {
       const receipt = await saveEmsWorkbenchSlot(slot.id, entityId, revisionRef.current, key)
       revisionRef.current = receipt.configuration_revision
-      onRevision(receipt.configuration_revision)
-      setSelections((current) => ({ ...current, [slot.id]: entityId || '' }))
-      setMessage(`${slot.label}已保存 · 配置修订 ${receipt.configuration_revision}${receipt.replayed ? ' · 幂等重放' : ''}`)
+      try {
+        const refreshed = await onSaved()
+        revisionRef.current = refreshed.configuration_revision
+        const refreshedSlots = buildWorkbenchSlots(refreshed.kpis)
+        setSelections(Object.fromEntries(refreshedSlots.map((item) => [item.id, item.entity?.entity_instance_id || ''])))
+        setMessage(`${slot.label}已保存 · 配置修订 ${refreshed.configuration_revision}${receipt.replayed ? ' · 幂等重放' : ''}`)
+      } catch (reason) {
+        setError(`${slot.label}保存已受理（配置修订 ${receipt.configuration_revision}），但读取最新工作台失败：${controlError(reason, '请重试读取；当前页面未把本地选择当作正式绑定。')}`)
+      }
     } catch (reason) {
       setError(`${slot.label}保存失败：${describeWorkbenchSlotError(reason)}`)
     } finally {
@@ -381,6 +391,21 @@ export default function EMSWorkbenchPage({
     }).finally(() => { if (current === generation.current) setWorkbenchLoading(false) })
   }, [])
 
+  const reloadWorkbench = useCallback(async (): Promise<EmsWorkbench> => {
+    setWorkbenchLoading(true)
+    setWorkbenchError('')
+    try {
+      const latest = await fetchEmsWorkbench()
+      setWorkbench(latest)
+      return latest
+    } catch (reason) {
+      setWorkbenchError(controlError(reason, '读取 EMS 工作台失败。'))
+      throw reason
+    } finally {
+      setWorkbenchLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     load()
     return () => { generation.current += 1 }
@@ -392,7 +417,16 @@ export default function EMSWorkbenchPage({
   ), [states])
   const runtimeEntities = useMemo(() => buildRuntimeNodes(descriptors, projections).flatMap((node) => node.entities), [descriptors, projections])
   const selected: RuntimeEntity | null = runtimeEntities.find((entity) => entity.descriptor.id === selectedEntityId) || null
-  const slots = useMemo(() => buildWorkbenchSlots(workbench?.kpis || []), [workbench])
+  const runtimeEvidence = useMemo<WorkbenchRuntimeEvidence[]>(() => runtimeEntities.map(({ descriptor, observation }) => {
+    const state = states.get(descriptor.node_id)
+    return {
+      entityInstanceId: descriptor.id,
+      observation,
+      nodeCurrent: state?.status === 'current' && state.projection?.status === 'COMPLETE',
+      reason: state?.error || (state?.status === 'loading' ? '正在读取已提交实时帧。' : undefined),
+    }
+  }), [runtimeEntities, states])
+  const slots = useMemo(() => buildWorkbenchSlots(workbench?.kpis || [], runtimeEvidence, !workbenchError), [runtimeEvidence, workbench, workbenchError])
   const flow = useMemo(() => fixedEnergyFlow(slots), [slots])
   const enabledStrategies = strategies.filter((strategy) => strategy.enabled)
   const primaryStrategy = enabledStrategies[0] || strategies[0] || null
@@ -456,8 +490,8 @@ export default function EMSWorkbenchPage({
           </section>
         </aside>
       </div>
-      {directoryError && <p role="status" className="workbench-detail-notice">L2 详情目录暂不可用：{directoryError}。首页槽位值仍以工作台响应为准。</p>}
-      {configuring && <SlotConfigurationDialog slots={slots} descriptors={descriptors} configurationRevision={workbench.configuration_revision} directoryError={directoryError} onRevision={(revision) => setWorkbench((current) => current ? { ...current, configuration_revision: revision } : current)} onClose={() => setConfiguring(false)} />}
+      {directoryError && <p role="status" className="workbench-detail-notice">L2 详情目录暂不可用：{directoryError}。已绑定槽位只保留最后值，不标记为当前。</p>}
+      {configuring && <SlotConfigurationDialog slots={slots} descriptors={descriptors} configurationRevision={workbench.configuration_revision} directoryError={directoryError} onSaved={reloadWorkbench} onClose={() => setConfiguring(false)} />}
       {selected && <EntityRuntimeDetail descriptor={selected.descriptor} observation={selected.observation} l0={[...(states.get(selected.descriptor.node_id)?.projection?.l0.values() || [])]} nodeCurrent={states.get(selected.descriptor.node_id)?.status === 'current' && states.get(selected.descriptor.node_id)?.projection?.status === 'COMPLETE'} onClose={() => setSelectedEntityId(null)} />}
     </section>
   )

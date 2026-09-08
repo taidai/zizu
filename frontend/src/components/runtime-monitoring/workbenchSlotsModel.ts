@@ -18,8 +18,23 @@ export type WorkbenchSlotView = EmsWorkbenchSlot & {
     unit: string
     quality: number | null
     observedAt: string | null
+    reason: string | null
   }
   bindingLabel: string
+}
+
+export type WorkbenchRuntimeEvidence = {
+  entityInstanceId: string
+  observation: {
+    value: unknown
+    unit: string | null
+    quality: number
+    reason: string | null
+    observed_at: string | null
+    value_observed_at: string | null
+  } | null
+  nodeCurrent: boolean
+  reason?: string
 }
 
 const bindingLabels: Record<EmsWorkbenchSlot['binding_mode'], string> = {
@@ -35,8 +50,13 @@ function valueText(value: unknown): string {
   return '—'
 }
 
-export function buildWorkbenchSlots(kpis: readonly EmsWorkbenchSlot[]): WorkbenchSlotView[] {
+export function buildWorkbenchSlots(
+  kpis: readonly EmsWorkbenchSlot[],
+  runtimeEvidence: readonly WorkbenchRuntimeEvidence[] = [],
+  workbenchCurrent = true,
+): WorkbenchSlotView[] {
   const byId = new Map(kpis.map((slot) => [slot.id, slot]))
+  const evidenceByEntity = new Map(runtimeEvidence.map((item) => [item.entityInstanceId, item]))
   return FIXED_WORKBENCH_SLOTS.map((fixed) => {
     const wire = byId.get(fixed.id)
     const slot: EmsWorkbenchSlot = wire || {
@@ -47,11 +67,23 @@ export function buildWorkbenchSlots(kpis: readonly EmsWorkbenchSlot[]): Workbenc
       entity: null,
     }
     const entity = slot.entity
-    const hasValue = entity?.value !== null && entity?.value !== undefined
-    const current = entity?.status === 'available'
-      && entity.quality === 192
-      && typeof entity.value === 'number'
-      && Number.isFinite(entity.value)
+    const runtime = entity ? evidenceByEntity.get(entity.entity_instance_id) : undefined
+    const observation = runtime?.observation
+    const value = observation ? observation.value : entity?.value
+    const quality = observation ? observation.quality : entity?.quality ?? null
+    const hasValue = value !== null && value !== undefined
+    const current = Boolean(runtime)
+      && workbenchCurrent
+      && runtime?.nodeCurrent === true
+      && entity?.status === 'available'
+      && quality === 192
+      && typeof value === 'number'
+      && Number.isFinite(value)
+    const evidenceReason = [
+      !workbenchCurrent ? '工作台刷新失败，当前值已降级为最后值。' : null,
+      runtime?.reason,
+      observation?.reason,
+    ].filter(Boolean).join('；') || null
     return {
       ...slot,
       id: fixed.id,
@@ -59,10 +91,11 @@ export function buildWorkbenchSlots(kpis: readonly EmsWorkbenchSlot[]): Workbenc
       bindingLabel: bindingLabels[slot.binding_mode],
       reading: {
         kind: current ? 'current' : hasValue ? 'last' : 'missing',
-        valueText: hasValue ? valueText(entity?.value) : '—',
-        unit: entity?.unit || fixed.unit,
-        quality: entity?.quality ?? null,
-        observedAt: entity?.observed_at ?? null,
+        valueText: hasValue ? valueText(value) : '—',
+        unit: observation?.unit || entity?.unit || fixed.unit,
+        quality,
+        observedAt: observation?.value_observed_at || observation?.observed_at || entity?.observed_at || null,
+        reason: evidenceReason,
       },
     }
   })
