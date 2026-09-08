@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test'
+import { openEngineeringPage } from './support/tabletNavigation'
 
 test.use({ actionTimeout: 5000 })
 test.setTimeout(15000)
@@ -32,14 +33,14 @@ test.beforeEach(async ({ page, baseURL }) => {
   })
   await page.goto('/', { waitUntil: 'domcontentloaded' })
   const login = page.getByRole('button', { name: '登录', exact: true })
-  const navigation = page.getByRole('button', { name: '系统工具', exact: true })
-  await Promise.race([login.waitFor({ state: 'visible' }), navigation.waitFor({ state: 'visible' })])
+  const engineeringEntry = page.getByRole('banner').getByRole('button', { name: '工程配置', exact: true })
+  await Promise.race([login.waitFor({ state: 'visible' }), engineeringEntry.waitFor({ state: 'visible' })])
   if (await login.isVisible()) {
     await page.getByLabel('用户名', { exact: true }).fill('cursor-test')
     await page.getByLabel('密码', { exact: true }).fill('local-only')
     await login.click()
   }
-  await navigation.click()
+  await openEngineeringPage(page, '系统工具')
   await page.getByRole('region', { name: 'HTTP 通知' }).getByRole('button', { name: '新增通知', exact: true }).click()
 })
 

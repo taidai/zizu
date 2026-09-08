@@ -95,9 +95,8 @@ test('a late response cannot replace the selected alarm filter', async ({ page }
   holdOpen = true
   await page.getByRole('checkbox', { name: '自动刷新 (5s)' }).check()
   await page.clock.runFor(5100)
-  await page.getByRole('button', { name: '已恢复', exact: true }).click()
+  await page.getByRole('button', { name: '历史记录', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Recovered result', exact: true })).toBeVisible()
   release()
-  await page.getByRole('checkbox', { name: '自动刷新 (5s)' }).uncheck()
   await expect(page.getByRole('heading', { name: 'Open result', exact: true })).toBeHidden()
 })

@@ -177,9 +177,31 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       const url = new URL(request.url())
       const pageSize = Number(url.searchParams.get('page_size') || 10)
       const pageNumber = Number(url.searchParams.get('page') || 1)
-      const items = Array.from({ length: 11 }, (_, index) => ({ id: `alarm-${index + 1}`, definition_id: 'temperature.high', entity_instance_id: 'temperature-1', state: 'active_unacknowledged', severity: index === 0 ? 'CRITICAL' : 'MAJOR', pending_at: now, active_at: now, acknowledged_at: null, acknowledged_by: null, recovered_at: null, node_name: '储能柜 1', entity_name: '柜内温度', alarm_name: `高温告警 ${index + 1}`, duration_seconds: 120, archived_at: null, archived_by: null }))
+      const state = url.searchParams.get('state')
+      const historical = state === 'recovered' || state === 'archived'
+      const items = Array.from({ length: 11 }, (_, index) => ({ id: `alarm-${index + 1}`, definition_id: 'temperature.high', entity_instance_id: 'temperature-1', state: historical ? 'recovered' : 'active_unacknowledged', severity: index === 0 ? 'CRITICAL' : 'MAJOR', pending_at: now, active_at: now, acknowledged_at: historical ? now : null, acknowledged_by: historical ? '值班员' : null, recovered_at: historical ? now : null, node_name: '储能柜 1', entity_name: '柜内温度', alarm_name: `${historical ? '历史高温告警' : '高温告警'} ${index + 1}`, duration_seconds: 120, archived_at: state === 'archived' ? now : null, archived_by: state === 'archived' ? '工程师' : null }))
       return json({ items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), total: 11, page: pageNumber, page_size: pageSize, total_pages: Math.ceil(11 / pageSize), summary: { active: 11, unacknowledged: 11, critical: 1 } })
     }
+    if (fixture === 'alarms' && path === '/alarms/notification-deliveries' && method === 'POST') {
+      return json({ deleted: request.postDataJSON()?.delivery_ids?.length || 0 })
+    }
+    if (fixture === 'alarms' && path === '/alarms/notification-deliveries') {
+      const url = new URL(request.url())
+      const pageSize = Number(url.searchParams.get('page_size') || 10)
+      const pageNumber = Number(url.searchParams.get('page') || 1)
+      const items = Array.from({ length: 11 }, (_, index) => ({
+        id: `delivery-${index + 1}`, event_id: `alarm-${index + 1}`, event_type: index % 2 ? 'ALARM_RECOVERED' : 'ALARM_ACTIVATED',
+        alarm_name: `高温告警 ${index + 1}`, severity: index === 0 ? 'CRITICAL' : 'MAJOR', node_name: '储能柜 1', entity_name: '柜内温度',
+        configuration_name: '值班 HTTP', configuration_exists: true, target_display: 'https://notice.invalid/alarm', status: 'delivered',
+        attempt_count: 1, last_http_status: 200, last_error_code: null, last_error_detail: null, last_response_excerpt: 'ok',
+        created_at: now, delivered_at: now, cancelled_at: null,
+        attempts: [{ attempt_no: 1, attempted_at: now, method: 'POST', target_display: 'https://notice.invalid/alarm', duration_ms: 18, outcome: 'delivered', http_status: 200, error_code: null, error_detail: null, response_excerpt: 'ok' }],
+      }))
+      return json({ items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), total: 11, page: pageNumber, page_size: pageSize, total_pages: Math.ceil(11 / pageSize) })
+    }
+    if (fixture === 'alarms' && path === '/alarm-rule-groups') return json({ items: [] })
+    if (fixture === 'alarms' && path === '/alarm-rule-sets') return json({ items: [] })
+    if (fixture === 'alarms' && path === '/alarm-http-notification-options') return json([])
     if (fixture === 'alarmAckRace' && path === '/alarm-events') {
       const url = new URL(request.url())
       const pageNumber = Number(url.searchParams.get('page') || 1)
@@ -263,13 +285,15 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
     if (path === '/dispatch-strategies/strategy-1/draft' && method === 'PUT' && staleCode) {
       return json({ detail: { code: staleCode, message: 'stale' } }, 409)
     }
-    if (path === '/entity-instances') return json({ items: fixtureStrategy ? [
+    if (path === '/entity-instances') return json({ items: fixture === 'alarms' ? [
+      { id: 'temperature-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'room.temperature', display_name: '柜内温度', data_type: 'FLOAT', unit: 'C', direction: 'R', freshness_seconds: 10, confirmed: true, control_eligible: false },
+    ] : fixtureStrategy ? [
       { id: 'temperature-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'room.temperature', display_name: '柜内温度', data_type: 'FLOAT', unit: 'C', direction: 'R', freshness_seconds: 10, confirmed: true, control_eligible: false },
       { id: 'mode-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'site.mode', display_name: '运行模式', data_type: 'STRING', unit: null, direction: 'R', freshness_seconds: 10, confirmed: true, control_eligible: false },
       { id: 'fan-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'fan.enable', display_name: '风机启停', data_type: 'BOOL', unit: null, direction: 'RW', freshness_seconds: 10, confirmed: true, control_eligible: true },
       { id: 'valve-1', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'valve.target', display_name: '阀门目标', data_type: 'FLOAT', unit: '%', direction: 'W', freshness_seconds: 10, confirmed: true, control_eligible: true },
       { id: 'unsafe-output', node_id: 'node-1', node_type: 'STORAGE', node_display_name: '储能柜 1', definition_id: 'unsafe.target', display_name: '无控制合同目标', data_type: 'FLOAT', unit: 'kW', direction: 'W', freshness_seconds: 10, confirmed: true, control_eligible: false },
-    ] : [], total: fixtureStrategy ? 5 : 0 })
+    ] : [], total: fixture === 'alarms' ? 1 : fixtureStrategy ? 5 : 0 })
     if (path === '/pipeline/config') return json({ batch_size: 50, flush_interval_sec: 1 })
     if (path === '/mqtt-config') return json({ mqtt_telemetry_topic: '/neuron/#', persisted: null, effective_topics: [] })
     if (path === '/admin/alarm-http-notifications') return json([])
@@ -338,6 +362,51 @@ test('告警事件按10/20条展示、当前页确认逐项报错并读取真实
   await page.getByLabel('选择告警 alarm-1', { exact: true }).check()
   await page.getByRole('button', { name: '已确认', exact: true }).click()
   await expect(page.getByRole('button', { name: '确认所选（0）' })).toBeDisabled()
+})
+
+test('告警中心以三张10行表和弹窗承载历史、通知详情与规则编辑', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1024, height: 768 })
+  const writes = await installReadOnlyApi(page, undefined, 'alarms')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '告警')
+
+  await expectTouchTargets(page, ['当前告警', '历史记录', '通知记录', '告警规则'])
+  await expect(page.getByTestId('alarm-current-table').locator('tbody tr')).toHaveCount(10)
+  await page.screenshot({ path: testInfo.outputPath('alarms-1024x768.png') })
+
+  await page.getByRole('button', { name: '历史记录', exact: true }).click()
+  await expect(page.getByTestId('alarm-history-table').locator('tbody tr')).toHaveCount(10)
+  await expect(page.getByText('历史高温告警 1', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '归档所选（0）', exact: true })).toBeDisabled()
+  await page.getByLabel('选择当前页可归档告警', { exact: true }).check()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: '归档所选（10）', exact: true }).click()
+  await expect.poll(() => writes.filter((item) => item.endsWith('/archivations')).length).toBe(10)
+
+  await page.getByRole('button', { name: '通知记录', exact: true }).click()
+  await expect(page.getByLabel('通知每页条数', { exact: true })).toHaveValue('10')
+  await expect(page.getByTestId('alarm-notification-table').locator('tbody tr')).toHaveCount(10)
+  await page.getByTestId('alarm-notification-table').getByRole('button', { name: '详情', exact: true }).first().click()
+  const deliveryDialog = page.getByRole('dialog', { name: 'HTTP 投递详情' })
+  await expect(deliveryDialog).toContainText('POST https://notice.invalid/alarm')
+  await expect(deliveryDialog).toContainText('HTTP 200')
+  await deliveryDialog.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByLabel('全选当前页可删除记录', { exact: true }).check()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: '删除所选（10）', exact: true }).click()
+  await expect.poll(() => writes).toContain('POST /alarms/notification-deliveries/deletions')
+
+  await page.getByRole('button', { name: '告警规则', exact: true }).click()
+  const ruleDialog = page.getByRole('dialog', { name: '告警规则配置' })
+  await expect(ruleDialog).toContainText('已配置规则')
+  await expect(ruleDialog).toContainText('试算并发布')
+  await ruleDialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.getByRole('button', { name: '当前告警', exact: true }).click()
+  await expect(page.getByTestId('alarm-current-table').locator('tbody tr')).toHaveCount(10)
+  await page.screenshot({ path: testInfo.outputPath('alarms-1280x800.png') })
 })
 
 test('迟到的批量确认不会用旧页加载覆盖正在加载的当前页', async ({ page }) => {
@@ -516,7 +585,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768
 
     await openNavigation(page, '告警')
     await expect(page.getByTestId('tablet-alarm-applications')).toBeVisible()
-    await expectTouchTargets(page, ['当前告警', '通知记录', '告警规则'])
+    await expectTouchTargets(page, ['当前告警', '历史记录', '通知记录', '告警规则'])
     await expect(page.getByRole('button', { name: '当前告警', exact: true })).toHaveCSS('background-color', 'rgb(238, 228, 206)')
 
     await openNavigation(page, '调度策略')

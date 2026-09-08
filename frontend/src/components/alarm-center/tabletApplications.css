@@ -34,6 +34,89 @@
   font-variant-numeric: tabular-nums;
 }
 
+.tablet-alarm-shell {
+  min-width: 0;
+}
+
+.tablet-alarm-shell .alarm-table-viewport {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tablet-alarm-shell .alarm-event-table th,
+.tablet-alarm-shell .alarm-event-table td,
+.tablet-alarm-shell .alarm-notification-table th,
+.tablet-alarm-shell .alarm-notification-table td {
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.tablet-alarm-shell .alarm-notification-table th:first-child,
+.tablet-alarm-shell .alarm-notification-table td:first-child {
+  width: 2.75rem;
+}
+
+.tablet-alarm-shell .alarm-notification-table th:nth-child(2),
+.tablet-alarm-shell .alarm-notification-table td:nth-child(2) {
+  width: 28%;
+}
+
+.tablet-alarm-shell .alarm-notification-table th:nth-child(3),
+.tablet-alarm-shell .alarm-notification-table td:nth-child(3) {
+  width: 22%;
+}
+
+.tablet-alarm-shell .alarm-notification-table th:nth-child(4),
+.tablet-alarm-shell .alarm-notification-table td:nth-child(4) {
+  width: 18%;
+}
+
+.tablet-alarm-shell .alarm-notification-table th:nth-child(5),
+.tablet-alarm-shell .alarm-notification-table td:nth-child(5) {
+  width: 15%;
+}
+
+.tablet-alarm-dialog,
+.tablet-alarm-rule-dialog {
+  border-color: rgba(184, 138, 52, 0.42);
+  box-shadow: 0 24px 72px rgba(39, 30, 22, 0.28);
+}
+
+.tablet-alarm-rule-dialog .tablet-rules-applications {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .tablet-alarm-shell .alarm-event-table [data-alarm-column='secondary'] {
+    display: none;
+  }
+
+  .tablet-alarm-shell .alarm-event-table th,
+  .tablet-alarm-shell .alarm-event-table td,
+  .tablet-alarm-shell .alarm-notification-table th,
+  .tablet-alarm-shell .alarm-notification-table td {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  .tablet-alarm-shell .alarm-notification-table th:nth-child(3),
+  .tablet-alarm-shell .alarm-notification-table td:nth-child(3) {
+    display: none;
+  }
+
+  .tablet-alarm-shell .alarm-notification-table th:nth-child(2),
+  .tablet-alarm-shell .alarm-notification-table td:nth-child(2) {
+    width: 34%;
+  }
+
+  .tablet-alarm-shell .alarm-notification-table th:nth-child(4),
+  .tablet-alarm-shell .alarm-notification-table td:nth-child(4),
+  .tablet-alarm-shell .alarm-notification-table th:nth-child(5),
+  .tablet-alarm-shell .alarm-notification-table td:nth-child(5) {
+    width: 22%;
+  }
+}
+
 @media (max-width: 1100px) {
   .tablet-dispatch-layout {
     flex-direction: column;

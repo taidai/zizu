@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   deleteAlarmNotificationDeliveries,
   fetchAlarmNotificationDeliveries,
@@ -30,8 +30,9 @@ function localTime(value: string | null): string {
 export default function AlarmNotificationRecords({ canManage }: { canManage: boolean }) {
   const [items, setItems] = useState<AlarmNotificationDelivery[]>([])
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<10 | 20>(10)
   const [totalPages, setTotalPages] = useState(1)
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const [detail, setDetail] = useState<AlarmNotificationDelivery | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -41,7 +42,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
     setBusy('load')
     setError('')
     try {
-      const result = await fetchAlarmNotificationDeliveries(targetPage, 50)
+      const result = await fetchAlarmNotificationDeliveries(targetPage, pageSize)
       const validPage = validDeliveryPage(targetPage, result.total_pages)
       if (validPage !== targetPage) {
         setPage(validPage)
@@ -57,7 +58,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
     }
   }
 
-  useEffect(() => { void load(page) }, [page])
+  useEffect(() => { void load(page) }, [page, pageSize])
 
   const retry = async (delivery: AlarmNotificationDelivery) => {
     setBusy(`retry:${delivery.id}`)
@@ -121,14 +122,21 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
           <button type="button" disabled={busy !== ''} onClick={() => void load(page)} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-40">
             刷新
           </button>
+          <label className="flex items-center text-xs text-gray-600">每页
+            <select aria-label="通知每页条数" value={pageSize} onChange={(event) => { setPage(1); setSelected(new Set()); setPageSize(Number(event.target.value) as 10 | 20) }} className="neu-input mx-2 px-2 py-1.5">
+              <option value={10}>10</option><option value={20}>20</option>
+            </select>条
+          </label>
         </div>
       </div>
+
+      {!canManage && <p className="rounded-lg border border-white/70 bg-white/40 px-3 py-2 text-xs text-gray-600">当前账户仅可查看通知投递与尝试详情；重新发送和删除需要实施工程师或管理员权限。</p>}
 
       {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
       {message && <p className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-700">{message}</p>}
 
-      <div className="neu-card overflow-x-auto">
-        <table className="w-full min-w-[1100px] text-left text-xs">
+      <div className="neu-card alarm-table-viewport">
+        <table className="alarm-notification-table w-full table-fixed text-left text-xs" data-testid="alarm-notification-table">
           <thead className="border-b border-gray-200 text-gray-500">
             <tr>
               <th className="w-10 p-3">
@@ -145,8 +153,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
           </thead>
           <tbody>
           {items.map((delivery) => (
-            <Fragment key={delivery.id}>
-            <tr className="border-b border-gray-100 align-top">
+            <tr key={delivery.id} className="border-b border-gray-100 align-top">
               <td className="p-3">
                 <input
                   type="checkbox"
@@ -158,12 +165,12 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
                 />
               </td>
               <td className="p-3">
-                <div className="flex flex-wrap items-center gap-2">
+                <article><div className="flex flex-wrap items-center gap-2">
                   <strong className="text-sm text-gray-800">{delivery.alarm_name || '告警通知'}</strong>
                   <span className="rounded bg-orange-50 px-2 py-0.5 text-[10px] text-orange-700">{delivery.severity || '—'}</span>
                   <span className="rounded bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-700">{describeDeliveryEvent(delivery.event_type)}</span>
                 </div>
-                <p className="mt-1 text-gray-500">{delivery.node_name || '未知节点'} / {delivery.entity_name || '未知实体'}</p>
+                <p className="mt-1 truncate text-gray-500" title={`${delivery.node_name || '未知节点'} / ${delivery.entity_name || '未知实体'}`}>{delivery.node_name || '未知节点'} / {delivery.entity_name || '未知实体'}</p><span className="sr-only">{describeDeliveryStatus(delivery.status)}</span></article>
               </td>
               <td className="p-3">
                 <p className="text-[10px] text-gray-400">通知与目标</p>
@@ -184,9 +191,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
               </td>
               <td className="p-3">
                 <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setExpanded(expanded === delivery.id ? null : delivery.id)} className="neu-btn px-3 py-1.5 text-xs text-gray-600">
-                  {expanded === delivery.id ? '收起' : '详情'}
-                </button>
+                <button type="button" onClick={() => setDetail(delivery)} className="neu-btn px-3 py-1.5 text-xs text-gray-600">详情</button>
                 {canManage && canRetryDelivery(delivery) && (
                   <button type="button" disabled={busy !== ''} onClick={() => void retry(delivery)} className="neu-btn px-3 py-1.5 text-xs text-blue-600 disabled:opacity-40">
                     重新发送
@@ -200,36 +205,6 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
                 </div>
               </td>
             </tr>
-
-            {expanded === delivery.id && (
-              <tr className="border-b border-gray-200 bg-white/30"><td colSpan={6} className="p-3">
-                <div className="grid gap-2 text-[11px] text-gray-600 md:grid-cols-3">
-                  <p>最后错误：{delivery.last_error_detail || '—'}</p>
-                  <p>最后响应：{delivery.last_response_excerpt || '—'}</p>
-                  <p>送达时间：{localTime(delivery.delivered_at)}</p>
-                </div>
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full min-w-[760px] text-left text-[11px]">
-                    <thead className="text-gray-400"><tr><th className="py-1">次数</th><th>时间</th><th>请求</th><th>结果</th><th>HTTP</th><th>耗时</th><th>说明</th></tr></thead>
-                    <tbody>
-                      {delivery.attempts.map((attempt) => (
-                        <tr key={attempt.attempt_no} className="border-t border-gray-100 text-gray-600">
-                          <td className="py-1.5">{attempt.attempt_no}</td>
-                          <td>{localTime(attempt.attempted_at)}</td>
-                          <td className="font-mono">{attempt.method} {attempt.target_display}</td>
-                          <td>{attempt.outcome}</td>
-                          <td>{attempt.http_status || '—'}</td>
-                          <td>{attempt.duration_ms} ms</td>
-                          <td>{attempt.error_detail || attempt.response_excerpt || '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {delivery.attempts.length === 0 && <p className="py-3 text-[11px] text-gray-400">尚未尝试发送。</p>}
-                </div>
-              </td></tr>
-            )}
-            </Fragment>
           ))}
           {!items.length && busy !== 'load' && <tr><td colSpan={6} className="p-8 text-center text-sm text-gray-400">暂无通知记录</td></tr>}
           {busy === 'load' && <tr><td colSpan={6} className="p-4 text-center text-xs text-gray-400">正在读取通知记录...</td></tr>}
@@ -244,6 +219,21 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
           <button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} className="neu-btn px-3 py-1.5 disabled:opacity-30">下一页</button>
         </div>
       )}
+
+      {detail && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-4" role="dialog" aria-modal="true" aria-label="HTTP 投递详情">
+        <div className="neu-card tablet-alarm-dialog max-h-[90vh] w-full max-w-4xl overflow-y-auto p-5">
+          <div className="flex items-start justify-between gap-3"><div><h3 className="text-base font-bold text-gray-800">HTTP 投递详情</h3><p className="mt-1 text-xs text-gray-500">{detail.alarm_name || '告警通知'} · {describeDeliveryEvent(detail.event_type)} · {describeDeliveryStatus(detail.status)}</p></div><button type="button" onClick={() => setDetail(null)} className="neu-btn px-3 py-2 text-xs">关闭</button></div>
+          <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-3"><div><dt className="text-gray-400">通知配置</dt><dd className="mt-1">{detail.configuration_name || '配置已删除'}</dd></div><div><dt className="text-gray-400">创建 / 送达</dt><dd className="mt-1">{localTime(detail.created_at)}<br />{localTime(detail.delivered_at)}</dd></div><div><dt className="text-gray-400">最后结果</dt><dd className="mt-1">{detail.last_http_status ? `HTTP ${detail.last_http_status}` : describeDeliveryError(detail.last_error_code)}</dd></div></dl>
+          {(detail.last_error_detail || detail.last_response_excerpt) && <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2"><p className="neu-inset p-3">最后错误：{detail.last_error_detail || '—'}</p><p className="neu-inset p-3">最后响应：{detail.last_response_excerpt || '—'}</p></div>}
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[700px] text-left text-[11px]">
+              <thead className="text-gray-400"><tr><th className="py-2">次数</th><th>时间</th><th>请求</th><th>结果</th><th>HTTP</th><th>耗时</th><th>说明</th></tr></thead>
+              <tbody>{detail.attempts.map((attempt) => <tr key={attempt.attempt_no} className="border-t border-gray-100 text-gray-600"><td className="py-2">{attempt.attempt_no}</td><td>{localTime(attempt.attempted_at)}</td><td className="font-mono">{attempt.method} {attempt.target_display}</td><td>{attempt.outcome}</td><td>{attempt.http_status ? `HTTP ${attempt.http_status}` : '—'}</td><td>{attempt.duration_ms} ms</td><td>{attempt.error_detail || attempt.response_excerpt || '—'}</td></tr>)}</tbody>
+            </table>
+            {detail.attempts.length === 0 && <p className="py-5 text-center text-xs text-gray-400">尚未尝试发送。</p>}
+          </div>
+        </div>
+      </div>}
     </div>
   )
 }
