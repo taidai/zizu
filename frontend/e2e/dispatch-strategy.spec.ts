@@ -913,9 +913,13 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await expect(l1Editor).toContainText('业务标识')
     await l1Editor.getByRole('button', { name: '取消', exact: true }).click()
 
+    await page.getByRole('button', { name: '点位加工', exact: true }).click()
+    await expect(
+      page.getByRole('region', { name: '数据来源与计算' }).getByText('已生效', { exact: true }),
+    ).toBeVisible()
+
     await page.getByRole('button', { name: '标准实体', exact: true }).click()
-    await expect(page.getByRole('heading', { name: '标准实体' })).toBeVisible()
-    await expect(page.getByText('已生效', { exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '实体实时数据' })).toBeVisible()
     const socEntity = page.getByRole('button', { name: /PCS 品牌 A · bms\.soc/ })
     await expect(socEntity).toContainText('50.5')
     await socEntity.click()
@@ -947,6 +951,9 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await expect(page.getByRole('button', { name: '确认发布', exact: true })).toBeVisible()
     await page.getByRole('button', { name: '确认发布', exact: true }).click()
     await expect(page.getByText(/已发布，统一配置版本/)).toBeVisible()
+    const alarmRulesDialog = page.getByRole('dialog', { name: '告警规则配置', exact: true })
+    await alarmRulesDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(alarmRulesDialog).toBeHidden()
 
     const alarmTrigger = await request.post(`http://127.0.0.1:${backendPort}/protocol-simulator/neuron`, {
       data: { node: 'strategy-test', group: 'group0', values: { soc: 50.5, limit: 0.5 } },

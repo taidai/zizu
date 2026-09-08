@@ -530,6 +530,10 @@ test.describe.serial('节点管理主干', () => {
     )
     await expect(page.getByRole('button', { name: '生成发布预览', exact: true })).toBeEnabled()
 
+    const alarmRulesDialog = page.getByRole('dialog', { name: '告警规则配置', exact: true })
+    await alarmRulesDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(alarmRulesDialog).toBeHidden()
+
     await openEngineeringPage(page, '节点与数据')
     await page.getByPlaceholder('搜索节点...').fill(editedPlatformNode)
     await nodeTree(page).getByTitle(editedPlatformNode).click()
