@@ -143,7 +143,7 @@ export function runtimeEntityReading(
 }
 
 export function deviceMonitorEvidenceTime(reading: RuntimeReading): string | null {
-  if (reading.kind === 'current') return null
+  if (reading.kind !== 'last') return null
   return reading.valueObservedAt || reading.observedAt
 }
 

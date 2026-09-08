@@ -11,19 +11,34 @@ const nodes = Array.from({ length: 8 }, (_, index) => ({
   tag_count: 0,
 }))
 
-const entities = Array.from({ length: 23 }, (_, index) => ({
-  id: `entity-${index + 1}`,
-  node_id: index < 22 ? 'device-1' : 'device-2',
-  node_type: 'PCS',
-  node_display_name: '同名 PCS',
-  definition_id: index === 0 ? 'pcs.running_state' : index === 1 ? 'pcs.activePower' : index === 2 ? 'pcs.temp' : `pcs.metric_${index + 1}`,
-  display_name: index === 0 ? '运行状态' : index === 1 ? '有功功率' : index === 2 ? '内部温度' : `指标 ${index + 1}`,
-  data_type: index === 0 ? 'bool' : 'float',
-  unit: index === 0 ? null : 'kW',
-  direction: 'R',
-  freshness_seconds: 60,
-  confirmed: true,
-}))
+const entities = [
+  ...Array.from({ length: 23 }, (_, index) => ({
+    id: `entity-${index + 1}`,
+    node_id: index < 22 ? 'device-1' : 'device-2',
+    node_type: 'PCS',
+    node_display_name: '同名 PCS',
+    definition_id: index === 0 ? 'pcs.running_state' : index === 1 ? 'pcs.activePower' : index === 2 ? 'pcs.temp' : `pcs.metric_${index + 1}`,
+    display_name: index === 0 ? '运行状态' : index === 1 ? '有功功率' : index === 2 ? '内部温度' : `指标 ${index + 1}`,
+    data_type: index === 0 ? 'bool' : 'float',
+    unit: index === 0 ? null : 'kW',
+    direction: 'R',
+    freshness_seconds: 60,
+    confirmed: true,
+  })),
+  {
+    id: 'entity-unknown',
+    node_id: 'device-2',
+    node_type: 'PCS',
+    node_display_name: '同名 PCS',
+    definition_id: 'pcs.unknown_signal',
+    display_name: '未知量',
+    data_type: 'float',
+    unit: 'kW',
+    direction: 'R',
+    freshness_seconds: 60,
+    confirmed: true,
+  },
+]
 
 function frame(nodeId: string) {
   const selected = entities.filter((entity) => entity.node_id === nodeId)
@@ -37,14 +52,14 @@ function frame(nodeId: string) {
       accepted_beat: 6, source_path: 'gateway/group/StatusWord', source_type: 'neuron', frame_sequence: 7,
     }],
     l2: selected.map((entity, index) => {
-      const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-3' ? 0 : 192
+      const quality = entity.id === 'entity-1' ? 64 : entity.id === 'entity-3' ? 0 : entity.id === 'entity-unknown' ? 1 : 192
       return {
         entity_instance_id: entity.id, node_id: nodeId, definition_id: entity.definition_id,
         display_name: entity.display_name, data_type: entity.data_type,
-        value: entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality,
-        reason: quality === 64 ? 'ENTITY_DATA_STALE' : quality === 0 ? 'INPUT_BAD' : null,
-        observed_at: entity.id === 'entity-3' ? '2026-09-07T01:59:55.000Z' : '2026-09-07T02:00:00.000Z',
-        value_observed_at: entity.id === 'entity-1' ? '2026-09-07T01:59:57.000Z' : entity.id === 'entity-3' ? null : '2026-09-07T02:00:00.000Z',
+        value: entity.id === 'entity-unknown' ? null : entity.data_type === 'bool' ? false : index + 1, unit: entity.unit, quality,
+        reason: quality === 64 ? 'ENTITY_DATA_STALE' : quality === 0 ? 'INPUT_BAD' : quality === 1 ? 'NO_DATA' : null,
+        observed_at: entity.id === 'entity-3' ? '2026-09-07T01:59:55.000Z' : entity.id === 'entity-unknown' ? '2026-09-07T01:59:50.000Z' : '2026-09-07T02:00:00.000Z',
+        value_observed_at: entity.id === 'entity-1' ? '2026-09-07T01:59:57.000Z' : entity.id === 'entity-3' || entity.id === 'entity-unknown' ? null : '2026-09-07T02:00:00.000Z',
         received_at: '2026-09-07T02:00:00.000Z', calculated_at: '2026-09-07T02:00:00.000Z',
         processing_revision_id: 'pr-1', configuration_revision: 12,
         source_digest: `sha256:${entity.id}`, frame_sequence: 7,
@@ -184,6 +199,11 @@ test('six-card pages keep ids isolated, show unconfigured nodes, and paginate 10
   await expect(sameName.nth(0)).toContainText('超时 · 最后值（非当前）')
   await expect(sameName.nth(0)).toContainText('异常 · 最后值（非当前）')
   await expect(sameName.nth(1)).toContainText('正常 · 当前值')
+  const unknownMetric = sameName.nth(1).locator('.runtime-device-card__secondary').getByRole('button', { name: '未知量' })
+  await expect(unknownMetric).toContainText('—')
+  await expect(unknownMetric).toContainText('未知 · 当前状态不确定')
+  await expect(unknownMetric).not.toContainText('最后值')
+  await expect(unknownMetric.locator('time')).toHaveCount(0)
   const primaryMetric = sameName.nth(0).locator('.runtime-device-card__primary')
   const secondaryMetrics = sameName.nth(0).locator('.runtime-device-card__secondary')
   await expect(primaryMetric).toContainText('有功功率')

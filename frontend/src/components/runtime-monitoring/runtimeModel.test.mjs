@@ -327,6 +327,14 @@ test('mixed-quality device cards retain the exact last-value time with observed-
     observed_at: '2026-09-07T01:02:01.000Z',
     value_observed_at: null,
   }, true)
+  const unknownWithObservationTime = runtimeEntityReading({
+    ...observation,
+    value: null,
+    quality: 1,
+    reason: 'NO_DATA',
+    observed_at: '2026-09-07T01:02:02.000Z',
+    value_observed_at: null,
+  }, true)
 
   assert.equal(runtimeModel.deviceMonitorDataState([
     { descriptor: descriptors[0], observation },
@@ -336,6 +344,8 @@ test('mixed-quality device cards retain the exact last-value time with observed-
   assert.equal(runtimeModel.deviceMonitorEvidenceTime(current), null)
   assert.equal(runtimeModel.deviceMonitorEvidenceTime(stale), '2026-09-07T01:01:57.000Z')
   assert.equal(runtimeModel.deviceMonitorEvidenceTime(badWithoutValueTime), '2026-09-07T01:02:01.000Z')
+  assert.equal(unknownWithObservationTime.kind, 'unknown')
+  assert.equal(runtimeModel.deviceMonitorEvidenceTime(unknownWithObservationTime), null)
 })
 
 test('device monitor pages six real nodes and keeps same-name identities and unconfigured nodes separate', () => {
