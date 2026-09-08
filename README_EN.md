@@ -6,7 +6,9 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current code version: `v1.0.4`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current code version: `v1.0.5`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+
+v1.0.5 uses the local Demo as the UI acceptance reference, completing fixed EMS homepage slot bindings, real-device monitoring, the engineering trunk, and tool dialogs. Production pages still consume formal APIs and committed L2, never demonstration data. See the [local acceptance and evidence boundaries](docs/reviews/2026-09-08-v1.0.5-local-acceptance.md) and [parity matrix](docs/reviews/2026-09-08-demo-parity-matrix.md). Release is in progress; the v1.0.4 field results below are historical and do not establish v1.0.5 deployment.
 
 [v1.0.4 integration, release, and field verification record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [Historical v0.9.9 field record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
