@@ -622,6 +622,7 @@ export interface PipelineConfig {
 
 export async function fetchPipelineConfig(): Promise<PipelineConfig> {
   const res = await apiFetch(`${API_BASE}/pipeline/config`)
+  if (!res.ok) throw await authError(res, `Fetch pipeline config failed: ${res.status}`)
   return res.json()
 }
 
@@ -631,7 +632,7 @@ export async function updatePipelineConfig(config: PipelineConfig): Promise<any>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   })
-  if (!res.ok) throw new Error(`Update failed: ${res.status}`)
+  if (!res.ok) throw await authError(res, `Update pipeline config failed: ${res.status}`)
   return res.json()
 }
 
@@ -643,6 +644,7 @@ export interface MqttConfig {
 
 export async function fetchMqttConfig(): Promise<MqttConfig> {
   const res = await apiFetch(`${API_BASE}/mqtt-config`)
+  if (!res.ok) throw await authError(res, `Fetch MQTT config failed: ${res.status}`)
   return res.json()
 }
 
@@ -652,7 +654,7 @@ export async function updateMqttConfig(config: { mqtt_telemetry_topic: string })
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   })
-  if (!res.ok) throw new Error(`Update failed: ${res.status}`)
+  if (!res.ok) throw await authError(res, `Update MQTT config failed: ${res.status}`)
   return res.json()
 }
 
@@ -2295,6 +2297,7 @@ export interface FaultMap {
 
 export async function fetchFaultMaps(): Promise<{ items: FaultMap[]; total: number }> {
   const res = await apiFetch(`${API_BASE}/fault-maps`)
+  if (!res.ok) throw await authError(res, `Fetch fault maps failed: ${res.status}`)
   return res.json()
 }
 

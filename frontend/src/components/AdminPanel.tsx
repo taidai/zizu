@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   fetchPipelineConfig, updatePipelineConfig, executeSql, truncateTable,
-  fetchMqttConfig, updateMqttConfig,
-  type PipelineConfig, type SqlQueryResult, type MqttConfig,
+  fetchMqttConfig, updateMqttConfig, fetchHealth,
+  type PipelineConfig, type SqlQueryResult, type MqttConfig, type HealthStatus,
 } from '../api/client'
 import DataBrowser from './DataBrowser'
 import NanoMQManager from './NanoMQManager'
@@ -44,6 +44,10 @@ const TOOL_GROUPS: Array<{ key: ToolKey; title: string; eyebrow: string; descrip
   },
 ]
 
+function apiMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : '未知错误'
+}
+
 function ToolDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
     <div className="zizu-tools-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
@@ -66,14 +70,23 @@ export default function AdminPanel() {
   const [truncateOpen, setTruncateOpen] = useState(false)
   const toolTriggers = useRef<Partial<Record<ToolKey, HTMLButtonElement>>>({})
   // 入库节拍
-  const [config, setConfig] = useState<PipelineConfig>({ batch_size: 50, flush_interval_sec: 1.0 })
+  const [config, setConfig] = useState<PipelineConfig | null>(null)
+  const [configLoading, setConfigLoading] = useState(true)
+  const [configError, setConfigError] = useState('')
   const [configSaving, setConfigSaving] = useState(false)
   const [configMsg, setConfigMsg] = useState('')
 
   // MQTT 主题
-  const [mqttConfig, setMqttConfig] = useState<MqttConfig>({ mqtt_telemetry_topic: '/neuron/#', persisted: null, effective_topics: [] })
+  const [mqttConfig, setMqttConfig] = useState<MqttConfig | null>(null)
+  const [mqttLoading, setMqttLoading] = useState(true)
+  const [mqttError, setMqttError] = useState('')
   const [mqttSaving, setMqttSaving] = useState(false)
   const [mqttMsg, setMqttMsg] = useState('')
+
+  // 系统健康状态
+  const [systemHealth, setSystemHealth] = useState<HealthStatus | null>(null)
+  const [systemHealthLoading, setSystemHealthLoading] = useState(false)
+  const [systemHealthError, setSystemHealthError] = useState('')
 
   // SQL 查询
   const [sql, setSql] = useState('SELECT * FROM t_telemetry ORDER BY ts DESC LIMIT 100')
@@ -87,10 +100,56 @@ export default function AdminPanel() {
   const [truncateLoading, setTruncateLoading] = useState(false)
   const [truncateMsg, setTruncateMsg] = useState('')
 
-  useEffect(() => {
-    fetchPipelineConfig().then(setConfig).catch(() => {})
-    fetchMqttConfig().then(setMqttConfig).catch(() => {})
+  const loadPipelineConfig = useCallback(async () => {
+    setConfigLoading(true)
+    setConfigError('')
+    setConfig(null)
+    try {
+      setConfig(await fetchPipelineConfig())
+    } catch (reason) {
+      setConfigError(`Pipeline 配置读取失败：${apiMessage(reason)}`)
+    } finally {
+      setConfigLoading(false)
+    }
   }, [])
+
+  const loadMqttConfig = useCallback(async () => {
+    setMqttLoading(true)
+    setMqttError('')
+    setMqttConfig(null)
+    try {
+      setMqttConfig(await fetchMqttConfig())
+    } catch (reason) {
+      setMqttError(`MQTT 配置读取失败：${apiMessage(reason)}`)
+    } finally {
+      setMqttLoading(false)
+    }
+  }, [])
+
+  const loadSystemHealth = useCallback(async () => {
+    setSystemHealthLoading(true)
+    setSystemHealthError('')
+    try {
+      setSystemHealth(await fetchHealth())
+    } catch (reason) {
+      setSystemHealth(null)
+      setSystemHealthError(`系统状态读取失败：${apiMessage(reason)}。连接中断，当前状态未知。`)
+    } finally {
+      setSystemHealthLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadPipelineConfig()
+    void loadMqttConfig()
+  }, [loadMqttConfig, loadPipelineConfig])
+
+  useEffect(() => {
+    if (activeTool !== 'data') return
+    void loadSystemHealth()
+    const interval = window.setInterval(() => { void loadSystemHealth() }, 5000)
+    return () => window.clearInterval(interval)
+  }, [activeTool, loadSystemHealth])
 
   useEffect(() => {
     if (!activeTool && !truncateOpen) return
@@ -111,27 +170,29 @@ export default function AdminPanel() {
   }
 
   const handleSaveConfig = async () => {
+    if (!config) return
     setConfigSaving(true)
     setConfigMsg('')
     try {
       await updatePipelineConfig(config)
       setConfigMsg('配置已保存并生效')
-    } catch {
-      setConfigMsg('保存失败')
+    } catch (reason) {
+      setConfigMsg(`保存失败：${apiMessage(reason)}`)
     } finally {
       setConfigSaving(false)
     }
   }
 
   const handleSaveMqtt = async () => {
+    if (!mqttConfig) return
     setMqttSaving(true)
     setMqttMsg('')
     try {
       const result = await updateMqttConfig({ mqtt_telemetry_topic: mqttConfig.mqtt_telemetry_topic })
       setMqttConfig(result)
       setMqttMsg('MQTT 主题已保存并实时重订阅')
-    } catch {
-      setMqttMsg('保存失败')
+    } catch (reason) {
+      setMqttMsg(`保存失败：${apiMessage(reason)}`)
     } finally {
       setMqttSaving(false)
     }
@@ -174,7 +235,9 @@ export default function AdminPanel() {
     <div className="zizu-tools-stack">
       <section className="neu-card p-4" aria-label="Pipeline 配置">
         <h3 className="text-sm font-bold text-gray-800 mb-3">入库节拍配置</h3>
-        <div className="flex flex-wrap items-center gap-4">
+        {configLoading && <p role="status" className="text-xs text-gray-500">正在读取 Pipeline 配置...</p>}
+        {configError && <div className="flex flex-wrap items-center gap-3"><p role="alert" className="text-xs text-red-700">{configError}</p><button type="button" onClick={() => void loadPipelineConfig()} className="neu-btn px-3 text-xs">重试 Pipeline</button></div>}
+        {config && !configLoading && !configError && <><div className="flex flex-wrap items-center gap-4">
           <label className="text-xs text-gray-600">批量大小
             <input type="number" min={1} max={1000} value={config.batch_size} onChange={(event) => setConfig({ ...config, batch_size: parseInt(event.target.value) || 50 })} className="neu-input ml-2 px-2 py-1 text-xs w-20" />
           </label>
@@ -182,14 +245,16 @@ export default function AdminPanel() {
             <input type="number" min={0.1} max={60} step={0.1} value={config.flush_interval_sec} onChange={(event) => setConfig({ ...config, flush_interval_sec: parseFloat(event.target.value) || 1 })} className="neu-input ml-2 px-2 py-1 text-xs w-20" /> 秒
           </label>
           <button type="button" onClick={() => void handleSaveConfig()} disabled={configSaving} className="neu-btn zizu-primary px-4 text-xs font-medium disabled:opacity-50">{configSaving ? '保存中...' : '保存配置'}</button>
-          {configMsg && <span role="status" className="text-xs text-gray-600">{configMsg}</span>}
+          {configMsg && <span role={configMsg.startsWith('保存失败') ? 'alert' : 'status'} className="text-xs text-gray-600">{configMsg}</span>}
         </div>
-        <p className="mt-2 text-[11px] text-gray-500">批量达到阈值或定时到期时写入数据库；保存后由正式 Pipeline 运行时生效。</p>
+        <p className="mt-2 text-[11px] text-gray-500">批量达到阈值或定时到期时写入数据库；保存后由正式 Pipeline 运行时生效。</p></>}
       </section>
 
       <section className="neu-card p-4" aria-label="MQTT 北向主题">
         <h3 className="text-sm font-bold text-gray-800 mb-3">MQTT 北向主题</h3>
-        <div className="flex flex-wrap items-center gap-3">
+        {mqttLoading && <p role="status" className="text-xs text-gray-500">正在读取 MQTT 配置...</p>}
+        {mqttError && <div className="flex flex-wrap items-center gap-3"><p role="alert" className="text-xs text-red-700">{mqttError}</p><button type="button" onClick={() => void loadMqttConfig()} className="neu-btn px-3 text-xs">重试 MQTT</button></div>}
+        {mqttConfig && !mqttLoading && !mqttError && <><div className="flex flex-wrap items-center gap-3">
           <label className="min-w-[260px] flex-1 text-xs text-gray-600">订阅主题
             <input type="text" value={mqttConfig.mqtt_telemetry_topic} onChange={(event) => setMqttConfig({ ...mqttConfig, mqtt_telemetry_topic: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" placeholder="例如 /neuron/#" />
           </label>
@@ -200,7 +265,7 @@ export default function AdminPanel() {
           {mqttConfig.effective_topics.length ? mqttConfig.effective_topics.map((topic) => <code key={topic} className="rounded bg-blue-50 px-2 py-1 text-blue-700">{topic}</code>) : <span>无</span>}
         </div>
         {mqttConfig.persisted && mqttConfig.persisted !== mqttConfig.mqtt_telemetry_topic && <p className="mt-2 text-[11px] text-gray-500">数据库持久化值：<code>{mqttConfig.persisted}</code>（保存后覆盖）</p>}
-        {mqttMsg && <p role="status" className="mt-2 text-xs text-gray-600">{mqttMsg}</p>}
+        {mqttMsg && <p role={mqttMsg.startsWith('保存失败') ? 'alert' : 'status'} className="mt-2 text-xs text-gray-600">{mqttMsg}</p>}</>}
       </section>
       <NanoMQManager />
     </div>
@@ -208,6 +273,28 @@ export default function AdminPanel() {
 
   const dataTools = (
     <div className="zizu-tools-stack">
+      <section className="neu-card p-4" aria-label="系统健康状态">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div><h3 className="text-sm font-bold text-gray-800">系统健康状态</h3><p className="mt-1 text-[11px] text-gray-500">每 5 秒读取正式 health API；未取得响应时不沿用旧状态。</p></div>
+          <button type="button" onClick={() => void loadSystemHealth()} disabled={systemHealthLoading} className="neu-btn px-3 text-xs disabled:opacity-50">重试系统状态</button>
+        </div>
+        {systemHealthLoading && <p role="status" className="mt-3 text-xs text-gray-500">正在读取系统状态...</p>}
+        {systemHealthError && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{systemHealthError}</p>}
+        {systemHealth && !systemHealthLoading && !systemHealthError && (() => {
+          const connected = systemHealth.status.toLowerCase() === 'healthy'
+            && systemHealth.pipeline.status.toLowerCase() === 'running'
+            && Object.values(systemHealth.components).every((component) => component.status.toLowerCase() === 'connected')
+          return <div className="mt-3 space-y-3">
+            <div className="flex flex-wrap items-center gap-3"><strong className={connected ? 'text-green-700' : 'text-red-700'}>{connected ? `系统健康 ${systemHealth.status}` : '连接异常'}</strong><span className="text-[11px] text-gray-500">API {systemHealth.version} · 运行 {systemHealth.uptime_seconds} 秒</span></div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div className="neu-inset px-3 py-2 text-xs">TimescaleDB <strong>{systemHealth.components.timescaledb.status}</strong></div>
+              <div className="neu-inset px-3 py-2 text-xs">MQTT <strong>{systemHealth.components.mqtt.status}</strong></div>
+              <div className="neu-inset px-3 py-2 text-xs">Neuron <strong>{systemHealth.components.neuron.status}</strong></div>
+            </div>
+            <p className="text-xs text-gray-600">Pipeline {systemHealth.pipeline.status} · 消息 {systemHealth.pipeline.messages_received.toLocaleString()} · 入库 {systemHealth.pipeline.points_written_db.toLocaleString()} · 最后消息 {systemHealth.pipeline.last_message_at ? new Date(systemHealth.pipeline.last_message_at).toLocaleString('zh-CN', { hour12: false }) : '无'}</p>
+          </div>
+        })()}
+      </section>
       <DataBrowser />
       <section className="neu-card p-4" aria-label="只读 SQL 查询">
         <div className="flex items-center justify-between gap-3">

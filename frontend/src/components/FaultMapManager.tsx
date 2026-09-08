@@ -9,8 +9,9 @@ import {
 } from '../api/client'
 
 export default function FaultMapManager() {
-  const [maps, setMaps] = useState<FaultMap[]>([])
-  const [loading, setLoading] = useState(false)
+  const [maps, setMaps] = useState<FaultMap[] | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [editing, setEditing] = useState<FaultMap | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<{ name: string; description: string; entries: FaultMapEntry[] }>({
@@ -21,16 +22,20 @@ export default function FaultMapManager() {
 
   const load = async () => {
     setLoading(true)
+    setLoadError('')
+    setMaps(null)
     try {
       const data = await fetchFaultMaps()
       setMaps(data.items)
+    } catch (reason) {
+      setLoadError(`故障映射读取失败：${reason instanceof Error ? reason.message : '未知错误'}`)
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    load()
+    void load()
   }, [])
 
   useEffect(() => {
@@ -61,7 +66,7 @@ export default function FaultMapManager() {
       }
       setShowForm(false)
       setEditing(null)
-      load()
+      await load()
     } catch (e: any) {
       alert('保存失败：' + (e.message || e))
     }
@@ -71,7 +76,7 @@ export default function FaultMapManager() {
     if (!confirm(`确定永久删除故障码映射表“${map.name}”吗？\n此操作不可恢复，引用该表的点位关联将被清空。`)) return
     try {
       await deleteFaultMap(map.id)
-      load()
+      await load()
     } catch (e: any) {
       alert('删除失败：' + (e.message || e))
     }
@@ -105,6 +110,7 @@ export default function FaultMapManager() {
         <h3 className="text-sm font-bold text-gray-800">故障码映射表</h3>
         <button
           onClick={startCreate}
+          disabled={loading || maps === null}
           className="neu-btn px-3 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
         >
           新建映射表
@@ -112,9 +118,10 @@ export default function FaultMapManager() {
       </div>
 
       {loading && <div className="text-xs text-gray-400">加载中...</div>}
+      {loadError && <div className="flex flex-wrap items-center gap-3"><p role="alert" className="text-xs text-red-700">{loadError}</p><button type="button" onClick={() => void load()} className="neu-btn px-3 text-xs">重试故障映射</button></div>}
 
       <div className="space-y-2">
-        {maps.map((map) => (
+        {maps?.map((map) => (
           <div key={map.id} className="bg-gray-50 rounded-lg p-3">
             <div className="flex items-center justify-between">
               <div>
@@ -152,7 +159,7 @@ export default function FaultMapManager() {
             )}
           </div>
         ))}
-        {maps.length === 0 && !loading && (
+        {maps !== null && maps.length === 0 && !loading && !loadError && (
           <div className="text-center text-gray-400 text-xs py-6">暂无故障码映射表</div>
         )}
       </div>
