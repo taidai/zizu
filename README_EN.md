@@ -6,25 +6,23 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current code version: `v1.0.5`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current code version: `v1.0.9`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-v1.0.5 uses the local Demo as the UI acceptance reference, completing fixed EMS homepage slot bindings, real-device monitoring, the engineering trunk, and tool dialogs. Production pages still consume formal APIs and committed L2, never demonstration data. See the [local acceptance and evidence boundaries](docs/reviews/2026-09-08-v1.0.5-local-acceptance.md) and [parity matrix](docs/reviews/2026-09-08-demo-parity-matrix.md). Host 1 now runs this release with Schema 063, healthy status, and a passing read-only headless trunk check. The visible-browser tool check remains incomplete; some field entities remain unbound or stale. See the [deployment record](docs/deploy-1号机-v1.0.5-http.md). The v1.0.4 results below are historical.
+Host 1 now runs v1.0.9 with Schema 065, healthy application status, and ten passing read-only headless trunk checks. The overview follows the approved Demo: four metric cards, five energy nodes, skeuomorphic SVG icons, red-gold-bright-silver styling, and an independent site-load binding. Production pages still consume formal APIs and committed L2. Recent releases also add compact strategy management, safe hard deletion, and collapsed control-readback details. See the [deployment record](docs/deploy-1号机-v1.0.9-http.md) and [overview behavior](docs/workbench-demo-overview.md).
 
 [v1.0.4 integration, release, and field verification record (Chinese)](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [Historical v0.9.9 field record (Chinese)](docs/deploy-1号机-v0.9.9-http.md)
 
-The v1.0.4 codebase integrates the red-gold-bright-silver production UI, a committed-L2 runtime home page, device monitoring, the Node→L0→L1→L2 engineering path, 10/20-row alarm tables, and generic native JDM editing. Code capability, artifact release, and field acceptance are separate; see the v1.0.4 acceptance record for the tested SHA, evidence, and remaining boundaries.
-
-v1.0.4 has been deployed once to Host 1 from the pinned ARM64 artifact. Post-deployment health, the read-only headless trunk, and the visible-browser spot check passed; TimescaleDB and NanoMQ were not restarted. This covers only the agreed v1.0.4 release scope, not live `GOOD` L2, real-device control, or complete EMS field delivery.
+This deployment changed no field metric bindings and issued no device controls. Some metrics still show last-known values; charging and load remain unbound. The visible-browser plugin spot check remains incomplete. Code capability, deployment, and read-only acceptance are distinct from full field delivery.
 
 > ZiZu has the core data trunk plus alarm and dispatch/control foundations, but it is not yet a complete delivery-ready solar-storage-charging EMS. Real-device control and full EMS field acceptance still require separate evidence.
 
-## Interface design preview
+## Latest runtime homepage
 
 The approved visual direction combines **flag red, gold, and bright silver** with skeuomorphic panels for a 10.1-inch tablet: daily operations come first, with engineering configuration grouped under one entry point.
 
-![ZiZu bright-silver EMS homepage design preview: operations overview, energy flow, alarms, and dispatch status, all using demonstration data](docs/images/ems-homepage-bright-silver-preview.png)
+![ZiZu v1.0.9 production frontend: four metric cards, five energy nodes, alarms and dispatch summaries, using public test data](docs/images/ems-homepage-v1.0.9.png)
 
-> This image is the local Demo interaction reference, not a live-site screenshot. The v1.0.4 production frontend implements the same information hierarchy and red-gold-bright-silver visual direction, but reads only formal APIs, real nodes, and committed L2. Every device, topology, power, SOC, alarm, dispatch, and energy-flow value in the image remains demonstration data and is not field or acceptance evidence.
+> Captured from the v1.0.9 production frontend build, not the old Demo. Sample data based on public repository test fixtures protects field information; the API version therefore reads `test`. Devices, values, and strategies are examples, not field evidence. Production sites still distinguish current, last-known, and unconfigured states and are never filled with this sample data.
 
 ## Core structure
 
