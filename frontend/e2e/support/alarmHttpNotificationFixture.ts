@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { statSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -37,22 +38,100 @@ export interface AlarmHttpReceiverStatus {
   records: AlarmHttpReceiverRecord[]
 }
 
+export interface AlarmHttpFixtureProcessCommand {
+  executable: 'python'
+  arguments: string[]
+}
+
+export function resolveAlarmHttpFixtureScript(
+  repositoryRoot: string,
+  environment: { baseUrl: string },
+  source: NodeJS.ProcessEnv = process.env,
+): string {
+  const defaultScript = path.join(
+    repositoryRoot,
+    'backend',
+    'scripts',
+    'alarm_http_notification_e2e_fixture.py',
+  )
+  const localScript = String(
+    source.ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT ?? '',
+  ).trim()
+  if (!localScript) return defaultScript
+
+  let site: URL
+  try {
+    site = new URL(environment.baseUrl)
+  } catch {
+    throw new Error('Local alarm HTTP fixture override requires HTTP loopback 127.0.0.1:19027')
+  }
+  if (
+    site.protocol !== 'http:'
+    || site.hostname !== '127.0.0.1'
+    || site.port !== '19027'
+  ) {
+    throw new Error('Local alarm HTTP fixture override requires HTTP loopback 127.0.0.1:19027')
+  }
+  const remoteOption = Object.entries(source).find(([key, value]) => (
+    (key.startsWith('ZIZU_E2E_SSH_') || key === 'ZIZU_E2E_SUDO_PASSWORD')
+    && String(value ?? '').trim() !== ''
+  ))
+  if (remoteOption) {
+    throw new Error('Local alarm HTTP fixture override refuses SSH or sudo options')
+  }
+  if (
+    !path.isAbsolute(localScript)
+    || path.extname(localScript).toLowerCase() !== '.py'
+    || !isExistingFile(localScript)
+  ) {
+    throw new Error(
+      'ZIZU_E2E_LOCAL_ALARM_HTTP_FIXTURE_SCRIPT must be an existing absolute Python script path',
+    )
+  }
+  return path.normalize(localScript)
+}
+
+function isExistingFile(filePath: string): boolean {
+  try {
+    return statSync(filePath).isFile()
+  } catch {
+    return false
+  }
+}
+
+export function buildAlarmHttpFixtureCommand(
+  repositoryRoot: string,
+  command: AlarmHttpFixtureCommand | 'force-due',
+  extraArguments: string[],
+  environment: { baseUrl: string },
+  source: NodeJS.ProcessEnv = process.env,
+): AlarmHttpFixtureProcessCommand {
+  return {
+    executable: 'python',
+    arguments: [
+      resolveAlarmHttpFixtureScript(repositoryRoot, environment, source),
+      command,
+      ...extraArguments,
+    ],
+  }
+}
+
 async function execute(
   command: AlarmHttpFixtureCommand | 'force-due',
   extraArguments: string[],
   environment = buildAcceptanceEnvironment(process.env),
 ) {
   const repositoryRoot = path.resolve(process.cwd(), '..')
-  const script = path.join(
+  const fixtureCommand = buildAlarmHttpFixtureCommand(
     repositoryRoot,
-    'backend',
-    'scripts',
-    'alarm_http_notification_e2e_fixture.py',
+    command,
+    extraArguments,
+    environment,
   )
   try {
     const { stdout } = await execFileAsync(
-      'python',
-      [script, command, ...extraArguments],
+      fixtureCommand.executable,
+      fixtureCommand.arguments,
       {
         cwd: repositoryRoot,
         env: { ...process.env, ZIZU_E2E_RUN_ID: environment.runId },
