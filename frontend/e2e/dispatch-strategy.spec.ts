@@ -742,7 +742,33 @@ test.describe.serial('调度策略本机真实纵向验收', () => {
     await page.goto('/')
     await page.getByLabel('用户名').fill('local-e2e')
     await page.getByLabel('密码').fill(password)
+    const loginResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === '/api/v1/auth/login'
+    })
     await page.getByRole('button', { name: '登录', exact: true }).click()
+    expect((await loginResponse).status()).toBe(200)
+    await expect.poll(() => page.evaluate(() => sessionStorage.getItem('zizu.auth.session.v1') !== null)).toBe(true)
+    const workbenchToken = await page.evaluate(() => {
+      const raw = sessionStorage.getItem('zizu.auth.session.v1')
+      if (!raw) throw new Error('authenticated browser session is missing')
+      const { accessToken } = JSON.parse(raw) as { accessToken: string }
+      return accessToken
+    })
+    const workbench = await request.get(`http://127.0.0.1:${backendPort}/api/v1/ems-workbench`, {
+      headers: { Authorization: `Bearer ${workbenchToken}` },
+    })
+    expect(workbench.status()).toBe(200)
+    const workbenchPayload = await workbench.json()
+    expect(workbenchPayload.kpis).toHaveLength(5)
+    expect(workbenchPayload.kpis.map((kpi: { id: string }) => kpi.id)).toEqual([
+      'site-power',
+      'pv-power',
+      'storage-power',
+      'storage-soc',
+      'charging-power',
+    ])
     consoleErrors.length = 0
     await openEngineeringPage(page, '调度策略')
     const strategyId = await createStrategyDraft(page)

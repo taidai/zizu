@@ -682,6 +682,13 @@ def run_local_dispatch_server(port: int) -> None:
     LocalFixture.setUpClass()
     fixture = LocalFixture()
     fixture.setUp()
+    migration_063 = (
+        Path(__file__).resolve().parents[2]
+        / "init-db"
+        / "migration_063_ems_workbench_slots.sql"
+    )
+    with fixture._connection() as connection, connection.cursor() as cursor:
+        cursor.execute(migration_063.read_text(encoding="utf-8"))
 
     def database_clock():
         with fixture._connection() as connection, connection.cursor() as cursor:
