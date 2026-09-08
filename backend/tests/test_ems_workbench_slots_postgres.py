@@ -218,6 +218,10 @@ class WorkbenchSlotPostgresTest(unittest.TestCase):
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(MIGRATION_062.read_text(encoding="utf-8"))
             cursor.execute(MIGRATION_063.read_text(encoding="utf-8"))
+            # Both migrations own and commit their transactions. Start the fixture
+            # transaction explicitly so deferred source checks see the final graph.
+            cursor.execute("BEGIN")
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED")
             self.node_id = uuid4()
             self.entity_id = uuid4()
             cursor.execute(
