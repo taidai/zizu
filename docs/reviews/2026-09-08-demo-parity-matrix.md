@@ -6,7 +6,7 @@
 
 目标版本：v1.0.5
 
-状态：`INCOMPLETE` —— Demo 金标准已冻结；Task 9g 的 production-preview route fixture 因测试契约与生产服务方式不兼容而阻断，尚未关闭正式产品逐项验收
+状态：`PASSED_WITH_ACCEPTED_EVIDENCE_DIFFERENCES` —— 冻结可执行候选 `938c018758d4810e673e5b88e38d8639f172c344` 已完成 production-preview 121/121、18/18 双视口视觉检查和 source/dist 零命中扫描；保留两项明示接受差异：组合式 node/alarm harness 证据，以及故障映射保存后的偶发焦点债务。
 
 ## 1. 这份矩阵约束什么
 
@@ -23,6 +23,8 @@
 - 浏览器：指定本机 Playwright Chromium；14 次页面捕获的 `pageerror` 与 console error 均为 0
 - 页面根尺寸：两种视口下均与视口一致；长表和宽决策表由内容区承载，不允许整页横向溢出
 - `#strategy` 不是 Demo 路由，禁止访问它后把回退的首页误当策略证据
+
+当前正式产品证据位于 `.release-artifacts/v1.0.5/local-acceptance/938c018758d4/`：production bundle 上的固定 13 文件 route fixture 单次执行 121/121、0 skip/retry；7 个正式页面及 HTTP/故障映射长编辑器在 1024×768、1280×800 共 18 张新图，manifest 固定 HEAD、时间、尺寸、SHA-256、console/pageerror/requestfailed 与触点/焦点数据。18 张均已逐图人工检查，无整页横向溢出、主操作遮挡或不可辨弹窗栈。
 
 | Demo 实际页 | 金标准文件 | 正式产品中的作用 |
 | --- | --- | --- |
@@ -164,20 +166,22 @@
 
 仅“看起来像 Demo”不能关闭矩阵；必须同时证明运行数据来自正式提交链，且没有放宽认证、权限、配置、JDM 和控制安全语义。
 
-## 7. Task 9g 同一 HEAD 最终验收状态
+## 7. Task 9l 冻结候选最终验收状态
 
-冻结 HEAD：`170f7c526412da6ddc45a112bb98f636463dff99`。完整证据见 `docs/reviews/2026-09-08-v1.0.5-local-acceptance.md`。
+冻结可执行 HEAD：`938c018758d4810e673e5b88e38d8639f172c344`。完整证据见 `docs/reviews/2026-09-08-v1.0.5-local-acceptance.md`。
 
-| 矩阵页面 / 公共项 | Task 9g 状态 | 原因 |
+| 矩阵页面 / 公共项 | Task 9l 状态 | 证据与差异 |
 | --- | --- | --- |
-| 公共外壳 | `INCOMPLETE` | route fixture 整体门禁为 96/106；18 张同 HEAD 视觉证据未捕获。 |
-| 运行首页 `workbench` | `INCOMPLETE` | 相关 fixture 用例已在阻断前通过，但统一截图/manifest 硬门禁未执行。 |
-| 设备监控 `monitor` | `FAILED` | `tablet-devices.spec.ts` 10/10 因直接导入 dev-only `/@react-refresh` 而无法在 `vite preview` 上挂载。 |
-| 手动控制 `controls` | `INCOMPLETE` | 相关 fixture 用例已通过；1280×800 截图及统一 manifest 未执行。 |
-| 节点与数据 `tree` | `INCOMPLETE` | 相关 route fixture 已通过；18 图门禁未执行。复用的真实 node 7/7 只覆盖 `506f360` 经摘要等价证明转移的运行链。 |
-| 告警中心 `alarms` | `INCOMPLETE` | 相关 route fixture 已通过；18 图门禁未执行。复用的 alarm HTTP 3/3 只覆盖经证明等价的真实告警链。 |
-| 调度策略 `strategies` | `INCOMPLETE` | route fixture 非 PG 用例已通过；因 stop condition 未运行最终同 HEAD dispatch 3/3 与视觉门禁。 |
-| 系统工具 `admin` | `INCOMPLETE` | route fixture 已通过；HTTP/故障映射长编辑器四张补图未执行。 |
-| Demo-only 禁入 | `INCOMPLETE` | 因先行 fixture 硬失败，修正后的 source/dist 扫描依 stop condition 未执行。 |
+| 公共外壳 | `MATCHED` | production preview 双视口图确认品牌、运行/工程导航、真实身份与状态；主触点 ≥44px，焦点轮廓可见。 |
+| 运行首页 `workbench` | `MATCHED` | 当前/最后值、需人工选择、未配置及固定能流同时可见；两个视口无溢出或遮挡。 |
+| 设备监控 `monitor` | `MATCHED` | 8 台真实 fixture、六卡分页、当前/最后值、异常和未配置节点在 production bundle 路径通过。 |
+| 手动控制 `controls` | `MATCHED` | 正式 L2 目录与统一安全门入口可见；dispatch/JDM/control PostgreSQL 3/3 证明正式闭环，未下现场控制。 |
+| 节点与数据 `tree` | `MATCHED` | 物理节点树和 L0/L1/L2 视图、来源身份、异常恢复 fixture 均通过；两视口布局可用。 |
+| 告警中心 `alarms` | `MATCHED` | 当前/历史/通知真实表、错误与空态不伪造；HTTP 编辑长弹层双视口可辨、可关闭。 |
+| 调度策略 `strategies` | `MATCHED` | 单一原生 JDM 草稿/试算/发布语义与正式状态可见；dispatch 3/3 覆盖真实 PostgreSQL 路径。 |
+| 系统工具 `admin` | `MATCHED` | NanoMQ/MQTT、HTTP 通知、故障映射、数据与系统状态四分区及 HTTP/故障映射长编辑器 4 图通过。 |
+| Demo-only 禁入 | `MATCHED` | corrected source 与 production dist 扫描均为 0 命中，未扩大 vendor/fixture 排除边界。 |
+| node/alarm 外部副作用纵向证据 | `ACCEPTED_DIFFERENCE` | 不冒充当前 HEAD fresh harness：采用已独立复审的 `506f360` run `formal_143223b2cd814b299302223fe8ccb67b`（node 7/7、alarm HTTP 3/3、0 skip/retry/flaky、双 cleanup exit 0、secret scan 0），并与当前 preview 121/121、dispatch 3/3 组合。当前变更谱系已精确审查，无 backend API/migration 改动；这是接受的证据组合差异。 |
+| 故障映射保存后焦点恢复 | `ACCEPTED_DIFFERENCE` | final whole-branch fix wave 曾在同一未改测试中出现一次重新渲染编辑按钮未获焦点，前一轮及当前 121 单次门禁均通过。原因未定，不按重跑挑绿结案；登记为 post-v1.0.5 UI debt，仍要求后续独立修复。 |
 
-没有任何行被误标为 `MATCHED` 或 `ACCEPTED_DIFFERENCE`。修复必须是单独复审的测试契约更改，使设备 fixture 消费已构建的 production bundle；不得改用 Vite dev server 冒充生产包验收。
+固定 13 文件列表没有扩张；合法计数由 Task 9m 在既有三个 focus 文件内新增并复审的覆盖从 106 增至 109，本轮 final-review fix wave 再在同一固定文件集合内新增 12 条覆盖，最终为 121。文件边界不变，0 skip/retry。

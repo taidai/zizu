@@ -5472,3 +5472,11 @@ VERSION / backend/app/VERSION / backend/pyproject.toml / frontend/package.json: 
 - 公网 Browser 实际点击专用规则“启用”成功显示“已启用”，再点击“停用”恢复现场；对应 plan/apply 均
   201/200，最终统一配置版本 457、相同内容历史定义仍为 1、当前指针 0、浏览器控制台 error/warn 0。
 - 本轮未确认告警、执行 JDM、控制或设备写。完整记录见 `docs/deploy-1号机-v0.7.3-http.md`。
+
+## Session 2026-09-08 — v1.0.5 最终本机验收关闭
+
+- 冻结可执行候选 `938c018758d4810e673e5b88e38d8639f172c344` 的 Task 9l 结论为 `PASSED_WITH_ACCEPTED_EVIDENCE_DIFFERENCES`；完整记录见 `docs/reviews/2026-09-08-v1.0.5-local-acceptance.md` 与同日 parity matrix。
+- 当前 production preview 的固定 13 文件一次执行 121/121、0 fail/skip/retry；corrected source/dist 扫描 0/0；7 页及 HTTP/故障映射编辑器双视口新图 18/18 已逐图检查，hash/尺寸一致、无整页横向溢出或主操作遮挡，pageerror/requestfailed 为 0。
+- 复用本轮经树等价证明的 frontend 201/201、scripts 56/56、backend 773 total（492 pass + 281 conditional skip）、build 8210 modules、focused 29/29、Schema 9/9 与 dispatch 3/3；281 skip 未算作通过。
+- 接受差异有且仅有两项：旧独立复审 run `formal_143223b2cd814b299302223fe8ccb67b` 的 real node 7/7 + alarm HTTP 3/3 与当前 preview/dispatch 组合使用，绝不称为 current fresh harness；故障映射保存后的偶发焦点恢复保留为 post-v1.0.5 UI debt，即使本次 121 用例通过也不宣称债务消失。
+- 临时 preview、随机 PostgreSQL 库、MQTT 容器和 owned 进程均已清理；只保留获批 55439 DB listener。本任务未操作 1 号机、push、tag、部署、通知、策略或控制。后续发布/CI/现场验收由 controller 单独负责。
