@@ -65,6 +65,7 @@ type ToolsApiScenario = {
   healthFailure?: boolean
   healthDisconnected?: boolean
   healthRace?: HealthRaceController
+  healthSlow?: HealthSlowController
 }
 
 type Deferred = { promise: Promise<void>; resolve: () => void }
@@ -76,6 +77,7 @@ function deferred(): Deferred {
 }
 
 type HealthRaceController = ReturnType<typeof createHealthRaceController>
+type HealthSlowController = ReturnType<typeof createHealthSlowController>
 
 function createHealthRaceController() {
   return {
@@ -85,6 +87,49 @@ function createHealthRaceController() {
     releaseOlder: deferred(),
     releaseNewer: deferred(),
   }
+}
+
+function createHealthSlowController() {
+  return {
+    requestCount: 0,
+    started: deferred(),
+    release: deferred(),
+  }
+}
+
+async function installControlledHealthClock(page: Page) {
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window)
+    const originalSetInterval = window.setInterval.bind(window)
+    const originalSetTimeout = window.setTimeout.bind(window)
+    const fiveSecondIntervals: TimerHandler[] = []
+    ;(window as any).__toolsHealthClock = { fiveSecondIntervals, healthFetchStarts: 0, parsedHealthVersions: [] as string[] }
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 5000) {
+        fiveSecondIntervals.push(handler)
+        return fiveSecondIntervals.length
+      }
+      return originalSetInterval(handler, timeout, ...args)
+    }) as typeof window.setInterval
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      timeout === 5000 ? 0 : originalSetTimeout(handler, timeout, ...args)
+    )) as typeof window.setTimeout
+    window.fetch = async (...args) => {
+      const requestUrl = typeof args[0] === 'string' ? args[0] : args[0] instanceof URL ? args[0].href : args[0].url
+      const isHealth = new URL(requestUrl, window.location.href).pathname === '/api/v1/health'
+      if (isHealth) (window as any).__toolsHealthClock.healthFetchStarts += 1
+      const response = await originalFetch(...args)
+      if (isHealth) {
+        const originalJson = response.json.bind(response)
+        response.json = async () => {
+          const value = await originalJson()
+          window.setTimeout(() => { (window as any).__toolsHealthClock.parsedHealthVersions.push(value.version) }, 0)
+          return value
+        }
+      }
+      return response
+    }
+  })
 }
 
 async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin', scenario: ToolsApiScenario = {}) {
@@ -117,6 +162,21 @@ async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin',
 
     if (pathName === '/auth/login') return json({ access_token: 'local-tools', expires_at: '2099-01-01T00:00:00Z', user })
     if (pathName === '/auth/me') return json({ user })
+    if (pathName === '/health' && scenario.healthSlow) {
+      const requestNumber = ++scenario.healthSlow.requestCount
+      const health = (version: string, messages: number) => ({
+        status: 'healthy', version, uptime_seconds: messages,
+        pipeline: { status: 'running', messages_received: messages, points_written_db: messages, last_message_at: '2026-09-08T10:00:00+08:00' },
+        components: { timescaledb: { status: 'connected' }, mqtt: { status: 'connected' }, neuron: { status: 'connected' } },
+      })
+      if (requestNumber === 1) return json(health('shell', 1))
+      if (requestNumber === 2) {
+        scenario.healthSlow.started.resolve()
+        await scenario.healthSlow.release.promise
+        return json(health('slow-success', 333))
+      }
+      return json(health('overlap', 444))
+    }
     if (pathName === '/health' && scenario.healthRace) {
       const requestNumber = ++scenario.healthRace.requestCount
       const health = (version: string, messages: number) => ({
@@ -342,27 +402,7 @@ test('系统组件断线保留服务端状态而不显示健康', async ({ page 
 
 test('旧系统状态请求晚于新请求返回时不能覆盖最新快照', async ({ page }) => {
   const race = createHealthRaceController()
-  await page.addInitScript(() => {
-    const originalFetch = window.fetch.bind(window)
-    const originalSetInterval = window.setInterval.bind(window)
-    ;(window as any).__parsedHealthVersions = []
-    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
-      timeout === 5000 ? 0 : originalSetInterval(handler, timeout, ...args)
-    )) as typeof window.setInterval
-    window.fetch = async (...args) => {
-      const response = await originalFetch(...args)
-      const requestUrl = typeof args[0] === 'string' ? args[0] : args[0] instanceof URL ? args[0].href : args[0].url
-      if (new URL(requestUrl, window.location.href).pathname === '/api/v1/health') {
-        const originalJson = response.json.bind(response)
-        response.json = async () => {
-          const value = await originalJson()
-          window.setTimeout(() => { (window as any).__parsedHealthVersions.push(value.version) }, 0)
-          return value
-        }
-      }
-      return response
-    }
-  })
+  await installControlledHealthClock(page)
   await installToolsApi(page, 'admin', { healthRace: race })
   await login(page)
   await openEngineeringPage(page, '系统工具')
@@ -380,11 +420,35 @@ test('旧系统状态请求晚于新请求返回时不能覆盖最新快照', as
   await expect(health).toContainText('消息 222')
 
   race.releaseOlder.resolve()
-  await page.waitForFunction(() => (window as any).__parsedHealthVersions.includes('stale'))
+  await page.waitForFunction(() => (window as any).__toolsHealthClock.parsedHealthVersions.includes('stale'))
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
   await expect(health).toContainText('API latest')
   await expect(health).toContainText('消息 222')
   await expect(health).not.toContainText('stale')
+})
+
+test('系统状态响应慢于轮询周期时保持单飞并最终显示响应', async ({ page }) => {
+  const slow = createHealthSlowController()
+  await installControlledHealthClock(page)
+  await installToolsApi(page, 'admin', { healthSlow: slow })
+  await login(page)
+  await openEngineeringPage(page, '系统工具')
+  const intervalCountBeforeOpen = await page.evaluate(() => (window as any).__toolsHealthClock.fiveSecondIntervals.length)
+
+  await page.getByRole('button', { name: '打开数据与系统状态', exact: true }).click()
+  await slow.started.promise
+  await page.evaluate((startIndex) => {
+    for (const handler of (window as any).__toolsHealthClock.fiveSecondIntervals.slice(startIndex)) {
+      if (typeof handler === 'function') handler()
+    }
+  }, intervalCountBeforeOpen)
+  const healthFetchStarts = await page.evaluate(() => (window as any).__toolsHealthClock.healthFetchStarts)
+  slow.release.resolve()
+
+  expect(healthFetchStarts).toBe(2)
+  const health = page.getByRole('dialog', { name: '数据与系统状态' }).getByRole('region', { name: '系统健康状态' })
+  await expect(health).toContainText('API slow-success')
+  await expect(health).toContainText('消息 333')
 })
 
 test('故障映射读取失败显示错误和重试，不伪装成空库', async ({ page }) => {

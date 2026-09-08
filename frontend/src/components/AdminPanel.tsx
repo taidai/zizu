@@ -151,10 +151,16 @@ export default function AdminPanel() {
 
   useEffect(() => {
     if (activeTool !== 'data') return
-    void loadSystemHealth()
-    const interval = window.setInterval(() => { void loadSystemHealth() }, 5000)
+    let closed = false
+    let nextPoll: number | undefined
+    const poll = async () => {
+      await loadSystemHealth()
+      if (!closed) nextPoll = window.setTimeout(() => { void poll() }, 5000)
+    }
+    void poll()
     return () => {
-      window.clearInterval(interval)
+      closed = true
+      if (nextPoll !== undefined) window.clearTimeout(nextPoll)
       systemHealthGeneration.current += 1
     }
   }, [activeTool, loadSystemHealth])
