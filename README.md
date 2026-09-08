@@ -8,7 +8,7 @@
 
 **当前代码版本：`v1.0.5`** · [English](README_EN.md) · [完整中英文架构说明](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
 
-v1.0.5 以本机 Demo 为界面验收样板，完善固定 EMS 首页槽位绑定、真实设备监控、工程配置主干和工具弹窗；页面继续使用正式 API 与 committed L2，不把演示数据带入现场。详见[本机验收与证据边界](docs/reviews/2026-09-08-v1.0.5-local-acceptance.md)和[界面对照清单](docs/reviews/2026-09-08-demo-parity-matrix.md)。本版正在发布，以下 v1.0.4 现场结论仅为历史记录，不代表 v1.0.5 已部署。
+v1.0.5 以本机 Demo 为界面验收样板，完善固定 EMS 首页槽位绑定、真实设备监控、工程配置主干和工具弹窗；页面继续使用正式 API 与 committed L2，不把演示数据带入现场。详见[本机验收与证据边界](docs/reviews/2026-09-08-v1.0.5-local-acceptance.md)和[界面对照清单](docs/reviews/2026-09-08-demo-parity-matrix.md)。本版已部署到 1 号机，Schema 063、应用健康、无头只读主干验收通过；可见 Browser 工具抽查未完成，现场仍有未绑定/超时实体，详见[发布记录](docs/deploy-1号机-v1.0.5-http.md)。以下 v1.0.4 内容为历史记录。
 
 [v1.0.4 集成、发布与现场复验记录](docs/reviews/2026-09-07-tablet-production-acceptance.md) · [v0.9.9 历史现场记录](docs/deploy-1号机-v0.9.9-http.md)
 
