@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   deleteAlarmNotificationDeliveries,
   fetchAlarmNotificationDeliveries,
@@ -37,28 +37,53 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const loadGeneration = useRef(0)
+  const scope = useRef({ page: 1, pageSize: 10 as 10 | 20 })
 
-  const load = async (targetPage = page) => {
+  const isCurrentScope = (targetPage: number, targetPageSize: 10 | 20) => (
+    scope.current.page === targetPage && scope.current.pageSize === targetPageSize
+  )
+
+  const changeScope = (targetPage: number, targetPageSize: 10 | 20) => {
+    if (isCurrentScope(targetPage, targetPageSize)) return
+    scope.current = { page: targetPage, pageSize: targetPageSize }
+    loadGeneration.current += 1
+    setSelected(new Set())
+    setItems([])
+    setError('')
+    setMessage('')
+    setPage(targetPage)
+    setPageSize(targetPageSize)
+  }
+
+  const load = async (targetPage = scope.current.page, targetPageSize = scope.current.pageSize) => {
+    if (!isCurrentScope(targetPage, targetPageSize)) return
+    const generation = ++loadGeneration.current
     setBusy('load')
     setError('')
     try {
-      const result = await fetchAlarmNotificationDeliveries(targetPage, pageSize)
+      const result = await fetchAlarmNotificationDeliveries(targetPage, targetPageSize)
+      if (generation !== loadGeneration.current || !isCurrentScope(targetPage, targetPageSize)) return
       const validPage = validDeliveryPage(targetPage, result.total_pages)
       if (validPage !== targetPage) {
-        setPage(validPage)
+        changeScope(validPage, targetPageSize)
         return
       }
       setItems(result.items)
       setTotalPages(result.total_pages)
       setSelected(new Set())
     } catch (reason) {
+      if (generation !== loadGeneration.current || !isCurrentScope(targetPage, targetPageSize)) return
       setError(reason instanceof Error ? reason.message : '无法读取通知记录。')
     } finally {
-      setBusy('')
+      if (generation === loadGeneration.current && isCurrentScope(targetPage, targetPageSize)) setBusy('')
     }
   }
 
-  useEffect(() => { void load(page) }, [page, pageSize])
+  useEffect(() => {
+    void load(page, pageSize)
+    return () => { loadGeneration.current += 1 }
+  }, [page, pageSize])
 
   const retry = async (delivery: AlarmNotificationDelivery) => {
     setBusy(`retry:${delivery.id}`)
@@ -67,7 +92,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
     try {
       await retryAlarmNotificationDelivery(delivery.id, crypto.randomUUID())
       setMessage('已重新加入发送队列。')
-      await load(page)
+      await load(page, pageSize)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '重新发送失败。')
     } finally {
@@ -85,7 +110,7 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
     try {
       const result = await deleteAlarmNotificationDeliveries(deliveryIds)
       setMessage(`已永久删除 ${result.deleted} 条通知记录。`)
-      await load(page)
+      await load(page, pageSize)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '删除通知记录失败。')
     } finally {
@@ -119,11 +144,11 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
               删除所选（{selected.size}）
             </button>
           )}
-          <button type="button" disabled={busy !== ''} onClick={() => void load(page)} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-40">
+          <button type="button" disabled={busy !== ''} onClick={() => void load(page, pageSize)} className="neu-btn px-3 py-2 text-xs text-gray-700 disabled:opacity-40">
             刷新
           </button>
           <label className="flex items-center text-xs text-gray-600">每页
-            <select aria-label="通知每页条数" value={pageSize} onChange={(event) => { setPage(1); setSelected(new Set()); setPageSize(Number(event.target.value) as 10 | 20) }} className="neu-input mx-2 px-2 py-1.5">
+            <select aria-label="通知每页条数" value={pageSize} onChange={(event) => changeScope(1, Number(event.target.value) as 10 | 20)} className="neu-input mx-2 px-2 py-1.5">
               <option value={10}>10</option><option value={20}>20</option>
             </select>条
           </label>
@@ -214,9 +239,9 @@ export default function AlarmNotificationRecords({ canManage }: { canManage: boo
 
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-3 text-xs text-gray-500">
-          <button type="button" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} className="neu-btn px-3 py-1.5 disabled:opacity-30">上一页</button>
+          <button type="button" disabled={page <= 1} onClick={() => changeScope(Math.max(1, page - 1), pageSize)} className="neu-btn px-3 py-1.5 disabled:opacity-30">上一页</button>
           <span>{page} / {totalPages}</span>
-          <button type="button" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} className="neu-btn px-3 py-1.5 disabled:opacity-30">下一页</button>
+          <button type="button" disabled={page >= totalPages} onClick={() => changeScope(Math.min(totalPages, page + 1), pageSize)} className="neu-btn px-3 py-1.5 disabled:opacity-30">下一页</button>
         </div>
       )}
 

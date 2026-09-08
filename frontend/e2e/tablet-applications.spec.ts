@@ -115,21 +115,42 @@ function creationStarterStrategy() {
   }
 }
 
-async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'alarmAckRace' | 'native' | 'multiple' | 'create' | 'delayed') {
+function notificationDelivery(id: string, alarmName: string) {
+  return {
+    id, event_id: `event-${id}`, event_type: 'ALARM_ACTIVATED', alarm_name: alarmName, severity: 'MAJOR',
+    node_name: '储能柜 1', entity_name: '柜内温度', configuration_name: '值班 HTTP', configuration_exists: true,
+    target_display: 'https://notice.invalid/alarm', status: 'delivered', attempt_count: 1, last_http_status: 200,
+    last_error_code: null, last_error_detail: null, last_response_excerpt: 'ok', created_at: now, delivered_at: now,
+    cancelled_at: null,
+    attempts: [{ attempt_no: 1, attempted_at: now, method: 'POST', target_display: 'https://notice.invalid/alarm', duration_ms: 18, outcome: 'delivered', http_status: 200, error_code: null, error_detail: null, response_excerpt: 'ok' }],
+  }
+}
+
+async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'alarms' | 'alarmAckRace' | 'alarmNotificationRace' | 'native' | 'multiple' | 'create' | 'delayed') {
   const writes: string[] & {
     ackPending?: boolean
     releaseAck?: () => void
     releasePageTwoLoad?: () => void
     alarmListScopes?: string[]
+    notificationRefreshPending?: boolean
+    releaseNotificationRefresh?: () => void
+    notificationListScopes?: string[]
   } = []
   const staleStrategy = staleCode ? staleStrategyView() : null
   let fixtureStrategy = fixture === 'native' || fixture === 'multiple' || fixture === 'delayed' ? applicationStrategy(fixture === 'multiple') : null
   let createdStrategy: ReturnType<typeof creationStarterStrategy> | null = null
   let resolvePageTwoLoad: (() => void) | undefined
   const pageTwoResponse = new Promise<void>((resolve) => { resolvePageTwoLoad = resolve })
+  let resolveNotificationRefresh: (() => void) | undefined
+  const notificationRefreshResponse = new Promise<void>((resolve) => { resolveNotificationRefresh = resolve })
+  let notificationPageOneLoads = 0
   if (fixture === 'alarmAckRace') {
     writes.releasePageTwoLoad = () => resolvePageTwoLoad?.()
     writes.alarmListScopes = []
+  }
+  if (fixture === 'alarmNotificationRace') {
+    writes.notificationListScopes = []
+    writes.releaseNotificationRefresh = () => resolveNotificationRefresh?.()
   }
   await page.routeWebSocket('**/api/v1/ws/data-frames', (socket) => {
     socket.onMessage((message) => {
@@ -182,7 +203,7 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
       const items = Array.from({ length: 11 }, (_, index) => ({ id: `alarm-${index + 1}`, definition_id: 'temperature.high', entity_instance_id: 'temperature-1', state: historical ? 'recovered' : 'active_unacknowledged', severity: index === 0 ? 'CRITICAL' : 'MAJOR', pending_at: now, active_at: now, acknowledged_at: historical ? now : null, acknowledged_by: historical ? '值班员' : null, recovered_at: historical ? now : null, node_name: '储能柜 1', entity_name: '柜内温度', alarm_name: `${historical ? '历史高温告警' : '高温告警'} ${index + 1}`, duration_seconds: 120, archived_at: state === 'archived' ? now : null, archived_by: state === 'archived' ? '工程师' : null }))
       return json({ items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), total: 11, page: pageNumber, page_size: pageSize, total_pages: Math.ceil(11 / pageSize), summary: { active: 11, unacknowledged: 11, critical: 1 } })
     }
-    if (fixture === 'alarms' && path === '/alarms/notification-deliveries' && method === 'POST') {
+    if (fixture === 'alarms' && path === '/alarms/notification-deliveries/deletions' && method === 'POST') {
       return json({ deleted: request.postDataJSON()?.delivery_ids?.length || 0 })
     }
     if (fixture === 'alarms' && path === '/alarms/notification-deliveries') {
@@ -198,6 +219,22 @@ async function installReadOnlyApi(page: Page, staleCode?: string, fixture?: 'ala
         attempts: [{ attempt_no: 1, attempted_at: now, method: 'POST', target_display: 'https://notice.invalid/alarm', duration_ms: 18, outcome: 'delivered', http_status: 200, error_code: null, error_detail: null, response_excerpt: 'ok' }],
       }))
       return json({ items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), total: 11, page: pageNumber, page_size: pageSize, total_pages: Math.ceil(11 / pageSize) })
+    }
+    if (fixture === 'alarmNotificationRace' && path === '/alarms/notification-deliveries') {
+      const url = new URL(request.url())
+      const pageSize = Number(url.searchParams.get('page_size') || 10)
+      const pageNumber = Number(url.searchParams.get('page') || 1)
+      writes.notificationListScopes?.push(`page:${pageNumber};size:${pageSize}`)
+      if (pageNumber === 2) return json({ detail: 'fixture page failure' }, 503)
+      if (pageSize === 10) {
+        notificationPageOneLoads += 1
+        if (notificationPageOneLoads > 1) {
+          writes.notificationRefreshPending = true
+          await notificationRefreshResponse
+        }
+        return json({ items: [notificationDelivery('delivery-old-scope', '旧作用域通知')], total: 11, page: 1, page_size: 10, total_pages: 2 })
+      }
+      return json({ items: [notificationDelivery('delivery-new-scope', '新作用域通知')], total: 1, page: 1, page_size: 20, total_pages: 1 })
     }
     if (fixture === 'alarms' && path === '/alarm-rule-groups') return json({ items: [] })
     if (fixture === 'alarms' && path === '/alarm-rule-sets') return json({ items: [] })
@@ -395,6 +432,7 @@ test('告警中心以三张10行表和弹窗承载历史、通知详情与规则
   page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '删除所选（10）', exact: true }).click()
   await expect.poll(() => writes).toContain('POST /alarms/notification-deliveries/deletions')
+  await expect(page.getByText('已永久删除 10 条通知记录。', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '告警规则', exact: true }).click()
   const ruleDialog = page.getByRole('dialog', { name: '告警规则配置' })
@@ -407,6 +445,44 @@ test('告警中心以三张10行表和弹窗承载历史、通知详情与规则
   await page.getByRole('button', { name: '当前告警', exact: true }).click()
   await expect(page.getByTestId('alarm-current-table').locator('tbody tr')).toHaveCount(10)
   await page.screenshot({ path: testInfo.outputPath('alarms-1280x800.png') })
+})
+
+test('通知记录只接受最后一次分页加载且作用域改变会清空当前页选择', async ({ page }) => {
+  const race = await installReadOnlyApi(page, undefined, 'alarmNotificationRace')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '告警')
+  await page.getByRole('button', { name: '通知记录', exact: true }).click()
+  await expect(page.getByText('旧作用域通知', { exact: true })).toBeVisible()
+
+  await page.getByLabel('选择 旧作用域通知', { exact: true }).check()
+  await expect(page.getByRole('button', { name: '删除所选（1）', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect.poll(() => race.notificationRefreshPending).toBe(true)
+  await page.getByLabel('通知每页条数', { exact: true }).selectOption('20')
+  await expect(page.getByText('新作用域通知', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '删除所选（1）', exact: true })).toHaveCount(0)
+
+  const delayedResponse = page.waitForResponse((response) => response.url().includes('/alarms/notification-deliveries?page=1&page_size=10'))
+  race.releaseNotificationRefresh!()
+  await delayedResponse
+  await page.waitForTimeout(250)
+  await expect(page.getByText('新作用域通知', { exact: true })).toBeVisible()
+  await expect(page.getByText('旧作用域通知', { exact: true })).toHaveCount(0)
+})
+
+test('通知记录新页加载失败后旧页选择不能留在新分页范围', async ({ page }) => {
+  await installReadOnlyApi(page, undefined, 'alarmNotificationRace')
+  await page.goto(tabletBaseUrl, { waitUntil: 'domcontentloaded' })
+  await openNavigation(page, '告警')
+  await page.getByRole('button', { name: '通知记录', exact: true }).click()
+  await expect(page.getByText('旧作用域通知', { exact: true })).toBeVisible()
+
+  await page.getByLabel('选择 旧作用域通知', { exact: true }).check()
+  await page.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(page.getByTestId('tablet-alarm-applications').getByRole('alert')).toContainText('读取通知记录失败：503')
+  await expect(page.getByRole('button', { name: '删除所选（1）', exact: true })).toHaveCount(0)
+  await expect(page.getByText('旧作用域通知', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('2 / 2', { exact: true })).toBeVisible()
 })
 
 test('迟到的批量确认不会用旧页加载覆盖正在加载的当前页', async ({ page }) => {
