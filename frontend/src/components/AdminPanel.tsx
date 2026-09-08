@@ -8,6 +8,7 @@ import DataBrowser from './DataBrowser'
 import NanoMQManager from './NanoMQManager'
 import FaultMapManager from './FaultMapManager'
 import AlarmHttpNotificationPanel from './admin/AlarmHttpNotificationPanel'
+import { restoreModalTrigger, useModalFocus } from './useModalFocus'
 import './alarm-center/tabletApplications.css'
 import './admin/systemTools.css'
 
@@ -49,9 +50,10 @@ function apiMessage(reason: unknown): string {
 }
 
 function ToolDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const modal = useModalFocus({ open: true, onClose })
   return (
     <div className="zizu-tools-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section role="dialog" aria-modal="true" aria-label={title} className="zizu-tools-dialog">
+      <section ref={modal.dialogRef} tabIndex={-1} onKeyDown={modal.onKeyDown} role="dialog" aria-modal="true" aria-label={title} className="zizu-tools-dialog">
         <header className="zizu-tools-dialog-header">
           <div>
             <span>系统工具</span>
@@ -69,6 +71,7 @@ export default function AdminPanel() {
   const [activeTool, setActiveTool] = useState<ToolKey | null>(null)
   const [truncateOpen, setTruncateOpen] = useState(false)
   const toolTriggers = useRef<Partial<Record<ToolKey, HTMLButtonElement>>>({})
+  const truncateTrigger = useRef<HTMLButtonElement | null>(null)
   const systemHealthGeneration = useRef(0)
   // 入库节拍
   const [config, setConfig] = useState<PipelineConfig | null>(null)
@@ -100,6 +103,12 @@ export default function AdminPanel() {
   const [truncateConfirm, setTruncateConfirm] = useState('')
   const [truncateLoading, setTruncateLoading] = useState(false)
   const [truncateMsg, setTruncateMsg] = useState('')
+
+  const closeTruncate = () => {
+    setTruncateOpen(false)
+    restoreModalTrigger(truncateTrigger.current)
+  }
+  const truncateModal = useModalFocus({ open: truncateOpen, onClose: closeTruncate })
 
   const loadPipelineConfig = useCallback(async () => {
     setConfigLoading(true)
@@ -165,22 +174,11 @@ export default function AdminPanel() {
     }
   }, [activeTool, loadSystemHealth])
 
-  useEffect(() => {
-    if (!activeTool && !truncateOpen) return
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      if (truncateOpen) setTruncateOpen(false)
-      else setActiveTool(null)
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [activeTool, truncateOpen])
-
   const closeTool = () => {
     const key = activeTool
     setActiveTool(null)
     setTruncateOpen(false)
-    if (key) window.requestAnimationFrame(() => toolTriggers.current[key]?.focus())
+    if (key) restoreModalTrigger(toolTriggers.current[key] || null)
   }
 
   const handleSaveConfig = async () => {
@@ -237,7 +235,7 @@ export default function AdminPanel() {
       const result = await truncateTable(truncateTableName, truncateConfirm)
       setTruncateMsg(`已清空 ${result.table}，删除 ${result.rows_deleted} 行`)
       setTruncateConfirm('')
-      setTruncateOpen(false)
+      closeTruncate()
     } catch (e: any) {
       setTruncateMsg(e.message || '操作失败')
     } finally {
@@ -330,7 +328,7 @@ export default function AdminPanel() {
             <option value="t_telemetry">t_telemetry（遥测数据）</option>
             <option value="t_audit_log">t_audit_log（审计日志）</option>
           </select>
-          <button type="button" onClick={() => { setTruncateConfirm(''); setTruncateMsg(''); setTruncateOpen(true) }} className="neu-btn zizu-tools-danger-button px-4 text-xs font-semibold">准备清空表</button>
+          <button ref={truncateTrigger} type="button" onClick={() => { setTruncateConfirm(''); setTruncateMsg(''); setTruncateOpen(true) }} className="neu-btn zizu-tools-danger-button px-4 text-xs font-semibold">准备清空表</button>
         </div>
         {truncateMsg && <p role={truncateMsg.includes('已清空') ? 'status' : 'alert'} className={`mt-2 text-xs ${truncateMsg.includes('已清空') ? 'text-green-700' : 'text-red-700'}`}>{truncateMsg}</p>}
       </section>
@@ -366,7 +364,7 @@ export default function AdminPanel() {
 
       {truncateOpen && (
         <div className="zizu-tools-overlay zizu-tools-danger-overlay">
-          <section role="dialog" aria-modal="true" aria-label="确认永久清空数据" className="zizu-tools-confirm">
+          <section ref={truncateModal.dialogRef} tabIndex={-1} onKeyDown={truncateModal.onKeyDown} role="dialog" aria-modal="true" aria-label="确认永久清空数据" className="zizu-tools-confirm">
             <span className="zizu-tools-danger-kicker">DANGER / 永久操作</span>
             <h2>确认永久清空数据</h2>
             <p>范围：表 <code>{truncateTableName}</code> 内的全部记录。</p>
@@ -375,7 +373,7 @@ export default function AdminPanel() {
               <input autoFocus aria-label="输入 yes 确认" value={truncateConfirm} onChange={(event) => setTruncateConfirm(event.target.value)} className="neu-input mt-2 w-full px-3 py-2 text-sm" />
             </label>
             <div className="zizu-tools-confirm-actions">
-              <button type="button" onClick={() => setTruncateOpen(false)} className="neu-btn px-4 text-xs">取消</button>
+              <button type="button" onClick={closeTruncate} className="neu-btn px-4 text-xs">取消</button>
               <button type="button" onClick={() => void handleTruncate()} disabled={truncateLoading || truncateConfirm.toLowerCase() !== 'yes'} className="neu-btn zizu-tools-danger-button px-4 text-xs font-semibold disabled:opacity-40">{truncateLoading ? '执行中...' : '永久清空'}</button>
             </div>
           </section>

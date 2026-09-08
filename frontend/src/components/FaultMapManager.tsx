@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   fetchFaultMaps,
   createFaultMap,
@@ -7,6 +7,7 @@ import {
   type FaultMap,
   type FaultMapEntry,
 } from '../api/client'
+import { restoreModalTrigger, useModalFocus } from './useModalFocus'
 
 export default function FaultMapManager() {
   const [maps, setMaps] = useState<FaultMap[] | null>(null)
@@ -14,6 +15,7 @@ export default function FaultMapManager() {
   const [loadError, setLoadError] = useState('')
   const [editing, setEditing] = useState<FaultMap | null>(null)
   const [showForm, setShowForm] = useState(false)
+  const editorTrigger = useRef<HTMLButtonElement | null>(null)
   const [form, setForm] = useState<{ name: string; description: string; entries: FaultMapEntry[] }>({
     name: '',
     description: '',
@@ -64,8 +66,7 @@ export default function FaultMapManager() {
       } else {
         await createFaultMap(payload)
       }
-      setShowForm(false)
-      setEditing(null)
+      closeEditor()
       await load()
     } catch (e: any) {
       alert('保存失败：' + (e.message || e))
@@ -98,10 +99,23 @@ export default function FaultMapManager() {
     setForm({ ...form, entries: next })
   }
 
-  const startCreate = () => {
+  function closeEditor() {
+    setShowForm(false)
+    setEditing(null)
+    restoreModalTrigger(editorTrigger.current)
+  }
+  const editorModal = useModalFocus({ open: showForm, onClose: closeEditor })
+
+  const startCreate = (trigger: HTMLButtonElement) => {
+    editorTrigger.current = trigger
     setEditing(null)
     setForm({ name: '', description: '', entries: [] })
     setShowForm(true)
+  }
+
+  const startEdit = (map: FaultMap, trigger: HTMLButtonElement) => {
+    editorTrigger.current = trigger
+    setEditing(map)
   }
 
   return (
@@ -109,7 +123,7 @@ export default function FaultMapManager() {
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-bold text-gray-800">故障码映射表</h3>
         <button
-          onClick={startCreate}
+          onClick={(event) => startCreate(event.currentTarget)}
           disabled={loading || maps === null}
           className="neu-btn px-3 py-1.5 text-xs font-medium text-white bg-[#52c41a] hover:bg-[#389e0d]"
         >
@@ -130,7 +144,7 @@ export default function FaultMapManager() {
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setEditing(map)}
+                  onClick={(event) => startEdit(map, event.currentTarget)}
                   className="neu-btn px-3 py-1 text-xs"
                 >
                   编辑
@@ -165,15 +179,15 @@ export default function FaultMapManager() {
       </div>
 
       {showForm && (
-        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { setShowForm(false); setEditing(null) } }}>
-          <section role="dialog" aria-modal="true" aria-label="故障映射编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
+        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeEditor() }}>
+          <section ref={editorModal.dialogRef} tabIndex={-1} onKeyDown={editorModal.onKeyDown} role="dialog" aria-modal="true" aria-label="故障映射编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
             <header className="zizu-tools-dialog-header">
               <div><span>FAULT MAP</span><h2>{editing ? `编辑：${editing.name}` : '新建故障映射'}</h2></div>
-              <button type="button" onClick={() => { setShowForm(false); setEditing(null) }} className="neu-btn zizu-tools-close">关闭</button>
+              <button type="button" onClick={closeEditor} className="neu-btn zizu-tools-close">关闭</button>
             </header>
             <div className="zizu-tools-dialog-body space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <label className="text-xs text-gray-600">映射表名称<input autoFocus aria-label="映射表名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
+                <label className="text-xs text-gray-600">映射表名称<input aria-label="映射表名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
                 <label className="text-xs text-gray-600">描述<input aria-label="映射表描述" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} className="neu-input mt-1 w-full px-3 py-2 text-xs" /></label>
               </div>
               <div className="space-y-2">
@@ -188,7 +202,7 @@ export default function FaultMapManager() {
                 {!form.entries.length && <p className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-xs text-gray-400">尚未添加故障码条目。</p>}
               </div>
               <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => { setShowForm(false); setEditing(null) }} className="neu-btn px-4 text-xs">取消</button>
+                <button type="button" onClick={closeEditor} className="neu-btn px-4 text-xs">取消</button>
                 <button type="button" onClick={() => void handleSave()} className="neu-btn zizu-primary px-4 text-xs font-medium">保存</button>
               </div>
             </div>

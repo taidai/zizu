@@ -16,6 +16,7 @@ import {
   buildMaskedPreview,
   describeHttpNotificationError,
 } from './alarmHttpNotificationModel'
+import { restoreModalTrigger, useModalFocus } from '../useModalFocus'
 
 type FieldGroup = 'query_params' | 'headers'
 
@@ -146,6 +147,7 @@ export default function AlarmHttpNotificationPanel() {
   const [error, setError] = useState('')
   const bodyEditor = useRef<HTMLTextAreaElement>(null)
   const pendingCaret = useRef<number | null>(null)
+  const editorTrigger = useRef<HTMLButtonElement | null>(null)
 
   useLayoutEffect(() => {
     if (pendingCaret.current === null || !bodyEditor.current) return
@@ -173,14 +175,22 @@ export default function AlarmHttpNotificationPanel() {
     [editingId, items],
   )
 
-  const startCreate = () => {
+  const closeEditor = () => {
+    setEditingId(undefined)
+    restoreModalTrigger(editorTrigger.current)
+  }
+  const editorModal = useModalFocus({ open: editingId !== undefined, onClose: closeEditor })
+
+  const startCreate = (trigger: HTMLButtonElement) => {
+    editorTrigger.current = trigger
     setEditingId(null)
     setDraft({ ...EMPTY_DRAFT, query_params: [], headers: [] })
     setMessage('')
     setError('')
   }
 
-  const startEdit = (config: AlarmHttpNotificationConfig) => {
+  const startEdit = (config: AlarmHttpNotificationConfig, trigger: HTMLButtonElement) => {
+    editorTrigger.current = trigger
     setEditingId(config.id)
     setDraft(configDraft(config))
     setMessage('')
@@ -269,7 +279,7 @@ export default function AlarmHttpNotificationPanel() {
           <h3 className="text-sm font-bold text-gray-800">HTTP 通知</h3>
           <p className="mt-1 text-xs text-gray-500">告警发生或恢复后，向指定地址发送 HTTP 请求。</p>
         </div>
-        <button type="button" onClick={startCreate} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-medium">
+        <button type="button" onClick={(event) => startCreate(event.currentTarget)} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-medium">
           新增通知
         </button>
       </header>
@@ -295,7 +305,7 @@ export default function AlarmHttpNotificationPanel() {
                 <p className="mt-1 font-mono text-[11px] text-gray-500">{config.method} {config.url_display}</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => startEdit(config)} className="neu-btn px-3 py-1.5 text-xs text-gray-700">编辑</button>
+                <button type="button" onClick={(event) => startEdit(config, event.currentTarget)} className="neu-btn px-3 py-1.5 text-xs text-gray-700">编辑</button>
                 <button type="button" disabled={busy !== ''} onClick={() => void action(config, 'test')} className="neu-btn px-3 py-1.5 text-xs text-blue-600">发送测试</button>
                 <button
                   type="button"
@@ -328,11 +338,11 @@ export default function AlarmHttpNotificationPanel() {
       </div>
 
       {editingId !== undefined && (
-        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingId(undefined) }}>
-          <section role="dialog" aria-modal="true" aria-label="HTTP 通知编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
+        <div className="zizu-tools-overlay zizu-tools-danger-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeEditor() }}>
+          <section ref={editorModal.dialogRef} tabIndex={-1} onKeyDown={editorModal.onKeyDown} role="dialog" aria-modal="true" aria-label="HTTP 通知编辑器" className="zizu-tools-dialog zizu-tools-editor-dialog">
             <header className="zizu-tools-dialog-header">
               <div><span>HTTP REQUEST</span><h2>{editingId ? `编辑：${selected?.name || ''}` : '新增 HTTP 通知'}</h2></div>
-              <button type="button" onClick={() => setEditingId(undefined)} className="neu-btn zizu-tools-close">关闭</button>
+              <button type="button" onClick={closeEditor} className="neu-btn zizu-tools-close">关闭</button>
             </header>
             <div className="zizu-tools-dialog-body">
           <div className="grid gap-3 md:grid-cols-2">
