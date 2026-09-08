@@ -130,6 +130,51 @@ test('edited bindings remain the save source after a native graph becomes a mult
   assert.notDeepEqual(saved, current)
 })
 
+test('full graph native table edits preserve extensions on every table without resurrecting deleted nodes rows or columns', () => {
+  assert.equal(typeof model.mergeNativeDecisionGraph, 'function')
+  const graph = singleTableGraph()
+  graph.nodes[1].content.rules = [
+    { _id: 'kept', temperature: '> 30', fan: 'true', vendorEvidence: { revision: 9 } },
+    { _id: 'deleted', temperature: '< 5', vendorEvidence: 'deleted' },
+  ]
+  graph.nodes.push({ ...structuredClone(graph.nodes[1]), id: 'second' })
+  const before = structuredClone(graph)
+  const edited = { nodes: graph.nodes.filter((node) => node.id !== 'unknown').map((node) => node.type !== 'decisionTableNode' ? node : ({
+    id: node.id, type: node.type, name: 'Edited', content: {
+      hitPolicy: 'collect', inputs: [{ id: 'temperature', field: 'temperature' }], outputs: [],
+      rules: [{ _id: 'kept', temperature: '> 35' }],
+    },
+  })), edges: [] }
+  const next = model.mergeNativeDecisionGraph(graph, edited)
+  assert.deepEqual(graph, before)
+  assert.deepEqual(next.metadata, graph.metadata)
+  assert.deepEqual(next.edges, [])
+  assert.equal(next.nodes.some((node) => node.id === 'unknown'), false)
+  for (const node of next.nodes.filter((item) => item.type === 'decisionTableNode')) {
+    assert.equal(node.custom, 'keep')
+    assert.equal(node.name, 'Edited')
+    assert.deepEqual(node.content.metadata, { owner: 'plant-a' })
+    assert.deepEqual(node.content.inputs[0].metadata, { source: 'plant-a' })
+    assert.deepEqual(node.content.outputs, [])
+    assert.deepEqual(node.content.rules, [{ _id: 'kept', temperature: '> 35', vendorEvidence: { revision: 9 } }])
+  }
+})
+
+test('example column IDs avoid input output and extension keys while fields retain business expressions', () => {
+  const graph = singleTableGraph()
+  graph.nodes[1].content.inputs.push({ id: 'site_local_minute', field: 'other_minute' })
+  graph.nodes[1].content.outputs.push({ id: 'soc', field: 'real_output' })
+  graph.nodes[1].content.rules = [{ _id: 'row', soc: '99', soc_1: 'vendor value', site_local_minute_1: 'vendor minute' }]
+  const before = structuredClone(graph)
+  const next = model.addNativeExampleColumns(graph, 'rules')
+  const content = next.nodes[1].content
+  assert.equal(content.inputs.find((column) => column.field === 'soc').id, 'soc_2')
+  assert.equal(content.inputs.find((column) => column.field === 'site_local_minute').id, 'site_local_minute_2')
+  assert.deepEqual(content.outputs, before.nodes[1].content.outputs)
+  assert.deepEqual(content.rules, before.nodes[1].content.rules)
+  assert.deepEqual(model.addNativeExampleColumns(next, 'rules'), next)
+})
+
 test('general L2 input accepts confirmed readable bool, numeric, and string entities', () => {
   const base = { confirmed: true, direction: 'R' }
   for (const data_type of ['BOOL', 'BOOLEAN', 'INT', 'FLOAT', 'NUMBER', 'STRING', 'STATE', 'ENUM']) {

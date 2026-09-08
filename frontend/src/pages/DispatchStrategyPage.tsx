@@ -37,6 +37,7 @@ import {
   inspectNativeDecisionTable,
   isNativeDecisionInputEntity,
   isNativeDecisionOutputEntity,
+  mergeNativeDecisionGraph,
   replaceDecisionTableContent,
   updateStrategyBinding,
   validateBindingAliases,
@@ -88,6 +89,8 @@ export default function DispatchStrategyPage() {
   const [graph, setGraph] = useState<DecisionGraphType>(() => buildGenericDecisionTableJdm() as DecisionGraphType)
   const [showGraph, setShowGraph] = useState(false)
   const [editorPending, setEditorPending] = useState(false)
+  const editorPendingRef = useRef(false)
+  const [editorSession, setEditorSession] = useState(0)
   const [simulation, setSimulation] = useState<DispatchStrategySimulation | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -168,6 +171,7 @@ export default function DispatchStrategyPage() {
         setTriggerKind(source?.trigger_kind || 'DATA_CHANGE')
         setShowGraph(false)
         setEditorPending(false)
+        editorPendingRef.current = false
         setDraftBindings(source?.bindings ? structuredClone(source.bindings) : [])
         setBindingsEdited(false)
         setSimulation(null)
@@ -218,6 +222,7 @@ export default function DispatchStrategyPage() {
   }
 
   const handleEditorPending = (pending: boolean) => {
+    editorPendingRef.current = pending
     setEditorPending(pending)
     if (pending) markEdited()
   }
@@ -241,6 +246,7 @@ export default function DispatchStrategyPage() {
   })
 
   const saveDraft = async (): Promise<DispatchStrategy> => {
+    if (editorPendingRef.current) throw new Error('原生编辑尚未确认，不能提交旧规则图。')
     if (!strategy || !currentRevision) throw new Error('请先选择策略。')
     const bindings = bindingsForDraft(draftBindings)
     if (nativeTable || bindingsEdited || bindings.length > 0) {
@@ -283,6 +289,7 @@ export default function DispatchStrategyPage() {
   })
 
   const simulate = () => run('simulate', async () => {
+    if (editorPendingRef.current) throw new Error('原生编辑尚未确认，不能试算旧规则图。')
     const requestGeneration = editGeneration.current
     setSimulation(null)
     if (!strategy || !currentRevision) throw new Error('请先选择策略。')
@@ -315,7 +322,7 @@ export default function DispatchStrategyPage() {
   })
 
   const enable = () => run('enable', async () => {
-    if (!strategy?.published_revision || dirty || strategy.draft) throw new Error('请先保存并发布当前草稿。')
+    if (editorPendingRef.current || !strategy?.published_revision || dirty || strategy.draft) throw new Error('请先保存并发布当前草稿。')
     const next = await enableDispatchStrategy(strategy.id, strategy.published_revision.id)
     setStrategy(next)
     await refreshList(next.id)
@@ -482,10 +489,10 @@ export default function DispatchStrategyPage() {
               <button type="button" disabled={editorPending} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 text-xs text-[#981320]">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button>
             </div>
             {nativeTable ? <>
-              <div className="mb-3 flex flex-wrap items-center gap-3"><button type="button" className="neu-btn px-3 text-xs" onClick={() => { setGraph(addNativeExampleColumns(graph, nativeTable.nodeId) as DecisionGraphType); markEdited() }}>添加可选示例列</button><span className="text-xs text-gray-500">时段 / SOC 只是可删除的原生条件列，不新增规则或输出目标。</span></div>
-              {!showGraph && <Suspense fallback={<p aria-live="polite">正在加载原生决策表…</p>}><NativeDecisionTableEditor onPendingChange={handleEditorPending} content={nativeTable.content} onChange={(content) => { setGraph((current) => replaceDecisionTableContent(current, nativeTable.nodeId, content) as DecisionGraphType); markEdited() }} /></Suspense>}
+              <div className="mb-3 flex flex-wrap items-center gap-3"><button type="button" disabled={editorPending} className="neu-btn px-3 text-xs" onClick={() => { setGraph(addNativeExampleColumns(graph, nativeTable.nodeId) as DecisionGraphType); markEdited() }}>添加可选示例列</button><span className="text-xs text-gray-500">时段 / SOC 只是可删除的原生条件列，不新增规则或输出目标。</span></div>
+              {!showGraph && <Suspense fallback={<p aria-live="polite">正在加载原生决策表…</p>}><NativeDecisionTableEditor key={editorSession} onPendingChange={handleEditorPending} content={nativeTable.content} onChange={(content) => { setGraph((current) => replaceDecisionTableContent(current, nativeTable.nodeId, content) as DecisionGraphType); markEdited() }} /></Suspense>}
             </> : <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">当前规则不是可无损往返的唯一决策表，请使用完整规则图编辑。保存、试算和发布均使用同一份完整 JDM，不会重建为内置表。</p>}
-            {showGraph && <Suspense fallback={<p aria-live="polite">正在加载完整规则图…</p>}><NativeDecisionGraphEditor graph={editorGraph} onChange={(next) => { if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph(next); markEdited() }} /></Suspense>}
+            {showGraph && <Suspense fallback={<p aria-live="polite">正在加载完整规则图…</p>}><NativeDecisionGraphEditor key={editorSession} graph={editorGraph} onPendingChange={handleEditorPending} onChange={(next) => { if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph((current) => mergeNativeDecisionGraph(current, next) as DecisionGraphType); markEdited() }} /></Suspense>}
           </section>
 
           <section className="neu-card p-4" aria-labelledby="output-heading">
@@ -497,7 +504,7 @@ export default function DispatchStrategyPage() {
 
           <section className="neu-card p-4" aria-labelledby="verification-heading">
             <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">草稿、试算与运行</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload || editorPending} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || dirty || !!strategy.draft || !strategy.published_revision || strategy.runtime_health === 'FAILED'} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
-            {editorPending && <p aria-live="polite" className="mt-3 text-xs text-amber-700">正在同步原生编辑内容，完成后可保存和试算。</p>}
+            {editorPending && <div aria-live="polite" className="mt-3 text-xs text-amber-700">正在同步原生编辑内容，收到确认后可保存、试算和发布。若仅打开菜单或取消编辑而没有内容回调，可放弃尚未确认的编辑，返回最后已同步图。<button type="button" className="ml-2 underline" onClick={() => { if (!window.confirm('放弃尚未收到原生确认的编辑？将返回最后已同步规则图；已同步但未保存的修改仍会保留。')) return; setEditorSession((value) => value + 1); handleEditorPending(false) }}>放弃未确认编辑</button></div>}
             {draftReceipt && <div data-testid="strategy-draft-receipt" className="mt-3 break-all rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800">草稿收据：{draftReceipt.id} · 配置修订 {draftReceipt.revision} · 摘要 {draftReceipt.digest}</div>}
             {simulation && <div className="mt-4 space-y-3" data-testid="strategy-simulation">
               {simulation.status !== 'EVALUATED' && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">

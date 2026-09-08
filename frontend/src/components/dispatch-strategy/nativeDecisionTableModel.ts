@@ -67,8 +67,23 @@ export function replaceDecisionTableContent(graph: NativeDecisionGraph, nodeId: 
   const candidates = graph.nodes.filter((node) => node.type === 'decisionTableNode')
   if (candidates.length !== 1 || candidates[0].id !== nodeId) throw new Error('请使用完整规则图编辑此策略')
   if (!content || typeof content !== 'object') throw new Error('原生决策表内容无效，请使用完整规则图编辑此策略')
-  const original = candidates[0].content as DecisionTableContent
-  const edited = content as DecisionTableContent
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, content: mergeDecisionTableContent(node.content as DecisionTableContent, content as DecisionTableContent) } : node),
+  }
+}
+
+export function mergeNativeDecisionGraph(original: NativeDecisionGraph, edited: NativeDecisionGraph): NativeDecisionGraph {
+  return { ...original, ...edited, nodes: edited.nodes.map((node) => {
+    const previous = original.nodes.find((candidate) => candidate.id === node.id && candidate.type === node.type)
+    if (!previous) return node
+    return { ...previous, ...node, ...(node.type === 'decisionTableNode' && previous.content && node.content ? {
+      content: mergeDecisionTableContent(previous.content as DecisionTableContent, node.content as DecisionTableContent),
+    } : {}) }
+  }) }
+}
+
+function mergeDecisionTableContent(original: DecisionTableContent, edited: DecisionTableContent): DecisionTableContent {
   const ownedFields = ['hitPolicy', 'rules', 'inputs', 'outputs', 'passThrough', 'inputField', 'outputPath', 'executionMode'] as const
   const merged: DecisionTableContent = { ...original }
   for (const field of ownedFields) {
@@ -87,10 +102,7 @@ export function replaceDecisionTableContent(graph: NativeDecisionGraph, nodeId: 
       return { ...extensions, ...row }
     })
   }
-  return {
-    ...graph,
-    nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, content: merged } : node),
-  }
+  return merged
 }
 
 export function addNativeExampleColumns(graph: NativeDecisionGraph, nodeId: string): NativeDecisionGraph {
@@ -98,10 +110,20 @@ export function addNativeExampleColumns(graph: NativeDecisionGraph, nodeId: stri
   if (!table || table.nodeId !== nodeId) throw new Error('请使用完整规则图编辑此策略')
   const content = table.content as DecisionTableContent
   const inputs = content.inputs as { id: string; field?: string }[]
+  const usedIds = new Set([
+    ...[content.inputs, content.outputs].flatMap((columns) => Array.isArray(columns) ? columns.map((column) => column.id) : []),
+    ...(Array.isArray(content.rules) ? content.rules.flatMap((row) => Object.keys(row)) : []),
+  ])
   const examples = [
     { id: 'site_local_minute', field: 'site_local_minute', name: '时段示例（站点分钟）' },
     { id: 'soc', field: 'soc', name: 'SOC 示例（需绑定 soc 输入）' },
-  ].filter((column) => !inputs.some((existing) => existing.id === column.id || existing.field === column.field))
+  ].filter((column) => !inputs.some((existing) => existing.field === column.field)).map((column) => {
+    let id = column.id
+    let suffix = 0
+    while (usedIds.has(id)) id = `${column.id}_${++suffix}`
+    usedIds.add(id)
+    return { ...column, id }
+  })
   return replaceDecisionTableContent(graph, nodeId, { ...content, inputs: [...inputs, ...examples] })
 }
 

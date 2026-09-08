@@ -1,4 +1,6 @@
-import { DecisionGraph, DecisionTable, JdmConfigProvider, ensureWasmLoaded, type DecisionTableType } from '@gorules/jdm-editor'
+import { useCallback, useEffect, useRef, type SyntheticEvent } from 'react'
+import { DecisionGraph, DecisionTable, JdmConfigProvider, ensureWasmLoaded, type DecisionGraphRef, type DecisionTableType } from '@gorules/jdm-editor'
+import type { DragDropManager } from 'dnd-core'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import '../../monaco'
@@ -6,32 +8,107 @@ import '@gorules/jdm-editor/dist/style.css'
 
 ensureWasmLoaded().catch(() => {})
 
-export function NativeDecisionGraphEditor({ graph, onChange }: {
+// Native callbacks are debounced. A capture barrier is conservative: interactions
+// that do not produce onChange remain unconfirmed, never treated as saved content.
+function useNativeBarrier(onPendingChange?: (pending: boolean) => void, sourceForEvent: (event: SyntheticEvent) => string = () => 'table') {
+  const revision = useRef(0)
+  const pending = useRef(new Map<string, number>())
+  const acknowledge = (source = 'table') => {
+    pending.current.delete(source)
+    onPendingChange?.(pending.current.size > 0)
+  }
+  const capture = (event: SyntheticEvent) => {
+    const target = event.target instanceof Element ? event.target : null
+    if (!target) return
+    // React changes radio/checkbox state during click. The following native input
+    // event is a duplicate notification, not another edit awaiting confirmation.
+    if (event.type === 'input' && target instanceof HTMLInputElement && ['radio', 'checkbox'].includes(target.type)) return
+    pending.current.set(sourceForEvent(event), ++revision.current)
+    onPendingChange?.(true)
+  }
+  return { acknowledge, handlers: {
+    onInputCapture: capture, onChangeCapture: capture, onPasteCapture: capture, onCutCapture: capture,
+    onDragStartCapture: capture, onDropCapture: capture,
+    onKeyDownCapture: (event: React.KeyboardEvent) => {
+      if (event.key.length === 1 || ['Backspace', 'Delete', 'Enter'].includes(event.key)) capture(event)
+    },
+    onClickCapture: (event: React.MouseEvent) => {
+      if ((event.target as Element).closest('button, [role="menuitem"], [role="option"], input, select')) capture(event)
+    },
+    onPointerDownCapture: (event: React.PointerEvent) => {
+      if ((event.target as Element).closest('.sort-handler.draggable, [draggable="true"], .react-flow__node, .react-flow__handle, .react-flow__edge')) capture(event)
+    },
+  } }
+}
+
+export function NativeDecisionGraphEditor({ graph, onChange, onPendingChange }: {
   graph: { nodes: any[]; edges: any[]; [key: string]: any }
   onChange: (graph: { nodes: any[]; edges: any[]; [key: string]: any }) => void
+  onPendingChange?: (pending: boolean) => void
 }) {
-  return <div className="mt-4 h-[520px] overflow-hidden rounded-xl border border-white/70"><JdmConfigProvider><DndProvider backend={HTML5Backend}><DecisionGraph value={graph} onChange={onChange} mode="dev" /></DndProvider></JdmConfigProvider></div>
+  const editorRef = useRef<DecisionGraphRef | null>(null)
+  const lastNode = useRef<string | null>(null)
+  const barrier = useNativeBarrier(onPendingChange, (event) => {
+    const target = event.target as Element
+    const nodeId = target.closest('.react-flow__node')?.getAttribute('data-id')
+    if (nodeId) { lastNode.current = nodeId; return 'node:' + nodeId }
+    const state = editorRef.current?.stateStore.getState()
+    if (state?.decisionGraph.nodes.some((node) => node.id === state.activeTab)) return 'node:' + state.activeTab
+    // Native settings portals retain React capture ancestry but not DOM ancestry.
+    if (!event.currentTarget.contains(target) && lastNode.current) return 'node:' + lastNode.current
+    return 'graph'
+  })
+  const callbacks = useRef({ onChange, acknowledge: barrier.acknowledge })
+  callbacks.current = { onChange, acknowledge: barrier.acknowledge }
+  const unsubscribe = useRef<(() => void) | undefined>(undefined)
+  const graphRef = useCallback((editor: DecisionGraphRef | null) => {
+    unsubscribe.current?.()
+    editorRef.current = editor
+    // A native table commits to this store only when its own onChange arrives.
+    // Confirm only changed node IDs: an older tab cannot unlock another tab.
+    // This bypasses only the outer graph notification debounce, never the table.
+    unsubscribe.current = editor?.stateStore.subscribe((next, previous) => {
+      if (next.decisionGraph === previous.decisionGraph) return
+      callbacks.current.onChange(next.decisionGraph)
+      for (const node of next.decisionGraph.nodes) {
+        const before = previous.decisionGraph.nodes.find((candidate) => candidate.id === node.id)
+        if (JSON.stringify(before) !== JSON.stringify(node)) callbacks.current.acknowledge('node:' + node.id)
+      }
+      const oldIds = previous.decisionGraph.nodes.map((node) => node.id)
+      const newIds = next.decisionGraph.nodes.map((node) => node.id)
+      for (const id of oldIds) if (!newIds.includes(id)) callbacks.current.acknowledge('node:' + id)
+      if (JSON.stringify(oldIds) !== JSON.stringify(newIds) || JSON.stringify(previous.decisionGraph.edges) !== JSON.stringify(next.decisionGraph.edges)) callbacks.current.acknowledge('graph')
+    })
+  }, [])
+  useEffect(() => () => unsubscribe.current?.(), [])
+  return <div {...barrier.handlers} data-testid="native-decision-graph" className="mt-4 h-[520px] overflow-hidden rounded-xl border border-white/70"><JdmConfigProvider><DndProvider backend={HTML5Backend}><DecisionGraph ref={graphRef} value={graph} mode="dev" /></DndProvider></JdmConfigProvider></div>
 }
 
 export default function NativeDecisionTableEditor({
   content,
   onChange,
   onPendingChange,
+  manager,
+  id = 'strategy-native-decision-table',
 }: {
   content: unknown
   onChange: (content: unknown) => void
   onPendingChange?: (pending: boolean) => void
+  manager?: DragDropManager
+  id?: string
 }) {
-  return <div onInputCapture={(event) => { if (event.target instanceof HTMLElement && event.target.isContentEditable) onPendingChange?.(true) }} className="native-decision-table overflow-hidden rounded-xl border border-white/70 bg-white/50" data-testid="native-decision-table">
+  const barrier = useNativeBarrier(onPendingChange)
+  return <div {...barrier.handlers} data-native-table className="native-decision-table overflow-hidden rounded-xl border border-white/70 bg-white/50" data-testid="native-decision-table">
     <p className="p-3 text-xs text-gray-600">添加条件列并填写输入别名或原生公式；单元格填写条件，规则行可新增、删除。action_id 填写第 3 步输出别名（加双引号，如 "fan_enable"）；target 填写强类型目标值（如 true 或 12.5）。新表使用 collect 与输出路径 intents，多条命中按行序产生意图；动态目标仍受后端发布安全校验。试算零设备写入，已有规则图不会自动转换。</p>
     <JdmConfigProvider>
       <DecisionTable
-        id="strategy-native-decision-table"
+        id={id}
         tableHeight={460}
+        manager={manager}
         mountDialogsOnBody
         mode="dev"
         value={content as DecisionTableType}
-        onChange={(value) => { onChange(value); onPendingChange?.(false) }}
+        onChange={(value) => { onChange(value); barrier.acknowledge() }}
       />
     </JdmConfigProvider>
   </div>

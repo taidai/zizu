@@ -360,6 +360,127 @@ test('原生规则行编辑直接保存 action_id 与强类型目标到唯一 JD
   expect(content.outputPath).toBe('intents')
 })
 
+for (const fullGraph of [false, true]) test(`原生${fullGraph ? '完整图' : '单表'}非文本新增行快速提交等待原生确认`, async ({ page }, testInfo) => {
+  const original = publishedStrategy()
+  const graph = original.published_revision.jdm_content
+  graph.metadata = { vendorGraph: true }
+  graph.nodes[1].vendorNode = 'keep'
+  graph.nodes[1].content.rules[0].vendorEvidence = { revision: 9 }
+  const count = graph.nodes[1].content.rules.length
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await expect(page.getByTestId('native-decision-table')).toBeVisible()
+  if (fullGraph) {
+    await page.getByRole('button', { name: '打开完整规则图' }).click()
+    await page.locator('.react-flow__node').filter({ hasText: graph.nodes[1].name }).getByRole('button', { name: 'Edit Table' }).click()
+  }
+  const add = page.getByRole('button', { name: /Add row$/ })
+  await expect(add).toBeVisible()
+  await page.clock.install()
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await add.evaluate((button: HTMLButtonElement) => button.click())
+  try {
+    for (const name of ['保存草稿', '试算', '发布']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled({ timeout: 1000 })
+  } catch (error) { await page.clock.resume(); throw error }
+  expect(api.savedDrafts).toHaveLength(0)
+  await page.clock.runFor(500)
+  await page.clock.resume()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(1)
+  const saved = api.savedDrafts[0].jdm_content
+  expect(saved.nodes[1].content.rules).toHaveLength(count + 1)
+  expect(saved.nodes[1].content.rules[0].vendorEvidence).toEqual({ revision: 9 })
+  expect(saved.nodes[1].vendorNode).toBe('keep')
+  expect(saved.metadata).toEqual({ vendorGraph: true })
+  await add.scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('native-sync-round-trip.png'), fullPage: true })
+})
+
+for (const fullGraph of [false, true]) test(`原生${fullGraph ? '完整图' : '单表'}增删列与删除行在快速提交前等待回调，删除内容不复活`, async ({ page }) => {
+  const original = publishedStrategy()
+  original.published_revision.jdm_content.nodes[1].content.rules[1].vendorEvidence = { keep: true }
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  if (fullGraph) {
+    await page.getByRole('button', { name: '打开完整规则图' }).click()
+    await page.getByRole('button', { name: 'Edit Table', exact: true }).click()
+  }
+  const table = page.getByTestId(fullGraph ? 'native-decision-graph' : 'native-decision-table')
+  await table.locator('.head-cell').filter({ hasText: /^Inputs$/ }).getByRole('button').last().click()
+  await page.getByPlaceholder('Field label').fill('Added condition')
+  await page.clock.install()
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await page.getByRole('button', { name: 'Create', exact: true }).evaluate((button: HTMLButtonElement) => button.click())
+  try { await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled({ timeout: 1000 }) }
+  catch (error) { await page.clock.resume(); throw error }
+  await page.clock.runFor(500)
+  await page.clock.resume()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(1)
+  const added = api.savedDrafts[0].jdm_content.nodes[1].content.inputs.find((column: any) => column.name === 'Added condition')
+  expect(added).toBeTruthy()
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  await table.locator('.head-cell').filter({ hasText: 'Added condition' }).locator('.grl-field-edit').click()
+  const removeColumn = page.locator('.grl-field-edit__footer button').first()
+  await removeColumn.click()
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await removeColumn.evaluate((button: HTMLButtonElement) => button.click())
+  try { await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled({ timeout: 1000 }) }
+  catch (error) { await page.clock.resume(); throw error }
+  await page.clock.runFor(500)
+  await page.clock.resume()
+  await table.locator('.grl-dt__cell__input').first().click({ button: 'right' })
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await page.getByRole('menuitem', { name: 'Remove row' }).evaluate((item: HTMLElement) => item.click())
+  try { await expect(page.getByRole('button', { name: '试算', exact: true })).toBeDisabled({ timeout: 1000 }) }
+  catch (error) { await page.clock.resume(); throw error }
+  await page.clock.runFor(500)
+  await page.clock.resume()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(2)
+  const saved = api.savedDrafts[1].jdm_content.nodes[1].content
+  expect(saved.inputs.some((column: any) => column.id === added.id)).toBe(false)
+  expect(saved.rules).toHaveLength(original.published_revision.jdm_content.nodes[1].content.rules.length - 1)
+  expect(saved.rules[0].vendorEvidence).toEqual({ keep: true })
+})
+
+test('完整图命中策略切换后快速保存使用最新原生图', async ({ page }) => {
+  const original = publishedStrategy()
+  original.published_revision.jdm_content.nodes[1].content.hitPolicy = 'collect'
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByRole('button', { name: '打开完整规则图' }).click()
+  await page.locator('.react-flow__node').filter({ hasText: original.published_revision.jdm_content.nodes[1].name }).getByRole('button', { name: 'Settings' }).click()
+  await page.clock.install()
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await page.getByRole('radio', { name: 'First', exact: true }).evaluate((input: HTMLInputElement) => input.click())
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(1)
+  await page.clock.resume()
+  expect(api.savedDrafts[0].jdm_content.nodes[1].content.hitPolicy).toBe('first')
+})
+
+test('取消原生菜单后可明确确认放弃未同步编辑恢复提交', async ({ page }) => {
+  const original = publishedStrategy()
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByTestId('native-decision-table').locator('.head-cell').filter({ hasText: /^Inputs$/ }).getByRole('button').last().click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled({ timeout: 1000 })
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await page.getByRole('button', { name: '放弃未确认编辑', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeDisabled()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: '放弃未确认编辑', exact: true }).click()
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await expect.poll(() => api.savedDrafts.length).toBe(1)
+  expect(api.savedDrafts[0].jdm_content).toEqual(original.published_revision.jdm_content)
+})
+
 test('已有时段 JDM 在原生表改名保存仍保留条件、公式与触发原义', async ({ page }) => {
   const original = publishedStrategy()
   original.published_revision.trigger_kind = 'DATA_CHANGE'
