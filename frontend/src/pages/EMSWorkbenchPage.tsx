@@ -19,6 +19,7 @@ import {
   type WorkbenchEntity,
 } from '../api/client'
 import EntityRuntimeDetail from '../components/runtime-monitoring/EntityRuntimeDetail'
+import EquipmentIcon, { type EquipmentKind } from '../components/runtime-monitoring/EquipmentIcon'
 import {
   buildRuntimeNodes,
   type RuntimeEntity,
@@ -46,12 +47,13 @@ export type RuntimeProps = {
   initialTab?: RuntimeTab
 }
 
-const SLOT_ICONS: Record<EmsWorkbenchSlotKey, string> = {
-  'site-power': '⌂',
-  'pv-power': '▧',
-  'storage-power': '▤',
-  'storage-soc': '▥',
-  'charging-power': 'ϟ',
+const SLOT_ICONS: Record<EmsWorkbenchSlotKey, EquipmentKind> = {
+  'site-power': 'grid',
+  'pv-power': 'solar',
+  'storage-power': 'cabinet',
+  'storage-soc': 'battery',
+  'charging-power': 'charger',
+  'load-power': 'factory',
 }
 
 function formatTime(value: string | null | undefined): string {
@@ -243,7 +245,7 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
 function MetricCard({ slot, onOpen }: { slot: WorkbenchSlotView; onOpen: () => void }) {
   const content = (
     <>
-      <span className="workbench-metric__icon" aria-hidden="true">{SLOT_ICONS[slot.id]}</span>
+      <EquipmentIcon kind={SLOT_ICONS[slot.id]} />
       <span className="workbench-metric__body">
         <span className="workbench-metric__label">{slot.label}</span>
         <span className="workbench-metric__reading"><strong>{slot.reading.valueText}</strong><small>{slot.reading.unit}</small></span>
@@ -262,7 +264,7 @@ function FlowNode({ slot, role }: { slot: WorkbenchSlotView; role: string }) {
   const stateLabel = slot.reading.kind === 'current' ? '当前值' : slot.reading.kind === 'last' ? '最后值（非当前）' : '当前未知'
   return (
     <div className={`workbench-flow-node workbench-flow-node--${role}`}>
-      <span aria-hidden="true">{SLOT_ICONS[slot.id]}</span>
+      <EquipmentIcon kind={SLOT_ICONS[slot.id]} />
       <div>
         <strong>{slot.label}</strong>
         <p>{slot.reading.valueText} <small>{slot.reading.unit}</small></p>
@@ -461,17 +463,14 @@ export default function EMSWorkbenchPage({
 
   return (
     <section className="runtime-shell workbench-page">
-      <header className="workbench-page-heading">
-        <div><p className="runtime-eyebrow">已提交 L2 · 固定 EMS 工作台</p><h2>运行总览</h2><span>真实值、质量与时间来自同一正式接口；异常状态不补零。</span></div>
-        <div>{onOpenEngineering && <button type="button" onClick={() => setConfiguring(true)} className="neu-btn runtime-touch-button">配置首页指标</button>}<button type="button" onClick={load} disabled={workbenchLoading} className="neu-btn runtime-touch-button">{workbenchLoading ? '刷新中…' : '刷新'}</button></div>
-      </header>
+      <h2 className="sr-only">运行总览</h2>
       {workbenchError && <div role="alert" className="runtime-error neu-card"><span>运行首页读取失败：{workbenchError}。旧内容不按零处理。</span><button type="button" onClick={load}>重试</button></div>}
       <div className="workbench-metrics" aria-label="关键指标">
-        {slots.map((slot) => <MetricCard key={slot.id} slot={slot} onOpen={() => setSelectedEntityId(slot.entity?.entity_instance_id || null)} />)}
+        {[slots[1], slots[3], slots[4], slots[5]].map((slot) => <MetricCard key={slot.id} slot={slot} onOpen={() => setSelectedEntityId(slot.entity?.entity_instance_id || null)} />)}
       </div>
       <div className="workbench-dashboard">
         <section className="workbench-flow neu-card" role="region" aria-label="站点能流">
-          <header><div><h3>站点能流</h3><p>左侧供电端：光伏、电网 · 右侧：储能、充电桩</p></div><span className="workbench-health">● {slots.some((slot) => slot.reading.kind === 'current') ? '已取得当前数据' : '暂无当前数据'}</span></header>
+          <header><div><h3>站点能流</h3><p>光伏、电网 → 储能、充电桩、负荷</p></div><div className="workbench-flow-actions">{onOpenEngineering && <button type="button" onClick={() => setConfiguring(true)} className="neu-btn runtime-touch-button">配置首页指标</button>}<button type="button" onClick={load} disabled={workbenchLoading} className="neu-btn runtime-touch-button">{workbenchLoading ? '刷新中…' : '刷新'}</button></div></header>
           <div className="workbench-flow__canvas">
             <FlowNode slot={slots[1]} role="pv" />
             <FlowNode slot={{ ...slots[0], label: '电网' }} role="site" />
@@ -480,6 +479,7 @@ export default function EMSWorkbenchPage({
             </div>
             <FlowNode slot={slots[2]} role="storage" />
             <FlowNode slot={slots[4]} role="charging" />
+            <FlowNode slot={slots[5]} role="load" />
           </div>
           <footer><span>ⓘ {flow.reason}</span>{onOpenDevices && <button type="button" onClick={onOpenDevices}>查看设备 →</button>}</footer>
         </section>

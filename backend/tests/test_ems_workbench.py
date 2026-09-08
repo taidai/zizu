@@ -94,6 +94,7 @@ class WorkbenchSlotResolutionTest(unittest.TestCase):
                 "storage-power",
                 "storage-soc",
                 "charging-power",
+                "load-power",
             ],
             [item.key for item in resolved],
         )
@@ -955,7 +956,7 @@ class EmsWorkbenchProjectionTest(unittest.TestCase):
         payload = subject.read()
 
         self.assertEqual(7, payload["configuration_revision"])
-        self.assertEqual(5, len(payload["kpis"]))
+        self.assertEqual(6, len(payload["kpis"]))
         storage = next(item for item in payload["kpis"] if item["id"] == "storage-power")
         solar = next(item for item in payload["kpis"] if item["id"] == "pv-power")
         self.assertEqual("exact", storage["binding_mode"])
@@ -1138,6 +1139,7 @@ class EmsWorkbenchPublicApiTest(unittest.IsolatedAsyncioTestCase):
                 "storage-power",
                 "storage-soc",
                 "charging-power",
+                "load-power",
             },
             {slot["id"] for slot in slots},
         )

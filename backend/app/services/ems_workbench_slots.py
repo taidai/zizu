@@ -159,6 +159,7 @@ WORKBENCH_SLOT_SPECS = (
         ),
         "kW",
     ),
+    WorkbenchSlotSpec("load-power", "站内负荷", ("load.active_power", "load.activePower"), "kW"),
 )
 WORKBENCH_SLOT_SPEC_BY_KEY = MappingProxyType(
     {spec.key: spec for spec in WORKBENCH_SLOT_SPECS}
@@ -166,7 +167,7 @@ WORKBENCH_SLOT_SPEC_BY_KEY = MappingProxyType(
 
 
 class EmsWorkbenchSlots:
-    """Resolve and persist the five fixed workbench slots through one seam."""
+    """Resolve and persist fixed workbench slots through one seam."""
 
     def __init__(
         self,

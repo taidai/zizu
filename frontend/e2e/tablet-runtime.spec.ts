@@ -164,15 +164,33 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
 }
 
 for (const viewport of [{ width: 1024, height: 768 }, { width: 1280, height: 800 }]) {
-  test(`formal overview composes five truthful slots at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+  test(`demo overview icons and five energy nodes at ${viewport.width}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await installFixture(page)
+    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    const metrics = page.getByLabel('关键指标')
+    await expect(metrics.locator('[data-workbench-slot]')).toHaveCount(4)
+    await expect(metrics.locator('svg[data-equipment]')).toHaveCount(4)
+    const flow = page.getByRole('region', { name: '站点能流', exact: true })
+    await expect(flow.locator('svg[data-equipment]')).toHaveCount(5)
+    await expect(flow.locator('.workbench-flow-node--load')).toContainText('未配置')
+    const pv = await flow.locator('.workbench-flow-node--pv').boundingBox()
+    const grid = await flow.locator('.workbench-flow-node--site').boundingBox()
+    const storage = await flow.locator('.workbench-flow-node--storage').boundingBox()
+    expect(pv!.x).toBeLessThan(storage!.x)
+    expect(grid!.x).toBeLessThan(storage!.x)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath('demo-overview.png'), fullPage: true })
+  })
+  test(`formal overview composes four truthful metrics and independent grid/load at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
     const fixture = await installFixture(page)
     await page.setViewportSize(viewport)
     await page.goto('/', { waitUntil: 'networkidle' })
 
     await expect(page.getByRole('heading', { name: '运行总览', exact: true })).toBeVisible()
-    await expect(page.locator('[data-workbench-slot]')).toHaveCount(5)
-    await expect(page.locator('[data-workbench-slot="site-power"]')).toContainText('0.0')
-    await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('需人工选择')
+    await expect(page.locator('[data-workbench-slot]')).toHaveCount(4)
+    await expect(page.locator('.workbench-flow-node--site')).toContainText('0.0')
+    await expect(page.locator('.workbench-flow-node--storage')).toContainText('需人工选择')
     await expect(page.locator('[data-workbench-slot="storage-soc"]')).toContainText('最后值')
     await expect(page.locator('[data-workbench-slot="charging-power"]')).toContainText('未配置')
     const energy = page.getByRole('region', { name: '站点能流' })
@@ -266,7 +284,7 @@ test('engineer can bind and clear a fixed slot with current revision and stable 
   expect(calls[0].key).toBeTruthy()
 
   await dialog.getByRole('button', { name: '关闭' }).click()
-  await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('1# 光伏逆变器')
+  await expect(page.locator('.workbench-flow-node--storage')).toContainText('1# 光伏逆变器')
   await page.getByRole('button', { name: /配置首页指标/ }).click()
   const reopened = page.getByRole('dialog', { name: '配置首页指标' })
   await expect(reopened.getByLabel('储能功率绑定')).toHaveValue('entity-pv')
@@ -293,8 +311,8 @@ test('a successful slot write followed by refresh failure never paints the local
 
   await expect(dialog.getByRole('alert')).toContainText(/保存已受理.*读取最新工作台失败/)
   await expect(dialog.getByRole('status')).toHaveCount(0)
-  await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('需人工选择')
-  await expect(page.locator('[data-workbench-slot="storage-power"]')).not.toContainText('1# 光伏逆变器')
+  await expect(page.locator('.workbench-flow-node--storage')).toContainText('需人工选择')
+  await expect(page.locator('.workbench-flow-node--storage')).not.toContainText('1# 光伏逆变器')
 })
 
 test('an older slow refresh cannot overwrite the workbench reloaded after a slot save', async ({ page }) => {
@@ -319,7 +337,7 @@ test('an older slow refresh cannot overwrite the workbench reloaded after a slot
   fixture.releaseDelayedWorkbench()
   await expect.poll(() => fixture.delayedWorkbenchCompleted).toBe(1)
   await dialog.getByRole('button', { name: '关闭' }).click()
-  await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('1# 光伏逆变器')
+  await expect(page.locator('.workbench-flow-node--storage')).toContainText('1# 光伏逆变器')
   await page.getByRole('button', { name: /配置首页指标/ }).click()
   const reopened = page.getByRole('dialog', { name: '配置首页指标' })
   await expect(reopened).toContainText('当前配置修订 13')

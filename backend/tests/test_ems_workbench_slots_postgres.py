@@ -289,6 +289,20 @@ class WorkbenchSlotPostgresTest(unittest.TestCase):
             )
             self.assertIn((True,), cursor.fetchall())
 
+    def test_load_migration_keeps_grid_and_persists_independent_load(self) -> None:
+        self.repository.set_binding(slot_key="site-power", entity_instance_id=self.entity_id,
+            base_configuration_revision=self.base_revision, actor="test:load", idempotency_key="grid")
+        migration = (ROOT / "init-db" / "migration_065_workbench_load_slot.sql").read_text(encoding="utf-8")
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(migration)
+            cursor.execute(migration)
+        receipt = self.repository.set_binding(slot_key="load-power", entity_instance_id=self.entity_id,
+            base_configuration_revision=self.base_revision + 1, actor="test:load", idempotency_key="load")
+        self.assertEqual(self.base_revision + 2, receipt.configuration_revision)
+        bindings = self.repository.list_manual_bindings()
+        self.assertEqual(self.entity_id, bindings["site-power"])
+        self.assertEqual(self.entity_id, bindings["load-power"])
+
     def test_save_is_revisioned_audited_and_same_request_replays(self) -> None:
         # Break caught: retrying after an unknown HTTP result allocating a second
         # configuration revision or duplicate audit event.

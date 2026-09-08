@@ -1924,7 +1924,7 @@ export interface WorkbenchEntity {
   quality?: number
 }
 
-export type EmsWorkbenchSlotKey = 'site-power' | 'pv-power' | 'storage-power' | 'storage-soc' | 'charging-power'
+export type EmsWorkbenchSlotKey = 'site-power' | 'pv-power' | 'storage-power' | 'storage-soc' | 'charging-power' | 'load-power'
 export type EmsWorkbenchBindingMode = 'manual' | 'exact' | 'unconfigured' | 'ambiguous'
 
 export interface EmsWorkbenchSlot {

@@ -39,7 +39,7 @@ test('five fixed slots keep product order and a real GOOD zero remains current',
   }])
 
   assert.deepEqual(slots.map((slot) => slot.id), [
-    'site-power', 'pv-power', 'storage-power', 'storage-soc', 'charging-power',
+    'site-power', 'pv-power', 'storage-power', 'storage-soc', 'charging-power', 'load-power',
   ])
   assert.equal(slots[1].reading.kind, 'current')
   assert.equal(slots[1].reading.valueText, '0.0')
@@ -109,8 +109,8 @@ test('unconfigured, ambiguous, unavailable, bad quality, and non-numeric reading
     { id: 'charging-power', label: '充电功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ entity_instance_id: 'charger', value: '12.5' }) },
   ])
 
-  assert.deepEqual(slots.map((slot) => slot.reading.kind), ['missing', 'missing', 'last', 'last', 'last'])
-  assert.deepEqual(slots.map((slot) => slot.reading.valueText), ['—', '—', '12.0', '62.0', '12.5'])
+  assert.deepEqual(slots.map((slot) => slot.reading.kind), ['missing', 'missing', 'last', 'last', 'last', 'missing'])
+  assert.deepEqual(slots.map((slot) => slot.reading.valueText), ['—', '—', '12.0', '62.0', '12.5', '—'])
   assert.equal(slots.some((slot) => slot.reading.kind !== 'current' && slot.reading.valueText === '0.0'), false)
 })
 
@@ -120,8 +120,17 @@ test('energy topology stays neutral without current runtime evidence', () => {
     { id: 'storage-power', label: '储能功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ entity_instance_id: 'storage', value: -26.8 }) },
   ]))
 
-  assert.deepEqual(flow.links.map((link) => link.direction), ['neutral', 'neutral', 'neutral', 'neutral'])
+  assert.deepEqual(flow.links.map((link) => link.direction), ['neutral', 'neutral', 'neutral', 'neutral', 'neutral'])
   assert.match(flow.reason, /超时/)
+})
+
+test('load never borrows grid power and remains missing until independently bound', () => {
+  const slots = buildWorkbenchSlots([{ id: 'site-power', label: '电网', binding_mode: 'manual', reason: '', entity: entity({ value: 123 }) }])
+  const load = slots.find(slot => slot.id === 'load-power')
+  assert.ok(load)
+  assert.equal(load.entity, null)
+  assert.equal(load.reading.kind, 'missing')
+  assert.equal(load.reading.valueText, '—')
 })
 
 test('current signed storage and grid power reverse flow; zero and stale readings stop it', () => {

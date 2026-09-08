@@ -6,6 +6,7 @@ export const FIXED_WORKBENCH_SLOTS = [
   { id: 'storage-power', label: '储能功率', unit: 'kW' },
   { id: 'storage-soc', label: '储能 SOC', unit: '%' },
   { id: 'charging-power', label: '充电功率', unit: 'kW' },
+  { id: 'load-power', label: '站内负荷', unit: 'kW' },
 ] as const
 
 export type WorkbenchSlotKey = typeof FIXED_WORKBENCH_SLOTS[number]['id']
@@ -122,12 +123,12 @@ export function fixedEnergyFlow(slots: readonly WorkbenchSlotView[]): {
 } {
   const available = new Set(slots.map((slot) => slot.id))
   return {
-    links: (['pv-power', 'storage-power', 'charging-power', 'site-power'] as WorkbenchSlotKey[])
+    links: (['pv-power', 'storage-power', 'charging-power', 'site-power', 'load-power'] as WorkbenchSlotKey[])
       .filter((id) => available.has(id))
       .map((from) => {
         const reading = slots.find((slot) => slot.id === from)?.reading
         const value = reading?.numericValue
-        const direction = reading?.kind !== 'current' || value == null || value === 0 || from === 'charging-power'
+        const direction = reading?.kind !== 'current' || value == null || value === 0 || from === 'charging-power' || from === 'load-power'
           ? 'neutral' : value > 0 ? 'to-bus' : 'from-bus'
         return { from, to: 'site-bus' as const, direction }
       }),
