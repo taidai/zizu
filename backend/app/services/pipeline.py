@@ -62,7 +62,7 @@ class DataPipeline:
         self._tag_id_map: dict[str, UUID] = {}             # {tag_name: tag_id}
         # Neuron 点位按 source_path 精确映射: {(neuron_node, group, tag_name): (node_id, tag_id, rule)}
         self._neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
-        self._raw_neuron_tag_map: dict[tuple[str, str, str], TagMetadata] = {}
+        self._raw_neuron_tag_map: dict[tuple[str, str, str], tuple[TagMetadata, ...]] = {}
         self._raw_node_tag_map: dict[tuple[str, str], TagMetadata] = {}
 
         # ---- Metrics ----
@@ -189,12 +189,17 @@ class DataPipeline:
         source_sequence = getattr(mqtt_msg, "sequence", None)
         if not isinstance(source_sequence, int) or isinstance(source_sequence, bool):
             source_sequence = None
-        raw_observations = self._raw_observation_adapter.from_parsed(
-            parsed,
-            self._raw_tag_catalog(parsed),
-            received_at=raw.timestamp_recv,
-            source_message_id=hashlib.sha256(raw.payload).hexdigest(),
-            source_sequence=source_sequence,
+        message_id = hashlib.sha256(raw.payload).hexdigest()
+        raw_observations = tuple(
+            observation
+            for catalog in self._raw_tag_catalogs(parsed)
+            for observation in self._raw_observation_adapter.from_parsed(
+                parsed,
+                catalog,
+                received_at=raw.timestamp_recv,
+                source_message_id=message_id,
+                source_sequence=source_sequence,
+            )
         )
 
         # ── Hook 2: 归一化 (CPU 密集型，放到线程池避免阻塞事件循环) ──
@@ -219,18 +224,23 @@ class DataPipeline:
     # 辅助方法
     # ══════════════════════════════
 
-    def _raw_tag_catalog(self, parsed: ParsedMessage) -> dict[str, TagMetadata]:
-        """Resolve parsed names to exact physical identities before buffering L0."""
-        catalog: dict[str, TagMetadata] = {}
+    def _raw_tag_catalogs(self, parsed: ParsedMessage) -> tuple[dict[str, TagMetadata], ...]:
+        """Resolve every enabled node-owned import; duplicate paths must not starve."""
+        catalogs: list[dict[str, TagMetadata]] = [{}]
         for raw_name in parsed.tags:
-            exact = None
+            targets = ()
             if parsed.group:
-                exact = self._raw_neuron_tag_map.get(
-                    (parsed.node_name, parsed.group, raw_name)
+                targets = self._raw_neuron_tag_map.get(
+                    (parsed.node_name, parsed.group, raw_name), ()
                 )
-            exact = exact or self._raw_node_tag_map.get((parsed.node_name, raw_name))
-            if exact is not None:
-                catalog[raw_name] = exact
+            if not targets:
+                direct = self._raw_node_tag_map.get((parsed.node_name, raw_name))
+                targets = (direct,) if direct is not None else ()
+            if targets:
+                for index, metadata in enumerate(targets):
+                    if index == len(catalogs):
+                        catalogs.append({})
+                    catalogs[index][raw_name] = metadata
                 continue
             rule = self._rules.get(raw_name)
             mapped = None
@@ -247,7 +257,7 @@ class DataPipeline:
             if node_id is None or tag_id is None or rule is None:
                 continue
             data_type = getattr(rule.data_type, "value", rule.data_type)
-            catalog[raw_name] = TagMetadata(
+            catalogs[0][raw_name] = TagMetadata(
                 node_id=node_id,
                 tag_id=tag_id,
                 stable_source_key=stable_key,
@@ -255,7 +265,7 @@ class DataPipeline:
                 unit=rule.unit_from,
                 timestamp_trusted=False,
             )
-        return catalog
+        return tuple(catalogs)
 
     async def _load_tag_rules(self) -> None:
         """从 t_tags 表加载归一化规则和 ID 映射。
@@ -299,7 +309,7 @@ class DataPipeline:
             new_node_id_map: dict[str, UUID] = {}
             new_tag_id_map: dict[str, UUID] = {}
             new_neuron_tag_map: dict[tuple[str, str, str], tuple[UUID, UUID, TagNormalizationRule]] = {}
-            new_raw_neuron_tag_map: dict[tuple[str, str, str], TagMetadata] = {}
+            new_raw_neuron_tag_map: dict[tuple[str, str, str], tuple[TagMetadata, ...]] = {}
             new_raw_node_tag_map: dict[tuple[str, str], TagMetadata] = {}
 
             for row in rows:
@@ -344,9 +354,10 @@ class DataPipeline:
                         new_neuron_tag_map[(neuron_node, neuron_group, neuron_tag_name)] = (
                             node_id, tag_id, rule
                         )
-                        new_raw_neuron_tag_map[
-                            (neuron_node, neuron_group, neuron_tag_name)
-                        ] = raw_metadata
+                        source = (neuron_node, neuron_group, neuron_tag_name)
+                        new_raw_neuron_tag_map[source] = (
+                            *new_raw_neuron_tag_map.get(source, ()), raw_metadata,
+                        )
                         # 归一化规则同时按 Neuron tag 名索引，保证 normalizer 能找到
                         new_rules[neuron_tag_name] = rule
 

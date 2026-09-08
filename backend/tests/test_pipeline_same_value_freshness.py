@@ -71,7 +71,7 @@ def _pipeline(*, timestamp_trusted: bool):
     )
     pipeline = DataPipeline(data_trunk=trunk)
     pipeline._raw_neuron_tag_map = {
-        ("PCS", "read", "timeout"): TagMetadata(
+        ("PCS", "read", "timeout"): (TagMetadata(
             node_id=NODE_ID,
             tag_id=TAG_ID,
             stable_source_key="PCS/read/timeout",
@@ -79,7 +79,7 @@ def _pipeline(*, timestamp_trusted: bool):
             wire_data_type="INT16",
             unit="s",
             timestamp_trusted=timestamp_trusted,
-        )
+        ),)
     }
     return pipeline, trunk, repository
 

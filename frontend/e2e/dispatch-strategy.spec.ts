@@ -164,6 +164,78 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
   return { calls, savedDrafts, getStrategy: () => strategy, setEvents: (items: any[]) => { events = items } }
 }
 
+for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768 }]) test(`Demo布局首屏三步横排与全宽决策表 ${viewport.width}`, async ({ page }) => {
+  const original = strategyView()
+  original.draft.jdm_content = buildGenericDecisionTableJdm()
+  await installApi(page, original)
+  await page.setViewportSize(viewport)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  const steps = page.getByTestId('dispatch-steps')
+  await expect(steps).toBeInViewport()
+  const boxes = await steps.locator(':scope > *').evaluateAll((elements) => elements.map((element) => { const r = element.getBoundingClientRect(); return { top: r.top, right: r.right, left: r.left } }))
+  expect(boxes).toHaveLength(3)
+  expect(Math.max(...boxes.map((box) => box.top)) - Math.min(...boxes.map((box) => box.top))).toBeLessThan(2)
+  expect(boxes[0].right).toBeLessThanOrEqual(boxes[1].left)
+  expect(boxes[1].right).toBeLessThanOrEqual(boxes[2].left)
+  const table = page.getByTestId('native-decision-table')
+  await expect(table).toBeInViewport()
+  expect((await table.boundingBox())!.width).toBeGreaterThan(viewport.width * 0.85)
+  for (const label of ['保存草稿', '试算', '发布', '启用']) await expect(page.getByRole('button', { name: label, exact: true })).toBeInViewport()
+  await expect(page.getByLabel('输入 1 别名')).not.toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath(`demo-layout-${viewport.width}.png`) })
+})
+
+test('绑定弹窗取消不改草稿，应用才使旧试算与收据失效', async ({ page }) => {
+  const original = strategyView()
+  original.draft.jdm_content = buildGenericDecisionTableJdm()
+  original.draft.bindings = [
+    { direction: 'INPUT', binding_key: 'soc', ordinal: 0, entity_instance_id: 'entity-soc', expected_data_type: 'FLOAT', unit: '%', freshness_seconds: 10 },
+    { direction: 'OUTPUT', binding_key: 'power_target', ordinal: 0, entity_instance_id: 'entity-limit', expected_data_type: 'FLOAT', unit: 'kW', freshness_seconds: 10 },
+  ]
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click()
+  await page.getByRole('button', { name: '试算', exact: true }).click()
+  await expect(page.getByTestId('strategy-simulation')).toBeVisible()
+  await page.getByRole('button', { name: /01.*选择 L2 输入/ }).click()
+  await page.getByLabel('输入 1 别名').fill('changed_alias')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(page.getByRole('button', { name: /01.*选择 L2 输入/ })).toBeFocused()
+  await expect(page.getByTestId('strategy-simulation')).toBeVisible()
+  await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
+  await page.getByRole('button', { name: /01.*选择 L2 输入/ }).click()
+  await expect(page.getByLabel('输入 1 别名')).not.toHaveValue('changed_alias')
+  await page.getByLabel('输入 1 别名').fill('changed_alias')
+  await page.getByRole('button', { name: '应用绑定', exact: true }).click()
+  await expect(page.getByRole('dialog')).not.toBeVisible()
+  await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
+  await expect(page.getByTestId('strategy-draft-receipt')).not.toBeVisible()
+  expect(api.savedDrafts).toHaveLength(1)
+})
+
+test('按需预览、同一JDM草稿与表达式说明不修改或执行策略', async ({ page }) => {
+  const original = strategyView()
+  original.draft.jdm_content = buildGenericDecisionTableJdm()
+  const api = await installApi(page, original)
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByRole('button', { name: '草稿 JSON', exact: true }).click({ timeout: 3000 })
+  await expect(page.getByRole('dialog')).toContainText('intents')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: '草稿 JSON', exact: true })).toBeFocused()
+  await page.getByRole('button', { name: '输入/输出预览', exact: true }).click()
+  await expect(page.getByRole('dialog')).toContainText('未绑定')
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '表达式说明', exact: true }).click()
+  await expect(page.getByRole('dialog')).toContainText('action_id')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeEnabled()
+  expect(api.calls.filter((call) => /^(PUT|POST) \/(dispatch-strategies|control-commands)/.test(call))).toEqual([])
+})
+
 test('三步原生工作流保留多类型绑定，编辑使试算与草稿收据失效', async ({ page }) => {
   const original = strategyView()
   original.draft.jdm_content = buildGenericDecisionTableJdm()
@@ -178,15 +250,18 @@ test('三步原生工作流保留多类型绑定，编辑使试算与草稿收�
   const inputs = page.getByRole('region', { name: '1. 选择 L2 输入' })
   const table = page.getByRole('region', { name: '2. 编辑原生 JDM 决策表' })
   const outputs = page.getByRole('region', { name: '3. 绑定可控 L2 输出' })
-  await expect(inputs).toBeVisible({ timeout: 3000 })
   await expect(table).toBeVisible()
-  await expect(outputs).toBeVisible()
+  await openBindingDialog(page, 'INPUT')
+  await expect(inputs).toBeVisible({ timeout: 3000 })
   await inputs.getByRole('button', { name: '添加输入' }).click()
   await inputs.getByRole('button', { name: '添加输入' }).click()
   await page.getByLabel('输入 2 实体').selectOption('mode')
+  await applyBindingDialog(page)
+  await openBindingDialog(page, 'OUTPUT')
   await outputs.getByRole('button', { name: '添加输出' }).click()
   await outputs.getByRole('button', { name: '添加输出' }).click()
   await expect(page.getByLabel('输出 1 实体')).not.toContainText('无控制合同')
+  await applyBindingDialog(page)
   await table.getByRole('button', { name: '添加可选示例列' }).click()
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
   await expect(page.getByTestId('strategy-draft-receipt')).toContainText('draft-1')
@@ -194,7 +269,9 @@ test('三步原生工作流保留多类型绑定，编辑使试算与草稿收�
   expect(api.savedDrafts[0].jdm_content.nodes[1].content.inputs.map((column: any) => column.field)).toEqual(['site_local_minute', 'soc'])
   await page.getByRole('button', { name: '试算', exact: true }).click()
   await expect(page.getByTestId('strategy-simulation')).toContainText('未下发')
+  await openBindingDialog(page, 'INPUT')
   await page.getByLabel('输入 1 别名').fill('temperature')
+  await applyBindingDialog(page)
   await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
   await expect(page.getByTestId('strategy-draft-receipt')).not.toBeVisible()
   await expect(page.getByRole('region', { name: '策略状态' })).toContainText('未保存修改')
@@ -206,8 +283,9 @@ test('三步原生工作流保留多类型绑定，编辑使试算与草稿收�
     await page.screenshot({ path: test.info().outputPath(`native-workflow-${size.width}.png`), fullPage: true })
     await table.getByRole('heading', { name: '2. 编辑原生 JDM 决策表' }).scrollIntoViewIfNeeded()
     await page.screenshot({ path: test.info().outputPath(`native-table-${size.width}.png`), fullPage: true })
-    await outputs.getByRole('heading', { name: '3. 绑定可控 L2 输出' }).scrollIntoViewIfNeeded()
+    await openBindingDialog(page, 'OUTPUT')
     await page.screenshot({ path: test.info().outputPath(`native-outputs-${size.width}.png`), fullPage: true })
+    await page.getByRole('button', { name: '取消', exact: true }).click()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   }
 })
@@ -244,8 +322,12 @@ test('已保存的完整 JDM 改名保存不丢规则、触发或额外绑定', 
   await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toHaveValue(original.name)
   await expect.soft(page.getByLabel('时段 1 功率目标')).not.toBeVisible()
+  await openBindingDialog(page, 'INPUT')
   await expect(page.getByLabel('输入 2 实体')).toHaveValue('entity-temperature')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await openBindingDialog(page, 'OUTPUT')
   await expect(page.getByLabel('输出 2 实体')).toHaveValue('entity-mode')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
   await expect(page.getByText(/不是可无损往返的唯一决策表/)).toBeVisible()
   await page.getByRole('button', { name: '打开完整规则图', exact: true }).click()
   await expect(page.getByText('完整决策', { exact: true }).first()).toBeVisible()
@@ -288,8 +370,12 @@ test('非标准 JDM 的旧缺失单位可显式保存并刷新到当前实体合
   const api = await installApi(page, original, entities, 7)
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
+  await openBindingDialog(page, 'INPUT')
   await expect(page.getByLabel('输入 1 实体')).toHaveValue('entity-soc')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await openBindingDialog(page, 'OUTPUT')
   await expect(page.getByLabel('输出 1 实体')).toHaveValue('entity-limit')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
 
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
 
@@ -559,8 +645,10 @@ test('不合格 L2 绑定不能保存且不自动改选；明确重新绑定后�
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('不再可读')
   expect(api.savedDrafts).toHaveLength(0)
+  await openBindingDialog(page, 'INPUT')
   await expect(page.getByLabel('输入 1 实体')).toHaveValue('entity-soc')
   await page.getByLabel('输入 1 实体').selectOption('confirmed-input')
+  await applyBindingDialog(page)
   await page.getByRole('button', { name: '保存草稿', exact: true }).click()
   await expect(page.getByTestId('strategy-draft-receipt')).toBeVisible()
   expect(api.savedDrafts[0].bindings[0]).toMatchObject({ entity_instance_id: 'confirmed-input', unit: '°C' })
@@ -570,8 +658,11 @@ test('空候选不提供伪造实体或控制输出', async ({ page }) => {
   const api = await installApi(page, strategyView(), [])
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
+  await openBindingDialog(page, 'INPUT')
   await page.getByRole('button', { name: '添加输入' }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('没有更多可读')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await openBindingDialog(page, 'OUTPUT')
   await page.getByRole('button', { name: '添加输出' }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('没有更多明确具备控制资格')
   await expect(page.getByText(/请先配置正式 L2 控制合同/)).toBeVisible()
@@ -633,7 +724,7 @@ test('策略卡片用当前 committed L2 代替上次决策快照冒充回读', 
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
 
-  const card = page.getByRole('button', { name: /2充2放调度策略/ })
+  const card = page.getByLabel('策略列表')
   await expect(card).toContainText('当前 L2 156.8')
   await expect(card).not.toContainText('回读')
   await expect(card).not.toContainText('121')
@@ -686,7 +777,9 @@ test('修改后试算使用新草稿，非法输入不能复用旧结果', async
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
   await expect(page.getByLabel('策略名称')).toBeVisible()
+  await openBindingDialog(page, 'INPUT')
   await page.getByLabel('输入 1 别名').fill('new_input')
+  await applyBindingDialog(page)
   const request = page.waitForRequest((item) => item.url().endsWith('/simulate'))
   await page.getByRole('button', { name: '试算', exact: true }).click()
   expect((await request).postDataJSON()).toEqual({ revision_id: 'draft-1', expected_digest: 'b'.repeat(64) })
@@ -697,7 +790,9 @@ test('修改后试算使用新草稿，非法输入不能复用旧结果', async
   await expect(page.getByTestId('strategy-simulation')).toBeVisible()
   expect(api.savedDrafts).toHaveLength(1)
   const requestsBefore = api.calls.filter((call) => call.endsWith('/simulate')).length
+  await openBindingDialog(page, 'INPUT')
   await page.getByLabel('输入 1 别名').fill('')
+  await applyBindingDialog(page)
   await page.getByRole('button', { name: '试算', exact: true }).click()
   await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('别名不能为空')
   await expect(page.getByTestId('strategy-simulation')).not.toBeVisible()
@@ -1015,18 +1110,22 @@ async function createStrategyDraft(page: Page): Promise<string> {
   })
   await loaded
   await expect(page.getByTestId('native-decision-table')).toBeVisible()
-  await expect(page.getByRole('button', { name: '添加输入' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /01.*选择 L2 输入/ })).toBeVisible()
   return strategyId
 }
 
 async function configureNativeControl(page: Page) {
   await page.getByLabel('触发方式').selectOption('FIXED_TICK')
+  await openBindingDialog(page, 'INPUT')
   await page.getByRole('button', { name: '添加输入' }).click()
   await page.getByLabel('输入 1 别名').fill('soc')
   await page.getByLabel('输入 1 实体').selectOption({ index: 1 })
+  await applyBindingDialog(page)
+  await openBindingDialog(page, 'OUTPUT')
   await page.getByRole('button', { name: '添加输出' }).click()
   await page.getByLabel('输出 1 别名').fill('power-target')
   await page.getByLabel('输出 1 实体').selectOption({ index: 1 })
+  await applyBindingDialog(page)
   await page.getByTestId('native-decision-table').getByRole('button', { name: /Add row$/ }).click()
   const cells = page.getByTestId('native-decision-table').locator('.grl-dt__cell__input')
   await cells.nth(1).click()
@@ -1057,4 +1156,15 @@ function startUntilReady(command: string, args: string[], env: NodeJS.ProcessEnv
 
 async function stopProcess(child: ChildProcess | undefined): Promise<void> {
   await stopSpawnedProcess(child)
+}
+
+
+async function openBindingDialog(page: Page, direction: 'INPUT' | 'OUTPUT') {
+  await page.getByRole('button', { name: direction === 'INPUT' ? /01.*选择 L2 输入/ : /03.*绑定可控 L2 输出/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+}
+
+async function applyBindingDialog(page: Page) {
+  await page.getByRole('button', { name: '应用绑定', exact: true }).click()
+  await expect(page.getByRole('dialog')).not.toBeVisible()
 }

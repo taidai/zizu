@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import '../components/alarm-center/tabletApplications.css'
+import '../components/dispatch-strategy/dispatchLayout.css'
+import { restoreModalTrigger, useModalFocus } from '../components/useModalFocus'
 import {
   clearDispatchStrategyFailure,
   createDispatchStrategy,
@@ -85,6 +87,23 @@ export default function DispatchStrategyPage() {
   const [name, setName] = useState('')
   const [triggerKind, setTriggerKind] = useState<'DATA_CHANGE' | 'FIXED_TICK'>('DATA_CHANGE')
   const [draftBindings, setDraftBindings] = useState<DispatchStrategyBinding[]>([])
+  const [bindingDialog, setBindingDialog] = useState<'INPUT' | 'OUTPUT' | null>(null)
+  const [dialogBindings, setDialogBindings] = useState<DispatchStrategyBinding[]>([])
+  const [bindingError, setBindingError] = useState('')
+  const [infoDialog, setInfoDialog] = useState<'preview' | 'json' | 'help' | null>(null)
+  const infoTrigger = useRef<HTMLElement | null>(null)
+  const closeInfo = () => { setInfoDialog(null); restoreModalTrigger(infoTrigger.current) }
+  const infoModal = useModalFocus({ open: infoDialog !== null, onClose: closeInfo })
+  const openInfo = (kind: 'preview' | 'json' | 'help') => { infoTrigger.current = document.activeElement as HTMLElement; setInfoDialog(kind) }
+  const bindingTrigger = useRef<HTMLElement | null>(null)
+  const closeBindings = () => { setBindingDialog(null); setBindingError(''); restoreModalTrigger(bindingTrigger.current) }
+  const bindingModal = useModalFocus({ open: bindingDialog !== null, onClose: closeBindings })
+  const openBindings = (direction: 'INPUT' | 'OUTPUT') => {
+    bindingTrigger.current = document.activeElement as HTMLElement
+    setDialogBindings(structuredClone(draftBindings))
+    setBindingError('')
+    setBindingDialog(direction)
+  }
   const [bindingsEdited, setBindingsEdited] = useState(false)
   const [graph, setGraph] = useState<DecisionGraphType>(() => buildGenericDecisionTableJdm() as DecisionGraphType)
   const [showGraph, setShowGraph] = useState(false)
@@ -347,7 +366,7 @@ export default function DispatchStrategyPage() {
   })
 
   const patchGenericBinding = (index: number, patch: { alias?: string; entityId?: string }) => {
-    setDraftBindings((current) => {
+    setDialogBindings((current) => {
       const binding = current[index]
       if (!binding) return current
       if (patch.entityId !== undefined) {
@@ -357,36 +376,39 @@ export default function DispatchStrategyPage() {
       }
       return current.map((item, itemIndex) => itemIndex === index ? { ...item, binding_key: patch.alias ?? item.binding_key } : item)
     })
-    setBindingsEdited(true)
-    markEdited()
   }
 
   const addGenericBinding = (direction: 'INPUT' | 'OUTPUT') => {
     const candidates = direction === 'INPUT' ? inputEntities : outputEntities
-    const used = new Set(draftBindings.filter((item) => item.direction === direction).map((item) => item.entity_instance_id))
+    const used = new Set(dialogBindings.filter((item) => item.direction === direction).map((item) => item.entity_instance_id))
     const entity = candidates.find((item) => !used.has(item.id))
     if (!entity) {
-      setError(direction === 'INPUT' ? '没有更多可读且类型受支持的 L2 输入实体。' : '没有更多明确具备控制资格的 L2 输出实体。')
+      setBindingError(direction === 'INPUT' ? '没有更多可读且类型受支持的 L2 输入实体。' : '没有更多明确具备控制资格的 L2 输出实体。')
       return
     }
-    const ordinal = draftBindings.filter((item) => item.direction === direction).length
+    const ordinal = dialogBindings.filter((item) => item.direction === direction).length
     const prefix = direction === 'INPUT' ? 'input' : 'output'
     const binding = makeStrategyBinding(entity, direction, `${prefix}_${ordinal + 1}`, ordinal)
-    setDraftBindings((current) => [...current, binding])
-    setBindingsEdited(true)
-    markEdited()
-    setError('')
+    setDialogBindings((current) => [...current, binding])
+    setBindingError('')
   }
 
   const removeGenericBinding = (index: number) => {
-    setDraftBindings((current) => {
+    setDialogBindings((current) => {
       const direction = current[index]?.direction
       return current.filter((_item, itemIndex) => itemIndex !== index).map((item) => item.direction === direction
         ? { ...item, ordinal: current.filter((_candidate, candidateIndex) => candidateIndex !== index).filter((candidate) => candidate.direction === direction).findIndex((candidate) => candidate === item) }
         : item)
     })
-    setBindingsEdited(true)
-    markEdited()
+  }
+
+  const applyBindings = () => {
+    if (!isJdmGraphUnchanged(dialogBindings, draftBindings)) {
+      setDraftBindings(dialogBindings)
+      setBindingsEdited(true)
+      markEdited()
+    }
+    closeBindings()
   }
 
   const loadEventPage = async (cursor: string | null = null, history: (string | null)[] = [], size = eventPageSize) => {
@@ -422,12 +444,12 @@ export default function DispatchStrategyPage() {
   const renderBindings = (direction: 'INPUT' | 'OUTPUT') => {
     const label = direction === 'INPUT' ? '输入' : '输出'
     const candidates = direction === 'INPUT' ? inputEntities : outputEntities
-    const rowsForDirection = draftBindings.map((binding, index) => ({ binding, index })).filter((item) => item.binding.direction === direction)
+    const rowsForDirection = dialogBindings.map((binding, index) => ({ binding, index })).filter((item) => item.binding.direction === direction)
     return <div className="neu-inset p-3" data-testid={direction === 'INPUT' ? 'generic-l2-bindings' : undefined}>
       <div className="flex items-center justify-between gap-2"><div><h4 className="text-xs font-bold text-gray-700">{label}绑定</h4><p className="mt-1 text-[10px] text-gray-500">{direction === 'INPUT' ? '已确认、可读的布尔/数值/字符串 L2' : '已确认、明确可控且可写的 L2'}</p></div><button type="button" onClick={() => addGenericBinding(direction)} className="neu-btn px-3 py-1.5 text-xs">添加{label}</button></div>
       <div className="mt-3 space-y-3">{rowsForDirection.map(({ binding, index }, visibleIndex) => {
         const currentEntity = entities.find((item) => item.id === binding.entity_instance_id)
-        return <div key={`${direction}:${index}`} className="rounded-lg border border-white/70 bg-white/35 p-3">
+        return <div key={`${direction}:${index}`} className="dispatch-binding-row rounded-lg border border-white/70 bg-white/35 p-3">
           <label className="block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 别名<input aria-label={`${label} ${visibleIndex + 1} 别名`} value={binding.binding_key} onChange={(event) => patchGenericBinding(index, { alias: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5 font-mono" /></label>
           <label className="mt-2 block text-[11px] font-semibold text-gray-600">{label} {visibleIndex + 1} 实体<select aria-label={`${label} ${visibleIndex + 1} 实体`} value={binding.entity_instance_id} onChange={(event) => patchGenericBinding(index, { entityId: event.target.value })} className="neu-input mt-1 w-full px-2 py-1.5"><option value="">请选择</option>{currentEntity && !candidates.some((item) => item.id === currentEntity.id) && <option value={currentEntity.id} disabled>当前绑定不再符合资格：{currentEntity.display_name}</option>}{candidates.map((item) => <option key={item.id} value={item.id}>{item.node_display_name} / {item.display_name} · {item.data_type} {item.unit || ''}</option>)}</select></label>
           <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-gray-500"><span>{binding.expected_data_type} {binding.unit || '无单位'} · 新鲜度 {binding.freshness_seconds}s · 质量：{qualityText(observations[binding.entity_instance_id])}</span><button type="button" onClick={() => removeGenericBinding(index)} className="text-red-600">移除</button></div>
@@ -437,32 +459,18 @@ export default function DispatchStrategyPage() {
   }
 
   return (
-    <div className="tablet-applications tablet-dispatch-layout flex min-h-[650px] gap-4" data-tablet-applications="dispatch" data-testid="dispatch-strategy-page">
-      <aside className="neu-card w-72 shrink-0 p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <div><h2 className="text-sm font-bold text-gray-800">调度策略</h2><p className="mt-1 text-[11px] text-gray-500">基于 L2 决策，经统一控制闭环执行</p></div>
-          <div className="flex flex-col items-end gap-2"><button type="button" onClick={createGeneric} disabled={!!busy} className="neu-btn zizu-primary px-3 py-1.5 text-xs font-semibold">新建通用策略</button></div>
-        </div>
-        <div className="space-y-2" aria-label="策略列表">
-          {strategies.map((item) => {
-            const itemStatus = projectStrategyStatus(item)
-            const currentOutput = item.id === selectedId && selectedSummaryOutputId
-              ? observations[selectedSummaryOutputId]
-              : null
-            return <button key={item.id} type="button" disabled={!!busy || editorPending} onClick={() => setSelectedId(item.id)} className={`w-full rounded-xl border p-3 text-left ${selectedId === item.id ? 'zizu-tab-active' : 'border-white/60 bg-white/30'}`}>
-              <div className="truncate text-xs font-semibold text-gray-800">{item.name}</div>
-              <div className="mt-2 flex flex-wrap gap-1 text-[10px]"><span>{itemStatus.enableLabel}</span><span>·</span><span>{itemStatus.lifecycleLabel}</span><span>·</span><span>{itemStatus.healthLabel}</span></div>
-              <div className="mt-1 text-[10px] text-gray-400">目标 {valueText(item.last_desired)} / {currentOutput ? '当前 L2' : '决策时值'} {valueText(currentOutput?.value ?? item.last_actual)}</div>
-            </button>
-          })}
-          {!strategies.length && !error && <p className="py-8 text-center text-xs text-gray-400">尚无策略，请新建通用策略。</p>}
-        </div>
+    <div className="tablet-applications tablet-dispatch-layout" data-tablet-applications="dispatch" data-testid="dispatch-strategy-page">
+      <aside className="dispatch-directory neu-card" aria-label="策略列表">
+        <label>调度策略<select aria-label="选择调度策略" className="neu-input" value={selectedId} disabled={!!busy || editorPending} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择策略</option>{strategies.map((item) => <option key={item.id} value={item.id}>{item.name} · {projectStrategyStatus(item).enableLabel}</option>)}</select></label>
+        {strategy && <span className="dispatch-current-output">目标 {valueText(strategy.last_desired)} / {observations[selectedSummaryOutputId] ? '当前 L2' : '决策时值'} {valueText(observations[selectedSummaryOutputId]?.value ?? strategy.last_actual)}</span>}
+        <button type="button" onClick={createGeneric} disabled={!!busy} className="neu-btn zizu-primary px-3 text-xs font-semibold">新建通用策略</button>
+        {!strategies.length && !error && <span>尚无策略，请新建通用策略。</span>}
       </aside>
 
-      <main className="min-w-0 flex-1 space-y-4">
+      <main className="dispatch-main min-w-0">
           {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{(requiresReload || (!strategy && error)) && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
         {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">{error ? '策略读取失败，请查看上方原因。' : busy ? '正在读取调度策略…' : '请选择或新建调度策略'}</div> : <>
-          <section className="neu-card p-4" aria-label="策略状态">
+          <section className="dispatch-status neu-card" aria-label="策略状态">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => { setName(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">{triggerKind === 'DATA_CHANGE' ? 'L2 数据变化触发' : '固定整分钟节拍'} · {currentRevision?.site_timezone} · 所有控制先形成意图，再由统一控制回读确认</p></div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -477,33 +485,34 @@ export default function DispatchStrategyPage() {
 
 
 
-          <section className="neu-card p-4" aria-labelledby="binding-heading">
-            <h3 id="binding-heading" className="mb-3 text-sm font-bold text-gray-800">1. 选择 L2 输入</h3>
-            <p className="mb-3 text-xs text-gray-500">选择多个强类型实体，以别名引用；跨设备只读取已提交 L2，不读取品牌点位。</p>
-            {renderBindings('INPUT')}
-          </section>
+          <div className="dispatch-steps" data-testid="dispatch-steps">
+            <button type="button" className="neu-card" disabled={!!busy || editorPending} onClick={() => openBindings('INPUT')}><b>01</b><span><small>选择 L2 输入</small><strong>{draftBindings.filter((item) => item.direction === 'INPUT').length} 个全局实体 · 多输入</strong></span></button>
+            <div className="neu-card"><b>02</b><span><small>原生 JDM 决策表</small><strong>{nativeTable ? '条件、规则与公式' : '保留完整规则图'}</strong></span></div>
+            <button type="button" className="neu-card" disabled={!!busy || editorPending} onClick={() => openBindings('OUTPUT')}><b>03</b><span><small>绑定可控 L2 输出</small><strong>{draftBindings.filter((item) => item.direction === 'OUTPUT').length} 个可控实体 · 多输出</strong></span></button>
+          </div>
 
-          <section className="neu-card p-4" aria-labelledby="schedule-heading">
-            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div><h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 编辑原生 JDM 决策表</h3><p className="mt-1 text-xs text-gray-500">通用原生决策表直接编辑现有唯一表节点，不限制为 SOC 或固定时段。</p></div>
-              <button type="button" disabled={editorPending} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 text-xs text-[#981320]">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button>
+          <section className="dispatch-table-panel neu-card" aria-labelledby="schedule-heading">
+            <div className="dispatch-editor-toolbar"><h3 id="verification-heading">草稿、试算与运行</h3><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload || editorPending} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || dirty || !!strategy.draft || !strategy.published_revision || strategy.runtime_health === 'FAILED'} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+            <div className="dispatch-table-heading flex flex-wrap items-center justify-between gap-3">
+              <h3 id="schedule-heading" className="text-sm font-bold text-gray-800">2. 编辑原生 JDM 决策表</h3>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => openInfo('preview')} className="neu-btn px-3 text-xs">输入/输出预览</button>
+                <button type="button" onClick={() => openInfo('json')} className="neu-btn px-3 text-xs">草稿 JSON</button>
+                <button type="button" onClick={() => openInfo('help')} className="neu-btn px-3 text-xs">表达式说明</button>
+                <button type="button" disabled={editorPending} onClick={() => setShowGraph((value) => !value)} className="neu-btn px-3 text-xs text-[#981320]">{showGraph ? '收起完整规则图' : '打开完整规则图'}</button>
+              </div>
             </div>
             {nativeTable ? <>
-              <div className="mb-3 flex flex-wrap items-center gap-3"><button type="button" disabled={editorPending} className="neu-btn px-3 text-xs" onClick={() => { setGraph(addNativeExampleColumns(graph, nativeTable.nodeId) as DecisionGraphType); markEdited() }}>添加可选示例列</button><span className="text-xs text-gray-500">时段 / SOC 只是可删除的原生条件列，不新增规则或输出目标。</span></div>
+              <div className="dispatch-table-options flex flex-wrap items-center gap-3"><button type="button" disabled={editorPending} className="neu-btn px-3 text-xs" onClick={() => { setGraph(addNativeExampleColumns(graph, nativeTable.nodeId) as DecisionGraphType); markEdited() }}>添加可选示例列</button><span className="text-xs text-gray-500">时段 / SOC 只是可删除的原生条件列，不新增规则或输出目标。</span></div>
               {!showGraph && <Suspense fallback={<p aria-live="polite">正在加载原生决策表…</p>}><NativeDecisionTableEditor key={editorSession} onPendingChange={handleEditorPending} content={nativeTable.content} onChange={(content) => { setGraph((current) => replaceDecisionTableContent(current, nativeTable.nodeId, content) as DecisionGraphType); markEdited() }} /></Suspense>}
             </> : <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">当前规则不是可无损往返的唯一决策表，请使用完整规则图编辑。保存、试算和发布均使用同一份完整 JDM，不会重建为内置表。</p>}
             {showGraph && <Suspense fallback={<p aria-live="polite">正在加载完整规则图…</p>}><NativeDecisionGraphEditor key={editorSession} graph={editorGraph} onPendingChange={handleEditorPending} onChange={(next) => { if (isJdmGraphUnchanged(next, editorGraph)) return; setGraph((current) => mergeNativeDecisionGraph(current, next) as DecisionGraphType); markEdited() }} /></Suspense>}
           </section>
 
-          <section className="neu-card p-4" aria-labelledby="output-heading">
-            <h3 id="output-heading" className="mb-3 text-sm font-bold text-gray-800">3. 绑定可控 L2 输出</h3>
-            <p className="mb-3 text-xs text-gray-500">action_id 对应输出别名；多个目标按意图顺序交给唯一控制链。接口受理不是设备执行成功。</p>
-            {renderBindings('OUTPUT')}
-            {!outputEntities.length && <p className="mt-3 text-xs text-amber-700">没有明确具备控制资格的输出候选。请先配置正式 L2 控制合同；保存、发布和运行仍由后端复核。</p>}
-          </section>
 
-          <section className="neu-card p-4" aria-labelledby="verification-heading">
-            <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 id="verification-heading" className="text-sm font-bold text-gray-800">草稿、试算与运行</h3><p className="mt-1 text-xs text-gray-500">试算不下发；发布冻结版本；启用后按已保存的触发方式产生控制意图。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={save} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs disabled:opacity-40">保存草稿</button><button type="button" onClick={simulate} disabled={!!busy || requiresReload || editorPending} className="neu-btn px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">试算</button><button type="button" onClick={publish} disabled={!!busy || requiresReload || editorPending} className="neu-btn zizu-primary px-3 py-1.5 text-xs disabled:opacity-40">发布</button>{strategy.enabled ? <button type="button" onClick={disable} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">停用</button> : <button type="button" onClick={enable} disabled={!!busy || requiresReload || dirty || !!strategy.draft || !strategy.published_revision || strategy.runtime_health === 'FAILED'} className="zizu-primary rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40">启用</button>}{strategy.runtime_health === 'FAILED' && <button type="button" onClick={clearFailure} disabled={!!busy} className="neu-btn px-3 py-1.5 text-xs text-red-600">清除故障锁</button>}</div></div>
+
+          <section className="dispatch-verification neu-card p-4" aria-label="草稿收据与试算依据">
+
             {editorPending && <div aria-live="polite" className="mt-3 text-xs text-amber-700">正在同步原生编辑内容，收到确认后可保存、试算和发布。若仅打开菜单或取消编辑而没有内容回调，可放弃尚未确认的编辑，返回最后已同步图。<button type="button" className="ml-2 underline" onClick={() => { if (!window.confirm('放弃尚未收到原生确认的编辑？将返回最后已同步规则图；已同步但未保存的修改仍会保留。')) return; setEditorSession((value) => value + 1); handleEditorPending(false) }}>放弃未确认编辑</button></div>}
             {draftReceipt && <div data-testid="strategy-draft-receipt" className="mt-3 break-all rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800">草稿收据：{draftReceipt.id} · 配置修订 {draftReceipt.revision} · 摘要 {draftReceipt.digest}</div>}
             {simulation && <div className="mt-4 space-y-3" data-testid="strategy-simulation">
@@ -534,6 +543,31 @@ export default function DispatchStrategyPage() {
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs"><label>每页条数<select aria-label="事件每页条数" value={eventPageSize} disabled={eventsBusy} onChange={(event) => loadEventPage(null, [], Number(event.target.value))} className="neu-input ml-2 px-2"><option value={10}>10</option><option value={20}>20</option></select></label><span>第 {eventHistory.length + 1} 页 · 本页 {events.length} 条</span><div className="flex gap-2"><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !eventHistory.length} onClick={() => loadEventPage(eventHistory[eventHistory.length - 1], eventHistory.slice(0, -1))}>上一页</button><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !nextEventCursor} onClick={() => loadEventPage(nextEventCursor, [...eventHistory, eventCursor])}>下一页</button></div></div>
           </section>
           {controlEvidence && <section className="neu-card p-4" aria-label="控制回读证据" data-testid="strategy-control-evidence"><div className="flex items-center justify-between gap-3"><h3 className="text-sm font-bold">控制回读证据</h3><button type="button" className="neu-btn px-3 text-xs" onClick={() => setControlEvidence(null)}>关闭证据</button></div><p className="mt-2 text-xs">{controlEvidence.command?.status === 'readback_confirmed' ? '回读确认到位（后端新 committed L2 证据）' : '未确认执行成功；仅按后端控制命令状态判断，不将接口受理当设备动作。'}</p>{controlEvidence.error ? <p role="alert" className="mt-2 text-xs text-red-700">{controlEvidence.error}</p> : controlEvidence.command ? <pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(controlEvidence.command, null, 2)}</pre> : <p aria-live="polite" className="mt-3 text-xs">正在读取控制命令…</p>}</section>}
+          {infoDialog && <div className="dispatch-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeInfo() }}>
+            <section ref={infoModal.dialogRef} tabIndex={-1} onKeyDown={infoModal.onKeyDown} role="dialog" aria-modal="true" aria-label={infoDialog === 'json' ? '同一份 JDM 草稿 JSON' : infoDialog === 'preview' ? '输入/输出预览' : '表达式说明'} className="dispatch-modal neu-card">
+              <header><h2>{infoDialog === 'json' ? '同一份 JDM 草稿 JSON' : infoDialog === 'preview' ? '输入/输出预览' : '表达式说明'}</h2><button type="button" className="neu-btn px-3" onClick={closeInfo}>关闭</button></header>
+              <div className="dispatch-modal-body">
+                {editorPending && <p className="mb-3 text-xs text-amber-700">原生编辑尚未确认；以下仅为最后已同步草稿，不能用于保存、发布或试算。</p>}
+                {infoDialog === 'json' && <pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify({ jdm_content: graph, bindings: draftBindings, trigger_kind: triggerKind, site_timezone: currentRevision?.site_timezone }, null, 2)}</pre>}
+                {infoDialog === 'preview' && <><p className="mb-3 text-xs text-gray-600">真实 L2 绑定与最近读取证据，不是本次试算快照，也不是控制成功证明。</p>{draftBindings.length ? <table className="w-full text-xs"><thead><tr><th>方向 / 别名</th><th>L2 实体</th><th>最近证据值</th><th>质量 / 新鲜度</th></tr></thead><tbody>{draftBindings.map((binding, index) => <tr key={index}><td className="p-2">{binding.direction} / {binding.binding_key}</td><td className="p-2">{entities.find((item) => item.id === binding.entity_instance_id)?.display_name || binding.entity_instance_id}</td><td className="p-2">{valueText(observations[binding.entity_instance_id]?.value)} {binding.unit}</td><td className="p-2">{qualityText(observations[binding.entity_instance_id])}</td></tr>)}</tbody></table> : <p>未绑定输入或输出实体。</p>}</>}
+                {infoDialog === 'help' && <div className="space-y-3 text-sm"><p>添加条件列并填写输入别名或原生公式；单元格填写条件，规则行可新增、删除。</p><p>action_id 填写第 3 步输出别名（加双引号，如 "fan_enable"）；target 填写强类型目标值（如 true 或 12.5）。新表使用 collect 与输出路径 intents，多条命中按行序产生意图。</p><p>动态目标仍受后端发布安全校验。试算零设备写入，已有规则图不会自动转换。时段和 SOC 只是可删除的条件列，不是另一套策略模式。</p></div>}
+              </div>
+            </section>
+          </div>}
+          {bindingDialog && <div className="dispatch-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeBindings() }}>
+            <section ref={bindingModal.dialogRef} tabIndex={-1} onKeyDown={bindingModal.onKeyDown} role="dialog" aria-modal="true" aria-label={bindingDialog === 'INPUT' ? '绑定多个输入全局实体' : '绑定多个可控输出实体'} className="dispatch-modal neu-card">
+              <header><h2>{bindingDialog === 'INPUT' ? '1. 选择 L2 输入' : '3. 绑定可控 L2 输出'}</h2><button type="button" className="neu-btn px-3" onClick={closeBindings}>关闭</button></header>
+              <div className="dispatch-modal-body">
+                <section aria-label={bindingDialog === 'INPUT' ? '1. 选择 L2 输入' : '3. 绑定可控 L2 输出'}>
+                  <p className="mb-3 text-xs text-gray-500">{bindingDialog === 'INPUT' ? '选择多个强类型实体，以别名引用；只读取已提交 L2。' : 'action_id 对应输出别名；接口受理不是设备执行成功。'}</p>
+                  {renderBindings(bindingDialog)}
+                  {bindingDialog === 'OUTPUT' && !outputEntities.length && <p className="mt-3 text-xs text-amber-700">没有明确具备控制资格的输出候选。请先配置正式 L2 控制合同；保存、发布和运行仍由后端复核。</p>}
+                  {bindingError && <p role="alert" className="mt-3 text-xs text-red-700">{bindingError}</p>}
+                </section>
+              </div>
+              <footer><span>应用只修改本地草稿，不保存、不发布、不执行。</span><button type="button" className="neu-btn px-3" onClick={closeBindings}>取消</button><button type="button" className="neu-btn zizu-primary px-3" onClick={applyBindings}>应用绑定</button></footer>
+            </section>
+          </div>}
         </>}
       </main>
     </div>
