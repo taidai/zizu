@@ -1,26 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  fetchAlarmCounts,
+  fetchAlarms,
   fetchControlCommand,
+  fetchDispatchStrategies,
   fetchEmsWorkbench,
   fetchEntityInstances,
   reconcileControlCommand,
   requestControlConfirmation,
+  saveEmsWorkbenchSlot,
   submitControlCommand,
+  type Alarm,
   type ControlCommand,
   type ControlConfirmation,
+  type DispatchStrategy,
   type EmsWorkbench,
+  type EmsWorkbenchSlotKey,
   type EntityInstance,
   type WorkbenchEntity,
 } from '../api/client'
 import EntityRuntimeDetail from '../components/runtime-monitoring/EntityRuntimeDetail'
 import {
   buildRuntimeNodes,
-  runtimeEntityReading,
   type RuntimeEntity,
 } from '../components/runtime-monitoring/runtimeModel'
+import {
+  buildWorkbenchSlots,
+  compatibleSlotEntities,
+  controlCommandPresentation,
+  describeWorkbenchSlotError,
+  fixedEnergyFlow,
+  isConfirmationExpired,
+  type WorkbenchSlotView,
+} from '../components/runtime-monitoring/workbenchSlotsModel'
 import { useRuntimeNodes } from '../components/runtime-monitoring/useRuntimeNodes'
 import '../components/runtime-monitoring/runtime-monitoring.css'
+import '../components/runtime-monitoring/workbench.css'
 
 export type RuntimeTab = 'overview' | 'trends' | 'alarms' | 'controls'
 
@@ -31,21 +45,27 @@ export type RuntimeProps = {
   initialTab?: RuntimeTab
 }
 
+const SLOT_ICONS: Record<EmsWorkbenchSlotKey, string> = {
+  'site-power': '⌂',
+  'pv-power': '▧',
+  'storage-power': '▤',
+  'storage-soc': '▥',
+  'charging-power': 'ϟ',
+}
+
 function formatTime(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未记录'
 }
 
-function formatValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join('、')
-  return value == null ? '—' : String(value)
+function controlError(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback
 }
 
-function qualityLabel(quality: number | null): string {
-  if (quality === 192) return '正常'
-  if (quality === 64) return '超时'
-  if (quality === 1) return '未知'
-  if (quality == null) return '无数据'
-  return '异常'
+function mergeControlEvidence(workbench: EmsWorkbench): WorkbenchEntity[] {
+  const liveById = new Map(
+    workbench.groups.flatMap((group) => group.entities).map((entity) => [entity.entity_instance_id, entity]),
+  )
+  return workbench.controls.entities.map((entity) => ({ ...entity, ...liveById.get(entity.entity_instance_id) }))
 }
 
 function Controls({ entities }: { entities: WorkbenchEntity[] }) {
@@ -54,118 +74,268 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
     entity: WorkbenchEntity
     value: unknown
     receipt: ControlConfirmation
+    commandKey: string
   } | null>(null)
   const [commands, setCommands] = useState<Record<string, ControlCommand>>({})
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const pending = useRef(new Set<string>())
+  const operationKeys = useRef(new Map<string, { confirmationKey: string; commandKey: string }>())
+
+  const setBusy = (key: string, busy: boolean) => {
+    if (busy) pending.current.add(key)
+    else pending.current.delete(key)
+    setBusyIds(new Set(pending.current))
+  }
+
   const valueFor = (entity: WorkbenchEntity): unknown | null => {
     const raw = values[entity.entity_instance_id]
     if (raw == null || raw === '') {
-      setMessage(`请先填写 ${entity.display_name} 的目标值。`)
+      setError(`请先填写 ${entity.display_name} 的目标值。`)
       return null
     }
     const value = entity.data_type === 'bool'
       ? raw === 'true'
       : ['float', 'int'].includes(entity.data_type) ? Number(raw) : raw
     if (typeof value === 'number' && !Number.isFinite(value)) {
-      setMessage('目标值必须是有效数字。')
+      setError('目标值必须是有效数字。')
       return null
     }
     return value
   }
-  const prepare = async (entity: WorkbenchEntity) => {
-    const value = valueFor(entity)
-    if (value === null) return
-    try {
-      const receipt = await requestControlConfirmation(entity.entity_instance_id, value)
-      setConfirmation({ entity, value, receipt })
-      setMessage(`请核对目标值后在 60 秒内确认下发：${entity.display_name} = ${String(value)}${entity.unit ? ` ${entity.unit}` : ''}。`)
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '控制二次确认申请失败。')
-    }
+
+  const keysFor = (entityId: string, value: unknown) => {
+    const identity = `${entityId}\u0000${JSON.stringify(value)}`
+    const current = operationKeys.current.get(identity)
+    if (current) return current
+    const created = { confirmationKey: crypto.randomUUID(), commandKey: crypto.randomUUID() }
+    operationKeys.current.set(identity, created)
+    return created
   }
-  const execute = async () => {
-    if (!confirmation) return
-    try {
-      const command = await submitControlCommand(
-        confirmation.entity.entity_instance_id,
-        confirmation.value,
-        confirmation.receipt.id,
-      )
-      setCommands((previous) => ({ ...previous, [confirmation.entity.entity_instance_id]: command }))
-      setConfirmation(null)
-      setMessage(`命令已受理：${command.id}（${command.status}）。请等待设备回读后刷新状态。`)
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '控制命令提交失败。')
-    }
-  }
+
   const refresh = async (entityInstanceId: string, command: ControlCommand) => {
+    const key = `readback:${command.id}`
+    if (pending.current.has(key)) return
+    setBusy(key, true)
+    setError('')
     try {
       const reconciled = await reconcileControlCommand(command.id)
-      const current = reconciled.status === 'dispatched' ? await fetchControlCommand(command.id) : reconciled
+      const presentation = controlCommandPresentation(reconciled)
+      const current = presentation.terminal ? reconciled : await fetchControlCommand(command.id)
       setCommands((previous) => ({ ...previous, [entityInstanceId]: current }))
-      setMessage(`命令 ${current.id} 当前状态：${current.status}（${current.code}）。`)
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : '命令状态刷新失败。')
+      const finalPresentation = controlCommandPresentation(current)
+      setMessage(`${finalPresentation.label} · 命令 ${current.id} · ${current.code}`)
+    } catch (reason) {
+      setError(controlError(reason, '命令回读状态查询失败。'))
+    } finally {
+      setBusy(key, false)
     }
   }
-  if (entities.length === 0) return <p className="runtime-empty">当前没有可授权控制的 L2 全局实体。</p>
+
+  const prepare = async (entity: WorkbenchEntity) => {
+    const key = `confirm:${entity.entity_instance_id}`
+    if (pending.current.has(key)) return
+    if (entity.status === 'unavailable' || (entity.quality != null && entity.quality !== 192)) {
+      setError(`${entity.display_name} 当前质量不满足控制要求，未申请确认。`)
+      return
+    }
+    const value = valueFor(entity)
+    if (value === null) return
+    const operation = keysFor(entity.entity_instance_id, value)
+    setBusy(key, true)
+    setMessage('')
+    setError('')
+    try {
+      const receipt = await requestControlConfirmation(entity.entity_instance_id, value, operation.confirmationKey)
+      setConfirmation({ entity, value, receipt, commandKey: operation.commandKey })
+    } catch (reason) {
+      setError(controlError(reason, '控制二次确认申请失败。'))
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  const execute = async () => {
+    if (!confirmation || pending.current.has('dispatch')) return
+    if (isConfirmationExpired(confirmation.receipt.expires_at)) {
+      setError('二次确认已过期，请重新申请。')
+      return
+    }
+    setBusy('dispatch', true)
+    setMessage('')
+    setError('')
+    try {
+      const currentConfirmation = confirmation
+      const command = await submitControlCommand(
+        currentConfirmation.entity.entity_instance_id,
+        currentConfirmation.value,
+        currentConfirmation.receipt.id,
+        currentConfirmation.commandKey,
+      )
+      setCommands((previous) => ({ ...previous, [currentConfirmation.entity.entity_instance_id]: command }))
+      setConfirmation(null)
+      setMessage(`等待设备回读 · 命令 ${command.id} 已受理，接口受理不代表设备成功。`)
+      await refresh(currentConfirmation.entity.entity_instance_id, command)
+    } catch (reason) {
+      setError(controlError(reason, '控制命令提交失败，未确认设备动作。'))
+    } finally {
+      setBusy('dispatch', false)
+    }
+  }
+
+  if (entities.length === 0) return <p className="runtime-empty">当前没有正式控制目录中的可控 L2 全局实体。</p>
   return (
-    <div className="runtime-controls">
-      {entities.map((entity) => (
-        <div key={entity.entity_instance_id} className="runtime-control-row neu-inset">
-          <div>
-            <strong>{entity.display_name}</strong>
-            <span>{entity.node_name} · {entity.definition_id}</span>
+    <div className="workbench-controls">
+      <div className="workbench-control-gate" role="note">
+        <strong>统一安全门</strong>
+        <span>后端在确认与下发时复核权限、上下限、联锁、质量、新鲜度和冷却；接口受理后仍须等待 committed L2 回读。</span>
+      </div>
+      {entities.map((entity) => {
+        const command = commands[entity.entity_instance_id]
+        const presentation = command ? controlCommandPresentation(command) : null
+        const blocked = entity.status === 'unavailable' || (entity.quality != null && entity.quality !== 192)
+        return (
+          <article key={entity.entity_instance_id} className="workbench-control-card">
+            <header>
+              <div><span>{entity.node_name}</span><h3>{entity.display_name}</h3></div>
+              <span className={`workbench-control-quality ${blocked ? 'is-blocked' : ''}`}>{blocked ? '质量不满足' : '后端复核'}</span>
+            </header>
+            <div className="workbench-control-input">
+              {entity.data_type === 'bool' ? (
+                <select aria-label={`${entity.display_name}目标值`} value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues((current) => ({ ...current, [entity.entity_instance_id]: event.target.value }))} className="neu-input">
+                  <option value="">选择目标</option><option value="true">开启</option><option value="false">关闭</option>
+                </select>
+              ) : (
+                <input aria-label={`${entity.display_name}目标值`} value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues((current) => ({ ...current, [entity.entity_instance_id]: event.target.value }))} type={['float', 'int'].includes(entity.data_type) ? 'number' : 'text'} className="neu-input" placeholder={entity.unit || '目标值'} />
+              )}
+              <span>{entity.unit || '无单位'}</span>
+              <button type="button" disabled={blocked || busyIds.has(`confirm:${entity.entity_instance_id}`)} onClick={() => void prepare(entity)} className="zizu-primary runtime-touch-button">{busyIds.has(`confirm:${entity.entity_instance_id}`) ? '申请中…' : '申请二次确认'}</button>
+            </div>
+            {command && presentation && (
+              <div className={`workbench-command-state is-${presentation.tone}`}>
+                <div><strong>{presentation.label}</strong><span>{command.code}</span></div>
+                <button type="button" disabled={busyIds.has(`readback:${command.id}`) || presentation.terminal} onClick={() => void refresh(entity.entity_instance_id, command)} className="neu-btn runtime-touch-button">刷新回读</button>
+              </div>
+            )}
+          </article>
+        )
+      })}
+      {confirmation && (() => {
+        const expired = isConfirmationExpired(confirmation.receipt.expires_at)
+        return (
+          <div className="runtime-detail-backdrop" role="presentation">
+            <section role="alertdialog" aria-modal="true" aria-label="确认控制命令" className="workbench-confirmation neu-card">
+              <p className="runtime-eyebrow">高风险操作 · 二次确认</p>
+              <h3>确认控制命令</h3>
+              <dl><div><dt>控制对象</dt><dd>{confirmation.entity.node_name} · {confirmation.entity.display_name}</dd></div><div><dt>目标值</dt><dd>{String(confirmation.value)} {confirmation.entity.unit || ''}</dd></div><div><dt>有效期</dt><dd>{formatTime(confirmation.receipt.expires_at)}{expired ? ' · 已过期' : ''}</dd></div></dl>
+              <p>确认下发仅表示向统一控制运行时提交命令；设备成功必须以后端 committed L2 回读为准。</p>
+              <div><button type="button" disabled={expired || busyIds.has('dispatch')} onClick={() => void execute()} className="runtime-danger runtime-touch-button">{busyIds.has('dispatch') ? '下发中…' : '确认下发'}</button><button type="button" disabled={busyIds.has('dispatch')} onClick={() => setConfirmation(null)} className="neu-btn runtime-touch-button">取消</button></div>
+            </section>
           </div>
-          {entity.data_type === 'bool' ? (
-            <select aria-label={`${entity.display_name}目标值`} value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues({ ...values, [entity.entity_instance_id]: event.target.value })} className="neu-input">
-              <option value="">选择</option><option value="true">开启</option><option value="false">关闭</option>
-            </select>
-          ) : (
-            <input aria-label={`${entity.display_name}目标值`} value={values[entity.entity_instance_id] || ''} onChange={(event) => setValues({ ...values, [entity.entity_instance_id]: event.target.value })} type={['float', 'int'].includes(entity.data_type) ? 'number' : 'text'} className="neu-input" placeholder={entity.unit || '目标值'} />
-          )}
-          <button type="button" onClick={() => void prepare(entity)} className="zizu-primary runtime-touch-button">核对目标</button>
-          {commands[entity.entity_instance_id] && <button type="button" onClick={() => void refresh(entity.entity_instance_id, commands[entity.entity_instance_id])} className="neu-btn runtime-touch-button">刷新回读</button>}
-        </div>
-      ))}
-      {confirmation && (
-        <div role="alertdialog" aria-label="确认控制命令" className="runtime-confirmation">
-          <strong>请确认控制目标</strong>
-          <p>{confirmation.entity.display_name} = {String(confirmation.value)}{confirmation.entity.unit ? ` ${confirmation.entity.unit}` : ''}</p>
-          <p>二次确认仅在 {new Date(confirmation.receipt.expires_at).toLocaleTimeString()} 前有效。提交后仍需等待设备回读确认。</p>
-          <div><button type="button" onClick={() => void execute()} className="runtime-danger runtime-touch-button">确认下发</button><button type="button" onClick={() => setConfirmation(null)} className="neu-btn runtime-touch-button">取消</button></div>
-        </div>
-      )}
-      {message && <p role="status" className="runtime-message">{message}</p>}
+        )
+      })()}
+      {error && <p role="alert" className="runtime-error workbench-inline-message">{error}</p>}
+      {message && <p role="status" className="runtime-message workbench-inline-message">{message}</p>}
     </div>
   )
 }
 
-function RuntimeMetric({
-  entity,
-  nodeCurrent,
-  onOpen,
-}: {
-  entity: RuntimeEntity
-  nodeCurrent: boolean
-  onOpen: () => void
-}) {
-  const reading = runtimeEntityReading(entity.observation, nodeCurrent)
-  const quality = qualityLabel(reading.quality)
+function MetricCard({ slot, onOpen }: { slot: WorkbenchSlotView; onOpen: () => void }) {
+  const content = (
+    <>
+      <span className="workbench-metric__icon" aria-hidden="true">{SLOT_ICONS[slot.id]}</span>
+      <span className="workbench-metric__body">
+        <span className="workbench-metric__label">{slot.label}</span>
+        <span className="workbench-metric__reading"><strong>{slot.reading.valueText}</strong><small>{slot.reading.unit}</small></span>
+        <span className="workbench-metric__source">{slot.entity?.node_name || slot.bindingLabel}</span>
+      </span>
+      <span className={`workbench-metric__state is-${slot.reading.kind}`}>{slot.reading.kind === 'current' ? '当前值' : slot.reading.kind === 'last' ? '最后值（非当前）' : slot.bindingLabel}</span>
+      <span className="workbench-metric__reason">{slot.reason}</span>
+    </>
+  )
+  return slot.entity ? (
+    <button type="button" data-workbench-slot={slot.id} onClick={onOpen} className="workbench-metric neu-card">{content}</button>
+  ) : <article data-workbench-slot={slot.id} className="workbench-metric neu-card">{content}</article>
+}
+
+function FlowNode({ slot, role }: { slot: WorkbenchSlotView; role: string }) {
   return (
-    <button type="button" className="runtime-metric neu-inset" onClick={onOpen}>
-      <span className="runtime-metric__identity">
-        <strong>{entity.descriptor.display_name}</strong>
-        <small>{entity.descriptor.definition_id}</small>
-      </span>
-      <span className="runtime-metric__value font-mono-value">
-        {formatValue(reading.value)}{entity.descriptor.unit ? <small> {entity.descriptor.unit}</small> : null}
-      </span>
-      <span className={`runtime-quality runtime-quality--${reading.quality ?? 'unknown'}`}>{quality}</span>
-      <span className="runtime-metric__evidence">
-        {reading.kind === 'current' ? '当前值' : reading.kind === 'last' ? '最后值（非当前）' : '无采样'} · {formatTime(reading.kind === 'last' ? reading.valueObservedAt || reading.observedAt : reading.observedAt)}
-      </span>
-    </button>
+    <div className={`workbench-flow-node workbench-flow-node--${role}`}>
+      <span aria-hidden="true">{SLOT_ICONS[slot.id]}</span>
+      <div><strong>{slot.label}</strong><p>{slot.reading.valueText} <small>{slot.reading.unit}</small></p><em>{slot.entity?.node_name || slot.bindingLabel}</em></div>
+    </div>
+  )
+}
+
+function SlotConfigurationDialog({
+  slots,
+  descriptors,
+  configurationRevision,
+  directoryError,
+  onRevision,
+  onClose,
+}: {
+  slots: WorkbenchSlotView[]
+  descriptors: EntityInstance[]
+  configurationRevision: number
+  directoryError: string
+  onRevision: (revision: number) => void
+  onClose: () => void
+}) {
+  const [selections, setSelections] = useState<Record<string, string>>(() => Object.fromEntries(slots.map((slot) => [slot.id, slot.entity?.entity_instance_id || ''])))
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const revisionRef = useRef(configurationRevision)
+  const keys = useRef(new Map<string, string>())
+  const candidates = (slot: WorkbenchSlotView) => {
+    const compatibleIds = new Set(compatibleSlotEntities(slot.id, descriptors).map((entity) => entity.id))
+    return descriptors.filter((entity) => compatibleIds.has(entity.id))
+  }
+  const save = async (slot: WorkbenchSlotView, value: string | null) => {
+    if (busy) return
+    const entityId = value || null
+    const identity = `${slot.id}\u0000${entityId || 'auto'}\u0000${revisionRef.current}`
+    const key = keys.current.get(identity) || crypto.randomUUID()
+    keys.current.set(identity, key)
+    setBusy(slot.id)
+    setMessage('')
+    setError('')
+    try {
+      const receipt = await saveEmsWorkbenchSlot(slot.id, entityId, revisionRef.current, key)
+      revisionRef.current = receipt.configuration_revision
+      onRevision(receipt.configuration_revision)
+      setSelections((current) => ({ ...current, [slot.id]: entityId || '' }))
+      setMessage(`${slot.label}已保存 · 配置修订 ${receipt.configuration_revision}${receipt.replayed ? ' · 幂等重放' : ''}`)
+    } catch (reason) {
+      setError(`${slot.label}保存失败：${describeWorkbenchSlotError(reason)}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+  return (
+    <div className="runtime-detail-backdrop" role="presentation">
+      <section role="dialog" aria-modal="true" aria-label="配置首页指标" className="workbench-slot-dialog neu-card">
+        <header><div><p className="runtime-eyebrow">固定 EMS 工作台</p><h3>配置首页指标</h3><span>当前配置修订 {revisionRef.current} · 只列类型与单位兼容的真实 L2</span></div><button type="button" onClick={onClose} className="neu-btn runtime-touch-button">关闭</button></header>
+        <div className="workbench-slot-dialog__list">
+          {slots.map((slot) => (
+            <article key={slot.id}>
+              <div><strong>{slot.label}</strong><span>{slot.bindingLabel} · {slot.reason}</span></div>
+              <select aria-label={`${slot.label}绑定`} value={selections[slot.id]} onChange={(event) => setSelections((current) => ({ ...current, [slot.id]: event.target.value }))} className="neu-input">
+                <option value="">自动匹配</option>
+                {candidates(slot).map((entity) => <option key={entity.id} value={entity.id}>{entity.node_display_name} · {entity.display_name} · {entity.unit}</option>)}
+              </select>
+              <button type="button" disabled={busy !== null} onClick={() => void save(slot, selections[slot.id])} className="zizu-primary runtime-touch-button">保存{slot.label}</button>
+              <button type="button" disabled={busy !== null} onClick={() => void save(slot, null)} className="neu-btn runtime-touch-button">清除{slot.label}绑定</button>
+            </article>
+          ))}
+        </div>
+        {directoryError && <p role="alert" className="runtime-error workbench-inline-message">L2 目录不可用：{directoryError}。现有绑定仍可清除，但不能选择新实体。</p>}
+        {message && <p role="status" className="runtime-message workbench-inline-message">{message}</p>}
+        {error && <p role="alert" className="runtime-error workbench-inline-message">{error}</p>}
+      </section>
+    </div>
   )
 }
 
@@ -175,192 +345,120 @@ export default function EMSWorkbenchPage({
   onOpenDevices,
   initialTab = 'overview',
 }: RuntimeProps) {
-  const [activeTab, setActiveTab] = useState<RuntimeTab>(initialTab)
-  const [descriptors, setDescriptors] = useState<EntityInstance[]>([])
-  const [directoryLoading, setDirectoryLoading] = useState(true)
-  const [directoryLoaded, setDirectoryLoaded] = useState(false)
-  const [directoryError, setDirectoryError] = useState('')
-  const [alarmCounts, setAlarmCounts] = useState<Record<string, number>>(Object.create(null))
-  const [alarmCountsError, setAlarmCountsError] = useState('')
-  const [alarmCountsLoading, setAlarmCountsLoading] = useState(true)
   const [workbench, setWorkbench] = useState<EmsWorkbench | null>(null)
   const [workbenchError, setWorkbenchError] = useState('')
+  const [workbenchLoading, setWorkbenchLoading] = useState(true)
+  const [descriptors, setDescriptors] = useState<EntityInstance[]>([])
+  const [directoryError, setDirectoryError] = useState('')
+  const [alarms, setAlarms] = useState<Alarm[]>([])
+  const [alarmTotal, setAlarmTotal] = useState<number | null>(null)
+  const [alarmError, setAlarmError] = useState('')
+  const [strategies, setStrategies] = useState<DispatchStrategy[]>([])
+  const [strategyError, setStrategyError] = useState('')
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null)
-  const directoryGeneration = useRef(0)
-  const alarmGeneration = useRef(0)
-  const workbenchGeneration = useRef(0)
+  const [configuring, setConfiguring] = useState(false)
+  const generation = useRef(0)
 
-  useEffect(() => setActiveTab(initialTab), [initialTab])
-
-  const loadDirectory = useCallback(() => {
-    const generation = ++directoryGeneration.current
-    setDirectoryLoading(true)
-    setDirectoryError('')
-    void fetchEntityInstances().then((payload) => {
-      if (generation !== directoryGeneration.current) return
-      setDescriptors(payload.items)
-      setDirectoryLoaded(true)
-    }).catch((reason) => {
-      if (generation !== directoryGeneration.current) return
-      setDirectoryError(reason instanceof Error ? reason.message : '读取 L2 实体目录失败。')
-    }).finally(() => {
-      if (generation === directoryGeneration.current) setDirectoryLoading(false)
-    })
-  }, [])
-
-  const loadAlarmCounts = useCallback(() => {
-    const generation = ++alarmGeneration.current
-    setAlarmCountsLoading(true)
-    setAlarmCountsError('')
-    void fetchAlarmCounts().then((counts) => {
-      if (generation === alarmGeneration.current) setAlarmCounts(counts)
-    }).catch((reason) => {
-      if (generation !== alarmGeneration.current) return
-      setAlarmCountsError(reason instanceof Error ? reason.message : '读取告警计数失败。')
-    }).finally(() => {
-      if (generation === alarmGeneration.current) setAlarmCountsLoading(false)
-    })
-  }, [])
-
-  const loadWorkbench = useCallback(() => {
-    const generation = ++workbenchGeneration.current
+  const load = useCallback(() => {
+    const current = ++generation.current
+    setWorkbenchLoading(true)
     setWorkbenchError('')
-    void fetchEmsWorkbench().then((payload) => {
-      if (generation === workbenchGeneration.current) setWorkbench(payload)
-    }).catch((reason) => {
-      if (generation !== workbenchGeneration.current) return
-      setWorkbenchError(reason instanceof Error ? reason.message : '读取控制目录失败。')
-    })
+    void Promise.allSettled([
+      fetchEmsWorkbench(),
+      fetchEntityInstances(),
+      fetchAlarms(1, 10, undefined, undefined, false, false),
+      fetchDispatchStrategies(),
+    ]).then(([workbenchResult, directoryResult, alarmResult, strategyResult]) => {
+      if (current !== generation.current) return
+      if (workbenchResult.status === 'fulfilled') setWorkbench(workbenchResult.value)
+      else setWorkbenchError(controlError(workbenchResult.reason, '读取 EMS 工作台失败。'))
+      if (directoryResult.status === 'fulfilled') { setDescriptors(directoryResult.value.items); setDirectoryError('') }
+      else setDirectoryError(controlError(directoryResult.reason, '读取 L2 实体目录失败。'))
+      if (alarmResult.status === 'fulfilled') { setAlarms(alarmResult.value.alarms); setAlarmTotal(alarmResult.value.total); setAlarmError('') }
+      else setAlarmError(controlError(alarmResult.reason, '读取待处理告警失败。'))
+      if (strategyResult.status === 'fulfilled') { setStrategies(strategyResult.value); setStrategyError('') }
+      else setStrategyError(controlError(strategyResult.reason, '读取调度摘要失败。'))
+    }).finally(() => { if (current === generation.current) setWorkbenchLoading(false) })
   }, [])
 
   useEffect(() => {
-    loadDirectory()
-    loadAlarmCounts()
-    loadWorkbench()
-    return () => {
-      directoryGeneration.current += 1
-      alarmGeneration.current += 1
-      workbenchGeneration.current += 1
-    }
-  }, [loadAlarmCounts, loadDirectory, loadWorkbench])
+    load()
+    return () => { generation.current += 1 }
+  }, [load])
 
-  const { states, retryNode } = useRuntimeNodes(descriptors)
+  const { states } = useRuntimeNodes(descriptors)
   const projections = useMemo(() => new Map(
     [...states.entries()].flatMap(([nodeId, state]) => state.projection ? [[nodeId, state.projection] as const] : []),
   ), [states])
-  const nodes = useMemo(() => buildRuntimeNodes(descriptors, projections), [descriptors, projections])
-  const allEntities = useMemo(() => nodes.flatMap((node) => node.entities), [nodes])
-  const selected = allEntities.find((entity) => entity.descriptor.id === selectedEntityId) || null
+  const runtimeEntities = useMemo(() => buildRuntimeNodes(descriptors, projections).flatMap((node) => node.entities), [descriptors, projections])
+  const selected: RuntimeEntity | null = runtimeEntities.find((entity) => entity.descriptor.id === selectedEntityId) || null
+  const slots = useMemo(() => buildWorkbenchSlots(workbench?.kpis || []), [workbench])
+  const flow = useMemo(() => fixedEnergyFlow(slots), [slots])
+  const enabledStrategies = strategies.filter((strategy) => strategy.enabled)
+  const primaryStrategy = enabledStrategies[0] || strategies[0] || null
+  const controls = workbench ? mergeControlEvidence(workbench) : []
 
-  const changeTab = (tab: RuntimeTab) => {
-    if (tab === 'alarms') onOpenAlarms()
-    else setActiveTab(tab)
+  if (initialTab === 'controls') {
+    return (
+      <section className="runtime-shell workbench-page workbench-control-page">
+        <header className="workbench-page-heading"><div><p className="runtime-eyebrow">统一安全入口</p><h2>手动控制</h2><span>目标输入 → 二次确认 → 正式下发 → committed L2 回读</span></div><button type="button" onClick={load} disabled={workbenchLoading} className="neu-btn runtime-touch-button">{workbenchLoading ? '刷新中…' : '刷新控制目录'}</button></header>
+        {workbenchError && <div role="alert" className="runtime-error neu-card"><span>{workbenchError}。现有内容不按空目录处理。</span><button type="button" onClick={load}>重试</button></div>}
+        {!workbench && !workbenchError ? <div className="runtime-empty neu-card">正在读取正式控制目录…</div> : null}
+        {workbench ? (workbench.controls.visible ? <Controls entities={controls} /> : <div className="runtime-empty neu-card">当前角色或配置没有可用控制。</div>) : null}
+      </section>
+    )
+  }
+
+  if (!workbench) {
+    return (
+      <section className="runtime-shell workbench-page">
+        <header className="workbench-page-heading">
+          <div><p className="runtime-eyebrow">已提交 L2 · 固定 EMS 工作台</p><h2>运行总览</h2><span>真实值、质量与时间来自同一正式接口；异常状态不补零。</span></div>
+          <button type="button" onClick={load} disabled={workbenchLoading} className="neu-btn runtime-touch-button">{workbenchLoading ? '刷新中…' : '重试'}</button>
+        </header>
+        {workbenchError ? <div role="alert" className="runtime-error neu-card"><span>运行首页读取失败：{workbenchError}。失败不按空站或零值处理。</span><button type="button" onClick={load}>重试</button></div> : <div role="status" className="runtime-empty neu-card">正在读取固定首页槽位、告警与调度摘要…</div>}
+      </section>
+    )
   }
 
   return (
-    <section className="runtime-shell">
-      <header className="runtime-hero neu-card">
-        <div>
-          <p className="runtime-eyebrow">自足IOT · 已提交 L2</p>
-          <h2>光储充现场</h2>
-          <p>按真实节点与实体实例展示，不以首台设备代替全站。</p>
-        </div>
-        <div className="runtime-hero__actions">
-          {onOpenDevices && <button type="button" onClick={onOpenDevices} className="neu-btn runtime-touch-button">设备监控</button>}
-          {onOpenEngineering && <button type="button" onClick={() => onOpenEngineering()} className="neu-btn runtime-touch-button">工程配置</button>}
-          <button type="button" onClick={loadDirectory} className="neu-btn runtime-touch-button" disabled={directoryLoading}>刷新目录</button>
-        </div>
+    <section className="runtime-shell workbench-page">
+      <header className="workbench-page-heading">
+        <div><p className="runtime-eyebrow">已提交 L2 · 固定 EMS 工作台</p><h2>运行总览</h2><span>真实值、质量与时间来自同一正式接口；异常状态不补零。</span></div>
+        <div>{onOpenEngineering && <button type="button" onClick={() => setConfiguring(true)} className="neu-btn runtime-touch-button">配置首页指标</button>}<button type="button" onClick={load} disabled={workbenchLoading} className="neu-btn runtime-touch-button">{workbenchLoading ? '刷新中…' : '刷新'}</button></div>
       </header>
-
-      <nav className="runtime-tabs neu-card" aria-label="运行工作台">
-        {([['overview', '概览'], ['trends', '历史'], ['alarms', '告警'], ['controls', '控制']] as Array<[RuntimeTab, string]>).map(([tab, label]) => (
-          <button type="button" key={tab} onClick={() => changeTab(tab)} className={activeTab === tab ? 'zizu-tab-active' : 'neu-btn'}>{label}</button>
-        ))}
-      </nav>
-
-      {directoryError && (
-        <div role="alert" className="runtime-error neu-card">
-          <span>实体目录读取失败：{directoryError}。现有内容不按零处理。</span>
-          <button type="button" onClick={loadDirectory}>重试目录</button>
-        </div>
-      )}
-
-      {activeTab === 'overview' && (
-        <div className="runtime-content">
-          {directoryLoading && !directoryLoaded ? <div className="runtime-empty neu-card">正在读取真实 L2 实体目录…</div> : null}
-          {directoryLoaded && descriptors.length === 0 ? (
-            <div className="runtime-unconfigured neu-card">
-              <strong>运行首页未配置</strong>
-              <p>当前没有已确认的 L2 全局实体。请由实施工程师沿节点 → L0 → L1 → L2 完成配置；本站不生成推测总功率或能流。</p>
-              {onOpenEngineering && <button type="button" onClick={() => onOpenEngineering()} className="zizu-primary runtime-touch-button">前往工程配置</button>}
-            </div>
-          ) : null}
-          <div className="runtime-node-grid">
-            {nodes.map((node) => {
-              const state = states.get(node.nodeId)
-              const current = state?.status === 'current' && state.projection?.status === 'COMPLETE'
-              const alarmCount = alarmCountsError ? null : alarmCounts[node.nodeId] ?? 0
-              return (
-                <article key={node.nodeId} aria-label={`${node.nodeName} 运行数据`} className="runtime-node neu-card">
-                  <header>
-                    <div><p>{node.nodeType || '其他'}</p><h3>{node.nodeName}</h3><span>{node.nodeId}</span></div>
-                    <div className="runtime-node__actions">
-                      <button type="button" onClick={onOpenAlarms} className="runtime-alarm-count" aria-label={`${node.nodeName}未恢复告警`}>
-                        未恢复 {alarmCountsLoading ? '…' : alarmCount == null ? '—' : alarmCount}
-                      </button>
-                      {onOpenEngineering && <button type="button" onClick={() => onOpenEngineering(node.nodeId)} className="neu-btn">配置此节点</button>}
-                    </div>
-                  </header>
-                  {alarmCountsError && <p className="runtime-node__notice">告警计数未知 · <button type="button" onClick={loadAlarmCounts}>重试</button></p>}
-                  {state?.error && <p className="runtime-node__notice">实时链路：{state.error} · <button type="button" onClick={() => retryNode(node.nodeId)}>重试</button></p>}
-                  <div className="runtime-node__metrics">
-                    {node.entities.map((entity) => <RuntimeMetric key={entity.descriptor.id} entity={entity} nodeCurrent={current} onOpen={() => setSelectedEntityId(entity.descriptor.id)} />)}
-                  </div>
-                  <footer>
-                    <span>节点帧 {state?.projection?.frameSequence ?? '未记录'}</span>
-                    <span>配置修订 {state?.projection?.configurationRevision ?? workbench?.configuration_revision ?? '未记录'}</span>
-                    <span>{state?.status === 'current' ? '实时连接' : state?.status === 'loading' ? '正在重验' : '非当前'}</span>
-                  </footer>
-                </article>
-              )
-            })}
+      {workbenchError && <div role="alert" className="runtime-error neu-card"><span>运行首页读取失败：{workbenchError}。旧内容不按零处理。</span><button type="button" onClick={load}>重试</button></div>}
+      <div className="workbench-metrics" aria-label="关键指标">
+        {slots.map((slot) => <MetricCard key={slot.id} slot={slot} onOpen={() => setSelectedEntityId(slot.entity?.entity_instance_id || null)} />)}
+      </div>
+      <div className="workbench-dashboard">
+        <section className="workbench-flow neu-card" role="region" aria-label="站点能流">
+          <header><div><h3>站点能流</h3><p>固定光伏—储能—充电—电网/负荷拓扑</p></div><span className="workbench-health">● {slots.some((slot) => slot.reading.kind === 'current') ? '已取得当前数据' : '暂无当前数据'}</span></header>
+          <div className="workbench-flow__canvas">
+            <FlowNode slot={slots[1]} role="pv" />
+            <FlowNode slot={{ ...slots[0], label: '电网 / 负荷' }} role="site" />
+            <div className="workbench-flow__bus" aria-hidden="true"><i /><i /><i /><i /></div>
+            <FlowNode slot={slots[2]} role="storage" />
+            <FlowNode slot={slots[4]} role="charging" />
           </div>
-        </div>
-      )}
-
-      {activeTab === 'trends' && (
-        <section className="runtime-history-index neu-card">
-          <header><div><p className="runtime-eyebrow">按实体、按单位</p><h3>历史与来源</h3></div><span>选择一个实体后才读取历史，不混合节点或单位。</span></header>
-          {allEntities.length === 0 ? <div className="runtime-empty">暂无可查询实体。</div> : (
-            <div className="runtime-history-index__list">
-              {allEntities.map((entity) => (
-                <button type="button" key={entity.descriptor.id} onClick={() => setSelectedEntityId(entity.descriptor.id)} className="neu-inset">
-                  <span><strong>{entity.descriptor.display_name}</strong><small>{entity.descriptor.node_display_name} · {entity.descriptor.definition_id}</small></span>
-                  <span>{entity.descriptor.unit || '无单位'}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          <footer><span>ⓘ {flow.reason}</span>{onOpenDevices && <button type="button" onClick={onOpenDevices}>查看设备 →</button>}</footer>
         </section>
-      )}
-
-      {activeTab === 'controls' && (
-        <section className="runtime-control-panel neu-card">
-          <header><div><p className="runtime-eyebrow">统一安全入口</p><h3>授权控制</h3></div><span>受理不等于设备成功，必须等待回读。</span></header>
-          {workbenchError && <div className="runtime-error"><span>{workbenchError}</span><button type="button" onClick={loadWorkbench}>重试控制目录</button></div>}
-          {workbench ? (workbench.controls.visible ? <Controls entities={workbench.controls.entities} /> : <p className="runtime-empty">当前角色或配置没有可用控制。</p>) : !workbenchError ? <p className="runtime-empty">正在读取控制目录…</p> : null}
-        </section>
-      )}
-
-      {selected && (
-        <EntityRuntimeDetail
-          descriptor={selected.descriptor}
-          observation={selected.observation}
-          l0={[...(states.get(selected.descriptor.node_id)?.projection?.l0.values() || [])]}
-          nodeCurrent={states.get(selected.descriptor.node_id)?.status === 'current' && states.get(selected.descriptor.node_id)?.projection?.status === 'COMPLETE'}
-          onClose={() => setSelectedEntityId(null)}
-        />
-      )}
+        <aside className="workbench-side">
+          <section className="workbench-summary neu-card" role="region" aria-label="待处理告警">
+            <header><h3>待处理告警</h3><strong>{alarmTotal == null ? '—' : alarmTotal}<small> 条</small></strong></header>
+            {alarmError ? <p className="workbench-summary__error">{alarmError}</p> : alarms.length ? <div className="workbench-alarm-list">{alarms.slice(0, 3).map((alarm) => <div key={alarm.id}><span>♧</span><p><strong>{alarm.message}</strong><small>{alarm.node_name || alarm.entity_name || '来源未记录'} · {formatTime(alarm.created_at)}</small></p></div>)}</div> : <p className="workbench-summary__empty">当前无待处理告警</p>}
+            <button type="button" onClick={onOpenAlarms} className="neu-btn runtime-touch-button">查看告警 →</button>
+          </section>
+          <section className="workbench-summary workbench-dispatch neu-card" role="region" aria-label="调度摘要">
+            <header><h3>调度摘要</h3><span>{primaryStrategy ? (primaryStrategy.enabled ? '运行中' : '未启用') : '未配置'}</span></header>
+            {strategyError ? <p className="workbench-summary__error">{strategyError}</p> : primaryStrategy ? <dl><div><dt>当前策略</dt><dd>{primaryStrategy.name}</dd></div><div><dt>运行状态</dt><dd>{primaryStrategy.runtime_health}</dd></div><div><dt>最近求值</dt><dd>{formatTime(primaryStrategy.last_evaluated_at)}</dd></div><div><dt>已启用策略</dt><dd>{enabledStrategies.length}</dd></div></dl> : <p className="workbench-summary__empty">暂无真实调度策略</p>}
+            {onOpenEngineering ? <button type="button" onClick={() => onOpenEngineering()} className="neu-btn runtime-touch-button">前往工程配置 →</button> : <p className="workbench-summary__note">策略配置仅对实施工程师和管理员开放。</p>}
+          </section>
+        </aside>
+      </div>
+      {directoryError && <p role="status" className="workbench-detail-notice">L2 详情目录暂不可用：{directoryError}。首页槽位值仍以工作台响应为准。</p>}
+      {configuring && <SlotConfigurationDialog slots={slots} descriptors={descriptors} configurationRevision={workbench.configuration_revision} directoryError={directoryError} onRevision={(revision) => setWorkbench((current) => current ? { ...current, configuration_revision: revision } : current)} onClose={() => setConfiguring(false)} />}
+      {selected && <EntityRuntimeDetail descriptor={selected.descriptor} observation={selected.observation} l0={[...(states.get(selected.descriptor.node_id)?.projection?.l0.values() || [])]} nodeCurrent={states.get(selected.descriptor.node_id)?.status === 'current' && states.get(selected.descriptor.node_id)?.projection?.status === 'COMPLETE'} onClose={() => setSelectedEntityId(null)} />}
     </section>
   )
 }

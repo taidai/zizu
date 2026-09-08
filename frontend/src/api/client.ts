@@ -1890,6 +1890,11 @@ export interface ControlCommand {
   status: string
   code: string
   source_type: string
+  entity_instance_id?: string | null
+  expected_value?: unknown
+  timeout_at?: string | null
+  created_at?: string
+  dispatched_at?: string | null
 }
 
 export interface ControlConfirmation {
@@ -1913,12 +1918,41 @@ export interface WorkbenchEntity {
   quality?: number
 }
 
+export type EmsWorkbenchSlotKey = 'site-power' | 'pv-power' | 'storage-power' | 'storage-soc' | 'charging-power'
+export type EmsWorkbenchBindingMode = 'manual' | 'exact' | 'unconfigured' | 'ambiguous'
+
+export interface EmsWorkbenchSlot {
+  id: EmsWorkbenchSlotKey
+  label: string
+  binding_mode: EmsWorkbenchBindingMode
+  reason: string
+  entity: WorkbenchEntity | null
+}
+
+export interface EmsWorkbenchSlotReceipt {
+  slot_key: EmsWorkbenchSlotKey
+  entity_instance_id: string | null
+  configuration_revision: number
+  replayed: boolean
+}
+
+export class EmsWorkbenchSlotApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message)
+    this.name = 'EmsWorkbenchSlotApiError'
+  }
+}
+
 export interface EmsWorkbench {
   workbench_id: string
   configuration_revision: number
   navigation: { id: 'overview' | 'trends' | 'alarms' | 'controls'; label: string }[]
   groups: { id: string; label: string; entities: WorkbenchEntity[] }[]
-  kpis: { id: string; label: string; entities: WorkbenchEntity[] }[]
+  kpis: EmsWorkbenchSlot[]
   trends: { id: string; label: string; default_range: '1h' | '24h' | '7d' | '30d'; entities: WorkbenchEntity[] }[]
   alarms: { visible: boolean }
   controls: { visible: boolean; entities: WorkbenchEntity[] }
@@ -1937,6 +1971,33 @@ export async function fetchEmsWorkbench(): Promise<EmsWorkbench> {
   return response.json()
 }
 
+export async function saveEmsWorkbenchSlot(
+  slotKey: EmsWorkbenchSlotKey,
+  entityInstanceId: string | null,
+  baseConfigurationRevision: number,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<EmsWorkbenchSlotReceipt> {
+  const response = await apiFetch(`${API_BASE}/ems-workbench/slots/${encodeURIComponent(slotKey)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      entity_instance_id: entityInstanceId,
+      base_configuration_revision: baseConfigurationRevision,
+    }),
+  })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string | { code?: string; message?: string } } | null
+    const detail = payload?.detail
+    const message = typeof detail === 'string' ? detail : detail?.message
+    const code = typeof detail === 'object' && detail ? detail.code || null : null
+    throw new EmsWorkbenchSlotApiError(message || `保存首页槽位失败：${response.status}`, response.status, code)
+  }
+  return response.json()
+}
+
 export async function fetchEmsWorkbenchTrend(
   trendId: string,
   range: EmsWorkbenchTrend['range'],
@@ -1949,12 +2010,13 @@ export async function fetchEmsWorkbenchTrend(
 export async function requestControlConfirmation(
   entityInstanceId: string,
   value: unknown,
+  idempotencyKey: string = crypto.randomUUID(),
 ): Promise<ControlConfirmation> {
   const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-confirmations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Idempotency-Key': crypto.randomUUID(),
+      'Idempotency-Key': idempotencyKey,
     },
     body: JSON.stringify({ value }),
   })
@@ -1966,12 +2028,13 @@ export async function submitControlCommand(
   entityInstanceId: string,
   value: unknown,
   confirmationId?: string,
+  idempotencyKey: string = crypto.randomUUID(),
 ): Promise<ControlCommand> {
   const response = await apiFetch(`${API_BASE}/entity-instances/${entityInstanceId}/control-commands`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Idempotency-Key': crypto.randomUUID(),
+      'Idempotency-Key': idempotencyKey,
     },
     body: JSON.stringify({ value, ...(confirmationId ? { confirmation_id: confirmationId } : {}) }),
   })
