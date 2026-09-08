@@ -2,6 +2,7 @@ import { expect, test, type BrowserContext, type Locator, type Page } from '@pla
 
 import { buildAcceptanceEnvironment } from './support/acceptanceEnvironment.mjs'
 import { fixtureNames, publishRawPoint, runFixture } from './support/e2eFixture'
+import { nodeTree } from './support/nodeManagementLocators'
 import { openEngineeringPage } from './support/tabletNavigation'
 
 const CONFIGURATION_CHANGE_TIMEOUT_MS = 40_000
@@ -573,12 +574,6 @@ test.describe.serial('节点管理主干', () => {
     })
   })
 })
-
-function nodeTree(page: Page) {
-  return page.locator('div.neu-card').filter({
-    has: page.getByRole('heading', { name: '节点管理' }),
-  }).first()
-}
 
 function nodeModal(page: Page, heading: string) {
   return page.getByRole('dialog', { name: heading, exact: true })

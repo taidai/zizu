@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import type { PointProcessingPlan, Tag } from '../src/api/client'
+import { nodeTree } from './support/nodeManagementLocators'
 import { openEngineeringPage } from './support/tabletNavigation'
 
 test.use({ actionTimeout: 10_000 })
@@ -7,6 +8,7 @@ test.setTimeout(45_000)
 
 const retryStorageKey = 'zizu.dataTrunk.applyRetry.v1'
 const nodeId = 'recovery-node'
+const entityId = 'entity-fixture'
 const user = { id: 'recovery-engineer', username: 'recovery-test', role: 'engineer' }
 const digest = 'a'.repeat(64)
 const retry = { actorId: user.id, nodeId, planId: 'original-plan', planDigest: digest, idempotencyKey: 'original-request-key' }
@@ -31,6 +33,7 @@ async function installFixture(page: Page, options: {
   stored?: boolean
   action?: 'add' | 'update' | 'delete_candidate'
   restore?: 'ready' | 'pending' | 'unavailable'
+  includeEntity?: boolean
 } = {}) {
   const requests = { drafts: [] as unknown[], applies: [] as Array<{ key: string | undefined; body: unknown; path: string }> }
   const state = { restore: options.restore || 'ready' }
@@ -70,15 +73,75 @@ async function installFixture(page: Page, options: {
     if (path === '/api/v1/tags') return route.fulfill({ json: { tags: points, total: 2, page: 1, page_size: 10, total_pages: 1 } })
     if (path === '/api/v1/categories') return route.fulfill({ json: { categories: [] } })
     if (path === '/api/v1/alarms/counts') return route.fulfill({ json: { counts: {} } })
-    if (path === '/api/v1/entity-instances' || path === '/api/v1/point-processing-templates') return route.fulfill({ json: { items: [], total: 0 } })
+    if (path === '/api/v1/entity-instances') return route.fulfill({ json: {
+      items: options.includeEntity ? [{
+        id: entityId,
+        node_id: nodeId,
+        node_type: 'PCS',
+        node_display_name: '恢复测试节点',
+        definition_id: 'pcs.active_power',
+        display_name: 'PCS 有功功率',
+        data_type: 'FLOAT',
+        unit: 'kW',
+        direction: 'R',
+        freshness_seconds: 30,
+        confirmed: true,
+        control_eligible: false,
+      }] : [],
+      total: options.includeEntity ? 1 : 0,
+    } })
+    if (path === '/api/v1/point-processing-templates') return route.fulfill({ json: { items: [], total: 0 } })
     if (path === '/api/v1/runtime/frame-snapshot') return route.fulfill({ json: {
       type: 'frame_snapshot', node_id: nodeId, cursor: 'fixture:1', frame_sequence: 1,
       frame_time: '2026-09-07T01:00:00Z', configuration_revision: 1,
-      frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [], l2: [],
+      frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [],
+      l2: options.includeEntity ? [{
+        entity_instance_id: entityId,
+        node_id: nodeId,
+        definition_id: 'pcs.active_power',
+        display_name: 'PCS 有功功率',
+        data_type: 'FLOAT',
+        value: 12.5,
+        unit: 'kW',
+        quality: 192,
+        reason: null,
+        observed_at: '2026-09-07T01:00:00Z',
+        value_observed_at: '2026-09-07T01:00:00Z',
+        received_at: '2026-09-07T01:00:00Z',
+        calculated_at: '2026-09-07T01:00:00Z',
+        processing_revision_id: 'processing-r1',
+        configuration_revision: 1,
+        source_digest: 'b'.repeat(64),
+        frame_sequence: 1,
+      }] : [],
     } })
-    if (path.endsWith('/data-trunk')) return route.fulfill({ json: {
-      node_id: nodeId, l0: [], l1_summary: { installed: false, revision_id: null, output_count: 0, source_summary: [] }, l2: [],
-    } })
+    if (path.endsWith('/data-trunk')) {
+      const sourceSummary = [{ input_id: 'upstream', source_kind: 'l2', source_key: 'site.total_power' }]
+      return route.fulfill({ json: options.includeEntity ? {
+        node_id: nodeId,
+        l0: [],
+        l1_summary: {
+          installed: true,
+          revision_id: 'processing-r1',
+          configuration_revision: 1,
+          output_count: 1,
+          source_summary: sourceSummary,
+          input_bindings: { upstream: 'site.total_power' },
+          can_promote: false,
+        },
+        l2: [{
+          output_key: 'active_power',
+          entity_instance_id: entityId,
+          processing_kind: 'formula',
+          source_summary: sourceSummary,
+        }],
+      } : {
+        node_id: nodeId,
+        l0: [],
+        l1_summary: { installed: false, revision_id: null, output_count: 0, source_summary: [] },
+        l2: [],
+      } })
+    }
     if (path.endsWith('/point-processing-drafts/plan')) {
       requests.drafts.push(request.postDataJSON())
       return route.fulfill({ json: makePlan() })
@@ -115,7 +178,7 @@ async function storedRetry(page: Page) {
 
 test('engineering keeps nodes physical and exposes L0 L1 L2 as three data views', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 800 })
-  await installFixture(page)
+  await installFixture(page, { includeEntity: true })
   await openRawPoints(page)
 
   const views = page.getByRole('navigation', { name: '节点数据视图' })
@@ -128,15 +191,17 @@ test('engineering keeps nodes physical and exposes L0 L1 L2 as three data views'
   await expect(page.getByText('跨节点计算只能使用其他节点已发布的标准实体（L2）。', { exact: true })).toBeVisible()
   await views.getByRole('button', { name: '标准实体', exact: true }).click()
   await expect(page.getByRole('heading', { name: '标准实体', exact: true })).toBeVisible()
-  const entityTable = page.getByRole('table', { name: '标准实体实时数据' })
-  await expect(entityTable).toBeVisible()
-  await expect(entityTable.getByRole('columnheader', { name: '实体名称' })).toBeVisible()
-  await expect(entityTable.getByRole('columnheader', { name: '当前值' })).toBeVisible()
-  await expect(entityTable.getByRole('columnheader', { name: '质量' })).toBeVisible()
-  await expect(entityTable.getByRole('columnheader', { name: '数据时间' })).toBeVisible()
-  await expect(entityTable.getByRole('columnheader', { name: '来源 / 加工' })).toBeVisible()
+  const entityList = page.getByRole('list', { name: '标准实体实时数据' })
+  await expect(entityList).toBeVisible()
+  const entityRow = entityList.getByRole('listitem')
+  await expect(entityRow).toHaveCount(1)
+  await expect(entityRow).toContainText('pcs.active_power')
+  await expect(entityRow).toContainText('12.5')
+  await expect(entityRow).toContainText('标准实体（L2） · site.total_power')
+  await expect(entityRow).not.toContainText('跨节点标准实体')
 
-  const tree = page.getByRole('region', { name: '真实节点树' })
+  const tree = nodeTree(page)
+  await expect(tree).toBeVisible()
   await expect(tree.getByText('点位加工', { exact: true })).toHaveCount(0)
   await expect(tree.getByText('标准实体', { exact: true })).toHaveCount(0)
 

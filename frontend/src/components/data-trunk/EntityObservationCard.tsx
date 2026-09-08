@@ -74,7 +74,7 @@ export default function EntityObservationCard({
   const sourceLabel = sourceSummary.map(pointProcessingSourceLabel).join('、') || '等待来源'
 
   return (
-    <article className="rounded-lg border border-gray-200 bg-white">
+    <article role="listitem" className="rounded-lg border border-gray-200 bg-white">
       <button
         type="button"
         onClick={onToggle}

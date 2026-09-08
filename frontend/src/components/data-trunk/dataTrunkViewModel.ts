@@ -98,7 +98,7 @@ export function pointProcessingSourceLabel(source: {
   source_key: string
 }): string {
   const scope = source.source_kind === 'l2'
-    ? '跨节点标准实体（L2）'
+    ? '标准实体（L2）'
     : '本节点原始点位（L0）'
   return `${scope} · ${source.source_key}`
 }

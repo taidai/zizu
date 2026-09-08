@@ -214,7 +214,7 @@ test('node data tabs expose the explicit L0, L1 and L2 user workflow', async () 
   ])
 })
 
-test('point processing source labels keep local L0 and cross-node L2 distinct', async () => {
+test('L2 source labels do not claim a cross-node origin without node evidence', async () => {
   const model = await import('./dataTrunkViewModel.ts')
 
   assert.equal(
@@ -223,7 +223,7 @@ test('point processing source labels keep local L0 and cross-node L2 distinct', 
   )
   assert.equal(
     model.pointProcessingSourceLabel({ source_kind: 'l2', source_key: 'site.total_power' }),
-    '跨节点标准实体（L2） · site.total_power',
+    '标准实体（L2） · site.total_power',
   )
 })
 
