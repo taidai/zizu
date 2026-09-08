@@ -333,6 +333,22 @@ class PostgresStrategyRepository:
             )
             return self._get_view(connection, strategy_id)
 
+    def delete_strategy(self, strategy_id: UUID) -> None:
+        with self._write() as connection, connection.cursor() as cursor:
+            strategy = self._lock_strategy(cursor, strategy_id)
+            if strategy[4]:
+                raise StrategyRepositoryError('STRATEGY_DELETE_ENABLED', '请先停用策略，再删除。')
+            cursor.execute(
+                "SELECT 1 FROM t_dispatch_control_intents AS intent "
+                "LEFT JOIN t_control_commands AS command ON command.id=intent.control_command_id "
+                "WHERE intent.strategy_id=%s AND (intent.status IN ('PENDING','IN_FLIGHT') "
+                "OR command.status IN ('accepted','validated','dispatched')) LIMIT 1", (strategy_id,),
+            )
+            if cursor.fetchone() is not None:
+                raise StrategyRepositoryError('STRATEGY_DELETE_IN_FLIGHT', '控制尚未结束，请等待回读处理完成后删除。')
+            # Schema 064 cascades only this strategy's owned configuration/evidence.
+            cursor.execute('DELETE FROM t_dispatch_strategies WHERE id=%s', (strategy_id,))
+
     def clear_failure(self, strategy_id: UUID, actor: str) -> StrategyView:
         with self._write() as connection, connection.cursor() as cursor:
             strategy = self._lock_strategy(cursor, strategy_id)

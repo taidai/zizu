@@ -80,6 +80,9 @@ def _view(draft=True, enabled=False):
 
 
 class _Repository:
+    def delete_strategy(self, strategy_id):
+        self.calls.append(('delete', strategy_id))
+
     def __init__(self) -> None:
         self.view = _view()
         self.calls = []
@@ -175,6 +178,17 @@ class _Runtime:
 
 
 class DispatchStrategyPublicApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_requires_configuration_permission(self):
+        async with AuthenticatedApiClient(self.app) as client:
+            path = f'/api/v1/dispatch-strategies/{STRATEGY_ID}'
+            denied = await client._client.delete(path, headers={'Authorization': await client._bearer('operator')})
+            self.assertEqual(403, denied.status_code)
+            self.assertEqual([], self.repository.calls)
+            response = await client._request('DELETE', path)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual({'deleted': str(STRATEGY_ID)}, response.json())
+            self.assertEqual([('delete', STRATEGY_ID)], self.repository.calls)
+
     async def asyncSetUp(self) -> None:
         self.repository = _Repository()
         self.runtime = _Runtime()

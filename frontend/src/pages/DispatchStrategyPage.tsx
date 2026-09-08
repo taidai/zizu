@@ -6,6 +6,7 @@ import {
   clearDispatchStrategyFailure,
   createDispatchStrategy,
   disableDispatchStrategy,
+  deleteDispatchStrategy,
   enableDispatchStrategy,
   fetchControlCommand,
   fetchDispatchStrategies,
@@ -246,6 +247,22 @@ export default function DispatchStrategyPage() {
     if (pending) markEdited()
   }
 
+  const removeStrategy = () => {
+    if (!strategy || strategy.enabled || busy) return
+    if (!window.confirm(`永久删除“${strategy.name}”？策略、草稿、发布版本与策略事件将一并删除，无法撤销。独立控制命令日志保留。`)) return
+    return run('delete', async () => {
+      await deleteDispatchStrategy(strategy.id)
+      const remaining = strategies.filter(item => item.id !== strategy.id)
+      setStrategies(remaining)
+      setStrategy(null)
+      setSelectedId(remaining[0]?.id || '')
+      setSimulation(null)
+      setDraftReceipt(null)
+      setControlEvidence(null)
+      setNotice('策略已永久删除。')
+    })
+  }
+
   const createGeneric = () => run('create', async () => {
     const created = await createDispatchStrategy({ name: '通用调度策略' })
     if (!created.draft) throw new Error('服务端没有返回可编辑草稿。')
@@ -460,17 +477,12 @@ export default function DispatchStrategyPage() {
 
   return (
     <div className="tablet-applications tablet-dispatch-layout" data-tablet-applications="dispatch" data-testid="dispatch-strategy-page">
-      <aside className="dispatch-directory neu-card" aria-label="策略列表">
+      <section className="dispatch-directory dispatch-management neu-card" aria-label="策略管理">
         <label>调度策略<select aria-label="选择调度策略" className="neu-input" value={selectedId} disabled={!!busy || editorPending} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择策略</option>{strategies.map((item) => <option key={item.id} value={item.id}>{item.name} · {projectStrategyStatus(item).enableLabel}</option>)}</select></label>
-        {strategy && <span className="dispatch-current-output">目标 {valueText(strategy.last_desired)} / {observations[selectedSummaryOutputId] ? '当前 L2' : '决策时值'} {valueText(observations[selectedSummaryOutputId]?.value ?? strategy.last_actual)}</span>}
         <button type="button" onClick={createGeneric} disabled={!!busy} className="neu-btn zizu-primary px-3 text-xs font-semibold">新建通用策略</button>
+        {strategy && <button type="button" onClick={removeStrategy} disabled={!!busy || strategy.enabled} title={strategy.enabled ? '请先停用策略，再删除' : '永久删除所选策略及其策略记录'} className="neu-btn px-3 text-xs text-red-700 disabled:opacity-40">删除策略</button>}
         {!strategies.length && !error && <span>尚无策略，请新建通用策略。</span>}
-      </aside>
-
-      <main className="dispatch-main min-w-0">
-          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{(requiresReload || (!strategy && error)) && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
-        {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">{error ? '策略读取失败，请查看上方原因。' : busy ? '正在读取调度策略…' : '请选择或新建调度策略'}</div> : <>
-          <section className="dispatch-status neu-card" aria-label="策略状态">
+        {strategy && <div className="dispatch-status" role="region" aria-label="策略状态">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-[260px] flex-1"><label className="text-xs font-semibold text-gray-600">策略名称<input aria-label="策略名称" value={name} onChange={(event) => { setName(event.target.value); markEdited() }} className="neu-input mt-1 w-full px-3 py-2 text-sm" /></label><p className="mt-2 text-[11px] text-gray-500">{triggerKind === 'DATA_CHANGE' ? 'L2 数据变化触发' : '固定整分钟节拍'} · {currentRevision?.site_timezone} · 所有控制先形成意图，再由统一控制回读确认</p></div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -481,10 +493,12 @@ export default function DispatchStrategyPage() {
                 <span className={`rounded px-2 py-1 ${HEALTH_STYLES[strategy.runtime_health] || 'bg-gray-100'}`}>{status?.healthLabel}</span>
               </div>
             </div>
-          </section>
+          </div>}
+      </section>
 
-
-
+      <main className="dispatch-main min-w-0">
+          {(error || notice) && <div role={error ? 'alert' : 'status'} className={`flex min-h-11 flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-xs ${error ? 'border-red-200 bg-red-50 text-red-700' : 'border-green-200 bg-green-50 text-green-700'}`}><span>{error || notice}</span>{(requiresReload || (!strategy && error)) && <button type="button" className="neu-btn min-h-11 px-4 text-xs font-semibold text-[#981320]" onClick={() => setReloadNonce((value) => value + 1)}>重新加载策略</button>}</div>}
+        {!strategy ? <div className="neu-card flex min-h-[500px] items-center justify-center text-sm text-gray-400">{error ? '策略读取失败，请查看上方原因。' : busy ? '正在读取调度策略…' : '请选择或新建调度策略'}</div> : <>
           <div className="dispatch-steps" data-testid="dispatch-steps">
             <button type="button" className="neu-card" disabled={!!busy || editorPending} onClick={() => openBindings('INPUT')}><b>01</b><span><small>选择 L2 输入</small><strong>{draftBindings.filter((item) => item.direction === 'INPUT').length} 个全局实体 · 多输入</strong></span></button>
             <div className="neu-card"><b>02</b><span><small>原生 JDM 决策表</small><strong>{nativeTable ? '条件、规则与公式' : '保留完整规则图'}</strong></span></div>
@@ -537,12 +551,16 @@ export default function DispatchStrategyPage() {
             </div>}
           </section>
 
+          <details key={selectedId} className="dispatch-evidence neu-card">
+            <summary>关键事件与控制回读</summary>
+            <p className="px-4 py-2 text-xs text-gray-500">目标 {valueText(strategy.last_desired)} / {observations[selectedSummaryOutputId] ? '当前 L2' : '决策时值'} {valueText(observations[selectedSummaryOutputId]?.value ?? strategy.last_actual)}（不代表控制已确认）</p>
           <section className="neu-card p-4" aria-labelledby="events-heading"><div className="mb-3 flex items-center justify-between"><div><h3 id="events-heading" className="text-sm font-bold text-gray-800">4. 关键事件与控制回读</h3><p className="mt-1 text-xs text-gray-500">只读运行证据；accepted / dispatched 仅表示受理或等待回读，readback_confirmed 才是已确认到位。</p></div><button type="button" disabled={eventsBusy} onClick={() => loadEventPage()} className="neu-btn px-3 py-1.5 text-xs">刷新</button></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b text-left text-gray-500"><th className="p-2">时间</th><th className="p-2">事件</th><th className="p-2">原因/命中</th><th className="p-2">控制命令</th><th className="p-2">回读状态</th></tr></thead><tbody>{events.map((event) => <tr key={event.id} className="border-b border-white/60"><td className="p-2">{new Date(event.occurred_at).toLocaleString()}</td><td className="p-2 font-medium">{event.event_kind}</td><td className="p-2">{event.reason_code || valueText(event.decision?.matched_rule)}</td><td className="p-2 font-mono text-[10px]">{event.control_command_id ? <button type="button" className="text-[#981320] underline" aria-label={`查看控制回读 ${event.control_command_id}`} onClick={() => readControlEvidence(event.control_command_id!)}>{event.control_command_id}</button> : '—'}</td><td className="p-2">{event.control_status === 'readback_confirmed' ? '回读确认到位' : ['accepted', 'validated', 'dispatched'].includes(event.control_status || '') ? '等待回读' : event.control_status || '—'}<details className="mt-1"><summary className="cursor-pointer text-[#981320]">查看证据</summary><pre className="max-w-sm whitespace-pre-wrap break-all text-[10px]">{JSON.stringify({ frame_sequence: event.frame_sequence, configuration_revision: event.configuration_revision, snapshot: event.snapshot_evidence, decision: event.decision, intents: event.intent_summary, command_id: event.control_command_id, control_status: event.control_status }, null, 2)}</pre></details></td></tr>)}{!events.length && <tr><td colSpan={5} className="p-6 text-center text-gray-400">暂无关键事件</td></tr>}</tbody></table></div>
             {eventsError && <p role="alert" className="mt-3 text-xs text-red-700">事件读取失败：{eventsError}。上表保留上次证据，不代表最新状态。</p>}
             {eventsBusy && <p aria-live="polite" className="mt-3 text-xs text-gray-500">正在读取运行事件…</p>}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs"><label>每页条数<select aria-label="事件每页条数" value={eventPageSize} disabled={eventsBusy} onChange={(event) => loadEventPage(null, [], Number(event.target.value))} className="neu-input ml-2 px-2"><option value={10}>10</option><option value={20}>20</option></select></label><span>第 {eventHistory.length + 1} 页 · 本页 {events.length} 条</span><div className="flex gap-2"><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !eventHistory.length} onClick={() => loadEventPage(eventHistory[eventHistory.length - 1], eventHistory.slice(0, -1))}>上一页</button><button type="button" className="neu-btn px-3 disabled:opacity-40" disabled={eventsBusy || !nextEventCursor} onClick={() => loadEventPage(nextEventCursor, [...eventHistory, eventCursor])}>下一页</button></div></div>
           </section>
           {controlEvidence && <section className="neu-card p-4" aria-label="控制回读证据" data-testid="strategy-control-evidence"><div className="flex items-center justify-between gap-3"><h3 className="text-sm font-bold">控制回读证据</h3><button type="button" className="neu-btn px-3 text-xs" onClick={() => setControlEvidence(null)}>关闭证据</button></div><p className="mt-2 text-xs">{controlEvidence.command?.status === 'readback_confirmed' ? '回读确认到位（后端新 committed L2 证据）' : '未确认执行成功；仅按后端控制命令状态判断，不将接口受理当设备动作。'}</p>{controlEvidence.error ? <p role="alert" className="mt-2 text-xs text-red-700">{controlEvidence.error}</p> : controlEvidence.command ? <pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(controlEvidence.command, null, 2)}</pre> : <p aria-live="polite" className="mt-3 text-xs">正在读取控制命令…</p>}</section>}
+          </details>
           {infoDialog && <div className="dispatch-modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeInfo() }}>
             <section ref={infoModal.dialogRef} tabIndex={-1} onKeyDown={infoModal.onKeyDown} role="dialog" aria-modal="true" aria-label={infoDialog === 'json' ? '同一份 JDM 草稿 JSON' : infoDialog === 'preview' ? '输入/输出预览' : '表达式说明'} className="dispatch-modal neu-card">
               <header><h2>{infoDialog === 'json' ? '同一份 JDM 草稿 JSON' : infoDialog === 'preview' ? '输入/输出预览' : '表达式说明'}</h2><button type="button" className="neu-btn px-3" onClick={closeInfo}>关闭</button></header>

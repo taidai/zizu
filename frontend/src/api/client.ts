@@ -901,6 +901,10 @@ export function disableDispatchStrategy(strategyId: string): Promise<DispatchStr
   return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/disable`, { method: 'POST' })
 }
 
+export function deleteDispatchStrategy(strategyId: string): Promise<{ deleted: string }> {
+  return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}`, { method: 'DELETE' })
+}
+
 export function clearDispatchStrategyFailure(strategyId: string): Promise<DispatchStrategy> {
   return dispatchStrategyFetch(`/dispatch-strategies/${encodeURIComponent(strategyId)}/failure-latch/clear`, { method: 'POST' })
 }

@@ -164,6 +164,54 @@ async function installApi(page: Page, initialStrategy: any = null, entityRows = 
   return { calls, savedDrafts, getStrategy: () => strategy, setEvents: (items: any[]) => { events = items } }
 }
 
+test('删除策略需要确认，成功后清空编辑器', async ({ page }) => {
+  const api = await installApi(page, strategyView())
+  await page.route('**/api/v1/dispatch-strategies/strategy-1', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    await page.route('**/api/v1/dispatch-strategies', route => route.fulfill({ json: { strategies: [] } }))
+    return route.fulfill({ json: { deleted: 'strategy-1' } })
+  })
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  page.once('dialog', dialog => dialog.dismiss())
+  await expect(page.getByRole('button', { name: '删除策略', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '删除策略', exact: true }).click()
+  await expect(page.getByLabel('策略名称')).toBeVisible()
+  page.once('dialog', dialog => dialog.accept())
+  await page.getByRole('button', { name: '删除策略', exact: true }).click()
+  await expect(page.getByLabel('策略名称')).toHaveCount(0)
+  await expect(page.getByLabel('选择调度策略')).toHaveValue('')
+  expect(api.calls.some(call => call.endsWith('/enable'))).toBe(false)
+})
+
+test('删除被后端拒绝时保留策略及编辑内容', async ({ page }) => {
+  await installApi(page, strategyView())
+  await page.route('**/api/v1/dispatch-strategies/strategy-1', route => route.request().method() === 'DELETE'
+    ? route.fulfill({ status: 409, json: { detail: { code: 'STRATEGY_DELETE_IN_FLIGHT', message: '控制尚未结束，请等待回读处理完成后删除。' } } })
+    : route.fallback())
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  await page.getByLabel('策略名称').fill('未保存名称')
+  page.once('dialog', dialog => dialog.accept())
+  await page.getByRole('button', { name: '删除策略', exact: true }).click()
+  await expect(page.getByTestId('dispatch-strategy-page').getByRole('alert')).toContainText('控制尚未结束')
+  await expect(page.getByLabel('策略名称')).toHaveValue('未保存名称')
+})
+
+test('策略统一栏与默认收起运行证据', async ({ page }) => {
+  await installApi(page, strategyView())
+  await page.goto('/')
+  await openEngineeringPage(page, '调度策略')
+  const bar = page.getByRole('region', { name: '策略管理' })
+  await expect(bar.getByLabel('选择调度策略')).toBeVisible()
+  await expect(bar.getByLabel('策略名称')).toBeVisible()
+  await expect(bar.getByLabel('触发方式')).toBeVisible()
+  const events = page.getByRole('region', { name: '4. 关键事件与控制回读' })
+  await expect(events).not.toBeVisible()
+  await page.getByText('关键事件与控制回读', { exact: true }).click()
+  await expect(events).toBeVisible()
+})
+
 for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768 }]) test(`Demo布局首屏三步横排与全宽决策表 ${viewport.width}`, async ({ page }) => {
   const original = strategyView()
   original.draft.jdm_content = buildGenericDecisionTableJdm()
@@ -394,6 +442,7 @@ test('运行事件默认10条可切20条，游标翻页不覆盖未保存草稿'
   await page.goto('/')
   await openEngineeringPage(page, '调度策略')
   const region = page.getByRole('region', { name: '4. 关键事件与控制回读' })
+  await page.getByText('关键事件与控制回读', { exact: true }).click()
   await expect(region.locator('tbody tr')).toHaveCount(10)
   await page.getByLabel('策略名称').fill('本地未保存')
   await region.getByRole('button', { name: '下一页' }).click()
@@ -680,6 +729,7 @@ test('发布与启用明确分开；故障锁解除不恢复运行，事件受�
   expect(api.calls.some((call) => call.endsWith('/enable'))).toBe(false)
   await page.getByRole('button', { name: '启用', exact: true }).click()
   await expect(page.getByRole('region', { name: '策略状态' })).toContainText('已启用')
+  await page.getByText('关键事件与控制回读', { exact: true }).click()
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect(page.getByRole('cell', { name: /等待回读/ })).toBeVisible()
   await page.getByRole('button', { name: '查看控制回读 command-1' }).click()

@@ -152,6 +152,18 @@ async def get_dispatch_strategy(
         _raise_http(error)
 
 
+@router.delete("/dispatch-strategies/{strategy_id}", **protected(CONFIGURATION_WRITE))
+async def delete_dispatch_strategy(
+    strategy_id: UUID,
+    repository=Depends(get_dispatch_strategy_repository),
+) -> dict[str, str]:
+    try:
+        await asyncio.to_thread(repository.delete_strategy, strategy_id)
+        return {"deleted": str(strategy_id)}
+    except Exception as error:
+        _raise_http(error)
+
+
 @router.put("/dispatch-strategies/{strategy_id}/draft", **protected(CONFIGURATION_WRITE))
 async def save_dispatch_strategy_draft(
     strategy_id: UUID,
