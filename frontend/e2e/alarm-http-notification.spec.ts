@@ -93,6 +93,9 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
       )
     )).toBe(true)
     await runAlarmHttpFixture('clear-receiver', environment)
+    const notificationDialog = page.getByRole('dialog', { name: 'HTTP 通知', exact: true })
+    await notificationDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(notificationDialog).toBeHidden()
   })
 
   test('L2 告警发生和恢复各送达一次，确认动作不发送', async () => {
@@ -138,6 +141,9 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
       ))
     expect(records).toHaveLength(2)
     expect(new Set(records.map((record) => record.idempotency_key)).size).toBe(2)
+    const alarmRulesDialog = page.getByRole('dialog', { name: '告警规则配置', exact: true })
+    await alarmRulesDialog.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(alarmRulesDialog).toBeHidden()
   })
 
   test('界面通知记录可看见发生和恢复结果', async () => {
