@@ -65,6 +65,9 @@ test.describe.serial('告警 HTTP 通知闭环', () => {
     )
     await panel.getByRole('button', { name: '保存', exact: true }).click()
     await expect(panel.getByText('已保存。请求内容变化后，需要重新发送测试。')).toBeVisible()
+    const editor = page.getByRole('dialog', { name: 'HTTP 通知编辑器', exact: true })
+    await editor.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(editor).toBeHidden()
 
     const card = panel.locator('article').filter({ hasText: fixture.config_name })
     await card.getByRole('button', { name: '发送测试' }).click()
