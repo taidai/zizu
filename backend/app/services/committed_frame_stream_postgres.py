@@ -557,5 +557,16 @@ def _optional_iso(value: datetime | None) -> str | None:
 
 
 def _project_l0_change(payload: dict[str, Any]) -> dict[str, Any]:
-    payload["reason"] = payload.pop("quality_reason", None)
+    quality_reason = payload.pop("quality_reason", None)
+    effective_quality = payload["effective_quality"]
+    if effective_quality == int(TrunkQuality.STALE):
+        reason = "STALE"
+    elif effective_quality not in {
+        int(TrunkQuality.GOOD),
+        int(TrunkQuality.UNCERTAIN),
+    }:
+        reason = quality_reason or "SOURCE_QUALITY_BAD"
+    else:
+        reason = None
+    payload["reason"] = reason
     return payload

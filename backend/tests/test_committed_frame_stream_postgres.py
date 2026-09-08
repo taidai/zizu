@@ -323,7 +323,12 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
 
 class CommittedFrameLegacyProjectionTest(unittest.TestCase):
-    def test_l0_delta_uses_public_reason_without_leaking_outbox_key(self) -> None:
+    def _l0_delta_item(
+        self,
+        *,
+        effective_quality: TrunkQuality,
+        quality_reason: str | None,
+    ) -> dict[str, object]:
         node_id = uuid4()
         event = FrameOutboxEvent(
             frame_id=uuid4(),
@@ -335,13 +340,17 @@ class CommittedFrameLegacyProjectionTest(unittest.TestCase):
                     tag_id=uuid4(),
                     observation_id=uuid4(),
                     value=TypedValue.integer(2),
-                    source_quality=TrunkQuality.BAD,
-                    effective_quality=TrunkQuality.BAD,
+                    source_quality=(
+                        TrunkQuality.GOOD
+                        if effective_quality is TrunkQuality.STALE
+                        else effective_quality
+                    ),
+                    effective_quality=effective_quality,
                     source_timestamp=NOW,
                     received_at=NOW,
                     accepted_beat=10,
                     node_id=node_id,
-                    quality_reason="BIT_VALUE_OUT_OF_RANGE",
+                    quality_reason=quality_reason,
                 ),
             ),
             l2_changes=(),
@@ -356,10 +365,47 @@ class CommittedFrameLegacyProjectionTest(unittest.TestCase):
             event,
             FrameScope.for_node(node_id),
         )
-        item = delta.public_dict()["l0_changes"][0]
+        return delta.public_dict()["l0_changes"][0]
+
+    def test_l0_delta_preserves_explicit_bad_reason_without_leaking_outbox_key(
+        self,
+    ) -> None:
+        item = self._l0_delta_item(
+            effective_quality=TrunkQuality.BAD,
+            quality_reason="BIT_VALUE_OUT_OF_RANGE",
+        )
 
         self.assertEqual("BIT_VALUE_OUT_OF_RANGE", item["reason"])
         self.assertNotIn("quality_reason", item)
+
+    def test_l0_delta_labels_effective_stale_without_an_internal_reason(self) -> None:
+        item = self._l0_delta_item(
+            effective_quality=TrunkQuality.STALE,
+            quality_reason=None,
+        )
+
+        self.assertEqual("STALE", item["reason"])
+        self.assertNotIn("quality_reason", item)
+
+    def test_l0_delta_labels_bad_without_an_internal_reason(self) -> None:
+        item = self._l0_delta_item(
+            effective_quality=TrunkQuality.BAD,
+            quality_reason=None,
+        )
+
+        self.assertEqual("SOURCE_QUALITY_BAD", item["reason"])
+        self.assertNotIn("quality_reason", item)
+
+    def test_l0_delta_clears_obsolete_reason_for_usable_quality(self) -> None:
+        for quality in (TrunkQuality.GOOD, TrunkQuality.UNCERTAIN):
+            with self.subTest(quality=quality):
+                item = self._l0_delta_item(
+                    effective_quality=quality,
+                    quality_reason="BIT_VALUE_OUT_OF_RANGE",
+                )
+
+                self.assertIsNone(item["reason"])
+                self.assertNotIn("quality_reason", item)
 
     def test_zero_accepted_beat_is_immediately_stale(self) -> None:
         self.assertEqual(
