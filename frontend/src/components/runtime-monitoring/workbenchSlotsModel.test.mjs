@@ -114,14 +114,32 @@ test('unconfigured, ambiguous, unavailable, bad quality, and non-numeric reading
   assert.equal(slots.some((slot) => slot.reading.kind !== 'current' && slot.reading.valueText === '0.0'), false)
 })
 
-test('energy topology is always neutral because the slot contract carries no sign convention', () => {
+test('energy topology stays neutral without current runtime evidence', () => {
   const flow = fixedEnergyFlow(buildWorkbenchSlots([
     { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ value: 89.2 }) },
     { id: 'storage-power', label: '储能功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ entity_instance_id: 'storage', value: -26.8 }) },
   ]))
 
   assert.deepEqual(flow.links.map((link) => link.direction), ['neutral', 'neutral', 'neutral', 'neutral'])
-  assert.match(flow.reason, /方向语义/)
+  assert.match(flow.reason, /超时/)
+})
+
+test('current signed storage and grid power reverse flow; zero and stale readings stop it', () => {
+  for (const [id, value, current, expected] of [
+    ['storage-power', -26.8, true, 'from-bus'],
+    ['storage-power', 26.8, true, 'to-bus'],
+    ['site-power', -10, true, 'from-bus'],
+    ['site-power', 10, true, 'to-bus'],
+    ['pv-power', 10, true, 'to-bus'],
+    ['storage-power', 0, true, 'neutral'],
+    ['storage-power', -10, false, 'neutral'],
+  ]) {
+    const slots = buildWorkbenchSlots([
+      { id, binding_mode: 'exact', entity: entity({ value }), reason: '', label: id },
+    ], [{ entityInstanceId: 'entity-pv', nodeCurrent: current,
+      observation: { value, quality: 192, unit: 'kW', observed_at: '2026-09-08T08:00:00Z' } }])
+    assert.equal(fixedEnergyFlow(slots).links.find((link) => link.from === id).direction, expected)
+  }
 })
 
 test('binding candidates use exact type and unit compatibility rather than names', () => {

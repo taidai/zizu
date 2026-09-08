@@ -15,6 +15,7 @@ export type WorkbenchSlotView = EmsWorkbenchSlot & {
   reading: {
     kind: 'current' | 'last' | 'missing'
     valueText: string
+    numericValue: number | null
     unit: string
     quality: number | null
     observedAt: string | null
@@ -95,6 +96,7 @@ export function buildWorkbenchSlots(
       reading: {
         kind: current ? 'current' : hasValue ? 'last' : 'missing',
         valueText: hasValue ? valueText(value) : '—',
+        numericValue: typeof value === 'number' && Number.isFinite(value) ? value : null,
         unit: observation?.unit || entity?.unit || fixed.unit,
         quality,
         observedAt: observation?.value_observed_at || observation?.observed_at || entity?.observed_at || null,
@@ -115,15 +117,21 @@ export function compatibleSlotEntities(
 }
 
 export function fixedEnergyFlow(slots: readonly WorkbenchSlotView[]): {
-  links: Array<{ from: WorkbenchSlotKey; to: 'site-bus'; direction: 'neutral' }>
+  links: Array<{ from: WorkbenchSlotKey; to: 'site-bus'; direction: 'neutral' | 'to-bus' | 'from-bus' }>
   reason: string
 } {
   const available = new Set(slots.map((slot) => slot.id))
   return {
     links: (['pv-power', 'storage-power', 'charging-power', 'site-power'] as WorkbenchSlotKey[])
       .filter((id) => available.has(id))
-      .map((from) => ({ from, to: 'site-bus' as const, direction: 'neutral' as const })),
-    reason: '接口未提供功率正负方向语义，拓扑保持中性，不绘制推测流向。',
+      .map((from) => {
+        const reading = slots.find((slot) => slot.id === from)?.reading
+        const value = reading?.numericValue
+        const direction = reading?.kind !== 'current' || value == null || value === 0 || from === 'charging-power'
+          ? 'neutral' : value > 0 ? 'to-bus' : 'from-bus'
+        return { from, to: 'site-bus' as const, direction }
+      }),
+    reason: '电网＋供电／−返送；储能＋放电／−充电。零值、超时或未知停止流动；充电桩方向未约定，保持静态。电网槽位须绑定并网功率。',
   }
 }
 

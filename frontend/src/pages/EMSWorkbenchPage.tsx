@@ -471,11 +471,13 @@ export default function EMSWorkbenchPage({
       </div>
       <div className="workbench-dashboard">
         <section className="workbench-flow neu-card" role="region" aria-label="站点能流">
-          <header><div><h3>站点能流</h3><p>固定光伏—储能—充电—电网/负荷拓扑</p></div><span className="workbench-health">● {slots.some((slot) => slot.reading.kind === 'current') ? '已取得当前数据' : '暂无当前数据'}</span></header>
+          <header><div><h3>站点能流</h3><p>左侧供电端：光伏、电网 · 右侧：储能、充电桩</p></div><span className="workbench-health">● {slots.some((slot) => slot.reading.kind === 'current') ? '已取得当前数据' : '暂无当前数据'}</span></header>
           <div className="workbench-flow__canvas">
             <FlowNode slot={slots[1]} role="pv" />
-            <FlowNode slot={{ ...slots[0], label: '电网 / 负荷' }} role="site" />
-            <div className="workbench-flow__bus" aria-hidden="true"><i /><i /><i /><i /></div>
+            <FlowNode slot={{ ...slots[0], label: '电网' }} role="site" />
+            <div className="workbench-flow__bus" aria-hidden="true">
+              {flow.links.map((link) => <i key={link.from} data-flow-slot={link.from} data-direction={link.direction}><b /></i>)}
+            </div>
             <FlowNode slot={slots[2]} role="storage" />
             <FlowNode slot={slots[4]} role="charging" />
           </div>
