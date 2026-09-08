@@ -77,11 +77,20 @@ async function installFixture(page: Page, options: {
   countSequence?: Array<'success' | 'fail' | 'pending-success'>
   trunkFailures?: number
   installedRevision?: number | null
+  engineering?: boolean
 } = {}) {
   const writes: string[] = []
+  const user = options.engineering
+    ? { id: 'device-fixture-engineer', username: 'device-engineer', role: 'engineer' }
+    : { id: 'device-fixture-operator', username: 'device-operator', role: 'operator' }
   let nodeCalls = 0
   let countCalls = 0
   let trunkCalls = 0
+  await page.addInitScript((fixtureUser) => {
+    sessionStorage.setItem('zizu.auth.session.v1', JSON.stringify({
+      accessToken: 'isolated-device-test-session', expiresAt: '2099-01-01T00:00:00Z', user: fixtureUser,
+    }))
+  }, user)
   await page.addInitScript(() => {
     const sockets: FixtureWebSocket[] = []
     class FixtureWebSocket {
@@ -113,6 +122,27 @@ async function installFixture(page: Page, options: {
     const request = route.request()
     const url = new URL(request.url())
     if (request.method() !== 'GET' && !url.pathname.endsWith('/auth/ws-ticket')) writes.push(`${request.method()} ${url.pathname}`)
+    if (url.pathname.endsWith('/auth/me')) return fulfillJson(route, { user })
+    if (url.pathname.endsWith('/health')) return fulfillJson(route, {
+      status: 'healthy', version: 'test', uptime_seconds: 1,
+      components: { timescaledb: { status: 'connected' }, mqtt: { status: 'connected' }, neuron: { status: 'connected' } },
+      pipeline: { status: 'running', messages_received: 1, points_written_db: 1, last_message_at: '2026-09-08T08:00:00Z' },
+    })
+    if (url.pathname.endsWith('/ems-workbench')) return fulfillJson(route, {
+      workbench_id: 'isolated-device-monitor', configuration_revision: 12,
+      navigation: [{ id: 'overview', label: '总览' }], groups: [], kpis: [], trends: [],
+      alarms: { visible: true }, controls: { visible: false, entities: [] },
+    })
+    if (url.pathname.endsWith('/alarm-events')) return fulfillJson(route, {
+      items: [], total: 0, page: 1, page_size: 10, total_pages: 0,
+      summary: { active: 0, unacknowledged: 0, critical: 0 },
+    })
+    if (url.pathname.endsWith('/dispatch-strategies')) return fulfillJson(route, { strategies: [] })
+    if (url.pathname.endsWith('/categories')) return fulfillJson(route, { categories: [] })
+    if (url.pathname.endsWith('/tags')) return fulfillJson(route, {
+      tags: [], total: 0, page: Number(url.searchParams.get('page') || 1),
+      page_size: Number(url.searchParams.get('page_size') || 50), total_pages: 0,
+    })
     if (url.pathname.endsWith('/nodes')) {
       nodeCalls += 1
       return nodeCalls <= (options.nodeFailures || 0)
@@ -155,13 +185,20 @@ async function installFixture(page: Page, options: {
       reason: null, observed_at: '2026-09-07T02:00:00.000Z', age_ms: 0,
       processing_revision_id: 'pr-1', configuration_revision: 12, source_digest: 'sha256:status',
     })
-    return fulfillJson(route, {})
+    return fulfillJson(route, { detail: `Unconfigured isolated boundary: ${url.pathname}` }, 404)
   })
   return writes
 }
 
 async function mountDeviceMonitor(page: Page, options: { engineering?: boolean } = {}) {
+  const refresh = await page.request.get('/@react-refresh')
+  const isViteDevModule = /(?:application|text)\/javascript/.test(refresh.headers()['content-type'] || '')
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  if (!isViteDevModule) {
+    await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '设备监控', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '设备监控', exact: true })).toBeVisible()
+    return
+  }
   await page.evaluate(async ({ engineering }) => {
     document.head.innerHTML = '<meta charset="UTF-8"><title>Device monitor fixture</title>'
     document.body.innerHTML = '<div id="root"></div>'
@@ -391,9 +428,13 @@ test('configuration jump stays hidden when the shell does not grant engineering 
 })
 
 test('configuration jump targets the selected device when the shell grants engineering access', async ({ page }) => {
-  await installFixture(page)
+  await installFixture(page, { engineering: true })
   await mountDeviceMonitor(page, { engineering: true })
   await page.getByRole('article', { name: /同名 PCS 设备卡片/ }).first().getByRole('button', { name: '查看详情' }).click()
+  const targetTagsRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return url.pathname.endsWith('/tags') && url.searchParams.get('node_id') === 'device-1'
+  })
   await page.getByRole('dialog', { name: '同名 PCS' }).getByRole('button', { name: '配置此设备' }).click()
-  await expect.poll(() => page.evaluate(() => (window as Window & { __engineeringNodeId?: string }).__engineeringNodeId)).toBe('device-1')
+  await targetTagsRequest
 })
