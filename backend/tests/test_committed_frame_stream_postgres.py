@@ -18,6 +18,7 @@ from app.services.committed_frame_stream_postgres import (
     _l0_snapshot_value,
 )
 from app.services.data_trunk_contracts import (
+    FrameStatus,
     FramedRawObservation,
     FrozenFrameCandidate,
     RawObservation,
@@ -26,6 +27,7 @@ from app.services.data_trunk_contracts import (
     TypedValue,
 )
 from app.services.data_trunk_freshness import effective_l0_quality
+from app.services.data_trunk_outbox import CommittedL0Change, FrameOutboxEvent
 from app.services.data_trunk_postgres import PostgresFrameRepository
 from tests import test_data_frames_migration_postgres as frame_migration
 from tests import test_committed_frame_payload_migration_postgres as payload_migration
@@ -321,6 +323,44 @@ class CommittedFrameStreamConnectionContractTest(unittest.TestCase):
 
 
 class CommittedFrameLegacyProjectionTest(unittest.TestCase):
+    def test_l0_delta_uses_public_reason_without_leaking_outbox_key(self) -> None:
+        node_id = uuid4()
+        event = FrameOutboxEvent(
+            frame_id=uuid4(),
+            frame_sequence=10,
+            status=FrameStatus.COMPLETE,
+            configuration_revision=7,
+            l0_changes=(
+                CommittedL0Change(
+                    tag_id=uuid4(),
+                    observation_id=uuid4(),
+                    value=TypedValue.integer(2),
+                    source_quality=TrunkQuality.BAD,
+                    effective_quality=TrunkQuality.BAD,
+                    source_timestamp=NOW,
+                    received_at=NOW,
+                    accepted_beat=10,
+                    node_id=node_id,
+                    quality_reason="BIT_VALUE_OUT_OF_RANGE",
+                ),
+            ),
+            l2_changes=(),
+            failure_id=None,
+            failure_code=None,
+            frame_time=NOW,
+        )
+
+        delta = PostgresCommittedFrameStreamRepository(
+            connection_factory=lambda: None
+        ).project_event(
+            event,
+            FrameScope.for_node(node_id),
+        )
+        item = delta.public_dict()["l0_changes"][0]
+
+        self.assertEqual("BIT_VALUE_OUT_OF_RANGE", item["reason"])
+        self.assertNotIn("quality_reason", item)
+
     def test_zero_accepted_beat_is_immediately_stale(self) -> None:
         self.assertEqual(
             int(TrunkQuality.STALE),

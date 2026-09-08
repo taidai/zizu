@@ -213,7 +213,7 @@ class PostgresCommittedFrameStreamRepository:
         entity_ids: frozenset[UUID] | None = None,
     ) -> FrameDelta:
         l0 = tuple(
-            item.public_dict()
+            _project_l0_change(item.public_dict())
             for item in event.l0_changes
             if item.node_id == scope.node_id
             and (tag_ids is None or item.tag_id in tag_ids)
@@ -554,3 +554,8 @@ def _iso(value: datetime) -> str:
 
 def _optional_iso(value: datetime | None) -> str | None:
     return None if value is None else _iso(value)
+
+
+def _project_l0_change(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["reason"] = payload.pop("quality_reason", None)
+    return payload
