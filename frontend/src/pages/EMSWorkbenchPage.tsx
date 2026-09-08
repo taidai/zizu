@@ -227,13 +227,15 @@ function Controls({ entities }: { entities: WorkbenchEntity[] }) {
               <h3>确认控制命令</h3>
               <dl><div><dt>控制对象</dt><dd>{confirmation.entity.node_name} · {confirmation.entity.display_name}</dd></div><div><dt>目标值</dt><dd>{String(confirmation.value)} {confirmation.entity.unit || ''}</dd></div><div><dt>有效期</dt><dd>{formatTime(confirmation.receipt.expires_at)}{expired ? ' · 已过期' : ''}</dd></div></dl>
               <p>确认下发仅表示向统一控制运行时提交命令；设备成功必须以后端 committed L2 回读为准。</p>
+              {(error || expired) && <p role="alert" className="runtime-error workbench-inline-message">{error || '二次确认已过期，请重新申请。'}</p>}
+              {message && <p role="status" className="runtime-message workbench-inline-message">{message}</p>}
               <div><button type="button" disabled={expired || busyIds.has('dispatch')} onClick={() => void execute()} className="runtime-danger runtime-touch-button">{busyIds.has('dispatch') ? '下发中…' : '确认下发'}</button><button type="button" disabled={busyIds.has('dispatch')} onClick={() => setConfirmation(null)} className="neu-btn runtime-touch-button">取消</button></div>
             </section>
           </div>
         )
       })()}
-      {error && <p role="alert" className="runtime-error workbench-inline-message">{error}</p>}
-      {message && <p role="status" className="runtime-message workbench-inline-message">{message}</p>}
+      {!confirmation && error && <p role="alert" className="runtime-error workbench-inline-message">{error}</p>}
+      {!confirmation && message && <p role="status" className="runtime-message workbench-inline-message">{message}</p>}
     </div>
   )
 }

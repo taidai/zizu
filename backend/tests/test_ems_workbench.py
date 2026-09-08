@@ -36,6 +36,7 @@ from app.services.ems_workbench_slots import (
 )
 from app.services.entity_instance_catalog import EntityInstanceCatalog, EntityInstanceDescriptor
 from app.services.ems_workbench import EmsWorkbench
+from app.services.realtime_blackboard import RealtimeBlackboard
 from tests.api_test_client import AuthenticatedApiClient
 
 
@@ -301,6 +302,43 @@ class _RevisionBlackboard:
         required_tag_ids: frozenset,
     ) -> None:
         self.revision = revision
+
+
+class _AckLostSlotRepository(_ReplayAfterWriteRepository):
+    """Persist the complete transaction, then lose its acknowledgement."""
+
+    def __init__(self, *, committed: bool) -> None:
+        super().__init__({"storage-power": SECOND_ENTITY_ID})
+        self.committed = committed
+        self.revision = 7
+        self.restore_revisions: list[int] = []
+
+    def set_binding(self, **kwargs) -> WorkbenchSlotWriteReceipt:
+        if self.committed:
+            receipt = super().set_binding(**kwargs)
+            self.revision = receipt.configuration_revision
+        else:
+            self.calls.append(kwargs)
+        raise ConnectionError("database acknowledgement lost")
+
+    def current_configuration_revision(self) -> int:
+        return self.revision
+
+    def unfinished_frame_count(self) -> int:
+        return 0
+
+    def unpublished_frame_outbox_count(self) -> int:
+        return 0
+
+    def restore_blackboard(self) -> BlackboardRecovery:
+        self.restore_revisions.append(self.revision)
+        return BlackboardRecovery(
+            capture_beat=0,
+            configuration_revision=self.revision,
+            active_input_contracts={},
+            required_tag_ids=frozenset(),
+            observations=(),
+        )
 
 
 class _InterleavingSlotRepository(_SlotRepository):
@@ -609,6 +647,72 @@ class WorkbenchSlotWriteTest(unittest.TestCase):
             gate.events,
         )
         self.assertIs(GateState.RUNNING, gate.state)
+
+    def test_commit_ack_lost_replay_reconciles_authoritative_binding_once(self) -> None:
+        # Break caught: treating an ACK loss as rollback resumes capture on the
+        # old blackboard and lets the committed same-key replay bypass recovery.
+        for target in (PCS_POWER_ID, None):
+            with self.subTest(target=target):
+                repository = _AckLostSlotRepository(committed=True)
+                blackboard = RealtimeBlackboard(active_input_contracts={}, required_tag_ids=frozenset())
+                blackboard.restore((), configuration_revision=7)
+                gate = ConfigurationRuntimeGate(repository, blackboard)
+                gate.register_committed_frame_consumer()
+                subject = EmsWorkbenchSlots(
+                    EntityInstanceCatalog(_CatalogRepository((_entity(PCS_POWER_ID, "pcs.active_power"),))),
+                    repository,
+                )
+                request = dict(slot_key="storage-power", entity_instance_id=target,
+                               base_configuration_revision=7, actor="user:engineer",
+                               idempotency_key="lost-ack", runtime_gate=gate)
+
+                with self.assertRaises(DataTrunkError) as unknown:
+                    subject.bind(**request)
+                self.assertEqual("CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED", unknown.exception.code)
+                self.assertIn("unknown", str(unknown.exception).lower())
+                self.assertIs(GateState.QUIESCED, gate.state)
+                self.assertFalse(gate.enter_capture())
+                self.assertIsNone(blackboard.tick(datetime(2026, 9, 8, tzinfo=UTC), configuration_revision=7))
+                self.assertEqual(8, repository.revision)
+                self.assertEqual(target, repository.list_manual_bindings().get("storage-power"))
+
+                receipt = subject.bind(**request)
+                self.assertEqual(WorkbenchSlotWriteReceipt("storage-power", target, 8, True), receipt)
+                self.assertIsNone(blackboard.tick(datetime(2026, 9, 8, tzinfo=UTC), configuration_revision=8))
+                self.assertIs(GateState.RUNNING, gate.state)
+                self.assertEqual(receipt, subject.bind(**request))
+                self.assertEqual([8], repository.restore_revisions)
+                self.assertEqual(1, len(repository.calls))
+
+    def test_unknown_commit_without_persisted_receipt_stays_fail_closed(self) -> None:
+        # Break caught: retrying an ambiguous write with no durable receipt
+        # must not publish again or infer rollback/success from absence alone.
+        repository = _AckLostSlotRepository(committed=False)
+        blackboard = RealtimeBlackboard(active_input_contracts={}, required_tag_ids=frozenset())
+        blackboard.restore((), configuration_revision=7)
+        gate = ConfigurationRuntimeGate(repository, blackboard)
+        gate.register_committed_frame_consumer()
+        subject = EmsWorkbenchSlots(
+            EntityInstanceCatalog(_CatalogRepository((_entity(PCS_POWER_ID, "pcs.active_power"),))),
+            repository,
+        )
+        request = dict(slot_key="storage-power", entity_instance_id=PCS_POWER_ID,
+                       base_configuration_revision=7, actor="user:engineer",
+                       idempotency_key="not-proven", runtime_gate=gate)
+
+        with self.assertRaises(DataTrunkError):
+            subject.bind(**request)
+        self.assertIs(GateState.QUIESCED, gate.state)
+        with self.assertRaises(DataTrunkError) as retry:
+            subject.bind(**request)
+        self.assertEqual("CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED", retry.exception.code)
+        self.assertIn("unknown", str(retry.exception).lower())
+        self.assertIs(GateState.QUIESCED, gate.state)
+        self.assertFalse(gate.enter_capture())
+        self.assertIsNone(blackboard.tick(datetime(2026, 9, 8, tzinfo=UTC), configuration_revision=7))
+        self.assertEqual(7, repository.revision)
+        self.assertEqual([], repository.restore_revisions)
+        self.assertEqual(1, len(repository.calls))
 
     def test_busy_runtime_never_turns_an_idempotent_replay_into_false_success(self) -> None:
         # Break caught: a replay returning 200 while another configuration

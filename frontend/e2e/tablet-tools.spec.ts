@@ -495,12 +495,96 @@ test('清空表先显示范围和不可恢复后果，确认前不发送请求',
   const danger = page.getByRole('dialog', { name: '确认永久清空数据' })
   await expect(danger).toContainText('t_telemetry')
   await expect(danger).toContainText('不可恢复')
+  await expect(danger.getByRole('button', { name: '永久清空', exact: true })).toBeDisabled()
   expect(writes).toEqual([])
   await danger.getByLabel('输入 yes 确认').fill('yes')
   await danger.getByRole('button', { name: '永久清空', exact: true }).click()
   await expect(toolsDialog.getByRole('status')).toContainText('已清空 t_telemetry，删除 12 行')
   expect(writes).toEqual(['POST /admin/truncate'])
 })
+
+for (const missing of ['name', 'url'] as const) {
+  test(`HTTP editor keeps ${missing} validation inside the current dialog`, async ({ page }) => {
+    // Break caught: validation exists but is rendered behind the active overlay.
+    const writes = await installToolsApi(page)
+    await login(page)
+    await openEngineeringPage(page, '系统工具')
+    await page.getByRole('button', { name: '打开HTTP 通知', exact: true }).click()
+    await page.getByRole('button', { name: '新增通知', exact: true }).click()
+    const editor = page.getByRole('dialog', { name: 'HTTP 通知编辑器', exact: true })
+    await editor.getByLabel(missing === 'name' ? '请求地址' : '名称', { exact: true }).fill(missing === 'name' ? 'https://receiver.invalid/alerts' : '值班草稿')
+    await editor.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(editor.getByRole('alert')).toContainText('请填写名称和请求地址', { timeout: 5_000 })
+    await expect(editor).toBeVisible()
+    expect(writes).toEqual([])
+  })
+}
+
+for (const outcome of ['403', '503', 'network', 'success'] as const) {
+  test(`HTTP editor shows ${outcome} save feedback without losing the current draft`, async ({ page }, testInfo) => {
+    // Break caught: a save response is hidden outside the open editor.
+    await installToolsApi(page)
+    const saves: unknown[] = []
+    await page.route('**/api/v1/admin/alarm-http-notifications/http-config-1', (route) => {
+      saves.push(route.request().postDataJSON())
+      if (outcome === 'network') return route.abort('failed')
+      return route.fulfill({
+        status: outcome === 'success' ? 200 : Number(outcome), contentType: 'application/json',
+        body: JSON.stringify(outcome === 'success' ? { ...notification, name: '值班草稿' } : outcome === '503' ? { detail: { code: 'HTTP_NOTIFICATION_PERSISTENCE_UNAVAILABLE', message: 'database unavailable' } } : { detail: 'Forbidden' }),
+      })
+    })
+    await login(page)
+    await openEngineeringPage(page, '系统工具')
+    await page.getByRole('button', { name: '打开HTTP 通知', exact: true }).click()
+    await page.getByRole('dialog', { name: 'HTTP 通知', exact: true }).getByRole('button', { name: '编辑', exact: true }).click()
+    const editor = page.getByRole('dialog', { name: 'HTTP 通知编辑器', exact: true })
+    await editor.getByLabel('名称', { exact: true }).fill('值班草稿')
+    await editor.getByRole('button', { name: '保存', exact: true }).click()
+    const feedback = editor.getByRole(outcome === 'success' ? 'status' : 'alert')
+    const expectedFeedback = outcome === 'success' ? '已保存' : outcome === 'network' ? /Failed to fetch|HTTP 通知操作失败/ : outcome === '503' ? '通知配置暂时无法保存，请稍后重试。' : 'HTTP 通知请求未完成，请检查配置后重试。'
+    await expect(feedback).toContainText(expectedFeedback, { timeout: 5_000 })
+    await feedback.scrollIntoViewIfNeeded()
+    expect(await feedback.evaluate((element) => {
+      const box = element.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+    })).toBe(true)
+    await expect(editor.getByLabel('名称', { exact: true })).toHaveValue('值班草稿')
+    expect(saves).toHaveLength(1)
+    await expect(editor.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+    await page.screenshot({ path: testInfo.outputPath(`http-feedback-${outcome}.png`), fullPage: true })
+    await editor.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(page.getByRole('dialog', { name: 'HTTP 通知', exact: true }).getByRole(outcome === 'success' ? 'status' : 'alert')).toContainText(expectedFeedback)
+  })
+}
+
+for (const outcome of ['503', 'network'] as const) {
+  test(`permanent truncate ${outcome} failure remains inside confirmation for explicit retry`, async ({ page }, testInfo) => {
+    // Break caught: failure is obscured, or a retry loses its confirmed table/input.
+    await installToolsApi(page)
+    const attempts: unknown[] = []
+    await page.route('**/api/v1/admin/truncate', (route) => {
+      attempts.push(route.request().postDataJSON())
+      return outcome === 'network' ? route.abort('failed') : route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'TRUNCATE_UNAVAILABLE' }) })
+    })
+    await login(page)
+    await openEngineeringPage(page, '系统工具')
+    await page.getByRole('button', { name: '打开数据与系统状态', exact: true }).click()
+    const parent = page.getByRole('dialog', { name: '数据与系统状态', exact: true })
+    await parent.getByLabel('要清空的表').selectOption('t_audit_log')
+    await parent.getByRole('button', { name: '准备清空表', exact: true }).click()
+    const confirmation = page.getByRole('dialog', { name: '确认永久清空数据', exact: true })
+    await confirmation.getByLabel('输入 yes 确认').fill('yes')
+    await confirmation.getByRole('button', { name: '永久清空', exact: true }).click()
+    await expect(confirmation.getByRole('alert')).toContainText(outcome === 'network' ? /Failed to fetch|操作失败/ : 'TRUNCATE_UNAVAILABLE', { timeout: 5_000 })
+    await expect(confirmation).toContainText('t_audit_log')
+    await expect(confirmation.getByLabel('输入 yes 确认')).toHaveValue('yes')
+    await expect(confirmation.getByRole('button', { name: '永久清空', exact: true })).toBeEnabled()
+    expect(attempts).toEqual([{ table: 't_audit_log', confirm: 'yes' }])
+    await page.screenshot({ path: testInfo.outputPath(`truncate-feedback-${outcome}.png`), fullPage: true })
+    await confirmation.getByRole('button', { name: '取消', exact: true }).click()
+    await expect(parent.getByRole('alert')).toContainText(outcome === 'network' ? /Failed to fetch|操作失败/ : 'TRUNCATE_UNAVAILABLE')
+  })
+}
 
 test('HTTP 测试展示服务端返回的正式收据而非通用成功文案', async ({ page }) => {
   const writes = await installToolsApi(page)

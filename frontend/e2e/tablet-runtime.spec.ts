@@ -183,6 +183,20 @@ for (const viewport of [{ width: 1024, height: 768 }, { width: 1280, height: 800
     expect(fixture.writes.filter((request) => !request.endsWith('/auth/ws-ticket'))).toEqual([])
     await page.screenshot({ path: testInfo.outputPath(`overview-${viewport.width}x${viewport.height}.png`), fullPage: true })
   })
+
+  test(`workbench key touch targets are at least 44px at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    // Break caught: desktop/mobile CSS shrinks key navigation hit areas below 44px.
+    await installFixture(page, 'engineer')
+    await page.setViewportSize(viewport)
+    await page.goto('/', { waitUntil: 'networkidle' })
+    const navigationActions = page.getByRole('button', { name: /^(查看设备|查看告警|前往工程配置)/ })
+    await expect(navigationActions).toHaveCount(3)
+    for (const action of await navigationActions.all()) {
+      await expect(action).toBeVisible()
+      expect.soft((await action.boundingBox())?.height, `${viewport.width}px ${await action.innerText()} touch height`).toBeGreaterThanOrEqual(44)
+    }
+    await page.screenshot({ path: testInfo.outputPath(`touch-targets-${viewport.width}x${viewport.height}.png`), fullPage: true })
+  })
 }
 
 test('metric opens the existing committed-L2 detail instead of exposing frame evidence on the overview', async ({ page }) => {

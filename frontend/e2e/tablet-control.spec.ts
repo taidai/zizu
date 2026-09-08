@@ -115,6 +115,7 @@ test('expired confirmation fails closed in place without a command write', async
   await page.getByLabel('PCS 功率设定目标值').fill('10')
   await page.getByRole('button', { name: '申请二次确认' }).click()
   await expect(page.getByRole('alertdialog', { name: '确认控制命令' })).toContainText('已过期')
+  await expect(page.getByRole('alertdialog', { name: '确认控制命令' }).getByRole('alert')).toContainText('已过期', { timeout: 5_000 })
   await expect(page.getByRole('button', { name: '确认下发' })).toBeDisabled()
   expect(calls.commands).toHaveLength(0)
   expect(calls.writes).toEqual(['POST /api/v1/entity-instances/entity-control/control-confirmations'])
@@ -175,7 +176,7 @@ test('an unknown command result retries the same confirmation with the same idem
   await page.getByLabel('PCS 功率设定目标值').fill('10')
   await page.getByRole('button', { name: '申请二次确认' }).click()
   await page.getByRole('button', { name: '确认下发' }).click()
-  await expect(page.getByRole('alert')).toContainText(/控制命令提交失败|Failed to fetch/)
+  await expect(page.getByRole('alertdialog', { name: '确认控制命令' }).getByRole('alert')).toContainText(/控制命令提交失败|Failed to fetch/, { timeout: 5_000 })
   await expect(page.getByRole('alertdialog', { name: '确认控制命令' })).toBeVisible()
 
   await page.getByRole('button', { name: '确认下发' }).click()
@@ -192,3 +193,32 @@ test('an unknown command result retries the same confirmation with the same idem
     'POST /api/v1/control-commands/command-2/reconcile',
   ])
 })
+
+for (const status of [409, 503]) {
+  test(`control dispatch ${status} failure stays inside the current confirmation`, async ({ page }, testInfo) => {
+    // Break caught: dispatch error is hidden behind the modal or loses its key.
+    const calls = await installControlFixture(page)
+    const attempts: Array<{ body: unknown; key: string | null }> = []
+    await page.route('**/api/v1/entity-instances/entity-control/control-commands', async (route) => {
+      attempts.push({ body: route.request().postDataJSON(), key: await route.request().headerValue('Idempotency-Key') })
+      return json(route, { detail: { code: status === 409 ? 'CONTROL_CONFIRMATION_EXPIRED' : 'CONTROL_RESULT_UNKNOWN', message: status === 409 ? '二次确认已过期' : '控制结果未知，请使用同一幂等键核对' } }, status)
+    })
+    await page.goto('/', { waitUntil: 'networkidle' })
+    await page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '手动控制' }).click()
+    await page.getByLabel('PCS 功率设定目标值').fill('10')
+    await page.getByRole('button', { name: '申请二次确认' }).click()
+    const confirmation = page.getByRole('alertdialog', { name: '确认控制命令' })
+    await confirmation.getByRole('button', { name: '确认下发' }).click()
+    await expect(confirmation.getByRole('alert')).toContainText(status === 409 ? '二次确认已过期' : '控制结果未知', { timeout: 5_000 })
+    await expect(confirmation).toContainText('10 kW')
+    expect(attempts).toHaveLength(1)
+    await page.screenshot({ path: testInfo.outputPath(`control-feedback-${status}.png`), fullPage: true })
+    if (status === 503) {
+      await confirmation.getByRole('button', { name: '确认下发' }).click()
+      await expect.poll(() => attempts.length).toBe(2)
+      expect(attempts[1]).toEqual(attempts[0])
+    }
+    expect(calls.confirmations).toHaveLength(1)
+    expect(calls.reconcile).toBe(0)
+  })
+}

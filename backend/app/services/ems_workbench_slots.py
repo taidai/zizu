@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Protocol
 from uuid import UUID
 
-from app.services.configuration_revision import GateState
+from app.services.configuration_revision import ConfigurationRevisionError, GateState
 from app.services.data_trunk_contracts import DataTrunkError
 from app.services.entity_instance_catalog import EntityInstanceCatalog, EntityInstanceDescriptor
 
@@ -51,7 +51,7 @@ class _PendingWorkbenchSlotRecovery:
     base_configuration_revision: int
     actor: str
     idempotency_key: str
-    configuration_revision: int
+    configuration_revision: int | None
 
     def matches(
         self,
@@ -69,7 +69,13 @@ class _PendingWorkbenchSlotRecovery:
             and self.base_configuration_revision == base_configuration_revision
             and self.actor == actor.strip()
             and self.idempotency_key == idempotency_key.strip()
-            and self.configuration_revision == receipt.configuration_revision
+            and receipt.slot_key == self.slot_key
+            and receipt.entity_instance_id == self.entity_instance_id
+            and receipt.configuration_revision == (
+                self.configuration_revision
+                if self.configuration_revision is not None
+                else self.base_configuration_revision + 1
+            )
         )
 
 
@@ -226,6 +232,11 @@ class EmsWorkbenchSlots:
         )
         if replay is not None:
             if runtime_gate is None:
+                if self._pending_recovery is not None:
+                    raise DataTrunkError(
+                        "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+                        "Slot publication requires runtime reconciliation",
+                    )
                 return replay
             runtime_state = runtime_gate.state
             if runtime_state is GateState.RUNNING:
@@ -245,12 +256,26 @@ class EmsWorkbenchSlots:
                         "CONFIGURATION_RUNTIME_BUSY",
                         "CONFIGURATION_RUNTIME_BUSY",
                     )
+                if (
+                    pending.configuration_revision is None
+                    and self._repository.list_manual_bindings().get(slot_key)
+                    != replay.entity_instance_id
+                ):
+                    raise DataTrunkError(
+                        "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+                        "Slot commit result is unknown: persisted binding does not match its receipt",
+                    )
                 runtime_gate.reconcile_configuration_runtime()
                 self._pending_recovery = None
                 return replay
             raise DataTrunkError(
                 "CONFIGURATION_RUNTIME_BUSY",
                 "CONFIGURATION_RUNTIME_BUSY",
+            )
+        if self._pending_recovery is not None:
+            raise DataTrunkError(
+                "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+                "Slot commit result is unknown: no authoritative persisted receipt; runtime remains quiesced",
             )
         if entity_instance_id is not None:
             by_id = {item.id: item for item in self._catalog.list()}
@@ -287,9 +312,25 @@ class EmsWorkbenchSlots:
                 actor=actor,
                 idempotency_key=idempotency_key,
             )
-        except Exception:
+        except (EmsWorkbenchSlotError, ConfigurationRevisionError):
+            # These domain failures are raised before commit by the repository.
             runtime_gate.cancel_configuration_publish()
             raise
+        except Exception as exc:
+            # A transport failure can arrive after PostgreSQL committed. Keep
+            # ownership and the fence until the atomic receipt proves the result.
+            self._pending_recovery = _PendingWorkbenchSlotRecovery(
+                slot_key=slot_key,
+                entity_instance_id=entity_instance_id,
+                base_configuration_revision=base_configuration_revision,
+                actor=actor.strip(),
+                idempotency_key=idempotency_key.strip(),
+                configuration_revision=None,
+            )
+            raise DataTrunkError(
+                "CONFIGURATION_RUNTIME_RECONCILIATION_REQUIRED",
+                "Slot commit result is unknown; retry the same request and idempotency key to reconcile",
+            ) from exc
         try:
             runtime_gate.reconcile_configuration_runtime()
         except Exception:

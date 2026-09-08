@@ -284,8 +284,8 @@ export default function AlarmHttpNotificationPanel() {
         </button>
       </header>
 
-      {message && <p className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">{message}</p>}
-      {error && <p className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
+      {editingId === undefined && message && <p role="status" className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">{message}</p>}
+      {editingId === undefined && error && <p role="alert" className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
 
       <div className="mt-4 space-y-2">
         {items.map((config) => {
@@ -394,6 +394,8 @@ export default function AlarmHttpNotificationPanel() {
             </div>
           </div>
 
+          {error && <p role="alert" className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
+          {message && <p role="status" className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">{message}</p>}
           <div className="mt-4 flex items-center gap-3">
             <button type="button" disabled={busy !== ''} onClick={() => void save()} className="neu-btn zizu-primary px-4 py-2 text-xs font-medium disabled:opacity-50">
               {busy === 'save' ? '保存中...' : '保存'}

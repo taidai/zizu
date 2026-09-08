@@ -330,7 +330,7 @@ export default function AdminPanel() {
           </select>
           <button ref={truncateTrigger} type="button" onClick={() => { setTruncateConfirm(''); setTruncateMsg(''); setTruncateOpen(true) }} className="neu-btn zizu-tools-danger-button px-4 text-xs font-semibold">准备清空表</button>
         </div>
-        {truncateMsg && <p role={truncateMsg.includes('已清空') ? 'status' : 'alert'} className={`mt-2 text-xs ${truncateMsg.includes('已清空') ? 'text-green-700' : 'text-red-700'}`}>{truncateMsg}</p>}
+        {!truncateOpen && truncateMsg && <p role={truncateMsg.includes('已清空') ? 'status' : 'alert'} className={`mt-2 text-xs ${truncateMsg.includes('已清空') ? 'text-green-700' : 'text-red-700'}`}>{truncateMsg}</p>}
       </section>
     </div>
   )
@@ -372,6 +372,7 @@ export default function AdminPanel() {
             <label>输入 yes 确认
               <input autoFocus aria-label="输入 yes 确认" value={truncateConfirm} onChange={(event) => setTruncateConfirm(event.target.value)} className="neu-input mt-2 w-full px-3 py-2 text-sm" />
             </label>
+            {truncateMsg && <p role="alert" className="mt-2 text-xs text-red-700">{truncateMsg}</p>}
             <div className="zizu-tools-confirm-actions">
               <button type="button" onClick={closeTruncate} className="neu-btn px-4 text-xs">取消</button>
               <button type="button" onClick={() => void handleTruncate()} disabled={truncateLoading || truncateConfirm.toLowerCase() !== 'yes'} className="neu-btn zizu-tools-danger-button px-4 text-xs font-semibold disabled:opacity-40">{truncateLoading ? '执行中...' : '永久清空'}</button>
