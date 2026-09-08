@@ -1,5 +1,14 @@
 ---
 
+## Session 2026-09-08 — v1.0.5 Task 9g 最终本机验收因 production fixture 契约阻断
+
+- 候选 HEAD `170f7c526412da6ddc45a112bb98f636463dff99`已冻结；冻结前只提交 accepted spec 的三处行尾空格和 EOF 多余空行清理，未改字词。
+- 已通过：tracked/diff-check；前端 201/201；scripts 56/56；backend 771 total = 490 pass + 281 conditional skip；Schema 063 PG 9/9 且随机库 absent-after；production build 8,209 modules。
+- `506f360..170f7c5` 只有一个 spec 路径；frontend/backend/tests/scripts Git tree、16 个 harness 文件和 111 个 dist 文件摘要均全等。因此复用独立复审的 node 7/7 + alarm HTTP 3/3（0 skip/retry/flaky，cleanup/secret scan 全绿）。
+- 最终 106 route fixture 在 production `vite preview` 上为 **96 pass / 10 fail**。10 个失败均因 `tablet-devices.spec.ts` 直接导入 dev-only `/@react-refresh`，分类 `ENVIRONMENT_BLOCKED — TEST_CONTRACT_MISMATCH`；不能改用 dev server 冒充 production 验收。
+- 按 stop condition 未继续 dispatch 3/3、禁入扫描或 18 图；Task 9 保持 `INCOMPLETE`，Task 10 不得开始。4195 及其他专用验收端口已精确清理，无产品/测试/版本/部署改动。
+- 详细证据：`docs/reviews/2026-09-08-v1.0.5-local-acceptance.md`。下一步是单独复审一个最小 test-only production-mount 契约修复，然后在新 HEAD 上重启受影响的 final gates；不修改产品来“过关”。
+
 ## Session 2026-09-08 — Schema 063 固定 EMS 首页槽位后端 seam（独立分支，未部署）
 
 - 新增固定且有界的 `site-power`、`pv-power`、`storage-power`、`storage-soc`、`charging-power` 五个首页槽位；人工绑定持久化优先，解除后只按显式 `definition_id` 别名精确自动匹配。零候选为 `unconfigured`，多候选为 `ambiguous`，不按名称/地址猜测、不自动求和。

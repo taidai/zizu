@@ -6,7 +6,7 @@
 
 目标版本：v1.0.5
 
-状态：Demo 金标准已冻结；正式产品逐项验收待后续任务关闭
+状态：`INCOMPLETE` —— Demo 金标准已冻结；Task 9g 的 production-preview route fixture 因测试契约与生产服务方式不兼容而阻断，尚未关闭正式产品逐项验收
 
 ## 1. 这份矩阵约束什么
 
@@ -163,3 +163,21 @@
 - `FAILED`：请求/控制违反正式契约，或出现页面、console、网络错误。
 
 仅“看起来像 Demo”不能关闭矩阵；必须同时证明运行数据来自正式提交链，且没有放宽认证、权限、配置、JDM 和控制安全语义。
+
+## 7. Task 9g 同一 HEAD 最终验收状态
+
+冻结 HEAD：`170f7c526412da6ddc45a112bb98f636463dff99`。完整证据见 `docs/reviews/2026-09-08-v1.0.5-local-acceptance.md`。
+
+| 矩阵页面 / 公共项 | Task 9g 状态 | 原因 |
+| --- | --- | --- |
+| 公共外壳 | `INCOMPLETE` | route fixture 整体门禁为 96/106；18 张同 HEAD 视觉证据未捕获。 |
+| 运行首页 `workbench` | `INCOMPLETE` | 相关 fixture 用例已在阻断前通过，但统一截图/manifest 硬门禁未执行。 |
+| 设备监控 `monitor` | `FAILED` | `tablet-devices.spec.ts` 10/10 因直接导入 dev-only `/@react-refresh` 而无法在 `vite preview` 上挂载。 |
+| 手动控制 `controls` | `INCOMPLETE` | 相关 fixture 用例已通过；1280×800 截图及统一 manifest 未执行。 |
+| 节点与数据 `tree` | `INCOMPLETE` | 相关 route fixture 已通过；18 图门禁未执行。复用的真实 node 7/7 只覆盖 `506f360` 经摘要等价证明转移的运行链。 |
+| 告警中心 `alarms` | `INCOMPLETE` | 相关 route fixture 已通过；18 图门禁未执行。复用的 alarm HTTP 3/3 只覆盖经证明等价的真实告警链。 |
+| 调度策略 `strategies` | `INCOMPLETE` | route fixture 非 PG 用例已通过；因 stop condition 未运行最终同 HEAD dispatch 3/3 与视觉门禁。 |
+| 系统工具 `admin` | `INCOMPLETE` | route fixture 已通过；HTTP/故障映射长编辑器四张补图未执行。 |
+| Demo-only 禁入 | `INCOMPLETE` | 因先行 fixture 硬失败，修正后的 source/dist 扫描依 stop condition 未执行。 |
+
+没有任何行被误标为 `MATCHED` 或 `ACCEPTED_DIFFERENCE`。修复必须是单独复审的测试契约更改，使设备 fixture 消费已构建的 production bundle；不得改用 Vite dev server 冒充生产包验收。
