@@ -64,6 +64,27 @@ type ToolsApiScenario = {
   faultMapsFailure?: boolean
   healthFailure?: boolean
   healthDisconnected?: boolean
+  healthRace?: HealthRaceController
+}
+
+type Deferred = { promise: Promise<void>; resolve: () => void }
+
+function deferred(): Deferred {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+type HealthRaceController = ReturnType<typeof createHealthRaceController>
+
+function createHealthRaceController() {
+  return {
+    requestCount: 0,
+    olderStarted: deferred(),
+    newerStarted: deferred(),
+    releaseOlder: deferred(),
+    releaseNewer: deferred(),
+  }
 }
 
 async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin', scenario: ToolsApiScenario = {}) {
@@ -96,6 +117,26 @@ async function installToolsApi(page: Page, role: 'admin' | 'engineer' = 'admin',
 
     if (pathName === '/auth/login') return json({ access_token: 'local-tools', expires_at: '2099-01-01T00:00:00Z', user })
     if (pathName === '/auth/me') return json({ user })
+    if (pathName === '/health' && scenario.healthRace) {
+      const requestNumber = ++scenario.healthRace.requestCount
+      const health = (version: string, messages: number) => ({
+        status: 'healthy', version, uptime_seconds: messages,
+        pipeline: { status: 'running', messages_received: messages, points_written_db: messages, last_message_at: '2026-09-08T10:00:00+08:00' },
+        components: { timescaledb: { status: 'connected' }, mqtt: { status: 'connected' }, neuron: { status: 'connected' } },
+      })
+      if (requestNumber === 1) return json(health('shell', 1))
+      if (requestNumber === 2) {
+        scenario.healthRace.olderStarted.resolve()
+        await scenario.healthRace.releaseOlder.promise
+        return json(health('stale', 111))
+      }
+      if (requestNumber === 3) {
+        scenario.healthRace.newerStarted.resolve()
+        await scenario.healthRace.releaseNewer.promise
+        return json(health('latest', 222))
+      }
+      return json(health('latest', 222))
+    }
     if (pathName === '/health' && scenario.healthFailure) return json({ detail: 'HEALTH_UPSTREAM_UNAVAILABLE' }, 503)
     if (pathName === '/health') return json({
       status: 'healthy', version: 'local', uptime_seconds: 60,
@@ -297,6 +338,53 @@ test('系统组件断线保留服务端状态而不显示健康', async ({ page 
   const disconnected = page.getByRole('dialog', { name: '数据与系统状态' }).getByRole('region', { name: '系统健康状态' })
   await expect(disconnected).toContainText('连接异常')
   await expect(disconnected).toContainText('MQTT disconnected')
+})
+
+test('旧系统状态请求晚于新请求返回时不能覆盖最新快照', async ({ page }) => {
+  const race = createHealthRaceController()
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window)
+    const originalSetInterval = window.setInterval.bind(window)
+    ;(window as any).__parsedHealthVersions = []
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      timeout === 5000 ? 0 : originalSetInterval(handler, timeout, ...args)
+    )) as typeof window.setInterval
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args)
+      const requestUrl = typeof args[0] === 'string' ? args[0] : args[0] instanceof URL ? args[0].href : args[0].url
+      if (new URL(requestUrl, window.location.href).pathname === '/api/v1/health') {
+        const originalJson = response.json.bind(response)
+        response.json = async () => {
+          const value = await originalJson()
+          window.setTimeout(() => { (window as any).__parsedHealthVersions.push(value.version) }, 0)
+          return value
+        }
+      }
+      return response
+    }
+  })
+  await installToolsApi(page, 'admin', { healthRace: race })
+  await login(page)
+  await openEngineeringPage(page, '系统工具')
+
+  await page.getByRole('button', { name: '打开数据与系统状态', exact: true }).click()
+  await race.olderStarted.promise
+  await page.getByRole('dialog', { name: '数据与系统状态' }).getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '打开数据与系统状态', exact: true }).click()
+  await race.newerStarted.promise
+  expect(race.requestCount).toBe(3)
+
+  race.releaseNewer.resolve()
+  const health = page.getByRole('dialog', { name: '数据与系统状态' }).getByRole('region', { name: '系统健康状态' })
+  await expect(health).toContainText('API latest')
+  await expect(health).toContainText('消息 222')
+
+  race.releaseOlder.resolve()
+  await page.waitForFunction(() => (window as any).__parsedHealthVersions.includes('stale'))
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await expect(health).toContainText('API latest')
+  await expect(health).toContainText('消息 222')
+  await expect(health).not.toContainText('stale')
 })
 
 test('故障映射读取失败显示错误和重试，不伪装成空库', async ({ page }) => {

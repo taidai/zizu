@@ -69,6 +69,7 @@ export default function AdminPanel() {
   const [activeTool, setActiveTool] = useState<ToolKey | null>(null)
   const [truncateOpen, setTruncateOpen] = useState(false)
   const toolTriggers = useRef<Partial<Record<ToolKey, HTMLButtonElement>>>({})
+  const systemHealthGeneration = useRef(0)
   // 入库节拍
   const [config, setConfig] = useState<PipelineConfig | null>(null)
   const [configLoading, setConfigLoading] = useState(true)
@@ -127,15 +128,19 @@ export default function AdminPanel() {
   }, [])
 
   const loadSystemHealth = useCallback(async () => {
+    const generation = ++systemHealthGeneration.current
     setSystemHealthLoading(true)
     setSystemHealthError('')
     try {
-      setSystemHealth(await fetchHealth())
+      const nextHealth = await fetchHealth()
+      if (generation === systemHealthGeneration.current) setSystemHealth(nextHealth)
     } catch (reason) {
-      setSystemHealth(null)
-      setSystemHealthError(`系统状态读取失败：${apiMessage(reason)}。连接中断，当前状态未知。`)
+      if (generation === systemHealthGeneration.current) {
+        setSystemHealth(null)
+        setSystemHealthError(`系统状态读取失败：${apiMessage(reason)}。连接中断，当前状态未知。`)
+      }
     } finally {
-      setSystemHealthLoading(false)
+      if (generation === systemHealthGeneration.current) setSystemHealthLoading(false)
     }
   }, [])
 
@@ -148,7 +153,10 @@ export default function AdminPanel() {
     if (activeTool !== 'data') return
     void loadSystemHealth()
     const interval = window.setInterval(() => { void loadSystemHealth() }, 5000)
-    return () => window.clearInterval(interval)
+    return () => {
+      window.clearInterval(interval)
+      systemHealthGeneration.current += 1
+    }
   }, [activeTool, loadSystemHealth])
 
   useEffect(() => {
