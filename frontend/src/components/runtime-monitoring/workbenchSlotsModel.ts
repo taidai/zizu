@@ -69,10 +69,12 @@ export function buildWorkbenchSlots(
     const entity = slot.entity
     const runtime = entity ? evidenceByEntity.get(entity.entity_instance_id) : undefined
     const observation = runtime?.observation
+    const runtimeObservationMissing = Boolean(runtime) && !observation
     const value = observation ? observation.value : entity?.value
     const quality = observation ? observation.quality : entity?.quality ?? null
     const hasValue = value !== null && value !== undefined
     const current = Boolean(runtime)
+      && Boolean(observation)
       && workbenchCurrent
       && runtime?.nodeCurrent === true
       && entity?.status === 'available'
@@ -81,6 +83,7 @@ export function buildWorkbenchSlots(
       && Number.isFinite(value)
     const evidenceReason = [
       !workbenchCurrent ? '工作台刷新失败，当前值已降级为最后值。' : null,
+      runtimeObservationMissing ? '已提交实时帧缺少与槽位实体匹配的 L2 观测，工作台快照只保留为最后值。' : null,
       runtime?.reason,
       observation?.reason,
     ].filter(Boolean).join('；') || null

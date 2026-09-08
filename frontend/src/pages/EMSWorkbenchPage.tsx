@@ -392,17 +392,19 @@ export default function EMSWorkbenchPage({
   }, [])
 
   const reloadWorkbench = useCallback(async (): Promise<EmsWorkbench> => {
+    const current = ++generation.current
     setWorkbenchLoading(true)
     setWorkbenchError('')
     try {
       const latest = await fetchEmsWorkbench()
+      if (current !== generation.current) throw new Error('读取结果已被较新的工作台请求取代。')
       setWorkbench(latest)
       return latest
     } catch (reason) {
-      setWorkbenchError(controlError(reason, '读取 EMS 工作台失败。'))
+      if (current === generation.current) setWorkbenchError(controlError(reason, '读取 EMS 工作台失败。'))
       throw reason
     } finally {
-      setWorkbenchLoading(false)
+      if (current === generation.current) setWorkbenchLoading(false)
     }
   }, [])
 

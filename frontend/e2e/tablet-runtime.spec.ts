@@ -24,6 +24,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 
 async function installFixture(page: Page, role: 'operator' | 'engineer' = 'operator') {
   const writes: string[] = []
+  let releaseDelayedWorkbench: (() => void) | null = null
   const state = {
     writes,
     historyRequests: 0,
@@ -32,6 +33,13 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
     failWorkbenchRead: false,
     configurationRevision: 12,
     storagePowerEntity: null as typeof entities.pv | null,
+    omitRuntimeObservationNodeIds: new Set<string>(),
+    delayNextWorkbenchRead: false,
+    delayedWorkbenchCompleted: 0,
+    releaseDelayedWorkbench: () => {
+      releaseDelayedWorkbench?.()
+      releaseDelayedWorkbench = null
+    },
   }
   const user = { id: `${role}-1`, username: `tablet-${role}`, role }
   await page.addInitScript((currentUser) => {
@@ -95,7 +103,7 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
         type: 'frame_snapshot', node_id: nodeId, cursor: `${nodeId}:1`, frame_sequence: 1,
         frame_time: '2026-09-08T08:00:03Z', configuration_revision: state.configurationRevision,
         frame_status: 'COMPLETE', failure: null, backlog_frames: 0, l0: [],
-        l2: item ? [{
+        l2: item && !state.omitRuntimeObservationNodeIds.has(nodeId) ? [{
           entity_instance_id: item.entity_instance_id, node_id: item.node_id,
           definition_id: item.definition_id, display_name: item.display_name, data_type: item.data_type,
           value: item.entity_instance_id === 'entity-pv' ? 15 : item.value, unit: item.unit,
@@ -129,8 +137,7 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
     if (url.pathname.endsWith('/dispatch-strategies')) return fulfillJson(route, { strategies: [{ id: 'strategy-1', name: '午间充电', description: null, active_revision_id: 'rev-1', enabled: true, runtime_health: 'READY', last_trigger_key: 'frame:12', last_evaluated_at: '2026-09-08T08:00:00Z', last_desired: { charge: 26.8 }, last_actual: { charge: 26.8 }, last_evidence: null, failure_code: null, created_at: '2026-09-08T07:00:00Z', updated_at: '2026-09-08T08:00:00Z', draft: null, active_revision: null, published_revision: null }] })
     if (url.pathname.endsWith('/ems-workbench')) {
       state.workbenchReads += 1
-      if (state.failWorkbenchRead) return fulfillJson(route, { detail: { message: '正式工作台暂不可用' } }, 503)
-      return fulfillJson(route, {
+      const payload = {
       workbench_id: 'fixed-light-storage-charging', configuration_revision: state.configurationRevision,
       navigation: [{ id: 'overview', label: '总览' }, { id: 'trends', label: '趋势' }, { id: 'alarms', label: '告警' }, { id: 'controls', label: '控制' }],
       groups: [],
@@ -142,7 +149,15 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
         { id: 'charging-power', label: '充电功率', binding_mode: 'unconfigured', reason: '未找到精确标准定义', entity: null },
       ],
       trends: [], alarms: { visible: true }, controls: { visible: false, entities: [] },
-    })}
+      }
+      if (state.failWorkbenchRead) return fulfillJson(route, { detail: { message: '正式工作台暂不可用' } }, 503)
+      if (state.delayNextWorkbenchRead) {
+        state.delayNextWorkbenchRead = false
+        await new Promise<void>((resolve) => { releaseDelayedWorkbench = resolve })
+        state.delayedWorkbenchCompleted += 1
+      }
+      return fulfillJson(route, payload)
+    }
     return fulfillJson(route, { items: [], total: 0 })
   })
   return state
@@ -197,6 +212,17 @@ test('a current committed value downgrades after workbench refresh failure and s
   await expect(pv.locator('.workbench-metric__state')).toHaveText('最后值（非当前）')
 })
 
+test('a complete runtime frame missing the bound L2 observation fails closed', async ({ page }) => {
+  const fixture = await installFixture(page)
+  fixture.omitRuntimeObservationNodeIds.add('node-pv')
+  await page.goto('/', { waitUntil: 'networkidle' })
+
+  const pv = page.locator('[data-workbench-slot="pv-power"]')
+  await expect(pv).toContainText('89.2')
+  await expect(pv.locator('.workbench-metric__state')).toHaveText('最后值（非当前）')
+  await expect(pv).toContainText(/已提交实时帧缺少.*L2 观测/)
+})
+
 test('engineer can bind and clear a fixed slot with current revision and stable idempotency headers', async ({ page }) => {
   const fixture = await installFixture(page, 'engineer')
   const calls: Array<{ body: unknown; key: string | null }> = []
@@ -247,6 +273,35 @@ test('a successful slot write followed by refresh failure never paints the local
   await expect(dialog.getByRole('status')).toHaveCount(0)
   await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('需人工选择')
   await expect(page.locator('[data-workbench-slot="storage-power"]')).not.toContainText('1# 光伏逆变器')
+})
+
+test('an older slow refresh cannot overwrite the workbench reloaded after a slot save', async ({ page }) => {
+  const fixture = await installFixture(page, 'engineer')
+  await page.route('**/api/v1/ems-workbench/slots/storage-power', async (route) => {
+    fixture.configurationRevision = 13
+    fixture.storagePowerEntity = entities.pv
+    await fulfillJson(route, { slot_key: 'storage-power', entity_instance_id: 'entity-pv', configuration_revision: 13, replayed: false })
+  })
+  await page.goto('/', { waitUntil: 'networkidle' })
+
+  const readsBeforeRefresh = fixture.workbenchReads
+  fixture.delayNextWorkbenchRead = true
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect.poll(() => fixture.workbenchReads).toBeGreaterThan(readsBeforeRefresh)
+  await page.getByRole('button', { name: /配置首页指标/ }).click()
+  const dialog = page.getByRole('dialog', { name: '配置首页指标' })
+  await dialog.getByLabel('储能功率绑定').selectOption('entity-pv')
+  await dialog.getByRole('button', { name: '保存储能功率' }).click()
+  await expect(dialog.getByRole('status')).toContainText('配置修订 13')
+
+  fixture.releaseDelayedWorkbench()
+  await expect.poll(() => fixture.delayedWorkbenchCompleted).toBe(1)
+  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(page.locator('[data-workbench-slot="storage-power"]')).toContainText('1# 光伏逆变器')
+  await page.getByRole('button', { name: /配置首页指标/ }).click()
+  const reopened = page.getByRole('dialog', { name: '配置首页指标' })
+  await expect(reopened).toContainText('当前配置修订 13')
+  await expect(reopened.getByLabel('储能功率绑定')).toHaveValue('entity-pv')
 })
 
 test('flow nodes expose current-or-last state, quality reason, and last-value time', async ({ page }) => {

@@ -71,6 +71,18 @@ test('committed runtime evidence replaces the workbench snapshot and disconnect 
   assert.match(disconnected[1].reading.reason, /连接已断开/)
 })
 
+test('a committed runtime path without the matching observation never promotes the workbench snapshot', () => {
+  const slots = buildWorkbenchSlots([
+    { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ value: 15 }) },
+  ], [{
+    entityInstanceId: 'entity-pv', observation: null, nodeCurrent: true,
+  }])
+
+  assert.equal(slots[1].reading.kind, 'last')
+  assert.equal(slots[1].reading.valueText, '15.0')
+  assert.match(slots[1].reading.reason, /已提交实时帧缺少.*L2 观测/)
+})
+
 test('workbench GET refresh failure prevents committed evidence from being labelled current', () => {
   const slots = buildWorkbenchSlots([
     { id: 'pv-power', label: '光伏功率', binding_mode: 'exact', reason: '唯一标准定义', entity: entity({ value: 999 }) },
