@@ -109,7 +109,7 @@ test('overview keeps alarm events reachable without adding alarm to runtime navi
   await installSession(page, 'operator')
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: '日常运行' }).getByRole('button', { name: '告警', exact: true })).toHaveCount(0)
-  await page.getByRole('navigation', { name: '运行工作台' }).getByRole('button', { name: '告警', exact: true }).click()
+  await page.getByRole('region', { name: '待处理告警' }).getByRole('button', { name: /^查看告警/ }).click()
   await expect(page.getByRole('heading', { name: '告警中心', exact: true })).toBeVisible()
 })
 
