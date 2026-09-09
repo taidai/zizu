@@ -6,7 +6,9 @@ ZiZu lets an implementation engineer model physical assets, connect device point
 and configure alarms, dispatch strategies, control, and a fixed EMS workbench without changing platform source code or writing
 SQL. A solar-storage-charging EMS is the first reference delivery.
 
-**Current code version: `v1.0.9`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+**Current code version: `v1.1.0`** · [中文](README.md) · [Full bilingual architecture](docs/ZIZU-TECHNICAL-ARCHITECTURE.md)
+
+v1.1.0 targets a **10.1-inch landscape tablet**, primarily 1280×800 CSS pixels with 1024×768 coverage. Three energy-flow rows prevent overlapping text, and the footer stays above navigation. See the [display specification](docs/tablet-primary-display.md). Field connectivity is unavailable, so v1.1.0 has not been deployed; the following records describe the preceding release.
 
 Host 1 now runs v1.0.9 with Schema 065, healthy application status, and ten passing read-only headless trunk checks. The overview follows the approved Demo: four metric cards, five energy nodes, skeuomorphic SVG icons, red-gold-bright-silver styling, and an independent site-load binding. Production pages still consume formal APIs and committed L2. Recent releases also add compact strategy management, safe hard deletion, and collapsed control-readback details. See the [deployment record](docs/deploy-1号机-v1.0.9-http.md) and [overview behavior](docs/workbench-demo-overview.md).
 
@@ -20,9 +22,9 @@ This deployment changed no field metric bindings and issued no device controls. 
 
 The approved visual direction combines **flag red, gold, and bright silver** with skeuomorphic panels for a 10.1-inch tablet: daily operations come first, with engineering configuration grouped under one entry point.
 
-![ZiZu v1.0.9 production frontend: four metric cards, five energy nodes, alarms and dispatch summaries, using public test data](docs/images/ems-homepage-v1.0.9.png)
+![ZiZu v1.1.0 production homepage at the primary 1280×800 tablet viewport, using public sample data](docs/images/ems-homepage-v1.1.0.png)
 
-> Captured from the v1.0.9 production frontend build, not the old Demo. Sample data based on public repository test fixtures protects field information; the API version therefore reads `test`. Devices, values, and strategies are examples, not field evidence. Production sites still distinguish current, last-known, and unconfigured states and are never filled with this sample data.
+> Captured from the v1.1.0 production frontend build, not the old Demo. Sample data based on public repository test fixtures protects field information; the API version therefore reads `test`. Devices, values, and strategies are examples, not field evidence. Production sites still distinguish current, last-known, and unconfigured states and are never filled with this sample data.
 
 ## Core structure
 

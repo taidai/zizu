@@ -164,6 +164,22 @@ async function installFixture(page: Page, role: 'operator' | 'engineer' = 'opera
 }
 
 for (const viewport of [{ width: 1024, height: 768 }, { width: 1280, height: 800 }]) {
+  test(`10.1-inch overview keeps energy text separated at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    await installFixture(page, 'engineer')
+    await page.goto('/', { waitUntil: 'networkidle' })
+    const contents = []
+    for (const role of ['storage', 'charging', 'load']) {
+      const content = page.locator(`.workbench-flow-node--${role} > div`)
+      await expect(content).toBeVisible()
+      contents.push((await content.boundingBox())!)
+    }
+    expect(contents[0].y + contents[0].height + 4).toBeLessThanOrEqual(contents[1].y)
+    expect(contents[1].y + contents[1].height + 4).toBeLessThanOrEqual(contents[2].y)
+    const footer = (await page.locator('.workbench-flow > footer').boundingBox())!
+    const navigation = (await page.getByRole('navigation', { name: '日常运行' }).boundingBox())!
+    expect(footer.y + footer.height).toBeLessThanOrEqual(navigation.y)
+  })
   test(`demo overview icons and five energy nodes at ${viewport.width}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     await installFixture(page)
