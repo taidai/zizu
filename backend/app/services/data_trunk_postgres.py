@@ -103,7 +103,14 @@ def verify_data_trunk_contract_gate(
                      OR to_regclass('public.t_dispatch_strategy_events') IS NULL
                      OR to_regclass('public.l2_agg_1h') IS NULL
                      OR to_regclass('public.l2_agg_1d') IS NULL
-                     OR to_regclass('zizu_internal.retention_guard') IS NULL
+                     OR NOT EXISTS (
+                       SELECT 1 FROM pg_class AS relation
+                       JOIN pg_namespace AS namespace
+                         ON namespace.oid = relation.relnamespace
+                       WHERE namespace.nspname = 'zizu_internal'
+                         AND relation.relname = 'retention_guard'
+                         AND relation.relkind = 'r'
+                     )
                      OR to_regclass('public.t_l2_stream_outbox') IS NOT NULL THEN
                     RAISE EXCEPTION 'schema 048 data frame contract is incomplete'
                       USING ERRCODE = '55000';
@@ -236,7 +243,6 @@ def verify_data_trunk_contract_gate(
                        SELECT 1 FROM pg_constraint
                        WHERE conrelid='public.t_dispatch_control_intents'::regclass
                          AND conname='chk_dispatch_intent_status'
-                     )
                      ) THEN
                     RAISE EXCEPTION 'schema 062 strategy fencing is incomplete'
                       USING ERRCODE = '55000';

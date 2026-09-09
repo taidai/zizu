@@ -96,7 +96,8 @@ class DataTrunkStartupGateTest(unittest.TestCase):
         self.assertIn("('t_telemetry_latest','accepted_beat')", calls[0])
         self.assertIn("ix_data_frame_outbox_replay", calls[0])
         self.assertIn("l2_agg_1h", calls[0])
-        self.assertIn("zizu_internal.retention_guard", calls[0])
+        self.assertIn("namespace.nspname = 'zizu_internal'", calls[0])
+        self.assertIn("relation.relname = 'retention_guard'", calls[0])
         self.assertIn("prune_committed_frame_history", calls[0])
         self.assertIn("column_name = 'node_id'", calls[0])
         self.assertNotIn("t_cross_node_processing_acceptance_reports", calls[0])
@@ -242,6 +243,31 @@ class DataTrunkStartupGateTest(unittest.TestCase):
             source = target.read_text(encoding="utf-8")
             for token in FORBIDDEN_STRATEGY_TOKENS:
                 self.assertNotIn(token, source, f"{target.name} bypasses strategy boundaries")
+
+
+@unittest.skipUnless(
+    os.environ.get("ZIZU_TEST_PROVISIONED_GATE") == "1",
+    "requires a provisioned database; checks contracts without changing schema",
+)
+class ProvisionedDataTrunkGateTest(unittest.TestCase):
+    def test_gate_executes_against_current_schema(self) -> None:
+        import psycopg2
+        from app.services.data_trunk_postgres import verify_data_trunk_contract_gate
+
+        @contextmanager
+        def connection():
+            conn = psycopg2.connect(
+                host=os.environ["DB_HOST"], port=os.environ["DB_PORT"],
+                dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+                password=os.environ["DB_PASSWORD"],
+            )
+            try:
+                yield conn
+            finally:
+                conn.rollback()
+                conn.close()
+
+        self.assertGreaterEqual(verify_data_trunk_contract_gate(connection), 0)
 
 
 if __name__ == "__main__":
